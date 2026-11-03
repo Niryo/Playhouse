@@ -8485,7 +8485,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertLessThan(reloaded.frame.minY, app.staticTexts["Context compaction completed."].frame.minY)
     }
 
-    // case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below. Scrolling upward loads earlier messages automatically in 40-message batches, including when the latest turn alone is shorter than the viewport, while keeping the anchored message in place and preserving chronological order. No separate control is needed on systems that report scroll position; below macOS 15 the transcript keeps an explicit Load earlier messages control inside that runway instead. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn and keeps upward paging working. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch.
+    // case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below. Scrolling upward loads earlier messages automatically in 40-message batches, including when the latest turn alone is shorter than the viewport, while keeping the anchored message in place and preserving chronological order. No separate control is needed on systems that report scroll position; below macOS 15 the transcript keeps an explicit Load earlier messages control inside that runway instead. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn and keeps upward paging working. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
     func test_conversation_loads_newest_messages_before_older_history() throws {
         let fixtureCopy = WorkspaceFixture.root.appendingPathComponent("codex-fixture-long-history-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the long-history fixture before launch.")
@@ -8535,8 +8535,19 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertGreaterThan(latest.frame.minY, latestQuestion.frame.minY, "The latest answer should be rendered below the latest question.")
         XCTAssertFalse(oldest.exists, "Older messages should not be rendered in the initial message window.")
         XCTAssertFalse(element("conversation-load-older-button").exists, "Earlier history should load only through upward scrolling, without a separate button.")
-        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID(named: "Long conversation history")])["result"] as? [String: Any])
-        XCTAssertEqual((history["messages"] as? [[String: Any]])?.count, 120, "The CLI should retain complete history while the UI renders a recent window.")
+        let longTaskID = try taskID(named: "Long conversation history")
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", longTaskID])["result"] as? [String: Any])
+        let allMessages = try XCTUnwrap(history["messages"] as? [[String: Any]])
+        XCTAssertEqual(allMessages.count, 120, "The CLI should retain complete history while the UI renders a recent window.")
+        let newestPage = try XCTUnwrap(try runCLI(["conversation", "history", longTaskID, "--limit", "80"])["result"] as? [String: Any])
+        let newestMessages = try XCTUnwrap(newestPage["messages"] as? [[String: Any]])
+        XCTAssertEqual(newestPage["earlierMessageCount"] as? Int, 40, "A paged read reports the messages left before it.")
+        XCTAssertEqual(newestMessages.compactMap { $0["text"] as? String }, allMessages[40...].compactMap { $0["text"] as? String })
+        let olderPage = try XCTUnwrap(try runCLI([
+            "conversation", "history", longTaskID, "--limit", "80", "--before", try XCTUnwrap(newestMessages.first?["id"] as? String),
+        ])["result"] as? [String: Any])
+        XCTAssertEqual(olderPage["earlierMessageCount"] as? Int, 0)
+        XCTAssertEqual((olderPage["messages"] as? [[String: Any]])?.compactMap { $0["text"] as? String }, allMessages[..<40].compactMap { $0["text"] as? String })
 
         let intermediate = element("user-message-item_long_history_user_21")
         let firstLoadedUser = element("user-message-item_long_history_user_40")
@@ -8604,6 +8615,184 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             scrollView.value as? String == "Showing latest 42 of 120 messages"
         }, timeout: 10), "Upward scrolling must still reveal earlier messages after an in-place reload.")
+    }
+
+    // case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, then reads the older page from the store as the reader scrolls up until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again.
+    func test_conversation_history_pages_claude_transcript_from_store() throws {
+        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-long-history")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path), "The prepared Claude Code fixture is missing or not executable.")
+        try FileManager.default.copyItem(at: source, to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let owner = dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
+        let ownerContents = "Playhouse test owns this Claude Code protocol fixture (v1).\n"
+        if FileManager.default.fileExists(atPath: owner.path) {
+            XCTAssertEqual(try String(contentsOf: owner, encoding: .utf8), ownerContents)
+        } else {
+            try Data(ownerContents.utf8).write(to: owner)
+        }
+        claudeFixtureExecutable = executable.path
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude paged history", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        let empty = try XCTUnwrap(try runCLI(["conversation", "history", taskID, "--limit", "10"])["result"] as? [String: Any])
+        XCTAssertEqual((empty["messages"] as? [Any])?.count, 0, "An empty conversation is an empty page.")
+        XCTAssertEqual(empty["earlierMessageCount"] as? Int, 0)
+
+        let image = dataDirectory.appendingPathComponent("first-turn.png")
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 48, pixelsHigh: 48, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        let teal = NSColor(deviceRed: 0.1, green: 0.6, blue: 0.7, alpha: 1)
+        for x in 0..<48 { for y in 0..<48 { bitmap.setColor(teal, atX: x, y: y) } }
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: image)
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Long history turn 1.", "--image", image.path])
+        let key = taskID.uppercased()
+        let storedTurnsBefore = Set(try conversationRows("SELECT id FROM conversation_turns WHERE task_id = '\(key)'").map { $0[0] ?? "" })
+        XCTAssertFalse(storedTurnsBefore.isEmpty, "The first Claude turn is stored as rows.")
+        let imageRows = try conversationRows("SELECT payload, image_data_urls FROM conversation_messages WHERE task_id = '\(key)' AND image_data_urls IS NOT NULL")
+        XCTAssertEqual(imageRows.count, 1, "The user image is stored once, in its own column.")
+        let imagePayload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try XCTUnwrap(imageRows.first?[0]).utf8)) as? [String: Any])
+        XCTAssertEqual((imagePayload["imageDataURLs"] as? [Any])?.count, 0, "Image data stays out of the message text payload.")
+        let storedImages = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try XCTUnwrap(imageRows.first?[1]).utf8)) as? [String])
+        XCTAssertTrue(storedImages.first?.hasPrefix("data:image/png;base64,") == true, "The image column holds the image data URL.")
+        // Every later row write is logged, so the next turn proves it left earlier turns alone.
+        try conversationExecute("""
+            CREATE TABLE test_row_writes (kind TEXT NOT NULL, turn_id TEXT NOT NULL);
+            CREATE TRIGGER test_message_insert AFTER INSERT ON conversation_messages BEGIN INSERT INTO test_row_writes VALUES ('message', NEW.turn_id); END;
+            CREATE TRIGGER test_message_update AFTER UPDATE ON conversation_messages BEGIN INSERT INTO test_row_writes VALUES ('message', NEW.turn_id); END;
+            CREATE TRIGGER test_message_delete AFTER DELETE ON conversation_messages BEGIN INSERT INTO test_row_writes VALUES ('message', OLD.turn_id); END;
+            CREATE TRIGGER test_activity_write AFTER UPDATE ON conversation_activities BEGIN INSERT INTO test_row_writes VALUES ('activity', NEW.turn_id); END;
+            CREATE TRIGGER test_turn_write AFTER UPDATE ON conversation_turns BEGIN INSERT INTO test_row_writes VALUES ('turn', NEW.id); END;
+            """)
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Long history turn 2."])
+        let writes = try conversationRows("SELECT kind, turn_id FROM test_row_writes")
+        try conversationExecute("""
+            DROP TRIGGER test_message_insert; DROP TRIGGER test_message_update; DROP TRIGGER test_message_delete;
+            DROP TRIGGER test_activity_write; DROP TRIGGER test_turn_write; DROP TABLE test_row_writes;
+            """)
+        XCTAssertGreaterThanOrEqual(writes.filter { $0[0] == "message" }.count, 31, "The second turn records its own messages.")
+        XCTAssertTrue(writes.filter { storedTurnsBefore.contains($0[1] ?? "") }.isEmpty, "Recording a later turn must not rewrite any row of an earlier turn.")
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Long history turn 3."])
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Say hello."])
+
+        let full = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        XCTAssertNil(full["earlierMessageCount"], "Default history is complete, not a page.")
+        let messages = try XCTUnwrap(full["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.count, 95)
+        XCTAssertEqual(messages.first?["text"] as? String, "Long history turn 1.")
+        XCTAssertEqual(messages.last?["text"] as? String, "OK.")
+        XCTAssertEqual((messages.first?["imageDataURLs"] as? [Any])?.count, 1, "Complete history includes the stored image.")
+        func historyReads() throws -> [[String: Any]] {
+            try diagnosticEvents().filter { $0["event"] as? String == "conversation.history.read" && $0["taskID"] as? String == key }
+        }
+        func readPages(matching full: [String: Any]) throws -> [[String: Any]] {
+            let readsBefore = try historyReads().count
+            var pages = [try XCTUnwrap(try runCLI(["conversation", "history", taskID, "--limit", "40"])["result"] as? [String: Any])]
+            while (pages[0]["earlierMessageCount"] as? Int ?? 0) > 0 {
+                let before = try XCTUnwrap(((pages[0]["messages"] as? [[String: Any]])?.first)?["id"] as? String)
+                pages.insert(try XCTUnwrap(try runCLI(["conversation", "history", taskID, "--limit", "40", "--before", before])["result"] as? [String: Any]), at: 0)
+            }
+            let fullMessages = try XCTUnwrap(full["messages"] as? [[String: Any]])
+            let joined = pages.flatMap { $0["messages"] as? [[String: Any]] ?? [] }
+            XCTAssertEqual(joined as NSArray, fullMessages as NSArray, "Pages join into the complete ordered history, images included.")
+            for page in pages {
+                XCTAssertEqual((page["activities"] as? [Any] ?? []) as NSArray, (full["activities"] as? [Any] ?? []) as NSArray,
+                               "Every page carries the conversation's activities.")
+                XCTAssertEqual((page["providerBoundaries"] as? [Any] ?? []) as NSArray, (full["providerBoundaries"] as? [Any] ?? []) as NSArray)
+            }
+            XCTAssertTrue(pages.dropFirst().allSatisfy { page in
+                (page["messages"] as? [[String: Any]] ?? []).allSatisfy { ($0["imageDataURLs"] as? [Any])?.isEmpty ?? true }
+            }, "Only the page holding the image message carries image data.")
+            let reads = try historyReads().dropFirst(readsBefore)
+            XCTAssertEqual(Set(reads.compactMap { $0["source"] as? String }), ["stored-page"],
+                           "A Claude page is read from the stored turns it covers, not by composing the whole history.")
+            XCTAssertEqual(reads.compactMap { $0["hydratedImageMessageCount"] as? String }, Array(repeating: "0", count: pages.count - 1) + ["1"])
+            return pages
+        }
+        let pages = try readPages(matching: full)
+        XCTAssertEqual(pages.map { ($0["messages"] as? [Any])?.count ?? -1 }, [15, 40, 40])
+        XCTAssertEqual(pages.map { $0["earlierMessageCount"] as? Int ?? -1 }, [0, 15, 55])
+        for limit in ["0", "-3", "many"] {
+            assertCLIError(try runCLI(["conversation", "history", taskID, "--limit", limit], expectedStatus: 2), code: "invalid_argument")
+        }
+        assertCLIError(try runCLI(["conversation", "history", taskID, "--limit", "5", "--before", "no-such-message"], expectedStatus: 3), code: "not_found")
+
+        let firstUserID = try XCTUnwrap(messages.first?["id"] as? String)
+        let latestUserID = try XCTUnwrap(messages[messages.count - 2]["id"] as? String)
+        let readsBeforeOpen = try historyReads().count
+        openTask(named: "Claude paged history")
+        let scrollView = element("conversation-scroll-view")
+        let latestQuestion = element("user-message-\(latestUserID)")
+        let oldest = element("user-message-\(firstUserID)")
+        XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest 2 of 95 messages" }, timeout: 20),
+                      "Reopening loads only the newest page and pins the latest turn.")
+        XCTAssertTrue(waitUntil({ latestQuestion.exists && latestQuestion.isHittable }, timeout: 5), "The latest question is visible on open.")
+        XCTAssertFalse(oldest.exists, "The first turn is not loaded with the newest page.")
+        let openReads = try historyReads().dropFirst(readsBeforeOpen)
+        XCTAssertTrue(openReads.contains {
+            $0["messageLimit"] as? String == "80" && $0["returnedMessageCount"] as? String == "80"
+                && $0["earlierMessageCount"] as? String == "15" && $0["source"] as? String == "stored-page"
+        }, "Opening reads only the newest 80 messages from the stored turns.")
+        XCTAssertFalse(openReads.contains { $0["returnedMessageCount"] as? String == "95" }, "Opening never reads the whole conversation.")
+        attachScreenshot(named: "Paged Claude history opens on the latest turn")
+        func isVisible(_ candidate: XCUIElement) -> Bool {
+            candidate.exists && scrollView.frame.intersects(candidate.frame)
+        }
+        func scrollUp(until condition: () -> Bool) {
+            for _ in 0..<40 where !condition() {
+                scrollView.scroll(byDeltaX: 0, deltaY: 400)
+                _ = waitUntil(condition, timeout: 1)
+            }
+        }
+        scrollUp(until: { scrollView.value as? String == "Showing latest 42 of 95 messages" })
+        XCTAssertEqual(scrollView.value as? String, "Showing latest 42 of 95 messages", "Scrolling up reveals an older batch already loaded.")
+        let readsBeforeOlderPage = try historyReads().count
+        scrollUp(until: { scrollView.value as? String == "Showing latest 82 of 95 messages" })
+        XCTAssertEqual(scrollView.value as? String, "Showing latest 82 of 95 messages", "The next batch loads the older page from the store.")
+        XCTAssertTrue(try historyReads().dropFirst(readsBeforeOlderPage).contains {
+            $0["beforeMessageProvided"] as? String == "true" && $0["returnedMessageCount"] as? String == "15"
+                && $0["earlierMessageCount"] as? String == "0" && $0["hydratedImageMessageCount"] as? String == "1"
+        }, "Scrolling past the loaded messages reads the older page, with its image, from the store.")
+        attachScreenshot(named: "Older Claude page read from the store while scrolling up")
+        scrollUp(until: { scrollView.value as? String == "Showing latest 95 of 95 messages" })
+        XCTAssertEqual(scrollView.value as? String, "Showing latest 95 of 95 messages")
+        scrollUp(until: { isVisible(oldest) })
+        XCTAssertTrue(waitUntil({ isVisible(oldest) }, timeout: 5), "Scrolling to the top shows the first turn.")
+        let firstImage = element("chat-image-\(firstUserID)-0")
+        XCTAssertTrue(firstImage.waitForExistence(timeout: 5), "The first turn's image is filled in when its page loads.")
+        // The image renders above its message's text, so scroll until it is in view too.
+        scrollUp(until: { isVisible(firstImage) })
+        XCTAssertTrue(waitUntil({ isVisible(firstImage) }, timeout: 5), "The first turn's image is shown in the transcript.")
+        let firstAnswer = element("assistant-message-\(try XCTUnwrap(messages[1]["id"] as? String))")
+        XCTAssertTrue(waitUntil({ isVisible(firstAnswer) }, timeout: 5))
+        XCTAssertLessThan(oldest.frame.minY, firstAnswer.frame.minY, "Older pages keep chronological order.")
+        attachScreenshot(named: "First Claude turn and its image loaded from the store")
+
+        // A turn sent from the composer keeps the earlier pages already loaded.
+        let readsBeforeSend = try historyReads().count
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Say hello again.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest 97 of 97 messages" }, timeout: 30),
+                      "The completed turn joins the transcript without dropping the earlier pages.")
+        // Rows far above the viewport are not realized, so scroll back up to
+        // confirm the first turn and its image are still loaded.
+        scrollUp(until: { isVisible(firstImage) })
+        XCTAssertTrue(waitUntil({ isVisible(oldest) && isVisible(firstImage) }, timeout: 5),
+                      "The first turn and its image stay loaded after the turn completes.")
+        let sendReads = try historyReads().dropFirst(readsBeforeSend)
+        XCTAssertFalse(sendReads.contains { $0["beforeMessageProvided"] as? String == "true" }, "Earlier pages are not read again.")
+        XCTAssertTrue(sendReads.contains {
+            $0["messageLimit"] as? String == "80" && $0["returnedMessageCount"] as? String == "80" && $0["earlierMessageCount"] as? String == "17"
+        }, "The completed turn brings back only the newest page.")
+        let grown = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let grownMessages = try XCTUnwrap(grown["messages"] as? [[String: Any]])
+        XCTAssertEqual(grownMessages.count, 97)
+        XCTAssertEqual(Array(grownMessages[..<95]) as NSArray, messages as NSArray, "A later turn does not change earlier messages.")
+        XCTAssertEqual(try readPages(matching: grown).map { $0["earlierMessageCount"] as? Int ?? -1 }, [0, 17, 57])
     }
 
     // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, Working for renders open and active agents appear as individual named rows outside it, with available path/model/reasoning metadata and started-working wording; a mid-turn collapse the reader performs is honored. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
@@ -9741,16 +9930,14 @@ final class PlayhouseUITests: XCTestCase {
         element("send-message-button").click()
         XCTAssertTrue(transcriptMessage("Answers received: Blue / fixture-secret.").waitForExistence(timeout: 15), "The Codex fixture's reply should arrive.")
         XCTAssertTrue(app.staticTexts["Codex · Sol"].exists, "The sent reply's label reflects the model actually selected for the turn, not the hardcoded default.")
-        let transcriptURL = dataDirectory.appendingPathComponent("conversation-transcripts", isDirectory: true)
-            .appendingPathComponent("\(taskID.uppercased()).json")
-        var transcript = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: transcriptURL)) as? [String: Any])
+        var transcript = try XCTUnwrap(try conversationState(taskID))
         var segments = try XCTUnwrap(transcript["segments"] as? [[String: Any]])
         for index in segments.indices {
             segments[index]["codexTurnIDs"] = []
             segments[index].removeValue(forKey: "codexTurnModelIDs")
         }
         transcript["segments"] = segments
-        try JSONSerialization.data(withJSONObject: transcript).write(to: transcriptURL, options: .atomic)
+        try writeConversationState(taskID, transcript)
         picker.click()
         app.buttons["model-option-gpt-6-luna"].click()
         picker.click()
@@ -10913,7 +11100,7 @@ final class PlayhouseUITests: XCTestCase {
         assertTaskVisible("Claude reminder question", inColumn: "Blocked")
     }
 
-    // case-contract: test_pending_question_repair_restores_thread_owner | A misplaced pending question can be repaired through CLI/XPC only into its owning conversation. Repair rejects a wrong owner and a conflicting destination without mutation, backs up both transcripts, preserves request identity and mode, clears only the misplaced source, and is retryable. Fresh history and the visible UI restore the question only on the original task; answering it clears pending state and the safe response survives reopening. Retrying an interrupted repair after the destination question was answered rejects the stale source without resurrecting the question.
+    // case-contract: test_pending_question_repair_restores_thread_owner | A misplaced pending question can be repaired through CLI/XPC only into its owning conversation. Repair rejects a wrong owner and a conflicting destination without mutation, applies both tasks' state atomically, preserves request identity and mode, clears only the misplaced source, and is retryable. Fresh history and the visible UI restore the question only on the original task; answering it clears pending state and the safe response survives reopening. Retrying an interrupted repair after the destination question was answered rejects the stale source without resurrecting the question.
     func test_pending_question_repair_restores_thread_owner() throws {
         let restartFixture = dataDirectory.appendingPathComponent("codex-fixture-restart-question")
         try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-restart-question"), to: restartFixture)
@@ -10926,41 +11113,37 @@ final class PlayhouseUITests: XCTestCase {
         let strangerFixture = dataDirectory.appendingPathComponent("codex-fixture-title-success")
         try FileManager.default.copyItem(at: restartFixture, to: strangerFixture)
         _ = try runCLI(["conversation", "send", stranger, "--message", "Start another real conversation."], extraEnvironment: ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": strangerFixture.path])
-        let directory = dataDirectory.appendingPathComponent("conversation-transcripts")
-        let destination = directory.appendingPathComponent("\(target.uppercased()).json")
-        let misplaced = directory.appendingPathComponent("\(source.uppercased()).json")
-        var original = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: destination)) as? [String: Any])
+        var original = try XCTUnwrap(try conversationState(target))
         let request = try XCTUnwrap(original.removeValue(forKey: "pendingUserInputRequest") as? [String: Any])
-        try JSONSerialization.data(withJSONObject: original).write(to: destination, options: .atomic)
+        try writeConversationState(target, original)
         let displaced: [String: Any] = ["version": 1, "segments": [], "turns": [], "pendingUserInputRequest": request]
-        try JSONSerialization.data(withJSONObject: displaced).write(to: misplaced, options: .atomic)
-        let originalBytes = try Data(contentsOf: destination)
-        let misplacedBytes = try Data(contentsOf: misplaced)
+        try writeConversationState(source, displaced)
+        let originalState = try XCTUnwrap(try conversationState(target)) as NSDictionary
+        let misplacedState = try XCTUnwrap(try conversationState(source)) as NSDictionary
         let wrong = try runCLI(["conversation", "repair-user-input", stranger, "--from-task", source], expectedStatus: 1)
         XCTAssertEqual((wrong["error"] as? [String: Any])?["code"] as? String, "invalid_transition")
-        XCTAssertEqual(try Data(contentsOf: destination), originalBytes)
-        XCTAssertEqual(try Data(contentsOf: misplaced), misplacedBytes)
+        XCTAssertEqual(try XCTUnwrap(try conversationState(target)) as NSDictionary, originalState)
+        XCTAssertEqual(try XCTUnwrap(try conversationState(source)) as NSDictionary, misplacedState)
         var conflict = request
         conflict["id"] = "a-different-pending-request"
         original["pendingUserInputRequest"] = conflict
-        try JSONSerialization.data(withJSONObject: original).write(to: destination, options: .atomic)
-        let conflictBytes = try Data(contentsOf: destination)
+        try writeConversationState(target, original)
+        let conflictState = try XCTUnwrap(try conversationState(target)) as NSDictionary
         _ = try runCLI(["conversation", "repair-user-input", target, "--from-task", source], expectedStatus: 1)
-        XCTAssertEqual(try Data(contentsOf: destination), conflictBytes)
+        XCTAssertEqual(try XCTUnwrap(try conversationState(target)) as NSDictionary, conflictState)
+        XCTAssertEqual(try XCTUnwrap(try conversationState(source)) as NSDictionary, misplacedState, "A rejected repair leaves both tasks' state untouched.")
         original.removeValue(forKey: "pendingUserInputRequest")
-        try JSONSerialization.data(withJSONObject: original).write(to: destination, options: .atomic)
+        try writeConversationState(target, original)
         let repaired = try runCLI(["conversation", "repair-user-input", target, "--from-task", source])
         XCTAssertEqual((repaired["result"] as? [String: Any])?["id"] as? String, request["id"] as? String)
         XCTAssertEqual((repaired["result"] as? [String: Any])?["mode"] as? String, "plan")
-        let sourceAfter = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: misplaced)) as? [String: Any])
-        XCTAssertNil(sourceAfter["pendingUserInputRequest"])
-        let backups = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("question-repair-backups"), includingPropertiesForKeys: nil)
-        XCTAssertEqual(backups.count, 1)
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: backups[0], includingPropertiesForKeys: nil).count, 2)
-        let destinationBackup = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: backups[0].appendingPathComponent(destination.lastPathComponent))) as? NSDictionary)
-        XCTAssertEqual(destinationBackup, original as NSDictionary)
-        let sourceBackup = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: backups[0].appendingPathComponent(misplaced.lastPathComponent))) as? NSDictionary)
-        XCTAssertEqual(sourceBackup, displaced as NSDictionary)
+        XCTAssertNil(try XCTUnwrap(try conversationState(source))["pendingUserInputRequest"])
+        let repairedTarget = try XCTUnwrap(try conversationState(target))
+        XCTAssertEqual((repairedTarget["pendingUserInputRequest"] as? [String: Any])?["id"] as? String, request["id"] as? String)
+        let receipts = try XCTUnwrap(repairedTarget["userInputRepairs"] as? [[String: Any]])
+        XCTAssertEqual(receipts.count, 1, "The destination records a receipt of the repair in the same transaction.")
+        XCTAssertEqual(receipts.first?["sourceTaskID"] as? String, source.uppercased())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dataDirectory.appendingPathComponent("conversation-transcripts").path), "Repairs no longer write JSON transcript backups; SQLite applies both tasks atomically.")
         _ = try runCLI(["conversation", "repair-user-input", target, "--from-task", source])
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Repair misplaced question")
@@ -10981,10 +11164,9 @@ final class PlayhouseUITests: XCTestCase {
         let historyBytes = try JSONSerialization.data(withJSONObject: try XCTUnwrap(history))
         XCTAssertFalse(String(decoding: historyBytes, as: UTF8.self).contains("fixture-secret"))
         XCTAssertFalse(String(decoding: historyBytes, as: UTF8.self).contains("Continue this conversation by applying"))
-        try misplacedBytes.write(to: misplaced, options: .atomic)
+        try writeConversationState(source, displaced)
         _ = try runCLI(["conversation", "repair-user-input", target, "--from-task", source], expectedStatus: 1)
-        let afterRetry = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: destination)) as? [String: Any])
-        XCTAssertNil(afterRetry["pendingUserInputRequest"])
+        XCTAssertNil(try XCTUnwrap(try conversationState(target))["pendingUserInputRequest"])
     }
 
     // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn reports no outcome, so Playhouse drives a private status nudge; when that private turn cannot complete, the task settles in Blocked naming that reason instead of Waiting Response. A parallel conversation retains its own question and thread; the original conversation receives and answers a second question in its original Plan mode, and completing either conversation preserves the other pending request.
@@ -11056,10 +11238,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(resumedStatus, "In Progress", "The unanswered question must not move the active task out of In Progress.")
 
         XCTAssertTrue(app.staticTexts["Which color should I use next?"].waitForExistence(timeout: 10), "A second question must return to the original task after the other task replaced the shared callback.")
-        let transcriptDirectory = dataDirectory.appendingPathComponent("conversation-transcripts")
         func pendingQuestion(_ owner: String) throws -> [String: Any] {
-            let url = transcriptDirectory.appendingPathComponent("\(owner.uppercased()).json")
-            let transcript = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+            let transcript = try XCTUnwrap(try conversationState(owner))
             return try XCTUnwrap(transcript["pendingUserInputRequest"] as? [String: Any])
         }
         XCTAssertEqual(try pendingQuestion(taskID)["threadID"] as? String, originalThread)
@@ -11083,8 +11263,7 @@ final class PlayhouseUITests: XCTestCase {
             "The Blocked reason must name why Playhouse stopped driving the work."
         )
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10), "Wait for A's completed provider response before checking B still owns its question.")
-        let originalTranscript = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: transcriptDirectory.appendingPathComponent("\(taskID.uppercased()).json"))) as? [String: Any])
-        XCTAssertNil(originalTranscript["pendingUserInputRequest"])
+        XCTAssertNil(try XCTUnwrap(try conversationState(taskID))["pendingUserInputRequest"])
         XCTAssertFalse(element("ai-question-form-title").exists)
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
@@ -11104,8 +11283,7 @@ final class PlayhouseUITests: XCTestCase {
             "The parallel conversation records the same Blocked reason."
         )
         XCTAssertTrue(waitUntil({ !self.element("ai-question-form-title").exists }, timeout: 10))
-        let parallelTranscript = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: transcriptDirectory.appendingPathComponent("\(parallelID.uppercased()).json"))) as? [String: Any])
-        XCTAssertNil(parallelTranscript["pendingUserInputRequest"])
+        XCTAssertNil(try XCTUnwrap(try conversationState(parallelID))["pendingUserInputRequest"])
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
         element("back-to-board-button").click()
         openTask(named: "Another conversation")
@@ -12977,6 +13155,79 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: timeout)
     }
 
+    /// Runs `body` against the app's SQLite conversation store, which the app
+    /// and its bridge daemon share in WAL mode.
+    private func withConversationDatabase<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
+        var database: OpaquePointer?
+        let path = dataDirectory.appendingPathComponent("Conversations-v1.sqlite").path
+        guard sqlite3_open_v2(path, &database, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK, let database else {
+            sqlite3_close(database)
+            throw NSError(domain: "PlayhouseUITests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not open the conversation store at \(path)."])
+        }
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 30_000)
+        return try body(database)
+    }
+
+    /// Rows of a query against the conversation store, as text columns.
+    private func conversationRows(_ sql: String) throws -> [[String?]] {
+        try withConversationDatabase { database in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw NSError(domain: "PlayhouseUITests", code: 5, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(database))])
+            }
+            defer { sqlite3_finalize(statement) }
+            var rows: [[String?]] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                rows.append((0..<sqlite3_column_count(statement)).map { column in
+                    sqlite3_column_text(statement, column).map { String(cString: $0) }
+                })
+            }
+            return rows
+        }
+    }
+
+    private func conversationExecute(_ sql: String) throws {
+        try withConversationDatabase { database in
+            guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
+                throw NSError(domain: "PlayhouseUITests", code: 6, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(database))])
+            }
+        }
+    }
+
+    /// The task's stored conversation state, or nil before anything is recorded.
+    private func conversationState(_ taskID: String) throws -> [String: Any]? {
+        guard FileManager.default.fileExists(atPath: dataDirectory.appendingPathComponent("Conversations-v1.sqlite").path) else { return nil }
+        return try withConversationDatabase { database in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(database, "SELECT payload FROM conversation_state WHERE task_id = ?", -1, &statement, nil) == SQLITE_OK else {
+                throw NSError(domain: "PlayhouseUITests", code: 2, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(database))])
+            }
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_text(statement, 1, taskID.uppercased(), -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            guard sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { return nil }
+            return try JSONSerialization.jsonObject(with: Data(String(cString: text).utf8)) as? [String: Any]
+        }
+    }
+
+    private func writeConversationState(_ taskID: String, _ state: [String: Any]) throws {
+        let payload = String(decoding: try JSONSerialization.data(withJSONObject: state), as: UTF8.self)
+        try withConversationDatabase { database in
+            var statement: OpaquePointer?
+            let sql = "INSERT INTO conversation_state (task_id, payload) VALUES (?, ?) ON CONFLICT(task_id) DO UPDATE SET payload = excluded.payload"
+            guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw NSError(domain: "PlayhouseUITests", code: 3, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(database))])
+            }
+            defer { sqlite3_finalize(statement) }
+            let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+            sqlite3_bind_text(statement, 1, taskID.uppercased(), -1, transient)
+            sqlite3_bind_text(statement, 2, payload, -1, transient)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw NSError(domain: "PlayhouseUITests", code: 4, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(database))])
+            }
+        }
+    }
+
     /// Opening a conversation renders only its newest turn, and older batches load as the
     /// reader scrolls up. Scrolls up as a reader would until every message is rendered, so
     /// an earlier turn can be asserted. The scroll view reports "Showing latest N of M".
@@ -13330,9 +13581,19 @@ final class PlayhouseUITests: XCTestCase {
         process.standardOutput = stdout
         process.standardError = stderr
         try process.run()
-        process.waitUntilExit()
+        // Drain both pipes while the CLI runs: a reply larger than the pipe
+        // buffer (a long history with images) would otherwise block its write
+        // while this waits for it to exit.
+        var errorData = Data()
+        let errorDrained = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+            errorDrained.signal()
+        }
         let output = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let errorOutput = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        errorDrained.wait()
+        process.waitUntilExit()
+        let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
         XCTAssertEqual(process.terminationStatus, expectedStatus, "CLI \(arguments) exited unexpectedly: \(output) \(errorOutput)")
         let responseLine = try XCTUnwrap(output.split(whereSeparator: \.isNewline).last, "CLI returned no JSON for \(arguments)")
         let response = try XCTUnwrap(

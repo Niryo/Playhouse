@@ -35,6 +35,7 @@
 		A10000000000000000000017 /* RemoteConversationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* RemoteConversationManager.swift */; };
 		A10000000000000000000018 /* BridgeSocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* BridgeSocket.swift */; };
 		A1000000000000000000001B /* ProcessCPUSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001B /* ProcessCPUSampler.swift */; };
+		A1000000000000000000001C /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002 /* GRDB */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -102,6 +103,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1000000000000000000001C /* GRDB in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -262,6 +264,9 @@
 			dependencies = (
 			);
 			name = Playhouse;
+			packageProductDependencies = (
+				A90000000000000000000002 /* GRDB */,
+			);
 			productName = Playhouse;
 			productReference = A20000000000000000000006 /* Playhouse.app */;
 			productType = "com.apple.product-type.application";
@@ -293,6 +298,9 @@
 				Base,
 			);
 			mainGroup = A70000000000000000000001;
+			packageReferences = (
+				A90000000000000000000001 /* XCLocalSwiftPackageReference "Vendor/GRDB.swift" */,
+			);
 			productRefGroup = A70000000000000000000004 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -339,6 +347,8 @@
 			inputPaths = (
 				"$(SRCROOT)/scripts/build-bridge.sh",
 				"$(SRCROOT)/scripts/app-profile.sh",
+				"$(SRCROOT)/scripts/build-grdb.sh",
+				"$(SRCROOT)/Vendor/GRDB.swift/Package.swift",
 				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
 				"$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
 				"$(SRCROOT)/Playhouse/Bridge/BridgeContract.swift",
@@ -593,6 +603,20 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A90000000000000000000001 /* XCLocalSwiftPackageReference "Vendor/GRDB.swift" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Vendor/GRDB.swift;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A90000000000000000000002 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = GRDB;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A40000000000000000000001 /* Project object */;
 }

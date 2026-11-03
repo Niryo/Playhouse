@@ -54,9 +54,15 @@ shared_sources=(
   "${repository_root}/Playhouse/Bridge/BridgeSocket.swift"
 )
 
+# The daemon compiles the app's sources as one Swift 5 module, so GRDB (a Swift 6
+# package) is linked as its own prebuilt static module. Its output path embeds
+# the GRDB source fingerprint.
+grdb_module="$("${repository_root}/scripts/build-grdb.sh" "${architecture}" "${deployment_target}" "${sdk}")"
+
 bridge_stamp="${TARGET_BUILD_DIR}/.playhouse-bridge-build-stamp-${PRODUCT_BUNDLE_IDENTIFIER//./_}"
 bridge_inputs=(
   "${BASH_SOURCE[0]}"
+  "${grdb_module}"
   "${shared_sources[@]}"
   "${repository_root}/Playhouse/Bridge/DaemonMain.swift"
   "${repository_root}/Playhouse/CLI/BridgeClient.swift"
@@ -107,6 +113,10 @@ xcrun --sdk macosx swiftc \
   -framework SwiftUI \
   -framework SwiftData \
   -framework Combine \
+  -I "${grdb_module}" \
+  -I "${repository_root}/Vendor/GRDB.swift/Sources/GRDBSQLite" \
+  -L "${grdb_module}" \
+  -lGRDB \
   "${shared_sources[@]}" \
   "${repository_root}/Playhouse/Bridge/DaemonMain.swift" \
   -o "${daemon_executable}"

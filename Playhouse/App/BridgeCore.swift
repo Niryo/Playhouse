@@ -1191,7 +1191,7 @@ final class BoardTaskManager {
         guard let storeURL = modelContext.container.configurations.first?.url else {
             throw BridgeCommandError(code: "operation_failed", message: "Couldn't locate the task store for conversation transcripts.")
         }
-        return ConversationTranscriptStore(directory: storeURL.deletingLastPathComponent().appendingPathComponent("conversation-transcripts", isDirectory: true))
+        return try ConversationTranscriptStore.open(directory: storeURL.deletingLastPathComponent())
     }
 
     /// Resolves the same isolated data directory as the task store itself (so e2e test
@@ -2671,7 +2671,7 @@ final class BoardTaskManager {
     func recordTokenUsage(taskID: UUID, provider: ConversationProvider, report: ConversationTurnUsageReport) async throws {
         guard !report.usage.isEmpty else { return }
         if let turnID = report.turnID {
-            try conversationTranscriptStore().mutate(taskID) { transcript in
+            try conversationTranscriptStore().mutate(taskID, turns: .none) { transcript in
                 var rows = transcript.tokenUsage ?? []
                 if let index = rows.firstIndex(where: { $0.id == turnID }) {
                     rows[index].usage = rows[index].usage + report.usage
@@ -2703,7 +2703,7 @@ final class BoardTaskManager {
 
     func tokenUsageSummary(_ id: UUID) throws -> TaskTokenUsageSummary {
         let task = try requireSubject(id)
-        let rows = (try? conversationTranscriptStore().read(id).tokenUsage) ?? []
+        let rows = (try? conversationTranscriptStore().readState(id).tokenUsage) ?? []
         var turnsByTool: [String: (turnCount: Int, totalTokens: Int)] = [:]
         for row in rows {
             for label in Set(row.toolLabels) {
@@ -2817,7 +2817,7 @@ final class BoardTaskManager {
                   !hasActiveReservation else {
                 return BoardTaskRecord(task: task)
             }
-            let pendingQuestion = try conversationTranscriptStore().read(id).pendingUserInputRequest
+            let pendingQuestion = try conversationTranscriptStore().readState(id).pendingUserInputRequest
             if let pendingQuestion, pendingQuestion.threadID == threadID, task.status != .done {
                 let pendingStatus: TaskStatus = pendingQuestion.isBlocking ? .waitingResponse : .inProgress
                 let pendingStatusMessage = pendingQuestion.isBlocking
@@ -4015,14 +4015,170 @@ final class ConversationManager {
             : task.workspaceRootPaths
     }
 
+    /// The task's conversation, oldest first. With `messageLimit`, returns only
+    /// the newest `messageLimit` messages (before `beforeMessageID`, when given)
+    /// and reports how many earlier messages remain, so a reader can page
+    /// backward. Image data is read only for the messages returned, and only
+    /// when `includesImageData` asks for it; internal readers never need it.
     func history(
         taskID: UUID,
         onActionRequest: @escaping () -> Void = {},
         sensitiveUserInputAnswerValues: [String] = [],
-        restoringEarlierChatPages: Bool = false
+        restoringEarlierChatPages: Bool = false,
+        messageLimit: Int? = nil,
+        beforeMessageID: String? = nil,
+        includesImageData: Bool = false
+    ) async throws -> ConversationHistory {
+        if let messageLimit, messageLimit < 1 {
+            throw BridgeCommandError(code: "invalid_argument", message: "The history limit must be a positive number of messages.")
+        }
+        var source = "composed"
+        var history: ConversationHistory
+        if let messageLimit, sensitiveUserInputAnswerValues.isEmpty,
+           let page = try storedTranscriptPage(taskID: taskID, messageLimit: messageLimit, beforeMessageID: beforeMessageID) {
+            history = page
+            source = "stored-page"
+        } else {
+            history = try await composedHistory(
+                taskID: taskID,
+                onActionRequest: onActionRequest,
+                sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
+                restoringEarlierChatPages: restoringEarlierChatPages
+            )
+            if messageLimit != nil || beforeMessageID != nil {
+                let end = try Self.pageEnd(of: history.messages, before: beforeMessageID)
+                let start = messageLimit.map { max(0, end - $0) } ?? 0
+                history.earlierMessageCount = start
+                history.messages = Array(history.messages[start..<end])
+            }
+        }
+        var hydratedImageMessages = 0
+        if includesImageData {
+            // Composition reads transcript messages without their image data;
+            // fill it in for the messages actually returned.
+            let images = try transcripts.imageDataURLs(taskID, messageIDs: Set(history.messages.compactMap {
+                $0.imageDataURLs.isEmpty ? $0.id : nil
+            }))
+            if !images.isEmpty {
+                history.messages = history.messages.map { message in
+                    guard message.imageDataURLs.isEmpty, let byTurn = images[message.id],
+                          let stored = message.turnID.flatMap({ byTurn[$0] }) ?? (byTurn.count == 1 ? byTurn.values.first : nil)
+                    else { return message }
+                    hydratedImageMessages += 1
+                    var message = message
+                    message.imageDataURLs = stored
+                    return message
+                }
+            }
+        }
+        PlayhouseDiagnostics.record("conversation.history.read", fields: [
+            "taskID": taskID.uuidString,
+            "source": source,
+            "messageLimit": messageLimit.map(String.init) ?? "none",
+            "beforeMessageProvided": String(beforeMessageID != nil),
+            "returnedMessageCount": String(history.messages.count),
+            "earlierMessageCount": history.earlierMessageCount.map(String.init) ?? "none",
+            "hydratedImageMessageCount": String(hydratedImageMessages),
+        ])
+        return history
+    }
+
+    private static func pageEnd(of messages: [ConversationMessage], before messageID: String?) throws -> Int {
+        guard let messageID else { return messages.count }
+        guard let index = messages.firstIndex(where: { $0.id == messageID }) else {
+            throw BridgeCommandError(code: "not_found", message: "That message is not in this conversation's history.")
+        }
+        return index
+    }
+
+    /// A page read straight from stored rows, loading only the turns it covers.
+    /// It applies only where composing the whole transcript would order these
+    /// messages by stored position alone: a Claude-only task with no Codex
+    /// thread, no pending private-answer redaction, and no positioned elements. Otherwise
+    /// returns nil and the caller composes the whole history and slices it.
+    private func storedTranscriptPage(taskID: UUID, messageLimit: Int, beforeMessageID: String?) throws -> ConversationHistory? {
+        let task = try tasks.conversationSubject(taskID)
+        guard !task.isStandaloneChat, task.codexThreadID == nil else { return nil }
+        let store = try transcripts
+        let state = try store.readState(taskID)
+        // Private Claude turns (`sensitiveTurnIDs`) only filter compaction rows in
+        // composition, and a page here has none, so they don't block this read.
+        guard !state.segments.isEmpty, state.segments.allSatisfy({ $0.provider == .claude }),
+              state.pendingSensitiveUserInputRedaction != true,
+              (state.sensitiveCodexTurnIDs ?? []).isEmpty else { return nil }
+        let outline = try store.outline(taskID)
+        guard !outline.hasPositionedElements else { return nil }
+        // Composition orders by segment before position, so stored order holds
+        // only while every turn's segment is known and never moves backward.
+        var segmentIndex = -1
+        for turn in outline.turns {
+            guard let index = state.segmentIndex(of: turn.segmentID), index >= segmentIndex else { return nil }
+            segmentIndex = index
+        }
+        let visibleTurns = outline.turns.filter { !$0.userTexts.contains(where: Self.isPrivateOutcomeReminderPrompt) }
+        let messageIDs = visibleTurns.flatMap(\.messageIDs)
+        let end: Int
+        if let beforeMessageID {
+            guard let index = messageIDs.firstIndex(of: beforeMessageID) else {
+                throw BridgeCommandError(code: "not_found", message: "That message is not in this conversation's history.")
+            }
+            end = index
+        } else {
+            end = messageIDs.count
+        }
+        let start = max(0, end - messageLimit)
+        // The turns overlapping [start, end), plus the latest visible turn, whose
+        // activities the conversation shows wherever the page falls.
+        var covered: [String] = []
+        var offset = 0
+        var firstCoveredOffset = 0
+        for turn in visibleTurns {
+            let range = offset..<(offset + turn.messageIDs.count)
+            if range.overlaps(start..<end) {
+                if covered.isEmpty { firstCoveredOffset = offset }
+                covered.append(turn.id)
+            }
+            offset = range.upperBound
+        }
+        var selection = ConversationTranscriptStore.TurnSelection(turnIDs: Set(covered))
+        if let latest = visibleTurns.last { selection.turnIDs.insert(latest.id) }
+        var partial = try store.read(taskID, turns: selection, includeImages: false)
+        let latestTurn = partial.turns.last { $0.id == visibleTurns.last?.id }
+        partial.turns = partial.turns.filter { covered.contains($0.id) }
+        let composed = Self.compose(transcript: partial, codex: nil)
+        let modelIDs = state.segments.reduce(into: [String: String]()) { result, segment in
+            result.merge(segment.codexTurnModelIDs) { existing, _ in existing }
+        }
+        let pageStart = start - firstCoveredOffset
+        // Composition numbers the covered turns from zero; every visible message
+        // before them precedes them in the whole conversation's timeline.
+        let pageMessages = composed.messages.dropFirst(pageStart).prefix(end - start).map { message -> ConversationMessage in
+            var message = message
+            message.timelineOrder = message.timelineOrder.map { $0 + firstCoveredOffset }
+            if message.provider == nil, message.turnID != nil { message.provider = .codex }
+            if message.modelID == nil, let turnID = message.turnID { message.modelID = modelIDs[turnID] }
+            return message
+        }
+        let earlierTurnIDs = visibleTurns.dropLast().map(\.id)
+        return ConversationHistory(
+            messages: Array(pageMessages),
+            activities: try store.subagentActivities(taskID, turnIDs: earlierTurnIDs) + (latestTurn?.activities ?? []),
+            diff: nil,
+            answeredAsyncQuestionIDs: try tasks.answeredAsyncQuestionIDs(taskID: taskID),
+            pendingUserInputRequest: state.pendingUserInputRequest,
+            providerBoundaries: [],
+            earlierMessageCount: start
+        )
+    }
+
+    private func composedHistory(
+        taskID: UUID,
+        onActionRequest: @escaping () -> Void,
+        sensitiveUserInputAnswerValues: [String],
+        restoringEarlierChatPages: Bool
     ) async throws -> ConversationHistory {
         let task = try tasks.conversationSubject(taskID)
-        let transcript = try transcripts.read(taskID)
+        let transcript = try transcripts.read(taskID, turns: .all, includeImages: false)
         let answered = try tasks.answeredAsyncQuestionIDs(taskID: taskID)
         // Tasks that never left Codex keep reading their native Codex thread.
         let hasSensitiveRecoveryState = transcript.pendingUserInputRequest != nil
@@ -4135,7 +4291,7 @@ final class ConversationManager {
         guard request.threadID == task.activeConversationID else {
             throw BridgeCommandError(code: "invalid_transition", message: "That question no longer belongs to this conversation.")
         }
-        let transcript = try transcripts.read(taskID)
+        let transcript = try transcripts.readState(taskID)
         guard transcript.pendingUserInputRequest == request else {
             throw BridgeCommandError(code: "not_found", message: "That pending question is no longer available.")
         }
@@ -4175,8 +4331,8 @@ final class ConversationManager {
                 value.trimmingCharacters(in: .whitespacesAndNewlines)
             }
         let requiresSensitiveAnswerRedaction = request.questions.contains(where: \.isSecret)
-        let sensitiveCodexTurnIDsBeforeRecovery = Set(try transcripts.read(taskID).sensitiveCodexTurnIDs ?? [])
-        try transcripts.mutate(taskID) { transcript in
+        let sensitiveCodexTurnIDsBeforeRecovery = Set(try transcripts.readState(taskID).sensitiveCodexTurnIDs ?? [])
+        try transcripts.mutate(taskID, turns: .none) { transcript in
             transcript.pendingSensitiveUserInputRedaction = true
         }
         let secretNote = request.questions.contains(where: \.isSecret)
@@ -4204,7 +4360,7 @@ final class ConversationManager {
             applyingUserInputRequestID: request.id,
             onUserInputApplied: { [self] in
                 if requiresSensitiveAnswerRedaction {
-                    try transcripts.mutate(taskID) { transcript in
+                    try transcripts.mutate(taskID, turns: .none) { transcript in
                         let recoveryTurnIDs = Set(transcript.sensitiveCodexTurnIDs ?? []).subtracting(sensitiveCodexTurnIDsBeforeRecovery)
                         var storedMessages = transcript.sensitiveCodexTurnMessages ?? [:]
                         for turnID in recoveryTurnIDs {
@@ -4232,7 +4388,7 @@ final class ConversationManager {
         modelID: String? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in }
     ) async throws -> Bool {
-        guard let request = try transcripts.read(taskID).pendingUserInputRequest,
+        guard let request = try transcripts.readState(taskID).pendingUserInputRequest,
               request.id == requestID else {
             throw BridgeCommandError(code: "not_found", message: "That pending question is no longer available.")
         }
@@ -4266,13 +4422,13 @@ final class ConversationManager {
         guard try tasks.conversationSubject(taskID).activeConversationID == request.threadID else {
             throw BridgeCommandError(code: "invalid_transition", message: "The question belongs to another conversation.")
         }
-        try transcripts.mutate(taskID) { transcript in
+        try transcripts.mutate(taskID, turns: .none) { transcript in
             transcript.pendingUserInputRequest = request
         }
     }
 
     private func clearPendingUserInputRequest(taskID: UUID, requestID: String) throws {
-        try transcripts.mutate(taskID) { transcript in
+        try transcripts.mutate(taskID, turns: .none) { transcript in
             guard transcript.pendingUserInputRequest?.id == requestID else { return }
             transcript.pendingUserInputRequest = nil
         }
@@ -4338,7 +4494,7 @@ final class ConversationManager {
                     || client(for: task).isTurnActiveInProcess(threadID: $0)
                     || ConversationSteerMailbox.activeTurnOwnerProcessID(threadID: $0) != nil
             } == true
-        try transcripts.mutate(taskID) { transcript in
+        try transcripts.mutate(taskID, turns: .latest) { transcript in
             var segment = transcript.segments.last.flatMap { $0.provider == provider ? $0 : nil }
             if segment == nil {
                 let created = ConversationTranscript.Segment(id: UUID().uuidString, provider: provider, startedAt: .now, handoffDelivered: true)
@@ -4380,7 +4536,7 @@ final class ConversationManager {
         let owner = CodexAppServerClient.sharedClient(loading: threadID, compatibleWith: clients.codex)
         let codex = owner ?? clients.codex
         let readsThroughOwner = owner != nil && owner !== clients.codex
-        let recoveryTranscript = try? transcripts.read(taskID)
+        let recoveryTranscript = try? transcripts.readState(taskID)
         let hasSensitiveRecoveryState = recoveryTranscript?.pendingUserInputRequest != nil
             || recoveryTranscript?.pendingSensitiveUserInputRedaction == true
             || !(recoveryTranscript?.sensitiveTurnIDs ?? []).isEmpty
@@ -4603,7 +4759,7 @@ final class ConversationManager {
         guard let childID = activity.childThreadID else {
             throw BridgeCommandError(code: "invalid_argument", message: "That activity is not a subagent.")
         }
-        let isClaudeSubagent = try transcripts.read(taskID).turns.contains { turn in
+        let isClaudeSubagent = try transcripts.read(taskID, turns: .all, includeImages: false).turns.contains { turn in
             turn.activities.contains { $0.childThreadID == childID }
         }
         guard isClaudeSubagent else {
@@ -4650,7 +4806,7 @@ final class ConversationManager {
         let needle = normalizedQuery.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
         for task in completed where !titleIDs.contains(task.id) && !conversationIDs.contains(task.id) {
             try Task.checkCancellation()
-            let matches = try store.read(task.id).turns.contains { turn in
+            let matches = try store.read(task.id, turns: .all, includeImages: false).turns.contains { turn in
                 turn.messages.contains { $0.text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).contains(needle) }
             }
             if matches { conversationIDs.insert(task.id) }
@@ -4857,7 +5013,7 @@ final class ConversationManager {
             return try await tasks.setConversationProvider(taskID, provider: provider)
         }
         let history = try await requireSettledConversation(task)
-        let transcript = try transcripts.read(taskID)
+        let transcript = try transcripts.read(taskID, turns: .latest, includeImages: false)
         var codexTurnIDs: [String] = []
         if history.activities.contains(where: { $0.isSubagent && $0.isActive }) {
             throw Self.switchBlocked("Subagents are still running. Wait for them to finish before switching providers.")
@@ -4868,7 +5024,9 @@ final class ConversationManager {
             codexTurnIDs = Self.orderedTurnIDs(history.messages)
         }
         let claimed = Set(transcript.segments.flatMap(\.codexTurnIDs))
-        try transcripts.mutate(taskID) { transcript in
+        // Turns follow their segments in order, so the last segment has turns
+        // exactly when it owns the latest turn.
+        try transcripts.mutate(taskID, turns: .latest) { transcript in
             if transcript.segments.isEmpty {
                 transcript.segments.append(.init(id: UUID().uuidString, provider: task.conversationProvider, startedAt: .now, handoffDelivered: true))
             }
@@ -4888,7 +5046,7 @@ final class ConversationManager {
         let record = try await tasks.setConversationProvider(taskID, provider: provider)
         PlayhouseDiagnostics.record("conversation.provider.switch.succeeded", fields: [
             "taskID": taskID.uuidString, "provider": provider.rawValue,
-            "segmentCount": String((try? transcripts.read(taskID).segments.count) ?? 0)
+            "segmentCount": String((try? transcripts.readState(taskID).segments.count) ?? 0)
         ])
         return record
     }
@@ -5068,7 +5226,12 @@ final class ConversationManager {
         client(for: try tasks.conversationSubject(taskID)).answerUserInput(requestID: requestID, threadID: threadID, answers: answers)
     }
 
-    func answerAsyncQuestion(taskID: UUID, question: ConversationMessage, answers: [String]) async throws -> (text: String, queued: Bool, history: ConversationHistory?) {
+    func answerAsyncQuestion(
+        taskID: UUID,
+        question: ConversationMessage,
+        answers: [String],
+        historyMessageLimit: Int? = nil
+    ) async throws -> (text: String, queued: Bool, history: ConversationHistory?) {
         let providerName = try tasks.conversationSubject(taskID).conversationProvider.displayName
         guard let questions = question.asyncQuestions, !questions.isEmpty, questions.count == answers.count else {
             throw BridgeCommandError(code: "invalid_argument", message: "Supply one answer for every question in the \(providerName) item.")
@@ -5092,12 +5255,12 @@ final class ConversationManager {
         let item = try await queueMissedSteer(taskID: taskID, text: reply, asyncQuestionItemID: question.id)
         let stillQueued = try queuedMessages(taskID: taskID).contains { $0.id == item.id }
         if !stillQueued { try await tasks.recordAnsweredAsyncQuestion(taskID: taskID, itemID: question.id) }
-        return (reply, stillQueued, stillQueued ? nil : try await history(taskID: taskID))
+        return (reply, stillQueued, stillQueued ? nil : try await history(taskID: taskID, messageLimit: historyMessageLimit, includesImageData: true))
     }
 
     /// The question persisted for this conversation, readable without its provider.
     func savedUserInputRequest(taskID: UUID) throws -> ConversationUserInputRequest? {
-        visiblePendingUserInputRequest(taskID: taskID, transcript: try transcripts.read(taskID))
+        visiblePendingUserInputRequest(taskID: taskID, transcript: try transcripts.readState(taskID))
     }
 
     func queuedMessages(taskID: UUID) throws -> [QueuedConversationMessage] {
@@ -5205,7 +5368,8 @@ final class ConversationManager {
         hideSensitiveRecoveryPrompt: Bool = false,
         hideInternalOutcomeReminder: Bool = false,
         applyingUserInputRequestID: String? = nil,
-        onUserInputApplied: (() throws -> Void)? = nil
+        onUserInputApplied: (() throws -> Void)? = nil,
+        historyMessageLimit: Int? = nil
     ) async throws -> ConversationHistory {
         let streamUpdate = onUpdate
         let onUpdate: (ConversationUpdate) -> Void = { update in
@@ -5235,12 +5399,12 @@ final class ConversationManager {
             history = try await tasks.withConversationTurnReservation(taskID) {
                 // Only the reservation holder owns the applying marker: take it for
                 // a recovery, or drop one a crashed recovery left behind.
-                try self.transcripts.mutate(taskID) { transcript in
+                try self.transcripts.mutate(taskID, turns: .none) { transcript in
                     transcript.applyingUserInputRequestID = applyingUserInputRequestID
                 }
                 defer {
                     if applyingUserInputRequestID != nil {
-                        try? self.transcripts.mutate(taskID) { transcript in
+                        try? self.transcripts.mutate(taskID, turns: .none) { transcript in
                             transcript.applyingUserInputRequestID = nil
                         }
                     }
@@ -5297,7 +5461,10 @@ final class ConversationManager {
                         contextPageIDs: contextPageIDs,
                         onTurnStarting: onTurnStarting,
                         onUpdate: onUpdate,
-                        onUserInput: onUserInput
+                        onUserInput: onUserInput,
+                        // A chat archives its finished turn from this result, so it
+                        // must hold the whole turn rather than the newest page.
+                        historyMessageLimit: task.isStandaloneChat ? nil : historyMessageLimit
                     )
                     // A turn that ends unsettled is driven forward privately rather
                     // than dropped on the board: `in-progress` asks for a
@@ -5313,7 +5480,7 @@ final class ConversationManager {
                     while drivesUnsettledTurns, continuations < TurnOutcome.maxContinuations {
                         // A question the model raised settles the turn on the
                         // user; nudging past it would talk over them.
-                        guard (try? self.transcripts.read(taskID).pendingUserInputRequest) == nil else { break }
+                        guard (try? self.transcripts.readState(taskID).pendingUserInputRequest) == nil else { break }
                         // The user taking over ends Playhouse's private driving.
                         // A continuation tells the model to resume working, so
                         // without this it could undo a Stop or run ahead of a
@@ -5360,7 +5527,7 @@ final class ConversationManager {
                         }
                     }
                     let settled = self.lastReportedTurnOutcomeByTaskID[taskID].flatMap(TurnOutcome.init(rawValue:))
-                    let waitingOnUser = (try? self.transcripts.read(taskID).pendingUserInputRequest) != nil
+                    let waitingOnUser = (try? self.transcripts.readState(taskID).pendingUserInputRequest) != nil
                     if drivesUnsettledTurns, !stoppedForUser, !waitingOnUser, settled == nil || settled == .inProgress {
                         // The work is unsettled and the user was never asked
                         // anything, so Waiting Response would misreport this.
@@ -5719,10 +5886,11 @@ final class ConversationManager {
     // MARK: - Transcript recording
 
     /// Appends or updates a visible element of the current Claude turn. Writes
-    /// are incremental so a crash mid-turn keeps everything already shown.
+    /// are incremental so a crash mid-turn keeps everything already shown, and
+    /// touch only this message's row, never the rest of the transcript.
     private func recordClaudeMessage(taskID: UUID, turnID: String? = nil, modelID: String? = nil, _ message: ConversationMessage) {
         do {
-            try transcripts.mutate(taskID) { transcript in
+            try transcripts.mutate(taskID, turns: .turn(turnID)) { transcript in
                 guard let index = turnID.flatMap({ id in transcript.turns.lastIndex { $0.id == id } }) ?? transcript.turns.indices.last else { return }
                 var message = message
                 message.turnID = transcript.turns[index].id
@@ -5742,8 +5910,14 @@ final class ConversationManager {
     }
 
     private func recordClaudeActivity(taskID: UUID, turnID: String, _ activity: ConversationActivity) {
+        // Loads only the turns this update can touch: its own turn, wherever an
+        // activity with the same background task lives, and wherever that
+        // activity's background agent report already sits.
+        var selection = ConversationTranscriptStore.TurnSelection(turnIDs: [turnID])
+        selection.backgroundTaskID = activity.backgroundTaskID
+        selection.messageIDs = [ConversationTranscriptStore.backgroundAgentReportMessagePrefix + activity.id]
         do {
-            try transcripts.mutate(taskID) { transcript in
+            try transcripts.mutate(taskID, turns: selection) { transcript in
                 // A background Agent/Task call can still be running (or get a terminal
                 // notification) after the turn that launched it ends, and after a
                 // restart its new turn has no in-memory record of the launch at all.
@@ -5810,7 +5984,7 @@ final class ConversationManager {
               activity.status == "completed",
               let summary = activity.backgroundTaskSummary,
               !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let messageID = "claude-background-agent-result-\(activity.id)"
+        let messageID = ConversationTranscriptStore.backgroundAgentReportMessagePrefix + activity.id
         guard let targetTurnIndex = transcript.turns.firstIndex(where: { $0.id == turnID }) else { return }
         let report = ConversationMessage(
             id: messageID,
@@ -5829,7 +6003,7 @@ final class ConversationManager {
     /// Records the accepted turn before its first events can be queried by another XPC call.
     private func recordCodexTurnStarted(taskID: UUID, segmentID: String, turnID: String, modelID: String) {
         do {
-            try transcripts.mutate(taskID) { transcript in
+            try transcripts.mutate(taskID, turns: .none) { transcript in
                 guard let index = transcript.segments.firstIndex(where: { $0.id == segmentID }) else { return }
                 if !transcript.segments[index].codexTurnIDs.contains(turnID) {
                     transcript.segments[index].codexTurnIDs.append(turnID)
@@ -5848,7 +6022,7 @@ final class ConversationManager {
     private func claimCodexTurns(taskID: UUID, segmentID: String, _ messages: [ConversationMessage]) {
         let turnIDs = Self.orderedTurnIDs(messages)
         do {
-            try transcripts.mutate(taskID) { transcript in
+            try transcripts.mutate(taskID, turns: .none) { transcript in
                 guard let index = transcript.segments.firstIndex(where: { $0.id == segmentID }) else { return }
                 let claimed = Set(transcript.segments.flatMap(\.codexTurnIDs))
                 let newTurnIDs = turnIDs.filter { !claimed.contains($0) }
@@ -5865,9 +6039,9 @@ final class ConversationManager {
     /// handoff context its first prompt still needs, if any.
     private func prepareSegment(task: any ConversationSubject) async throws -> (segmentID: String, handoff: String?)? {
         let provider = task.conversationProvider
-        var transcript = try transcripts.read(task.id)
+        var transcript = try transcripts.readState(task.id)
         if transcript.segments.last?.provider != provider || transcript.segments.isEmpty {
-            transcript = try transcripts.mutate(task.id) { transcript in
+            transcript = try transcripts.mutate(task.id, turns: .none) { transcript in
                 if transcript.segments.last?.provider != provider || transcript.segments.isEmpty {
                     let isInitialExistingCodex = transcript.segments.isEmpty && provider == .codex && task.codexThreadID != nil
                     let isFirst = transcript.segments.isEmpty && task.codexThreadID == nil
@@ -5878,7 +6052,9 @@ final class ConversationManager {
         }
         guard let segment = transcript.segments.last else { return nil }
         guard !segment.handoffDelivered else { return (segment.id, nil) }
-        let history = try await history(taskID: task.id)
+        // Only an undelivered handoff needs to know which turns each segment owns.
+        transcript = try transcripts.read(task.id, turns: .all, includeImages: false)
+        let history = try await history(taskID: task.id, includesImageData: false)
         let current = transcript.segments.count - 1
         let previousOwnSegment = transcript.segments[..<current].lastIndex { $0.provider == provider }
         let unseenStart = previousOwnSegment.map { index in
@@ -5909,7 +6085,8 @@ final class ConversationManager {
         contextPageIDs: [String],
         onTurnStarting: (() -> Void)?,
         onUpdate: @escaping (ConversationUpdate) -> Void,
-        onUserInput: @escaping (ConversationUserInputRequest) async -> Void
+        onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
+        historyMessageLimit: Int? = nil
     ) async throws -> ConversationHistory {
         let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let persistedText = hideSensitiveRecoveryPrompt
@@ -6144,7 +6321,7 @@ final class ConversationManager {
             }
             let claudeTurnID = provider == .claude ? UUID().uuidString.lowercased() : nil
             if let claudeTurnID, let segment {
-                try transcripts.mutate(taskID) { transcript in
+                try transcripts.mutate(taskID, turns: .none) { transcript in
                     if hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty {
                         transcript.sensitiveTurnIDs = Array(Set(transcript.sensitiveTurnIDs ?? []).union([claudeTurnID])).sorted()
                         // Claude messages are persisted locally from sanitized
@@ -6240,7 +6417,7 @@ final class ConversationManager {
                     let privateOutcomeReminderTurnIDs = Set(history.messages.filter {
                         $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text)
                     }.compactMap(\.turnID))
-                    let previousTranscript = try? self.transcripts.read(taskID)
+                    let previousTranscript = try? self.transcripts.readState(taskID)
                     let previouslyPrivateTurnIDs = Set(previousTranscript?.sensitiveCodexTurnIDs ?? [])
                     let previouslySecretRecoveryTurnIDs = Set(previousTranscript?.sensitiveCodexSecretTurnIDs ?? [])
                     let currentSecretRecoveryTurnIDs = Set(history.messages.filter { message in
@@ -6283,7 +6460,7 @@ final class ConversationManager {
                                         }
                                 }
                             }
-                            try self.transcripts.mutate(taskID) { transcript in
+                            try self.transcripts.mutate(taskID, turns: .none) { transcript in
                                 transcript.sensitiveTurnIDs = Array(Set(transcript.sensitiveTurnIDs ?? []).union(matchedPrivateRecoveryTurnIDs)).sorted()
                                 if provider == .codex {
                                     transcript.sensitiveCodexTurnIDs = Array(Set(transcript.sensitiveCodexTurnIDs ?? []).union(matchedPrivateRecoveryTurnIDs)).sorted()
@@ -6298,7 +6475,7 @@ final class ConversationManager {
                             // Keep the pending marker so later reads redact conservatively.
                         }
                     }
-                    let currentTranscript = try? self.transcripts.read(taskID)
+                    let currentTranscript = try? self.transcripts.readState(taskID)
                     let safeMessages = history.messages.filter { message in
                         guard let turnID = message.turnID else { return true }
                         return !privateOutcomeReminderTurnIDs.contains(turnID)
@@ -6460,14 +6637,14 @@ final class ConversationManager {
                 hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt
             )
             if hideSensitiveRecoveryPrompt,
-               try transcripts.read(taskID).pendingSensitiveUserInputRedaction == true {
+               try transcripts.readState(taskID).pendingSensitiveUserInputRedaction == true {
                 throw BridgeCommandError(
                     code: "operation_failed",
                     message: "Playhouse couldn't safely record the private answer for conversation history. The question remains available to retry."
                 )
             }
             if let segment, segment.handoff != nil || provider == .claude {
-                try transcripts.mutate(taskID) { transcript in
+                try transcripts.mutate(taskID, turns: .none) { transcript in
                     guard let index = transcript.segments.firstIndex(where: { $0.id == segment.segmentID }) else { return }
                     transcript.segments[index].handoffDelivered = true
                 }
@@ -6484,7 +6661,7 @@ final class ConversationManager {
             let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID) ?? leakedOutcome
             lastReportedTurnOutcomeByTaskID[taskID] = reportedOutcome
             if reportedOutcome == nil, deferMissingOutcomeStatus, let revision = pendingQuestionLifecycleRevision,
-               let stillPending = try? transcripts.read(taskID).pendingUserInputRequest {
+               let stillPending = try? transcripts.readState(taskID).pendingUserInputRequest {
                 // The turn completed without reporting an outcome while a structured
                 // question it raised is still unanswered. Undo the immediate
                 // waiting-response flip so the outcome reminder loop — not a stray
@@ -6492,7 +6669,7 @@ final class ConversationManager {
                 // saved request so reopening the conversation doesn't re-force it.
                 _ = try? await tasks.restoreLifecycleStatus(taskID, to: .inProgress, ifRevision: revision)
                 if stillPending.isBlocking {
-                    try? transcripts.mutate(taskID) { transcript in
+                    try? transcripts.mutate(taskID, turns: .none) { transcript in
                         guard transcript.pendingUserInputRequest?.id == stillPending.id else { return }
                         transcript.pendingUserInputRequest = ConversationUserInputRequest(
                             id: stillPending.id,
@@ -6581,7 +6758,7 @@ final class ConversationManager {
                     ? "The private status nudge could not be completed."
                     : "The private answer could not be applied. Please answer the question again.")
                 : Self.redactingSensitiveText(error.localizedDescription, values: sensitiveUserInputAnswerValues)
-            let pendingQuestion = try? transcripts.read(taskID).pendingUserInputRequest
+            let pendingQuestion = try? transcripts.readState(taskID).pendingUserInputRequest
             let hasPendingBlockingQuestion = pendingQuestion?.isBlocking == true
             // A saved non-blocking question stays answerable after the provider
             // exits, exactly as when the task is reconciled on open.
@@ -6613,7 +6790,9 @@ final class ConversationManager {
             onActionRequest: {
             onUpdate(ConversationUpdate(type: "action_notice", message: approvalNotice))
             },
-            sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues
+            sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
+            messageLimit: historyMessageLimit,
+            includesImageData: true
         )
         onUpdate(ConversationUpdate(type: "completed", history: standaloneChatDisplayHistory(taskID: taskID, finalHistory)))
         return finalHistory
@@ -7316,12 +7495,16 @@ final class PlayhouseBridgeRuntime {
                 let clients = conversationClients()
                 _ = try await taskManager.reconcileLifecycleStatusOnOpen(taskID, clients: clients)
                 let conversations = ConversationManager(tasks: taskManager, clients: clients, settingsManager: settings)
+                let messageLimit = try request.optionalHistoryLimit("limit")
                 result = try Self.value(await conversations.history(
                     taskID: taskID,
                     onActionRequest: {
                         eventHandler(BridgeEvent(requestID: request.id, type: "action_request", payload: .object([:])))
                     },
-                    restoringEarlierChatPages: true
+                    restoringEarlierChatPages: true,
+                    messageLimit: messageLimit,
+                    beforeMessageID: request.arguments["before"]?.string,
+                    includesImageData: true
                 ))
             case "conversation.present-image":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
@@ -7434,7 +7617,10 @@ final class PlayhouseBridgeRuntime {
                 guard let question = history.messages.first(where: { $0.id == itemID && $0.asyncQuestions != nil }) else {
                     throw BridgeCommandError(code: "not_found", message: "That question is not in this conversation.")
                 }
-                let answer = try await conversations.answerAsyncQuestion(taskID: taskID, question: question, answers: answers)
+                let answer = try await conversations.answerAsyncQuestion(
+                    taskID: taskID, question: question, answers: answers,
+                    historyMessageLimit: try request.optionalHistoryLimit()
+                )
                 var answered: [String: BridgeValue] = ["text": .string(answer.text), "queued": .boolean(answer.queued)]
                 if let history = answer.history { answered["history"] = try Self.value(history) }
                 result = .object(answered)
@@ -7529,7 +7715,8 @@ final class PlayhouseBridgeRuntime {
                         if let payload = try? Self.value(update) {
                             eventHandler(BridgeEvent(requestID: request.id, type: update.type, payload: payload))
                         }
-                    }
+                    },
+                    historyMessageLimit: try request.optionalHistoryLimit()
                 )
                 result = try Self.value(history)
             default:
@@ -7778,6 +7965,15 @@ private extension BridgeRequest {
                 mergeTarget: object["mergeTarget"]?.string
             )
         }
+    }
+
+    /// A positive message count for a paged history read, when one was given.
+    func optionalHistoryLimit(_ name: String = "historyLimit") throws -> Int? {
+        guard let raw = arguments[name]?.string else { return nil }
+        guard let limit = Int(raw), limit > 0 else {
+            throw BridgeCommandError(code: "invalid_argument", message: "The history limit must be a positive number of messages.")
+        }
+        return limit
     }
 
     func requiredUUID(_ name: String) throws -> UUID {
