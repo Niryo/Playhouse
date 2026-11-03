@@ -86,9 +86,6 @@ struct ProviderContextItem: Sendable {
     /// The call ID a tool call declares or a tool result answers.
     let callID: String?
     var callItemID: Int?
-    /// The file an instruction block quotes or a tool call read, so two
-    /// different copies of one file can be told apart from unrelated items.
-    var source: String?
     var tokens = 0
     var requests = 0
     var inFinalTranscript = false
@@ -253,33 +250,6 @@ enum ProviderContextText {
     static func weight(text: String, kind: ProviderContextKind) -> Int {
         kind == .image ? 6_400 : max(1, text.unicodeScalars.count)
     }
-
-    /// The file an instruction block quotes: Claude Code's "Contents of <path> (…)"
-    /// or Codex's "# AGENTS.md instructions for <directory>".
-    static func quotedSource(_ text: String) -> String? {
-        let head = text.prefix(4_096)
-        if let marker = head.range(of: "Contents of ") {
-            let line = head[marker.upperBound...].prefix { !$0.isNewline }
-            let path = line.range(of: " (").map { line[..<$0.lowerBound] } ?? line.dropLast(line.hasSuffix(":") ? 1 : 0)
-            if !path.isEmpty { return String(path) }
-        }
-        if let marker = head.range(of: "# AGENTS.md instructions for ") {
-            let directory = head[marker.upperBound...].prefix { !$0.isNewline }.trimmingCharacters(in: .whitespaces)
-            if !directory.isEmpty { return directory + "/AGENTS.md" }
-        }
-        return nil
-    }
-
-    /// The file a read-style tool call names, so the results of two reads of one
-    /// file read as related; an edit's or write's result is not the file's content.
-    static func toolSource(_ value: Any) -> String? {
-        guard let block = value as? [String: Any], ["Read", "NotebookRead", "View", "view"].contains(block["name"] as? String ?? ""),
-              let input = block["input"] as? [String: Any] else { return nil }
-        for key in ["file_path", "notebook_path", "path"] {
-            if let path = input[key] as? String, !path.isEmpty { return path }
-        }
-        return nil
-    }
 }
 
 /// Builds items one at a time while a reader parses a file.
@@ -295,19 +265,13 @@ private struct ProviderItemBuilder {
         // Every image displays as "[image]"; its data tells two images apart.
         hasher.combine(kind == .image ? ProviderContextText.prettyJSON(value) : text)
         let id = items.count
-        var source: String?
-        switch kind {
-        case .systemReminder, .userText: source = ProviderContextText.quotedSource(text)
-        case .toolCall: source = ProviderContextText.toolSource(value)
-        default: break
-        }
         items.append(ProviderContextItem(
             id: id, kind: kind, role: role, label: label, server: server,
             weight: ProviderContextText.weight(text: text, kind: kind),
             textLength: text.unicodeScalars.count,
             preview: ProviderContextText.preview(text),
             contentKey: hasher.finalize(),
-            location: location, callID: callID, source: source
+            location: location, callID: callID
         ))
         return id
     }
@@ -707,7 +671,6 @@ final class ClaudeRequestLogParser: ProviderRequestLogParser {
             guard let callID = items[index].callID, let call = calls[callID] else { continue }
             items[index].label = items[call].label
             items[index].server = items[call].server
-            items[index].source = items[call].source
             items[index].callItemID = call
         }
     }
@@ -860,7 +823,6 @@ final class CodexRolloutParser: ProviderRequestLogParser {
             guard let callID = items[index].callID, let call = calls[callID] else { continue }
             items[index].label = items[call].label
             items[index].server = items[call].server
-            items[index].source = items[call].source
             items[index].callItemID = call
         }
 
@@ -1196,11 +1158,8 @@ struct TaskTokenWasteReport: Codable, Equatable, Sendable {
 
 /// One page of an agent's context, without the items' full text.
 struct TaskRawInputPage: Codable, Equatable, Sendable {
-    /// An item sent more than once in one request, or alongside a near-identical one.
+    /// An item whose identical text one request sends more than once.
     struct Repeat: Codable, Equatable, Sendable {
-        /// `exact` for the same text, `similar` for the same source file or leading text.
-        let kind: String
-        let reason: String
         /// Position of the group's first copy in the request.
         let first: Int
         /// Which copy this is, from 1, and how many the request holds.
@@ -1587,39 +1546,21 @@ enum ProviderTokenMap {
         return number - 1
     }
 
-    private static let leadLength = 120
-
-    /// Items a request sends more than once, by their text, and items that are
-    /// near-identical to another one it sends: two copies of one source file,
-    /// or two texts that open the same way. Keys are positions in the request.
+    /// Items a request sends more than once with identical text, keyed by
+    /// their positions in the request.
     static func repeatedItems(_ ids: [Int], items: [ProviderContextItem]) -> [Int: TaskRawInputPage.Repeat] {
-        var result: [Int: TaskRawInputPage.Repeat] = [:]
-        var exact: [String: [Int]] = [:]
-        var sources: [String: [Int]] = [:]
-        var leads: [String: [Int]] = [:]
+        var copies: [String: [Int]] = [:]
         for (position, id) in ids.enumerated() {
             let item = items[id]
             guard item.kind != .hiddenOverhead, item.textLength > 0 else { continue }
-            exact["\(item.contentKey):\(item.textLength)", default: []].append(position)
-            // A call names the file its result holds; the results are what repeat.
-            guard !item.kind.isFixedOverhead, item.kind != .toolCall else { continue }
-            if let source = item.source { sources[source, default: []].append(position) }
-            let lead = item.preview.replacingOccurrences(of: "<system-reminder>", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines).prefix(leadLength)
-            if lead.count == leadLength { leads[String(lead), default: []].append(position) }
+            copies["\(item.contentKey):\(item.textLength)", default: []].append(position)
         }
-        func mark(_ groups: [String: [Int]], kind: String, reason: (String) -> String, distinct: Bool) {
-            for (key, positions) in groups.sorted(by: { $0.value[0] < $1.value[0] }) where positions.count > 1 {
-                // Copies of one text are already exact repeats; a near-identical group needs two different texts.
-                if distinct, Set(positions.map { items[ids[$0]].contentKey }).count < 2 { continue }
-                for (copy, position) in positions.enumerated() where result[position] == nil {
-                    result[position] = .init(kind: kind, reason: reason(key), first: positions[0], copy: copy + 1, copies: positions.count)
-                }
+        var result: [Int: TaskRawInputPage.Repeat] = [:]
+        for positions in copies.values where positions.count > 1 {
+            for (copy, position) in positions.enumerated() {
+                result[position] = .init(first: positions[0], copy: copy + 1, copies: positions.count)
             }
         }
-        mark(exact, kind: "exact", reason: { _ in "Identical text" }, distinct: false)
-        mark(sources, kind: "similar", reason: { "Same source file: \(URL(fileURLWithPath: $0).lastPathComponent)" }, distinct: true)
-        mark(leads, kind: "similar", reason: { _ in "Same leading text" }, distinct: true)
         return result
     }
 
@@ -1692,7 +1633,7 @@ enum ProviderTokenMap {
                 let item = log.items[id]
                 var header = "===== #\(position + 1) · \(item.kind.rawValue) · \(item.label) · \(item.tokens) tokens"
                 if let repeated = repeats[position] {
-                    header += " · \(repeated.kind) \(repeated.copy) of \(repeated.copies): \(repeated.reason)"
+                    header += " · duplicate \(repeated.copy) of \(repeated.copies)"
                 }
                 lines += ["", header + " =====", texts[id] ?? item.preview]
             }

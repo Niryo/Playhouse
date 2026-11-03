@@ -12533,8 +12533,8 @@ final class PlayhouseUITests: XCTestCase {
         element("raw-input-request-previous").click()
         assertText("raw-input-request-number", equals: "Request 4 of 5")
         revealRawInputRow("raw-input-request-row-11")
-        assertText("raw-input-request-row-9-repeat", equals: "Duplicate 1 of 2 · Identical text")
-        assertText("raw-input-request-row-11-repeat", equals: "Duplicate 2 of 2 · Identical text · first at #10")
+        assertText("raw-input-request-row-9-repeat", equals: "Duplicate 1 of 2")
+        assertText("raw-input-request-row-11-repeat", equals: "Duplicate 2 of 2 · first at #10")
         attachScreenshot(named: "A reconstructed Codex request flags the README read sent twice")
         element("close-raw-input-button").click()
         element("close-token-stats-button").click()
@@ -12619,8 +12619,8 @@ final class PlayhouseUITests: XCTestCase {
         element("close-token-stats-button").click()
     }
 
-    // case-contract: test_task_raw_input_single_request_flags_resumed_instruction_copies | After a Claude Code fixture session that resumes once its AGENTS.md changed, the raw input's single-request scope lists every item one request sent, in order and with nothing merged, and shows the latest request by default. A request after the resume carries both instruction copies in order, flagged as near-duplicates from the same source file, and the date reminder sent twice is flagged as an exact duplicate; a request before the resume carries one copy and no repeats, and a search keeps each row's position. Each request reports Claude's input with its cache-read and cache-write split, and its items' sizes add up to that input. The request is labelled exact; its text export gives every item's full text under a header naming any repeat, and its JSON export is the request body with the logged parameters, cache markers, system prompt, tools and messages verbatim, an earlier request's messages being a prefix of a later one's. A request number past the last is not_found, and zero or an unknown export format is invalid_argument. In the app, choosing Single request shows the latest request with its usage and the flagged copies, stepping back to a request before the resume shows one copy and no flags, Latest returns to the last request, and Copy all copies the whole request as JSON.
-    func test_task_raw_input_single_request_flags_resumed_instruction_copies() throws {
+    // case-contract: test_task_raw_input_single_request_lists_resumed_instruction_copies_in_order | After a Claude Code fixture session that resumes once its AGENTS.md changed, the raw input's single-request scope lists every item one request sent, in order and with nothing merged, and shows the latest request by default. A request after the resume carries both instruction copies in order, which differ and so are not flagged, while the date reminder sent twice word for word is flagged as a duplicate; a request before the resume carries one copy and no duplicates, and a search keeps each row's position. Each request reports Claude's input with its cache-read and cache-write split, and its items' sizes add up to that input. The request is labelled exact; its text export gives every item's full text under a header naming any duplicate, and its JSON export is the request body with the logged parameters, cache markers, system prompt, tools and messages verbatim, an earlier request's messages being a prefix of a later one's. A request number past the last is not_found, and zero or an unknown export format is invalid_argument. In the app, choosing Single request shows the latest request with its usage, both instruction copies unflagged and the repeated date reminder flagged, stepping back to a request before the resume shows one copy and no flags, Latest returns to the last request, and Copy all copies the whole request as JSON.
+    func test_task_raw_input_single_request_lists_resumed_instruction_copies_in_order() throws {
         var environment = try installClaudeFixture(named: "claude-fixture-ui-instruction-resume")
         let claudeConfig = dataDirectory.appendingPathComponent("claude-config").path
         environment["CLAUDE_CONFIG_DIR"] = claudeConfig
@@ -12645,19 +12645,21 @@ final class PlayhouseUITests: XCTestCase {
         assertText("raw-input-request-exactness", equals: "Exact")
         assertText(
             "raw-input-request-usage",
-            equals: "Reported input 9,100 (uncached 2 · cache read 9,000 · cache write 98) · items add up to 9,100 · 4 repeated · source sdk"
+            equals: "Reported input 9,100 (uncached 2 · cache read 9,000 · cache write 98) · items add up to 9,100 · 2 repeated · source sdk"
         )
         XCTAssertFalse(element("raw-input-request-next").isEnabled, "The latest request is the last one.")
         XCTAssertFalse(element("raw-input-request-latest").isEnabled)
         XCTAssertTrue(element("raw-input-request-time").exists, "The request shows when it was sent.")
-        assertText("raw-input-request-row-3-repeat", equals: "Near-duplicate 1 of 2 · Same source file: AGENTS.md")
-        assertText("raw-input-request-row-4-repeat", equals: "Duplicate 1 of 2 · Identical text")
+        XCTAssertTrue(element("raw-input-request-row-3").exists)
+        XCTAssertFalse(element("raw-input-request-row-3-repeat").exists, "The two AGENTS.md copies differ, so neither is flagged.")
+        assertText("raw-input-request-row-4-repeat", equals: "Duplicate 1 of 2")
         revealRawInputRow("raw-input-request-row-13")
-        assertText("raw-input-request-row-11-repeat", equals: "Near-duplicate 2 of 2 · Same source file: AGENTS.md · first at #4")
-        assertText("raw-input-request-row-12-repeat", equals: "Duplicate 2 of 2 · Identical text · first at #5")
+        XCTAssertTrue(element("raw-input-request-row-11").exists)
+        XCTAssertFalse(element("raw-input-request-row-11-repeat").exists)
+        assertText("raw-input-request-row-12-repeat", equals: "Duplicate 2 of 2 · first at #5")
         XCTAssertTrue(element("raw-input-request-row-13").exists)
         XCTAssertFalse(element("raw-input-request-row-13-repeat").exists, "The resumed prompt itself is not a repeat.")
-        attachScreenshot(named: "The latest request lists both AGENTS.md copies in order, flagged as near-duplicates")
+        attachScreenshot(named: "The latest request lists both AGENTS.md copies in order and flags the date reminder sent twice")
 
         element("raw-input-request-row-11").click()
         let secondLine = element("raw-input-text-line-2")

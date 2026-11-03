@@ -9214,8 +9214,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         repeated = self.assert_success(single("--request", "4"))
         self.assertEqual((repeated["request"]["items"], repeated["request"]["itemTokens"], repeated["request"]["contextTokens"]), (12, 19600, 19600))
         self.assertEqual(
-            [(row["position"], row["label"], row["repeated"]["kind"], row["repeated"]["copy"]) for row in repeated["rows"] if row.get("repeated")],
-            [(8, "exec", "exact", 1), (9, "exec", "exact", 1), (10, "exec", "exact", 2), (11, "exec", "exact", 2)],
+            [(row["position"], row["label"], row["repeated"]["copy"]) for row in repeated["rows"] if row.get("repeated")],
+            [(8, "exec", 1), (9, "exec", 1), (10, "exec", 2), (11, "exec", 2)],
             "Both README reads and both of their outputs were sent in request 4.",
         )
         first_request = self.assert_success(single("--request", "1"))["request"]
@@ -9315,8 +9315,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         self.assert_failure(response, "not_found")
 
-    # case-contract: test_task_raw_input_single_request_flags_resumed_instruction_copies | After a Claude Code fixture session that resumes once its AGENTS.md changed, the raw input's single-request scope lists every item one request sent, in order and with nothing merged, and shows the latest request by default. A request after the resume carries both instruction copies in order, flagged as near-duplicates from the same source file, and the date reminder sent twice is flagged as an exact duplicate; a request before the resume carries one copy and no repeats, and a search keeps each row's position. Each request reports Claude's input with its cache-read and cache-write split, and its items' sizes add up to that input. The request is labelled exact; its text export gives every item's full text under a header naming any repeat, and its JSON export is the request body with the logged parameters, cache markers, system prompt, tools and messages verbatim, an earlier request's messages being a prefix of a later one's. A request number past the last is not_found, and zero or an unknown export format is invalid_argument. In the app, choosing Single request shows the latest request with its usage and the flagged copies, stepping back to a request before the resume shows one copy and no flags, Latest returns to the last request, and Copy all copies the whole request as JSON.
-    def test_task_raw_input_single_request_flags_resumed_instruction_copies(self):
+    # case-contract: test_task_raw_input_single_request_lists_resumed_instruction_copies_in_order | After a Claude Code fixture session that resumes once its AGENTS.md changed, the raw input's single-request scope lists every item one request sent, in order and with nothing merged, and shows the latest request by default. A request after the resume carries both instruction copies in order, which differ and so are not flagged, while the date reminder sent twice word for word is flagged as a duplicate; a request before the resume carries one copy and no duplicates, and a search keeps each row's position. Each request reports Claude's input with its cache-read and cache-write split, and its items' sizes add up to that input. The request is labelled exact; its text export gives every item's full text under a header naming any duplicate, and its JSON export is the request body with the logged parameters, cache markers, system prompt, tools and messages verbatim, an earlier request's messages being a prefix of a later one's. A request number past the last is not_found, and zero or an unknown export format is invalid_argument. In the app, choosing Single request shows the latest request with its usage, both instruction copies unflagged and the repeated date reminder flagged, stepping back to a request before the resume shows one copy and no flags, Latest returns to the last request, and Copy all copies the whole request as JSON.
+    def test_task_raw_input_single_request_lists_resumed_instruction_copies_in_order(self):
         environment = self.install_claude_fixture("claude-fixture-instruction-resume")
         environment["CLAUDE_CONFIG_DIR"] = str(self.data_directory / "claude-config")
         task_id = self.create_task(title="Claude instruction resume", provider="claude")["id"]
@@ -9341,7 +9341,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         request = latest["request"]
         self.assertEqual(
             {key: request[key] for key in ("number", "count", "latest", "items", "repeatedItems", "exact")},
-            {"number": 5, "count": 5, "latest": 5, "items": 16, "repeatedItems": 4, "exact": True},
+            {"number": 5, "count": 5, "latest": 5, "items": 16, "repeatedItems": 2, "exact": True},
             "The latest request is shown by default, with every item it sent.",
         )
         self.assertEqual(
@@ -9364,14 +9364,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(first_copy["preview"].startswith("<system-reminder> Codebase and user instructions are shown below."))
         self.assertTrue(second_copy["preview"].startswith("<system-reminder> Instruction files were re-read"))
         self.assertNotEqual(first_copy["id"], second_copy["id"], "Two copies of AGENTS.md, not one item listed twice.")
-        for copy, row in enumerate((first_copy, second_copy), start=1):
-            self.assertEqual(
-                row["repeated"],
-                {"kind": "similar", "reason": "Same source file: AGENTS.md", "first": 3, "copy": copy, "copies": 2},
-            )
+        for row in (first_copy, second_copy):
+            self.assertNotIn("repeated", row, "Two different texts are not flagged, however alike.")
         for copy, row in enumerate((rows[4], rows[12]), start=1):
-            self.assertEqual(row["repeated"], {"kind": "exact", "reason": "Identical text", "first": 4, "copy": copy, "copies": 2})
-        self.assertEqual([row["position"] for row in rows if row.get("repeated")], [3, 4, 11, 12])
+            self.assertEqual(row["repeated"], {"first": 4, "copy": copy, "copies": 2})
+        self.assertEqual([row["position"] for row in rows if row.get("repeated")], [4, 12])
         self.assertEqual(sum(row["tokens"] for row in rows), 9100)
 
         before = self.assert_success(single("--request", "3"))
@@ -9420,8 +9417,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(text.startswith("Request 5 of 5 · Claude main agent"))
         self.assertIn("Reported input: 9100 tokens (uncached 2 · cache read 9000 · cache write 98)", text)
         self.assertEqual(text.count("\n===== #"), 16, "One header per item sent.")
-        for position, repeat in ((3, "similar 1 of 2: Same source file: AGENTS.md"), (11, "similar 2 of 2: Same source file: AGENTS.md"),
-                                 (12, "exact 2 of 2: Identical text")):
+        for position, repeat in ((4, "duplicate 1 of 2"), (12, "duplicate 2 of 2")):
             row = rows[position]
             self.assertIn(f"\n===== #{position + 1} · {row['kind']} · {row['label']} · {row['tokens']} tokens · {repeat} =====\n", text)
         self.assertIn(full_text(second_copy["id"]), text, "Each item's full text, verbatim.")

@@ -2689,9 +2689,9 @@ private struct RawInputRowView: View {
             // of one height keep the lazy list's placement from oscillating.
             if row.position != nil {
                 if let repeated = row.repeated {
-                    Text("\(repeated.kind == "exact" ? "Duplicate" : "Near-duplicate") \(repeated.copy) of \(repeated.copies) · \(repeated.reason)\(repeated.copy > 1 ? " · first at #\(repeated.first + 1)" : "")")
+                    Text("Duplicate \(repeated.copy) of \(repeated.copies)\(repeated.copy > 1 ? " · first at #\(repeated.first + 1)" : "")")
                         .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(repeated.kind == "exact" ? Color.red : Color.orange)
+                        .foregroundStyle(Color.red)
                         .lineLimit(1)
                         .accessibilityIdentifier("\(row.accessibilityID)-repeat")
                 } else {
@@ -2710,8 +2710,7 @@ private struct RawInputRowView: View {
 
     private var background: Color {
         if isSelected { return Color.accentColor.opacity(0.18) }
-        guard let repeated = row.repeated else { return .clear }
-        return (repeated.kind == "exact" ? Color.red : Color.orange).opacity(0.08)
+        return row.repeated == nil ? .clear : Color.red.opacity(0.08)
     }
 }
 
