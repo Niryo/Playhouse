@@ -2856,7 +2856,10 @@ final class PlayhouseUITests: XCTestCase {
 
         // A model can write its outcome command as answer text instead of running
         // it. The echo is hidden, and it counts only when it names this task.
-        let echoedAnswers = app.groups.matching(NSPredicate(format: "label == %@", "Fixture answer with an echoed outcome."))
+        // Scoped to message containers: a reply's paragraphs are labelled groups too.
+        let echoedAnswers = app.groups.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label == %@", "assistant-message-", "Fixture answer with an echoed outcome."
+        ))
         for (turnIndex, (echoedTaskID, expectedColumn)) in [(UUID().uuidString, "Blocked"), (taskID, "Review")].enumerated() {
             XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15), "The composer should accept the echoed-outcome turn.")
             composer.click()
@@ -6473,7 +6476,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(texts.contains("OK."))
     }
 
-    // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details.
+    // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload.
     func test_conversation_adds_ordered_text_annotations() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-goal-success").path
         let fixtureStateDirectory = dataDirectory.appendingPathComponent("comment-goal-fixture-state", isDirectory: true)
@@ -6883,17 +6886,22 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertGreaterThanOrEqual(markerY(), reloadedTranscript.frame.minY + 16)
             XCTAssertLessThanOrEqual(markerY(), reloadedTranscript.frame.maxY - 16)
         }
-        let assistantResponseLines = renderedCommentResponse.descendants(matching: .staticText).allElementsBoundByIndex
-            .compactMap { $0.value as? String }
+        // The reply's prose is one selectable text; each response line is its own paragraph in it.
+        let responseTexts = renderedCommentResponse.descendants(matching: .staticText).allElementsBoundByIndex
+        XCTAssertEqual(responseTexts.count, 1, "The reply's lines should share one selectable text.")
+        let assistantResponseLines = (responseTexts.first?.value as? String ?? "").components(separatedBy: "\n")
         XCTAssertEqual(assistantResponseLines.count, 2, "Each comment response should render on its own line.")
         XCTAssertTrue(assistantResponseLines[0].hasPrefix("1. "), "The first response should begin with its numbered comment link.")
         XCTAssertTrue(assistantResponseLines[1].hasPrefix("2. "), "The second response should begin with its numbered comment link.")
         XCTAssertFalse(assistantResponseLines.joined(separator: "\n").contains(":playhouse-annotation"),
                        "Protocol markers should be replaced by visible comment labels.")
         let firstMarkerCenterX = "1.".size(withAttributes: [.font: NSFont.systemFont(ofSize: 16)]).width / 2
-        let firstResponseLine = renderedCommentResponse.descendants(matching: .staticText).matching(
-            NSPredicate(format: "value BEGINSWITH %@", "1. ")
-        ).firstMatch
+        func responseLine(_ prefix: String) -> XCUIElement {
+            renderedCommentResponse.descendants(matching: .any).matching(NSPredicate(
+                format: "identifier BEGINSWITH %@ AND label BEGINSWITH %@", "assistant-markdown-paragraph-", prefix
+            )).firstMatch
+        }
+        let firstResponseLine = responseLine("1. ")
         revealReplyMarker(firstResponseLine, verticalOffset: 0.5)
         let markerPoint = firstResponseLine.coordinate(withNormalizedOffset: CGVector(
             dx: max(0.01, firstMarkerCenterX / max(1, firstResponseLine.frame.width)), dy: 0.5
@@ -6916,9 +6924,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(waitUntil({ commentHint.exists && commentHint.label.contains("Explain this phrase") }, timeout: 5),
                           "The first comment link should reliably reopen after pointer reentry.")
         }
-        let secondResponseLine = renderedCommentResponse.descendants(matching: .staticText).matching(
-            NSPredicate(format: "value BEGINSWITH %@", "2. ")
-        ).firstMatch
+        let secondResponseLine = responseLine("2. ")
         XCTAssertGreaterThan(secondResponseLine.frame.height, 40,
                              "The second response should wrap while its numbered link stays at the start.")
         revealReplyMarker(secondResponseLine, verticalOffset: 0.03)
@@ -6982,15 +6988,36 @@ final class PlayhouseUITests: XCTestCase {
 
         let emptyComposer = element("message-composer")
         XCTAssertTrue((emptyComposer.value as? String ?? "").isEmpty)
+        // Selecting all of the reply's text spans both response paragraphs, so this comment
+        // covers more than one block.
+        // Each paragraph is measured fully on screen: the pending-comment chip grows the composer,
+        // which can cover the end of the reply.
+        func orangePixels(in line: XCUIElement) -> Int {
+            XCTAssertTrue(scrollFullyIntoView(line, in: reloadedTranscript), "The reply paragraph should scroll fully into view.")
+            return orangePixelCount(in: line.screenshot())
+        }
+        let firstLineOrangeBefore = orangePixels(in: firstResponseLine)
+        let secondLineOrangeBefore = orangePixels(in: secondResponseLine)
         secondResponseLine.click()
         secondResponseLine.typeKey("a", modifierFlags: .command)
         let addCommentOnly = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
         XCTAssertTrue(addCommentOnly.waitForExistence(timeout: 5))
+        // The selection starts in the first paragraph, which can be scrolled above the
+        // transcript; the hint then stays at the top of the selection's visible part.
+        XCTAssertTrue(addCommentOnly.isHittable && reloadedTranscript.frame.contains(addCommentOnly.frame),
+                      "The Add comment hint should stay on screen when the selection starts above the visible transcript.")
         addCommentOnly.click()
         let commentOnlyField = element("comment-input-field")
         XCTAssertTrue(commentOnlyField.waitForExistence(timeout: 5))
         commentOnlyField.typeText("Explain this reply\r")
         XCTAssertTrue(element("pending-comment-count").waitForExistence(timeout: 5), "The comment-only selection should become a pending comment.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("pending-comment-count")).contains("1 comment"),
+                      "A selection across paragraphs should add one comment, not one per paragraph.")
+        XCTAssertGreaterThan(orangePixels(in: firstResponseLine), firstLineOrangeBefore + 5,
+                             "A comment across paragraphs should highlight its first paragraph.")
+        XCTAssertGreaterThan(orangePixels(in: secondResponseLine), secondLineOrangeBefore + 5,
+                             "A comment across paragraphs should highlight its last paragraph.")
+        attachScreenshot(named: "Comment spanning two reply paragraphs")
         XCTAssertTrue((emptyComposer.value as? String ?? "").isEmpty)
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({
@@ -7007,6 +7034,33 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(commentOnlyPayload.hasPrefix("<playhouse-comment-context>"),
                       "An empty-composer send should contain only the structured comment context.")
         XCTAssertTrue(commentOnlyPayload.contains("Explain this reply"))
+        let spanningPayload = try XCTUnwrap(commentOnlyPayload.components(separatedBy: "<response-comments>").last?
+            .components(separatedBy: "</response-comments>").first)
+        let spanningComments = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(spanningPayload.utf8)) as? [[String: Any]])
+        XCTAssertEqual(spanningComments.count, 1, "A selection across paragraphs should send one comment.")
+        let spanningSource = try XCTUnwrap(spanningComments.first?["source"] as? [String: Any])
+        XCTAssertEqual(spanningSource["messageId"] as? String, annotatedAssistantID)
+        let spanningStartBlock = try XCTUnwrap(spanningSource["blockID"] as? Int)
+        let spanningEndBlock = try XCTUnwrap(spanningSource["endBlockID"] as? Int,
+                                             "A comment across paragraphs should record the block it ends in.")
+        XCTAssertLessThan(spanningStartBlock, spanningEndBlock)
+        XCTAssertEqual(spanningSource["startOffset"] as? Int, 0)
+        let spanningText = try XCTUnwrap(spanningComments.first?["text"] as? String)
+        XCTAssertTrue(spanningText.contains("1. ") && spanningText.contains("2. "),
+                      "The commented text should include both paragraphs.")
+
+        // The cross-paragraph highlight is restored from the sent payload after reopening.
+        element("back-to-board-button").click()
+        openTask(named: "Comment source")
+        // Reopening shows only the newest turn; the commented reply is in an earlier one.
+        XCTAssertTrue(waitUntil({ firstResponseLine.exists }, timeout: 5) || revealWholeTranscript(),
+                      "The commented reply should render after reopening.")
+        XCTAssertTrue(firstResponseLine.waitForExistence(timeout: 10))
+        XCTAssertGreaterThan(orangePixels(in: firstResponseLine), firstLineOrangeBefore + 5,
+                             "Reopening should restore the cross-paragraph highlight on its first paragraph.")
+        XCTAssertGreaterThan(orangePixels(in: secondResponseLine), secondLineOrangeBefore + 5,
+                             "Reopening should restore the cross-paragraph highlight on its last paragraph.")
+        attachScreenshot(named: "Restored comment spanning two reply paragraphs")
     }
 
     // case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged.
@@ -9181,16 +9235,28 @@ final class PlayhouseUITests: XCTestCase {
         // A long reply's label is a summary; its Markdown blocks carry the text.
         XCTAssertTrue(waitUntil({ self.transcriptContains("Implementation plan") }, timeout: 10), "The completed plan should appear automatically after reopening.")
         XCTAssertTrue(transcriptContains("Start with the workspace model.") && transcriptContains("A separate paragraph confirms readable spacing"),
-                      "Paragraphs should remain separate blocks after reopening.")
+                      "Both paragraphs should render after reopening.")
         XCTAssertFalse(transcriptContains("<proposed_plan>"), "The reloaded plan should hide its opening protocol wrapper.")
         XCTAssertFalse(transcriptContains("</proposed_plan>"), "The reloaded plan should hide its closing protocol wrapper.")
         let markdownContent = app.staticTexts.matching(
             NSPredicate(format: "value CONTAINS %@", "Implementation plan")
         ).firstMatch
         XCTAssertTrue(markdownContent.waitForExistence(timeout: 5), "The plan should render as one selectable Markdown text view.")
-        markdownContent.click()
-        markdownContent.typeKey("a", modifierFlags: .command)
-        markdownContent.typeKey("c", modifierFlags: .command)
+        let sharedProse = markdownContent.value as? String ?? ""
+        for text in ["Start with the workspace model.", "A separate paragraph confirms readable spacing",
+                     "Implementation detail 01", "Second numbered step"] {
+            XCTAssertTrue(sharedProse.contains(text), "The heading, paragraphs, and list items should share one selectable text: \(text)")
+        }
+        XCTAssertFalse(sharedProse.contains("console.log"), "A fenced code block should stay in its own card.")
+        // The shared text is taller than the viewport; click a line that is on screen.
+        let visibleOrderedItem = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-markdown-ordered-list-item-", "First numbered step"))
+            .firstMatch
+        XCTAssertTrue(visibleOrderedItem.waitForExistence(timeout: 5))
+        XCTAssertTrue(scrollFullyIntoView(visibleOrderedItem, in: element("conversation-scroll-view")))
+        visibleOrderedItem.click()
+        visibleOrderedItem.typeKey("a", modifierFlags: .command)
+        visibleOrderedItem.typeKey("c", modifierFlags: .command)
         let copiedPlan = NSPasteboard.general.string(forType: .string) ?? ""
         XCTAssertTrue(copiedPlan.contains("Implementation plan"), "Selecting all should include the plan heading.")
         XCTAssertTrue(copiedPlan.contains("Implementation detail 01"), "Selecting all should include the first list item.")
@@ -9946,7 +10012,11 @@ final class PlayhouseUITests: XCTestCase {
         composer.click()
         composer.typeText("Check legacy model attribution.")
         element("send-message-button").click()
-        XCTAssertTrue(waitUntil({ app.groups.matching(NSPredicate(format: "label == %@", "Answers received: Blue / fixture-secret.")).count >= 2 }, timeout: 15))
+        XCTAssertTrue(waitUntil({
+            app.groups.matching(NSPredicate(
+                format: "identifier BEGINSWITH %@ AND label == %@", "assistant-message-", "Answers received: Blue / fixture-secret."
+            )).count >= 2
+        }, timeout: 15))
         XCTAssertTrue(app.staticTexts["Codex"].exists, "A legacy reply without a stored model stays provider-only.")
         XCTAssertTrue(app.staticTexts["Codex · Luna"].exists, "The new turn is attributed to the model selected for that send.")
         XCTAssertEqual(app.staticTexts.matching(identifier: "message-time-item_assistant_fixture_1").count, 0,
@@ -13226,6 +13296,36 @@ final class PlayhouseUITests: XCTestCase {
                 throw NSError(domain: "PlayhouseUITests", code: 4, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(database))])
             }
         }
+    }
+
+    /// Scrolls `scrollView` until `element` sits fully inside it, or, for an element taller than
+    /// the scroll view, until its top edge is at the scroll view's top. Custom accessibility
+    /// elements, such as one paragraph of a reply's shared text, are not scrolled into view by a
+    /// click.
+    @discardableResult
+    private func scrollFullyIntoView(_ element: XCUIElement, in scrollView: XCUIElement, margin: CGFloat = 8) -> Bool {
+        for _ in 0..<40 {
+            let viewport = scrollView.frame
+            let frame = element.frame
+            let delta: CGFloat
+            if frame.height > viewport.height {
+                let offset = frame.minY - viewport.minY
+                if abs(offset) <= 4 { return true }
+                delta = -offset
+            } else {
+                // An element nearly as tall as the viewport fits only with a smaller margin.
+                let margin = min(margin, (viewport.height - frame.height) / 2)
+                if frame.minY < viewport.minY + margin {
+                    delta = viewport.minY + margin - frame.minY
+                } else if frame.maxY > viewport.maxY - margin {
+                    delta = viewport.maxY - margin - frame.maxY
+                } else {
+                    return true
+                }
+            }
+            scrollView.scroll(byDeltaX: 0, deltaY: max(-100, min(100, delta)))
+        }
+        return false
     }
 
     /// Opening a conversation renders only its newest turn, and older batches load as the

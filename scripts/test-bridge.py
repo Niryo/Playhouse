@@ -5154,7 +5154,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             any("<playhouse-handoff-context>" in message["text"] for message in final_history["messages"]),
             "Handoff context never appears in the visible transcript.",
         )
-    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details.
+    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload.
     def test_conversation_adds_ordered_text_annotations(self):
         task = self.create_repo_task("Conversation comments", [self.primary])
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -5170,7 +5170,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
                 "messageId": "assistant-message", "blockID": 0, "startOffset": 3, "endOffset": 15}},
             {"text": "second phrase with enough surrounding context to remain identifiable when the hint truncates a very long selected range",
              "comment": "Please clarify this response in detail, including how each part connects to the question. " * 8, "source": {
-                "messageId": "assistant-message", "blockID": 0, "startOffset": 22, "endOffset": 36}},
+                # A selection across paragraphs names the block it ends in.
+                "messageId": "assistant-message", "blockID": 0, "startOffset": 22, "endBlockID": 2, "endOffset": 36}},
         ]
         ordinary_text = "Keep the existing behavior too."
         prompt = (
@@ -5207,6 +5208,15 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Explain this",
             "Please clarify this response in detail, including how each part connects to the question. " * 8,
         ])
+        reloaded_comments = json.loads(
+            user_messages[-1]["text"].split("<response-comments>", 1)[1].split("</response-comments>", 1)[0]
+        )
+        self.assertNotIn("endBlockID", reloaded_comments[0]["source"], "A comment inside one block keeps the original source fields.")
+        self.assertEqual(
+            reloaded_comments[1]["source"],
+            {"messageId": "assistant-message", "blockID": 0, "startOffset": 22, "endBlockID": 2, "endOffset": 36},
+            "A comment across blocks keeps its start and end blocks after a fresh CLI/XPC history read.",
+        )
         self.assertIn(ordinary_text, user_messages[-1]["text"])
         current_goal, _ = self.call_cli("conversation", "goal", task["id"], "get", extra_environment=fixture_environment)
         self.assertIsNone(self.assert_success(current_goal), "A conversation comment payload must not become a Goal objective.")
