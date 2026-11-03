@@ -11978,7 +11978,7 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
-    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory.
+    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch.
     func test_external_git_edits_and_commit_refresh_workspace_changes() throws {
         let repository = runDirectory.appendingPathComponent("external-git", isDirectory: true)
         try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
@@ -12039,6 +12039,25 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.element("workspace-change-unviewed-tracked.txt").value as? String == "Committed, primary" }, timeout: 10))
         XCTAssertFalse(committedEntries.contains { $0["path"] as? String == "base-only.txt" })
         attachScreenshot(named: "Branch changes exclude base-only commits and retain task commits")
+
+        // Upstream moves ahead of a stale local base branch, and the task branch merges it.
+        let origin = runDirectory.appendingPathComponent("external-git-origin.git", isDirectory: true)
+        try FileManager.default.createDirectory(at: origin, withIntermediateDirectories: true)
+        try runGit(origin, "init", "--bare", "--initial-branch=main")
+        try runGit(repository, "remote", "add", "origin", origin.path)
+        try runGit(repository, "push", "origin", "main")
+        try "Upstream commit.\n".write(to: repository.appendingPathComponent("upstream-only.txt"), atomically: true, encoding: .utf8)
+        try runGit(repository, "add", "upstream-only.txt")
+        try runGit(repository, "commit", "-m", "Upstream commit")
+        try runGit(repository, "push", "origin", "main")
+        try runGit(repository, "reset", "--hard", "HEAD~1")
+        try runGit(worktree, "merge", "--no-edit", "origin/main")
+        let staleBase = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        let staleBaseEntries = staleBase?["unviewed"] as? [[String: Any]] ?? []
+        XCTAssertEqual(staleBaseEntries.map { $0["path"] as? String }, ["tracked.txt", "untracked.txt"])
+        XCTAssertTrue(waitUntil({ !self.element("workspace-change-unviewed-upstream-only.txt").exists }, timeout: 10))
+        XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").exists)
+        attachScreenshot(named: "Merged upstream commits are excluded when the local base branch is stale")
     }
 
     // case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. The task card shows a token usage dot whose tooltip reports the total, and the Token Stats context-menu item opens a modal showing the totals, the per-tool rollup and the per-turn breakdown.

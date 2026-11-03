@@ -8739,7 +8739,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(event.get("event") == "workspace.file.read.failed" and event.get("path") == "stale.txt" for event in diagnostics))
         self.assertNotIn("Shared working version.", json.dumps(diagnostics))
 
-    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory.
+    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch.
     def test_external_git_edits_and_commit_refresh_workspace_changes(self):
         repository = self.data_directory / "external-git"
         repository.mkdir()
@@ -8793,6 +8793,26 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(set(entries), {"tracked.txt", "untracked.txt"})
         self.assertFalse(entries["tracked.txt"]["isUncommitted"])
         self.assertNotIn("base-only.txt", entries)
+
+        # Upstream moves ahead of a stale local base branch, and the task branch merges it.
+        origin = self.data_directory / "external-git-origin.git"
+        origin.mkdir()
+        self.run_git(origin, "init", "--bare", "--initial-branch=main")
+        self.run_git(repository, "remote", "add", "origin", str(origin))
+        self.run_git(repository, "push", "origin", "main")
+        (repository / "upstream-only.txt").write_text("Upstream commit.\n", encoding="utf-8")
+        self.run_git(repository, "add", "upstream-only.txt")
+        self.run_git(repository, "commit", "-m", "Upstream commit")
+        self.run_git(repository, "push", "origin", "main")
+        self.run_git(repository, "reset", "--hard", "HEAD~1")
+        self.run_git(worktree, "merge", "--no-edit", "origin/main")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        entries = {entry["path"]: entry for entry in self.assert_success(response)["unviewed"]}
+        self.assertEqual(set(entries), {"tracked.txt", "untracked.txt"})
+        self.assertNotIn("upstream-only.txt", entries)
+        self.assertNotIn("base-only.txt", entries)
+        stale_base_diff = self.assert_success(self.changes_diff(task_id, "tracked.txt", "unviewed", repository=worktree))
+        self.assertEqual(stale_base_diff["original"], "Baseline.\n")
 
     def install_claude_fixture(self, name):
         """Installs the Claude Code protocol fixture and returns its turn environment."""
