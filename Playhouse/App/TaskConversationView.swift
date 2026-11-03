@@ -716,6 +716,10 @@ struct TaskConversationView: View {
     @State private var hasPausedResponse = false
     @State private var isPausingResponse = false
     @State private var queuedMessages: [QueuedConversationMessage] = []
+    /// A `.dispatching` follow-up is already being sent (its message is in the
+    /// conversation) and stays in the store until that whole turn ends, so only
+    /// the others are still waiting for the user.
+    private var waitingFollowUps: [QueuedConversationMessage] { queuedMessages.filter { $0.state != .dispatching } }
     @State private var isSubmittingLiveMessage = false
     @State private var userInputRequest: ConversationUserInputRequest?
     // The live snapshot can still carry a request this window just answered.
@@ -3869,9 +3873,9 @@ struct TaskConversationView: View {
                     .accessibilityIdentifier("codex-chat-error")
             }
 
-            if !queuedMessages.isEmpty {
+            if !waitingFollowUps.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(queuedMessages) { queued in
+                    ForEach(waitingFollowUps) { queued in
                         HStack(spacing: 12) {
                             Image(systemName: "text.line.first.and.arrowtriangle.forward")
                                 .font(.system(size: 14, weight: .medium))
