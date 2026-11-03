@@ -12434,13 +12434,24 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((report["tools"] as? [[String: Any]])?.first?["totalTokens"] as? Int, 18_000)
     }
 
+    /// Rows of the raw input list are drawn lazily; scrolls the list until one is on screen.
+    private func revealRawInputRow(_ identifier: String) {
+        let row = element(identifier)
+        let list = element("raw-input-list")
+        XCTAssertTrue(list.waitForExistence(timeout: 10))
+        for _ in 0..<20 where !row.exists {
+            list.scroll(byDeltaX: 0, deltaY: -300)
+        }
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "\(identifier) should be on screen after scrolling the list.")
+    }
+
     private func duplicateTokens(taskID: String, environment: [String: String]) throws -> String {
         let report = try XCTUnwrap(try runCLI(["task", "token-waste", taskID], extraEnvironment: environment)["result"] as? [String: Any])
         let tokens = try XCTUnwrap((report["duplicates"] as? [[String: Any]])?.first?["tokensPerCopy"] as? Int)
         return tokens.formatted(IntegerFormatStyle<Int>().grouping(.automatic))
     }
 
-    // case-contract: test_task_token_waste_ranks_codex_items_by_size | A Codex fixture turn whose thread and subagent have rollout files gives the same map from Codex's own format: a request was sent the instructions plus every item before its own output, the final transcript's tokens equal the last request's input exactly after a compaction replaced the history, Codex's unsaved tool definitions appear as one hidden-overhead item sent with every request, encrypted reasoning is shown by its size, the MCP tool's log is the largest item and was removed by the compaction, the repeated README read and the cache miss are reported, and the subagent's thread is its own agent. The raw input's final transcript lists the hidden overhead, the instructions and the replacement history once each without the removed log, and an item's full text, from a tool output or from the replacement history, reads back exactly as Codex saved it, in chunks, with its call named. The Token Stats modal shows the Codex wasters, the hidden overhead and the subagent, and showing the log opens its full text.
+    // case-contract: test_task_token_waste_ranks_codex_items_by_size | A Codex fixture turn whose thread and subagent have rollout files gives the same map from Codex's own format: a request was sent the instructions plus every item before its own output, the final transcript's tokens equal the last request's input exactly after a compaction replaced the history, Codex's unsaved tool definitions appear as one hidden-overhead item sent with every request, encrypted reasoning is shown by its size, the MCP tool's log is the largest item and was removed by the compaction, the repeated README read and the cache miss are reported, and the subagent's thread is its own agent. The raw input's final transcript lists the hidden overhead, the instructions and the replacement history once each without the removed log, and an item's full text, from a tool output or from the replacement history, reads back exactly as Codex saved it, in chunks, with its call named. The single-request scope rebuilds each Codex request from the rollout and labels it reconstructed: the latest request is the final transcript in order, request 4 flags both README reads and both of their outputs as exact duplicates, each request's items add up to the input Codex reported with its cached share as cache read and no cache write, and the JSON export holds the base instructions and the input items exactly as saved. The Token Stats modal shows the Codex wasters, the hidden overhead and the subagent, showing the log opens its full text, and the raw input's single request reads as reconstructed, with request 4's duplicates flagged.
     func test_task_token_waste_ranks_codex_items_by_size() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Codex token waste", roots: [fixture.primary.path])
@@ -12507,6 +12518,25 @@ final class PlayhouseUITests: XCTestCase {
         )
         XCTAssertTrue(element("token-stats-agent-codex/\(threadID)-subagent").exists, "The subagent thread is its own agent.")
         attachScreenshot(named: "Codex overhead includes the hidden tool definitions and the subagent")
+
+        element("token-stats-raw-input-button").click()
+        let requestScope = element("raw-input-scope-request")
+        XCTAssertTrue(requestScope.waitForExistence(timeout: 10))
+        requestScope.click()
+        assertText("raw-input-request-number", equals: "Request 5 of 5")
+        assertText("raw-input-request-exactness", equals: "Reconstructed")
+        XCTAssertTrue(
+            accessibleLabelOrValue(of: element("raw-input-request-note")).hasPrefix("Reconstructed: Codex resends the whole history"),
+            "The view says how the Codex request was rebuilt."
+        )
+        assertText("raw-input-request-usage", equals: "Reported input 4,400 (uncached 500 · cache read 3,900) · items add up to 4,400 · 0 repeated")
+        element("raw-input-request-previous").click()
+        assertText("raw-input-request-number", equals: "Request 4 of 5")
+        revealRawInputRow("raw-input-request-row-11")
+        assertText("raw-input-request-row-9-repeat", equals: "Duplicate 1 of 2 · Identical text")
+        assertText("raw-input-request-row-11-repeat", equals: "Duplicate 2 of 2 · Identical text · first at #10")
+        attachScreenshot(named: "A reconstructed Codex request flags the README read sent twice")
+        element("close-raw-input-button").click()
         element("close-token-stats-button").click()
 
         let report = try XCTUnwrap(try runCLI(["task", "token-waste", taskID])["result"] as? [String: Any])
@@ -12587,6 +12617,92 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Scrolling the log reaches its last line")
         element("close-raw-input-button").click()
         element("close-token-stats-button").click()
+    }
+
+    // case-contract: test_task_raw_input_single_request_flags_resumed_instruction_copies | After a Claude Code fixture session that resumes once its AGENTS.md changed, the raw input's single-request scope lists every item one request sent, in order and with nothing merged, and shows the latest request by default. A request after the resume carries both instruction copies in order, flagged as near-duplicates from the same source file, and the date reminder sent twice is flagged as an exact duplicate; a request before the resume carries one copy and no repeats, and a search keeps each row's position. Each request reports Claude's input with its cache-read and cache-write split, and its items' sizes add up to that input. The request is labelled exact; its text export gives every item's full text under a header naming any repeat, and its JSON export is the request body with the logged parameters, cache markers, system prompt, tools and messages verbatim, an earlier request's messages being a prefix of a later one's. A request number past the last is not_found, and zero or an unknown export format is invalid_argument. In the app, choosing Single request shows the latest request with its usage and the flagged copies, stepping back to a request before the resume shows one copy and no flags, Latest returns to the last request, and Copy all copies the whole request as JSON.
+    func test_task_raw_input_single_request_flags_resumed_instruction_copies() throws {
+        var environment = try installClaudeFixture(named: "claude-fixture-ui-instruction-resume")
+        let claudeConfig = dataDirectory.appendingPathComponent("claude-config").path
+        environment["CLAUDE_CONFIG_DIR"] = claudeConfig
+        environment["PLAYHOUSE_E2E_CLAUDE_CONFIG_DIR"] = claudeConfig
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        let title = "Claude instruction resume"
+        let taskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", title, "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        XCTAssertTrue(app.buttons[title].waitForExistence(timeout: 10))
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Show instruction resume."], extraEnvironment: environment)
+
+        openTokenStats(of: title)
+        let rawInputButton = element("token-stats-raw-input-button")
+        XCTAssertTrue(waitUntil({ rawInputButton.exists && rawInputButton.isEnabled }, timeout: 10), "The raw input opens once the map has loaded.")
+        rawInputButton.click()
+        let requestScope = element("raw-input-scope-request")
+        XCTAssertTrue(requestScope.waitForExistence(timeout: 10), "The raw input offers a single-request scope.")
+        requestScope.click()
+        assertText("raw-input-request-number", equals: "Request 5 of 5")
+        assertText("raw-input-summary", equals: "16 items · 9,100 tokens")
+        assertText("raw-input-request-exactness", equals: "Exact")
+        assertText(
+            "raw-input-request-usage",
+            equals: "Reported input 9,100 (uncached 2 · cache read 9,000 · cache write 98) · items add up to 9,100 · 4 repeated · source sdk"
+        )
+        XCTAssertFalse(element("raw-input-request-next").isEnabled, "The latest request is the last one.")
+        XCTAssertFalse(element("raw-input-request-latest").isEnabled)
+        XCTAssertTrue(element("raw-input-request-time").exists, "The request shows when it was sent.")
+        assertText("raw-input-request-row-3-repeat", equals: "Near-duplicate 1 of 2 · Same source file: AGENTS.md")
+        assertText("raw-input-request-row-4-repeat", equals: "Duplicate 1 of 2 · Identical text")
+        revealRawInputRow("raw-input-request-row-13")
+        assertText("raw-input-request-row-11-repeat", equals: "Near-duplicate 2 of 2 · Same source file: AGENTS.md · first at #4")
+        assertText("raw-input-request-row-12-repeat", equals: "Duplicate 2 of 2 · Identical text · first at #5")
+        XCTAssertTrue(element("raw-input-request-row-13").exists)
+        XCTAssertFalse(element("raw-input-request-row-13-repeat").exists, "The resumed prompt itself is not a repeat.")
+        attachScreenshot(named: "The latest request lists both AGENTS.md copies in order, flagged as near-duplicates")
+
+        element("raw-input-request-row-11").click()
+        let secondLine = element("raw-input-text-line-2")
+        XCTAssertTrue(secondLine.waitForExistence(timeout: 10), "Selecting the second copy opens its full text.")
+        XCTAssertTrue(
+            accessibleLabelOrValue(of: secondLine).contains("Instruction files were re-read when this session started"),
+            "The second copy is the instructions re-read on resume."
+        )
+        attachScreenshot(named: "The re-read AGENTS.md copy, selected in the request")
+
+        let previous = element("raw-input-request-previous")
+        previous.click()
+        assertText("raw-input-request-number", equals: "Request 4 of 5")
+        previous.click()
+        assertText("raw-input-request-number", equals: "Request 3 of 5")
+        assertText("raw-input-summary", equals: "10 items · 4,400 tokens")
+        XCTAssertTrue(element("raw-input-request-row-3").waitForExistence(timeout: 5), "The first copy was already sent.")
+        XCTAssertFalse(element("raw-input-request-row-3-repeat").exists, "Before the resume the instructions were sent once.")
+        XCTAssertFalse(element("raw-input-request-row-11").exists, "Request 3 sent only ten items.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("raw-input-request-usage")).contains("items add up to 4,400 · 0 repeated"))
+        attachScreenshot(named: "A request before the resume carries one AGENTS.md copy and no repeats")
+
+        element("raw-input-request-latest").click()
+        assertText("raw-input-request-number", equals: "Request 5 of 5")
+        element("raw-input-export-format-json").click()
+        NSPasteboard.general.clearContents()
+        element("raw-input-request-copy-button").click()
+        assertText("raw-input-request-export-status", equals: "Copied request 5 as JSON: 16 items")
+        let copied = try XCTUnwrap(NSPasteboard.general.string(forType: .string), "Copy all puts the request on the pasteboard.")
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(copied.utf8)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.count, 9, "The whole request, every message it sent.")
+        let resumed = try XCTUnwrap((messages[6]["content"] as? [[String: Any]])?.first?["text"] as? String)
+        XCTAssertTrue(resumed.contains("Instruction files were re-read"))
+        let original = try XCTUnwrap((messages[0]["content"] as? [[String: Any]])?.first?["text"] as? String)
+        XCTAssertTrue(original.contains("Codebase and user instructions are shown below"))
+        XCTAssertEqual(body["model"] as? String, "claude-fixture")
+        attachScreenshot(named: "Copy all copies the whole request as JSON")
+        element("close-raw-input-button").click()
+        element("close-token-stats-button").click()
+
+        let page = try XCTUnwrap(try runCLI(
+            ["task", "raw-input", taskID, "--scope", "request", "--request", "3"], extraEnvironment: environment
+        )["result"] as? [String: Any])
+        XCTAssertEqual((page["request"] as? [String: Any])?["repeatedItems"] as? Int, 0)
     }
 
     // case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.

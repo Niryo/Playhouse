@@ -2252,9 +2252,16 @@ private struct TokenStatsSheet: View {
     }
 }
 
-/// The input a task's model requests were sent, one row per item and each item
-/// once: the final transcript, or everything ever sent including what a
-/// compaction removed. Rows load a page at a time as the list scrolls.
+private extension TaskRawInputPage.Row {
+    /// A single request can list one item twice, so its rows are keyed by position.
+    var listKey: Int { position ?? id }
+    var accessibilityID: String { position.map { "raw-input-request-row-\($0)" } ?? "raw-input-row-\(id)" }
+}
+
+/// The input a task's model requests were sent, one row per item: the final
+/// transcript or everything ever sent (including what a compaction removed)
+/// list each item once, and a single request lists everything it sent in
+/// order, repeats included and flagged. Rows load a page at a time as the list scrolls.
 private struct RawInputSheet: View {
     @Environment(\.dismiss) private var dismiss
     let taskID: UUID
@@ -2270,7 +2277,14 @@ private struct RawInputSheet: View {
     @State private var rows: [TaskRawInputPage.Row] = []
     @State private var isLoading = false
     @State private var selected: Int?
+    /// In a single request, which copy of the selected item is highlighted.
+    @State private var selectedPosition: Int?
     @State private var scrollTarget: Int?
+    /// `nil` is the request the final transcript was read from.
+    @State private var requestNumber: Int?
+    @State private var requestField = ""
+    @State private var exportFormat = TaskRawInputExportFormat.text
+    @State private var exportStatus: String?
 
     private static let pageSize = 100
     private static let number = IntegerFormatStyle<Int>().grouping(.automatic)
@@ -2292,7 +2306,9 @@ private struct RawInputSheet: View {
     }
 
     private var hasMore: Bool { rows.count < (page?.total ?? 0) }
-    private var reloadKey: String { "\(agent ?? "")|\(scope.rawValue)|\(order.rawValue)|\(submittedQuery)" }
+    private var reloadKey: String {
+        "\(agent ?? "")|\(scope.rawValue)|\(order.rawValue)|\(submittedQuery)|\(scope == .request ? requestNumber ?? 0 : 0)"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -2320,6 +2336,9 @@ private struct RawInputSheet: View {
                 }
             }
             controls
+            if scope == .request, let request = page?.request {
+                requestBar(request)
+            }
             HStack(alignment: .top, spacing: 0) {
                 list
                     .frame(width: min(460, Self.size.width * 0.42))
@@ -2353,7 +2372,16 @@ private struct RawInputSheet: View {
         .frame(width: Self.size.width, height: Self.size.height)
         .task(id: reloadKey) { await reload() }
         // Item IDs belong to one agent's log; another agent's item with the same ID is unrelated.
-        .onChange(of: agent) { selected = nil }
+        .onChange(of: agent) {
+            selected = nil
+            selectedPosition = nil
+            requestNumber = nil
+        }
+        .onChange(of: requestNumber) {
+            selected = nil
+            selectedPosition = nil
+            exportStatus = nil
+        }
     }
 
     private var controls: some View {
@@ -2369,6 +2397,7 @@ private struct RawInputSheet: View {
                 choices: [
                     (TaskRawInputScope.finalTranscript, "Final transcript", "raw-input-scope-final"),
                     (TaskRawInputScope.everything, "Everything sent", "raw-input-scope-all"),
+                    (TaskRawInputScope.request, "Single request", "raw-input-scope-request"),
                 ],
                 selection: $scope
             )
@@ -2390,14 +2419,20 @@ private struct RawInputSheet: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(rows) { row in
-                        RawInputRowView(row: row, maxTokens: page?.maxTokens ?? 0, isSelected: row.id == selected)
-                            .id(row.id)
-                            .contentShape(Rectangle())
-                            .onTapGesture { selected = row.id }
-                            .onAppear {
-                                if row.id == rows.last?.id { Task { await loadMore() } }
-                            }
+                    ForEach(rows, id: \.listKey) { row in
+                        RawInputRowView(
+                            row: row, maxTokens: page?.maxTokens ?? 0,
+                            isSelected: row.position.map { $0 == selectedPosition } ?? (row.id == selected)
+                        )
+                        .id(row.listKey)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selected = row.id
+                            selectedPosition = row.position
+                        }
+                        .onAppear {
+                            if row.listKey == rows.last?.listKey { Task { await loadMore() } }
+                        }
                     }
                     if hasMore {
                         ProgressView()
@@ -2427,8 +2462,153 @@ private struct RawInputSheet: View {
     private func fetch(offset: Int, focusing item: Int?) async -> TaskRawInputPage? {
         try? await BoardTaskManager(modelContext: modelContext).rawInputPage(
             taskID, homes: .forThisApp, agent: agent, scope: scope, order: order, query: submittedQuery,
-            offset: offset, limit: Self.pageSize, focus: item
+            offset: offset, limit: Self.pageSize, focus: item, request: scope == .request ? requestNumber : nil
         )
+    }
+
+    /// Which request is shown, how the provider measured it, how exact the
+    /// rebuild is, and the whole request's export.
+    private func requestBar(_ request: TaskRawInputPage.Request) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Button("Previous request", systemImage: "chevron.left") { requestNumber = request.number - 1 }
+                    .labelStyle(.iconOnly)
+                    .buttonHoverPointer()
+                    .help("Show the request before this one")
+                    .disabled(request.number <= 1)
+                    .accessibilityIdentifier("raw-input-request-previous")
+                Text("Request \(request.number) of \(request.count)")
+                    .font(.system(size: 12, weight: .semibold))
+                    .monospacedDigit()
+                    .accessibilityIdentifier("raw-input-request-number")
+                Button("Next request", systemImage: "chevron.right") { requestNumber = request.number + 1 }
+                    .labelStyle(.iconOnly)
+                    .buttonHoverPointer()
+                    .help("Show the request after this one")
+                    .disabled(request.number >= request.count)
+                    .accessibilityIdentifier("raw-input-request-next")
+                TextField("Go to #", text: $requestField)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 70)
+                    .onSubmit {
+                        if let number = Int(requestField.trimmingCharacters(in: .whitespaces)) {
+                            requestNumber = min(max(1, number), request.count)
+                        }
+                        requestField = ""
+                    }
+                    .accessibilityIdentifier("raw-input-request-field")
+                Button("Latest") { requestNumber = nil }
+                    .buttonHoverPointer()
+                    .help("Show the request the final transcript was read from")
+                    .controlSize(.small)
+                    .disabled(request.number == request.latest)
+                    .accessibilityIdentifier("raw-input-request-latest")
+                Text(request.exact ? "Exact" : "Reconstructed")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(request.exact ? Color.green : Color.orange)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill((request.exact ? Color.green : Color.orange).opacity(0.15)))
+                    .help(request.note)
+                    .accessibilityIdentifier("raw-input-request-exactness")
+                if let timestamp = request.timestamp {
+                    Text(Self.displayTime(timestamp))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityIdentifier("raw-input-request-time")
+                }
+                Spacer(minLength: 8)
+                ChoiceBar(
+                    choices: [
+                        (TaskRawInputExportFormat.text, "Text", "raw-input-export-format-text"),
+                        (TaskRawInputExportFormat.json, "JSON", "raw-input-export-format-json"),
+                    ],
+                    selection: $exportFormat
+                )
+                Button("Copy all", systemImage: "doc.on.doc") { Task { await exportRequest(request, open: false) } }
+                    .buttonHoverPointer()
+                    .help("Copy this whole request, every item in order")
+                    .controlSize(.small)
+                    .accessibilityIdentifier("raw-input-request-copy-button")
+                Button("Open in editor", systemImage: "square.and.pencil") { Task { await exportRequest(request, open: true) } }
+                    .buttonHoverPointer()
+                    .help("Write this whole request to a file and open it")
+                    .controlSize(.small)
+                    .accessibilityIdentifier("raw-input-request-open-editor-button")
+            }
+            // The bar keeps one height whatever it shows: a bar that grows
+            // resizes the lazy list below it while it lays out its rows.
+            HStack(spacing: 8) {
+                Text(Self.usageLine(request))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                    .accessibilityIdentifier("raw-input-request-usage")
+                Spacer(minLength: 8)
+                Text(exportStatus ?? "")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("raw-input-request-export-status")
+            }
+            Text("\(request.note) \(request.tokenNote)")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .lineLimit(2, reservesSpace: true)
+                .help("\(request.note) \(request.tokenNote)")
+                .accessibilityIdentifier("raw-input-request-note")
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.04)))
+    }
+
+    private static func usageLine(_ request: TaskRawInputPage.Request) -> String {
+        var parts: [String] = []
+        if let context = request.contextTokens {
+            var reported = "Reported input \(context.formatted(number))"
+            var split = ["uncached \((request.inputTokens ?? 0).formatted(number))", "cache read \((request.cacheReadTokens ?? 0).formatted(number))"]
+            if let write = request.cacheWriteTokens { split.append("cache write \(write.formatted(number))") }
+            reported += " (\(split.joined(separator: " · ")))"
+            parts.append(reported)
+        } else {
+            parts.append("No usage reported")
+        }
+        parts.append("items add up to \(request.itemTokens.formatted(number))")
+        parts.append("\(request.repeatedItems) repeated")
+        if let source = request.querySource, !source.isEmpty { parts.append("source \(source)") }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func displayTime(_ timestamp: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = formatter.date(from: timestamp) ?? ISO8601DateFormatter().date(from: timestamp)
+        return date?.formatted(date: .abbreviated, time: .standard) ?? timestamp
+    }
+
+    private func exportRequest(_ request: TaskRawInputPage.Request, open: Bool) async {
+        let format = exportFormat
+        do {
+            let export = try await BoardTaskManager(modelContext: modelContext).rawInputExport(
+                taskID, homes: .forThisApp, agent: page?.agent ?? agent, request: request.number, format: format
+            )
+            let name = format == .json ? "JSON" : "text"
+            if open {
+                let file = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("playhouse-request-\(taskID.uuidString.prefix(8))-\(export.agent.replacingOccurrences(of: "/", with: "-"))-\(export.request).\(format == .json ? "json" : "txt")")
+                try export.text.write(to: file, atomically: true, encoding: .utf8)
+                NSWorkspace.shared.open(file)
+                exportStatus = "Opened request \(export.request) as \(name): \(export.items) items"
+            } else {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(export.text, forType: .string)
+                exportStatus = "Copied request \(export.request) as \(name): \(export.items) items"
+            }
+        } catch {
+            exportStatus = error.localizedDescription
+        }
     }
 
     /// Loads the first page, then on up to the selected item so the list can scroll to it.
@@ -2442,7 +2622,9 @@ private struct RawInputSheet: View {
             while rows.count <= position, let next = await fetch(offset: rows.count, focusing: nil), !next.rows.isEmpty {
                 rows += next.rows
             }
-            scrollTarget = selected
+            guard rows.indices.contains(position) else { return }
+            if selectedPosition == nil || scope != .request { selectedPosition = rows[position].position }
+            scrollTarget = rows[position].listKey
         }
     }
 
@@ -2472,10 +2654,16 @@ private struct RawInputRowView: View {
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
                     .background(Capsule().fill(Color.primary.opacity(0.07)))
+                if let position = row.position {
+                    Text("#\(position + 1)")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                }
                 Text(row.label)
                     .font(.system(size: 11, weight: .medium))
                     .lineLimit(1)
-                    .accessibilityIdentifier("raw-input-row-\(row.id)-label")
+                    .accessibilityIdentifier("\(row.accessibilityID)-label")
                 if !row.inFinalTranscript {
                     Text("removed")
                         .font(.system(size: 9))
@@ -2488,7 +2676,7 @@ private struct RawInputRowView: View {
                 Text(row.tokens.formatted(Self.number))
                     .font(.system(size: 11, weight: .medium))
                     .monospacedDigit()
-                    .accessibilityIdentifier("raw-input-row-\(row.id)-tokens")
+                    .accessibilityIdentifier("\(row.accessibilityID)-tokens")
             }
             HStack(spacing: 6) {
                 TokenShareBar(tokens: row.tokens, maxTokens: maxTokens)
@@ -2497,12 +2685,33 @@ private struct RawInputRowView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
+            // Every row of a single request keeps this line, flagged or not: rows
+            // of one height keep the lazy list's placement from oscillating.
+            if row.position != nil {
+                if let repeated = row.repeated {
+                    Text("\(repeated.kind == "exact" ? "Duplicate" : "Near-duplicate") \(repeated.copy) of \(repeated.copies) · \(repeated.reason)\(repeated.copy > 1 ? " · first at #\(repeated.first + 1)" : "")")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(repeated.kind == "exact" ? Color.red : Color.orange)
+                        .lineLimit(1)
+                        .accessibilityIdentifier("\(row.accessibilityID)-repeat")
+                } else {
+                    Text(" ")
+                        .font(.system(size: 9, weight: .semibold))
+                        .accessibilityHidden(true)
+                }
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? Color.accentColor.opacity(0.18) : Color.clear))
+        .background(RoundedRectangle(cornerRadius: 6).fill(background))
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("raw-input-row-\(row.id)")
+        .accessibilityIdentifier(row.accessibilityID)
+    }
+
+    private var background: Color {
+        if isSelected { return Color.accentColor.opacity(0.18) }
+        guard let repeated = row.repeated else { return .clear }
+        return (repeated.kind == "exact" ? Color.red : Color.orange).opacity(0.08)
     }
 }
 

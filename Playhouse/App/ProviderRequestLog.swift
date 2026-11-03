@@ -86,6 +86,9 @@ struct ProviderContextItem: Sendable {
     /// The call ID a tool call declares or a tool result answers.
     let callID: String?
     var callItemID: Int?
+    /// The file an instruction block quotes or a tool call read, so two
+    /// different copies of one file can be told apart from unrelated items.
+    var source: String?
     var tokens = 0
     var requests = 0
     var inFinalTranscript = false
@@ -94,9 +97,30 @@ struct ProviderContextItem: Sendable {
 /// One model request's billed usage.
 struct ProviderRequestUsage: Sendable {
     let timestamp: String?
+    /// Everything the request was sent: uncached input plus cache reads and writes.
     let contextTokens: Int
     let cacheReadTokens: Int
+    /// `nil` where the provider does not report cache writes (Codex).
+    let cacheWriteTokens: Int?
     let outputTokens: Int
+}
+
+/// One model request as its log records it: every item it was sent, in order.
+struct ProviderSentRequest: Sendable {
+    let timestamp: String?
+    let querySource: String?
+    /// Item IDs in the order they were sent; an item sent twice appears twice.
+    let items: [Int]
+    /// Claude: how many of the items each message holds, after the system
+    /// prompt parts and tool definitions that lead the request.
+    let messageLengths: [Int]
+    /// Claude: messages the request names by hash that no line of the log holds.
+    let missingMessages: Int
+    /// Claude: the request names a system prompt and tools shape no line of the log holds.
+    let missingShape: Bool
+    let usage: ProviderRequestUsage?
+    /// Claude: the `api-request` line, which holds the request's parameters.
+    let line: ProviderContextLocation?
 }
 
 /// Everything one agent (a session's main agent or one subagent) was sent.
@@ -105,8 +129,12 @@ struct ProviderAgentLog: Sendable {
     let file: URL
     var items: [ProviderContextItem] = []
     var requests: [ProviderRequestUsage] = []
+    /// Every request the log records, measured or not, in the order it was made.
+    var sent: [ProviderSentRequest] = []
     /// Item IDs of the last request's context, in the order they were sent.
     var finalTranscript: [Int] = []
+    /// Index in `sent` of the request `finalTranscript` was read from.
+    var finalRequest: Int?
     /// Model requests the log records, measured or not.
     var sentRequests = 0
     var compactions = 0
@@ -225,6 +253,33 @@ enum ProviderContextText {
     static func weight(text: String, kind: ProviderContextKind) -> Int {
         kind == .image ? 6_400 : max(1, text.unicodeScalars.count)
     }
+
+    /// The file an instruction block quotes: Claude Code's "Contents of <path> (…)"
+    /// or Codex's "# AGENTS.md instructions for <directory>".
+    static func quotedSource(_ text: String) -> String? {
+        let head = text.prefix(4_096)
+        if let marker = head.range(of: "Contents of ") {
+            let line = head[marker.upperBound...].prefix { !$0.isNewline }
+            let path = line.range(of: " (").map { line[..<$0.lowerBound] } ?? line.dropLast(line.hasSuffix(":") ? 1 : 0)
+            if !path.isEmpty { return String(path) }
+        }
+        if let marker = head.range(of: "# AGENTS.md instructions for ") {
+            let directory = head[marker.upperBound...].prefix { !$0.isNewline }.trimmingCharacters(in: .whitespaces)
+            if !directory.isEmpty { return directory + "/AGENTS.md" }
+        }
+        return nil
+    }
+
+    /// The file a read-style tool call names, so the results of two reads of one
+    /// file read as related; an edit's or write's result is not the file's content.
+    static func toolSource(_ value: Any) -> String? {
+        guard let block = value as? [String: Any], ["Read", "NotebookRead", "View", "view"].contains(block["name"] as? String ?? ""),
+              let input = block["input"] as? [String: Any] else { return nil }
+        for key in ["file_path", "notebook_path", "path"] {
+            if let path = input[key] as? String, !path.isEmpty { return path }
+        }
+        return nil
+    }
 }
 
 /// Builds items one at a time while a reader parses a file.
@@ -237,15 +292,22 @@ private struct ProviderItemBuilder {
     ) -> Int {
         let text = ProviderContextText.display(value, kind: kind)
         var hasher = Hasher()
-        hasher.combine(text)
+        // Every image displays as "[image]"; its data tells two images apart.
+        hasher.combine(kind == .image ? ProviderContextText.prettyJSON(value) : text)
         let id = items.count
+        var source: String?
+        switch kind {
+        case .systemReminder, .userText: source = ProviderContextText.quotedSource(text)
+        case .toolCall: source = ProviderContextText.toolSource(value)
+        default: break
+        }
         items.append(ProviderContextItem(
             id: id, kind: kind, role: role, label: label, server: server,
             weight: ProviderContextText.weight(text: text, kind: kind),
             textLength: text.unicodeScalars.count,
             preview: ProviderContextText.preview(text),
             contentKey: hasher.finalize(),
-            location: location, callID: callID
+            location: location, callID: callID, source: source
         ))
         return id
     }
@@ -397,6 +459,7 @@ final class ClaudeRequestLogParser: ProviderRequestLogParser {
         let shapeHash: String?
         let timestamp: String?
         let querySource: String?
+        let line: ProviderContextLocation
     }
 
     /// A content block of a transcript line, kept until its message is complete.
@@ -457,7 +520,8 @@ final class ClaudeRequestLogParser: ProviderRequestLogParser {
                 tail: object["tail"] as? [String] ?? [],
                 shapeHash: object["shapeHash"] as? String,
                 timestamp: object["timestamp"] as? String,
-                querySource: object["querySource"] as? String
+                querySource: object["querySource"] as? String,
+                line: .init(offset: offset, length: length, path: [])
             ))
         case "assistant":
             guard let message = object["message"] as? [String: Any] else { return }
@@ -586,20 +650,37 @@ final class ClaudeRequestLogParser: ProviderRequestLogParser {
         var sent: [(items: [Int], context: Int?)] = []
         log.sentRequests = requests.count
         for (index, request) in requests.enumerated() {
-            let shapeItems = request.shapeHash.flatMap { shapes[$0] } ?? []
-            let messageItems = chains[index].flatMap { blobs[$0] ?? [] }
+            let shape = request.shapeHash.flatMap { shapes[$0] }
+            let shapeItems = shape ?? []
+            var messageItems: [Int] = []
+            var messageLengths: [Int] = []
+            var missing = 0
+            for hash in chains[index] {
+                guard let blob = blobs[hash] else {
+                    missing += 1
+                    continue
+                }
+                messageItems += blob
+                messageLengths.append(blob.count)
+            }
             let ids = shapeItems + messageItems
             for id in Set(ids) { items[id].requests += 1 }
-            let usage = usageByRequest[request.id]
-            sent.append((ids, usage.map { $0.inputTokens + $0.cacheReadTokens + $0.cacheCreationTokens }))
-            if let usage {
-                log.requests.append(ProviderRequestUsage(
+            let usage = usageByRequest[request.id].map {
+                ProviderRequestUsage(
                     timestamp: request.timestamp,
-                    contextTokens: usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens,
-                    cacheReadTokens: usage.cacheReadTokens,
-                    outputTokens: usage.outputTokens
-                ))
+                    contextTokens: $0.inputTokens + $0.cacheReadTokens + $0.cacheCreationTokens,
+                    cacheReadTokens: $0.cacheReadTokens,
+                    cacheWriteTokens: $0.cacheCreationTokens,
+                    outputTokens: $0.outputTokens
+                )
             }
+            sent.append((ids, usage?.contextTokens))
+            if let usage { log.requests.append(usage) }
+            log.sent.append(ProviderSentRequest(
+                timestamp: request.timestamp, querySource: request.querySource, items: ids,
+                messageLengths: messageLengths, missingMessages: missing, missingShape: request.shapeHash != nil && shape == nil,
+                usage: usage, line: request.line
+            ))
         }
         ProviderTokenCalibration.apply(items: &items, requests: sent)
 
@@ -609,6 +690,7 @@ final class ClaudeRequestLogParser: ProviderRequestLogParser {
         let mainSource = sources.max { $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key }?.key ?? ""
         if let last = requests.indices.last(where: { (requests[$0].querySource ?? "") == mainSource }) {
             var seen = Set<Int>()
+            log.finalRequest = last
             log.finalTranscript = sent[last].items.filter { seen.insert($0).inserted }
             for id in log.finalTranscript { items[id].inFinalTranscript = true }
         }
@@ -625,6 +707,7 @@ final class ClaudeRequestLogParser: ProviderRequestLogParser {
             guard let callID = items[index].callID, let call = calls[callID] else { continue }
             items[index].label = items[call].label
             items[index].server = items[call].server
+            items[index].source = items[call].source
             items[index].callItemID = call
         }
     }
@@ -777,6 +860,7 @@ final class CodexRolloutParser: ProviderRequestLogParser {
             guard let callID = items[index].callID, let call = calls[callID] else { continue }
             items[index].label = items[call].label
             items[index].server = items[call].server
+            items[index].source = items[call].source
             items[index].callItemID = call
         }
 
@@ -807,9 +891,18 @@ final class CodexRolloutParser: ProviderRequestLogParser {
         }
         ProviderTokenCalibration.apply(items: &items, requests: sent, preassigned: [hidden: hiddenTokens])
         log.requests = records.map {
-            ProviderRequestUsage(timestamp: $0.timestamp, contextTokens: $0.input, cacheReadTokens: $0.cached, outputTokens: $0.output)
+            ProviderRequestUsage(
+                timestamp: $0.timestamp, contextTokens: $0.input, cacheReadTokens: $0.cached, cacheWriteTokens: nil, outputTokens: $0.output
+            )
+        }
+        log.sent = zip(log.requests, sent).map { usage, request in
+            ProviderSentRequest(
+                timestamp: usage.timestamp, querySource: nil, items: request.items,
+                messageLengths: [], missingMessages: 0, missingShape: false, usage: usage, line: nil
+            )
         }
         log.finalTranscript = sent[sent.count - 1].items
+        log.finalRequest = sent.count - 1
         for id in log.finalTranscript { items[id].inFinalTranscript = true }
         log.sentRequests = records.count
         log.compactions = compactions
@@ -886,23 +979,33 @@ final class ProviderRequestLogStore: @unchecked Sendable {
     /// Full texts of several items, each line read and parsed once however many items it holds.
     func texts(of items: [ProviderContextItem], in log: ProviderAgentLog) -> [Int: String] {
         var result: [Int: String] = [:]
-        guard let handle = try? FileHandle(forReadingFrom: log.file) else { return result }
-        defer { try? handle.close() }
-        let byLine = Dictionary(grouping: items.filter { $0.location != nil }, by: { $0.location?.offset ?? 0 })
-        for (offset, lineItems) in byLine {
-            autoreleasepool {
-                guard let length = lineItems.first?.location?.length,
-                      (try? handle.seek(toOffset: offset)) != nil,
-                      let data = try? handle.read(upToCount: length),
-                      let object = try? JSONSerialization.jsonObject(with: data) else { return }
-                for item in lineItems {
-                    guard let path = item.location?.path else { continue }
-                    result[item.id] = ProviderContextText.display(Self.value(at: path, in: object), kind: item.kind)
-                }
-            }
+        let kinds = Dictionary(items.map { ($0.id, $0.kind) }, uniquingKeysWith: { first, _ in first })
+        readValues(of: items.compactMap { item in item.location.map { (item.id, $0) } }, in: log) { id, value in
+            result[id] = ProviderContextText.display(value, kind: kinds[id] ?? .other)
         }
         for item in items where item.location == nil { result[item.id] = item.preview }
         return result
+    }
+
+    /// The JSON values at several locations of the log, each line read and parsed once.
+    func values(at locations: [(key: Int, location: ProviderContextLocation)], in log: ProviderAgentLog) -> [Int: Any] {
+        var result: [Int: Any] = [:]
+        readValues(of: locations.map { ($0.key, $0.location) }, in: log) { result[$0] = $1 }
+        return result
+    }
+
+    private func readValues(of locations: [(Int, ProviderContextLocation)], in log: ProviderAgentLog, _ body: (Int, Any) -> Void) {
+        guard let handle = try? FileHandle(forReadingFrom: log.file) else { return }
+        defer { try? handle.close() }
+        for (offset, lineLocations) in Dictionary(grouping: locations, by: { $0.1.offset }) {
+            autoreleasepool {
+                guard let length = lineLocations.first?.1.length,
+                      (try? handle.seek(toOffset: offset)) != nil,
+                      let data = try? handle.read(upToCount: length),
+                      let object = try? JSONSerialization.jsonObject(with: data) else { return }
+                for (key, location) in lineLocations { body(key, Self.value(at: location.path, in: object)) }
+            }
+        }
     }
 
     private static func value(at path: [ProviderJSONPathComponent], in object: Any) -> Any {
@@ -1093,8 +1196,22 @@ struct TaskTokenWasteReport: Codable, Equatable, Sendable {
 
 /// One page of an agent's context, without the items' full text.
 struct TaskRawInputPage: Codable, Equatable, Sendable {
+    /// An item sent more than once in one request, or alongside a near-identical one.
+    struct Repeat: Codable, Equatable, Sendable {
+        /// `exact` for the same text, `similar` for the same source file or leading text.
+        let kind: String
+        let reason: String
+        /// Position of the group's first copy in the request.
+        let first: Int
+        /// Which copy this is, from 1, and how many the request holds.
+        let copy: Int
+        let copies: Int
+    }
+
     struct Row: Codable, Equatable, Sendable, Identifiable {
         let id: Int
+        /// Where the item sits in a single request, from 0; absent in the other scopes.
+        let position: Int?
         let kind: String
         let role: String
         let label: String
@@ -1105,6 +1222,32 @@ struct TaskRawInputPage: Codable, Equatable, Sendable {
         let inFinalTranscript: Bool
         let textLength: Int
         let preview: String
+        let repeated: Repeat?
+    }
+
+    /// The single request a `request`-scope page lists.
+    struct Request: Codable, Equatable, Sendable {
+        /// From 1, in the order the agent made its requests.
+        let number: Int
+        let count: Int
+        /// The request whose context is the final transcript, which a page shows when none is named.
+        let latest: Int
+        let timestamp: String?
+        let querySource: String?
+        let items: Int
+        /// What the items' estimated sizes add up to.
+        let itemTokens: Int
+        /// The provider's own figures; absent when it reported no usage for this request.
+        let contextTokens: Int?
+        let inputTokens: Int?
+        let cacheReadTokens: Int?
+        let cacheWriteTokens: Int?
+        let outputTokens: Int?
+        let repeatedItems: Int
+        /// Whether the provider's log records exactly what the request sent.
+        let exact: Bool
+        let note: String
+        let tokenNote: String
     }
 
     let taskID: UUID
@@ -1120,6 +1263,18 @@ struct TaskRawInputPage: Codable, Equatable, Sendable {
     let rows: [Row]
     /// Where the requested focus item sits in this ordering, so a caller can load up to it.
     let focusPosition: Int?
+    let request: Request?
+}
+
+/// One whole request, exported as readable text or as the request body JSON.
+struct TaskRawInputExport: Codable, Equatable, Sendable {
+    let taskID: UUID
+    let agent: String
+    let request: Int
+    let format: String
+    let exact: Bool
+    let items: Int
+    let text: String
 }
 
 /// One chunk of an item's full text, as the model received it.
@@ -1142,6 +1297,13 @@ struct TaskRawInputText: Codable, Equatable, Sendable {
 enum TaskRawInputScope: String, CaseIterable, Sendable {
     case finalTranscript = "final"
     case everything = "all"
+    /// One request's items in the order it sent them, repeats included.
+    case request
+}
+
+enum TaskRawInputExportFormat: String, CaseIterable, Sendable {
+    case text
+    case json
 }
 
 enum TaskRawInputOrder: String, CaseIterable, Sendable {
@@ -1334,64 +1496,281 @@ enum ProviderTokenMap {
 
     static func page(
         taskID: UUID, agents: [LoadedAgent], agent: String?, scope: TaskRawInputScope, order: TaskRawInputOrder,
-        query: String, offset: Int, limit: Int, focus: Int?, store: ProviderRequestLogStore = .shared
+        query: String, offset: Int, limit: Int, focus: Int?, request number: Int? = nil,
+        store: ProviderRequestLogStore = .shared
     ) throws -> TaskRawInputPage {
         let summaries = agentSummaries(agents)
         guard let loaded = try resolve(agent, in: agents) else {
             return TaskRawInputPage(
                 taskID: taskID, agent: nil, agents: summaries, scope: scope.rawValue, order: order.rawValue, query: query,
-                total: 0, totalTokens: 0, maxTokens: 0, offset: offset, rows: [], focusPosition: nil
+                total: 0, totalTokens: 0, maxTokens: 0, offset: offset, rows: [], focusPosition: nil, request: nil
             )
         }
         let items = loaded.log.items
-        var ids: [Int]
+        // A single request can send one item twice, so its rows are told apart by position.
+        var entries: [(position: Int?, id: Int)]
+        var repeats: [Int: TaskRawInputPage.Repeat] = [:]
+        var request: TaskRawInputPage.Request?
         switch scope {
         case .finalTranscript:
-            ids = loaded.log.finalTranscript
+            entries = loaded.log.finalTranscript.map { (nil, $0) }
         case .everything:
             // Everything ever sent, in the order it was first logged; Codex's hidden overhead leads.
-            ids = items.filter { $0.requests > 0 }
+            entries = items.filter { $0.requests > 0 }
                 .sorted { ($0.kind == .hiddenOverhead ? -1 : $0.id) < ($1.kind == .hiddenOverhead ? -1 : $1.id) }
-                .map(\.id)
+                .map { (nil, $0.id) }
+        case .request:
+            let index = try requestIndex(number, in: loaded.log)
+            let sent = loaded.log.sent[index]
+            entries = sent.items.enumerated().map { ($0.offset, $0.element) }
+            repeats = repeatedItems(sent.items, items: items)
+            request = requestSummary(index, of: loaded.log, repeats: repeats.count)
         }
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if !needle.isEmpty {
-            let unmatched = ids.map { items[$0] }.filter {
-                !$0.label.localizedCaseInsensitiveContains(needle) && !$0.preview.localizedCaseInsensitiveContains(needle)
+            var seen = Set<Int>()
+            let unmatched = entries.map { items[$0.id] }.filter {
+                seen.insert($0.id).inserted
+                    && !$0.label.localizedCaseInsensitiveContains(needle) && !$0.preview.localizedCaseInsensitiveContains(needle)
             }
             let texts = store.texts(of: unmatched, in: loaded.log)
             let misses = Set(unmatched.map(\.id).filter { !(texts[$0]?.localizedCaseInsensitiveContains(needle) ?? false) })
-            ids = ids.filter { !misses.contains($0) }
+            entries = entries.filter { !misses.contains($0.id) }
         }
         switch order {
         case .transcript: break
         case .size:
-            ids = ids.enumerated().sorted { lhs, rhs in
-                items[lhs.element].tokens != items[rhs.element].tokens
-                    ? items[lhs.element].tokens > items[rhs.element].tokens : lhs.offset < rhs.offset
+            entries = entries.enumerated().sorted { lhs, rhs in
+                items[lhs.element.id].tokens != items[rhs.element.id].tokens
+                    ? items[lhs.element.id].tokens > items[rhs.element.id].tokens : lhs.offset < rhs.offset
             }.map(\.element)
         case .rent:
-            ids = ids.enumerated().sorted { lhs, rhs in
-                let left = items[lhs.element].tokens * items[lhs.element].requests
-                let right = items[rhs.element].tokens * items[rhs.element].requests
+            entries = entries.enumerated().sorted { lhs, rhs in
+                let left = items[lhs.element.id].tokens * items[lhs.element.id].requests
+                let right = items[rhs.element.id].tokens * items[rhs.element.id].requests
                 return left != right ? left > right : lhs.offset < rhs.offset
             }.map(\.element)
         }
-        let window = ids.dropFirst(offset).prefix(limit)
+        let window = entries.dropFirst(offset).prefix(limit)
         return TaskRawInputPage(
             taskID: taskID, agent: loaded.id, agents: summaries, scope: scope.rawValue, order: order.rawValue, query: needle,
-            total: ids.count, totalTokens: ids.reduce(0) { $0 + items[$1].tokens },
-            maxTokens: ids.map { items[$0].tokens }.max() ?? 0, offset: offset,
-            rows: window.map { id in
-                let item = items[id]
+            total: entries.count, totalTokens: entries.reduce(0) { $0 + items[$1.id].tokens },
+            maxTokens: entries.map { items[$0.id].tokens }.max() ?? 0, offset: offset,
+            rows: window.map { entry in
+                let item = items[entry.id]
                 return TaskRawInputPage.Row(
-                    id: id, kind: item.kind.rawValue, role: item.role, label: item.label, server: item.server,
-                    tokens: item.tokens, requests: item.requests, rentTokens: item.tokens * item.requests,
-                    inFinalTranscript: item.inFinalTranscript, textLength: item.textLength, preview: item.preview
+                    id: entry.id, position: entry.position, kind: item.kind.rawValue, role: item.role, label: item.label,
+                    server: item.server, tokens: item.tokens, requests: item.requests, rentTokens: item.tokens * item.requests,
+                    inFinalTranscript: item.inFinalTranscript, textLength: item.textLength, preview: item.preview,
+                    repeated: entry.position.flatMap { repeats[$0] }
                 )
             },
-            focusPosition: focus.flatMap { ids.firstIndex(of: $0) }
+            focusPosition: focus.flatMap { id in entries.firstIndex { $0.id == id } },
+            request: request
         )
+    }
+
+    /// Index in `sent` of request `number` (from 1); `nil` is the request the final transcript was read from.
+    private static func requestIndex(_ number: Int?, in log: ProviderAgentLog) throws -> Int {
+        guard let number else {
+            guard let latest = log.finalRequest ?? log.sent.indices.last else {
+                throw BridgeCommandError(code: "not_found", message: "This agent's log records no request.")
+            }
+            return latest
+        }
+        guard log.sent.indices.contains(number - 1) else {
+            throw BridgeCommandError(
+                code: "not_found",
+                message: "This agent made \(log.sent.count) \(log.sent.count == 1 ? "request" : "requests"); there is no request \(number)."
+            )
+        }
+        return number - 1
+    }
+
+    private static let leadLength = 120
+
+    /// Items a request sends more than once, by their text, and items that are
+    /// near-identical to another one it sends: two copies of one source file,
+    /// or two texts that open the same way. Keys are positions in the request.
+    static func repeatedItems(_ ids: [Int], items: [ProviderContextItem]) -> [Int: TaskRawInputPage.Repeat] {
+        var result: [Int: TaskRawInputPage.Repeat] = [:]
+        var exact: [String: [Int]] = [:]
+        var sources: [String: [Int]] = [:]
+        var leads: [String: [Int]] = [:]
+        for (position, id) in ids.enumerated() {
+            let item = items[id]
+            guard item.kind != .hiddenOverhead, item.textLength > 0 else { continue }
+            exact["\(item.contentKey):\(item.textLength)", default: []].append(position)
+            // A call names the file its result holds; the results are what repeat.
+            guard !item.kind.isFixedOverhead, item.kind != .toolCall else { continue }
+            if let source = item.source { sources[source, default: []].append(position) }
+            let lead = item.preview.replacingOccurrences(of: "<system-reminder>", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines).prefix(leadLength)
+            if lead.count == leadLength { leads[String(lead), default: []].append(position) }
+        }
+        func mark(_ groups: [String: [Int]], kind: String, reason: (String) -> String, distinct: Bool) {
+            for (key, positions) in groups.sorted(by: { $0.value[0] < $1.value[0] }) where positions.count > 1 {
+                // Copies of one text are already exact repeats; a near-identical group needs two different texts.
+                if distinct, Set(positions.map { items[ids[$0]].contentKey }).count < 2 { continue }
+                for (copy, position) in positions.enumerated() where result[position] == nil {
+                    result[position] = .init(kind: kind, reason: reason(key), first: positions[0], copy: copy + 1, copies: positions.count)
+                }
+            }
+        }
+        mark(exact, kind: "exact", reason: { _ in "Identical text" }, distinct: false)
+        mark(sources, kind: "similar", reason: { "Same source file: \(URL(fileURLWithPath: $0).lastPathComponent)" }, distinct: true)
+        mark(leads, kind: "similar", reason: { _ in "Same leading text" }, distinct: true)
+        return result
+    }
+
+    private static func requestSummary(_ index: Int, of log: ProviderAgentLog, repeats: Int) -> TaskRawInputPage.Request {
+        let sent = log.sent[index]
+        let itemTokens = sent.items.reduce(0) { $0 + log.items[$1].tokens }
+        let usage = sent.usage
+        let note: String
+        let complete = sent.missingMessages == 0 && !sent.missingShape
+        switch log.provider {
+        case .claude where complete:
+            note = "Exact: rebuilt from Claude Code's request log, with the system prompt, tool definitions and every message this request sent, in order."
+        case .claude:
+            var gaps: [String] = []
+            if sent.missingShape { gaps.append("its system prompt and tool definitions") }
+            if sent.missingMessages > 0 { gaps.append("\(sent.missingMessages) \(sent.missingMessages == 1 ? "message" : "messages")") }
+            note = "Rebuilt from Claude Code's request log, which does not hold everything this request named; missing here: \(gaps.joined(separator: " and "))."
+        case .codex:
+            note = "Reconstructed: Codex resends the whole history, so this is its base instructions plus every item its rollout file saved before this request's output. Codex does not save its tool definitions or request framing; they are one estimated hidden-overhead item and are left out of the JSON export."
+        }
+        let tokenNote: String
+        if let context = usage?.contextTokens {
+            let difference = itemTokens - context
+            tokenNote = difference == 0
+                ? "The items' sizes add up to the input the provider reported for this request."
+                : "The items' sizes add up to \(abs(difference)) \(difference > 0 ? "more" : "fewer") tokens than the provider reported: each item's size is measured once, from the first request that sent it, and an item sent twice counts twice."
+        } else {
+            tokenNote = "The provider reported no usage for this request; the items' sizes are estimates."
+        }
+        return TaskRawInputPage.Request(
+            number: index + 1, count: log.sent.count, latest: (log.finalRequest ?? log.sent.count - 1) + 1,
+            timestamp: sent.timestamp, querySource: sent.querySource, items: sent.items.count, itemTokens: itemTokens,
+            contextTokens: usage?.contextTokens,
+            inputTokens: usage.map { $0.contextTokens - $0.cacheReadTokens - ($0.cacheWriteTokens ?? 0) },
+            cacheReadTokens: usage?.cacheReadTokens, cacheWriteTokens: usage?.cacheWriteTokens,
+            outputTokens: usage?.outputTokens, repeatedItems: repeats,
+            exact: log.provider == .claude && complete, note: note, tokenNote: tokenNote
+        )
+    }
+
+    /// One whole request: as text, each item's full text under a header naming
+    /// it, or as JSON, the request body as the provider's log holds it.
+    static func export(
+        taskID: UUID, agents: [LoadedAgent], agent: String?, request number: Int?, format: TaskRawInputExportFormat,
+        store: ProviderRequestLogStore = .shared
+    ) throws -> TaskRawInputExport {
+        guard let loaded = try resolve(agent, in: agents) else {
+            throw BridgeCommandError(code: "not_found", message: "This task has no request log yet.")
+        }
+        let log = loaded.log
+        let index = try requestIndex(number, in: log)
+        let sent = log.sent[index]
+        let repeats = repeatedItems(sent.items, items: log.items)
+        let summary = requestSummary(index, of: log, repeats: repeats.count)
+        let text: String
+        switch format {
+        case .text:
+            let texts = store.texts(of: Set(sent.items).map { log.items[$0] }, in: log)
+            var lines = [
+                "Request \(summary.number) of \(summary.count) · \(loaded.label)\(sent.timestamp.map { " · \($0)" } ?? "")",
+                summary.contextTokens.map { context in
+                    "Reported input: \(context) tokens (uncached \(summary.inputTokens ?? 0) · cache read \(summary.cacheReadTokens ?? 0)"
+                        + (summary.cacheWriteTokens.map { " · cache write \($0)" } ?? "") + ")"
+                } ?? "No usage reported.",
+                "\(sent.items.count) items · \(summary.itemTokens) tokens by item · \(repeats.count) repeated",
+                summary.note,
+                summary.tokenNote,
+            ]
+            for (position, id) in sent.items.enumerated() {
+                let item = log.items[id]
+                var header = "===== #\(position + 1) · \(item.kind.rawValue) · \(item.label) · \(item.tokens) tokens"
+                if let repeated = repeats[position] {
+                    header += " · \(repeated.kind) \(repeated.copy) of \(repeated.copies): \(repeated.reason)"
+                }
+                lines += ["", header + " =====", texts[id] ?? item.preview]
+            }
+            text = lines.joined(separator: "\n") + "\n"
+        case .json:
+            text = ProviderContextText.prettyJSON(try requestBody(sent, of: log, store: store))
+        }
+        return TaskRawInputExport(
+            taskID: taskID, agent: loaded.id, request: index + 1, format: format.rawValue,
+            exact: summary.exact, items: sent.items.count, text: text
+        )
+    }
+
+    /// Claude: the request's parameters, system prompt, tools and messages,
+    /// with its cache markers put back. Codex: its instructions and input items.
+    private static func requestBody(_ sent: ProviderSentRequest, of log: ProviderAgentLog, store: ProviderRequestLogStore) throws -> [String: Any] {
+        var locations: [(key: Int, location: ProviderContextLocation)] = sent.items.enumerated().compactMap { position, id in
+            log.items[id].location.map { (position, $0) }
+        }
+        if let line = sent.line { locations.append((-1, line)) }
+        let values = store.values(at: locations, in: log)
+        func value(_ position: Int) -> Any { values[position] ?? NSNull() }
+        switch log.provider {
+        case .codex:
+            let kinds = sent.items.map { log.items[$0].kind }
+            return [
+                "instructions": kinds.indices.filter { kinds[$0] == .systemPrompt }.map(value).first ?? NSNull(),
+                "input": kinds.indices.filter { kinds[$0] != .systemPrompt && kinds[$0] != .hiddenOverhead }.map(value),
+            ]
+        case .claude:
+            let line = values[-1] as? [String: Any] ?? [:]
+            var body = line["params"] as? [String: Any] ?? [:]
+            let leading = sent.items.count - sent.messageLengths.reduce(0, +)
+            body["system"] = (0..<leading).filter { log.items[sent.items[$0]].kind == .systemPrompt }.map(value)
+            body["tools"] = (0..<leading).filter { log.items[sent.items[$0]].kind == .toolDefinition }.map(value)
+            var messages: [Any] = []
+            var start = leading
+            for length in sent.messageLengths {
+                let positions = Array(start..<(start + length))
+                start += length
+                guard let first = positions.first else { continue }
+                let item = log.items[sent.items[first]]
+                let content: Any
+                if positions.count == 1, case .key = item.location?.path.last {
+                    content = value(first)
+                } else {
+                    // Lines sent as one message turn a plain string into a text block.
+                    content = positions.map { position -> Any in
+                        (value(position) as? String).map { ["type": "text", "text": $0] as [String: Any] } ?? value(position)
+                    }
+                }
+                messages.append(["role": item.role, "content": content])
+            }
+            body["messages"] = messages
+            var marked: Any = body
+            for marker in line["cacheControl"] as? [[String: Any]] ?? [] {
+                guard let path = marker["path"] as? [Any], let cacheControl = marker["value"] else { continue }
+                marked = settingCacheControl(cacheControl, at: path[...], in: marked)
+            }
+            return marked as? [String: Any] ?? body
+        }
+    }
+
+    private static func settingCacheControl(_ value: Any, at path: ArraySlice<Any>, in container: Any) -> Any {
+        guard let head = path.first else {
+            guard var block = container as? [String: Any] else { return container }
+            block["cache_control"] = value
+            return block
+        }
+        if let key = head as? String, var object = container as? [String: Any], let child = object[key] {
+            object[key] = settingCacheControl(value, at: path.dropFirst(), in: child)
+            return object
+        }
+        if let index = (head as? NSNumber)?.intValue, var array = container as? [Any], array.indices.contains(index) {
+            array[index] = settingCacheControl(value, at: path.dropFirst(), in: array[index])
+            return array
+        }
+        return container
     }
 
     static func text(

@@ -2813,16 +2813,31 @@ final class BoardTaskManager {
         }.value
     }
 
-    /// One page of an agent's context: the final transcript, or everything ever sent.
+    /// One page of an agent's context: the final transcript, everything ever
+    /// sent, or one request's items in the order it sent them (`request` is
+    /// from 1; `nil` is the request the final transcript was read from).
     func rawInputPage(
         _ id: UUID, homes: ProviderSessionHomes, agent: String?, scope: TaskRawInputScope, order: TaskRawInputOrder,
-        query: String, offset: Int, limit: Int, focus: Int?
+        query: String, offset: Int, limit: Int, focus: Int?, request: Int? = nil
     ) async throws -> TaskRawInputPage {
         let sessions = try tokenMapSessions(id)
         return try await Task.detached(priority: .userInitiated) {
             try ProviderTokenMap.page(
                 taskID: id, agents: ProviderTokenMap.load(sessions: sessions, homes: homes), agent: agent,
-                scope: scope, order: order, query: query, offset: offset, limit: limit, focus: focus
+                scope: scope, order: order, query: query, offset: offset, limit: limit, focus: focus, request: request
+            )
+        }.value
+    }
+
+    /// One whole request of an agent, as readable text or as its request body JSON.
+    func rawInputExport(
+        _ id: UUID, homes: ProviderSessionHomes, agent: String?, request: Int?, format: TaskRawInputExportFormat
+    ) async throws -> TaskRawInputExport {
+        let sessions = try tokenMapSessions(id)
+        return try await Task.detached(priority: .userInitiated) {
+            try ProviderTokenMap.export(
+                taskID: id, agents: ProviderTokenMap.load(sessions: sessions, homes: homes), agent: agent,
+                request: request, format: format
             )
         }.value
     }
@@ -7371,7 +7386,17 @@ final class PlayhouseBridgeRuntime {
                     query: request.arguments["query"]?.string ?? "",
                     offset: request.optionalInteger("offset", in: 0...Int.max) ?? 0,
                     limit: request.optionalInteger("limit", in: 1...1_000) ?? 100,
-                    focus: request.optionalInteger("focus", in: 0...Int.max)
+                    focus: request.optionalInteger("focus", in: 0...Int.max),
+                    request: request.optionalInteger("request", in: 1...Int.max)
+                ))
+            case "task.raw-input-export":
+                let taskID = try request.requiredUUID("taskID")
+                let homes = ProviderSessionHomes.resolve(claudeConfigDirectory: claudeConfigDirectory, codexHome: callerCodexHome)
+                result = try Self.value(await taskManager.rawInputExport(
+                    taskID, homes: homes,
+                    agent: request.arguments["agent"]?.string,
+                    request: request.optionalInteger("request", in: 1...Int.max),
+                    format: request.optionalChoice("format", default: TaskRawInputExportFormat.text)
                 ))
             case "task.raw-input-text":
                 let taskID = try request.requiredUUID("taskID")
