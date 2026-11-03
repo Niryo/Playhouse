@@ -2732,6 +2732,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
                         self.addCleanup(remove_fixture_origin, self.primary, remote)
                         self.run_git(Path(record["worktreePath"]), "remote", "add", "origin", str(remote))
                         self.run_git(Path(record["worktreePath"]), "push", "origin", "main")
+                        # GitHub rejects a pull request whose branch has no commits.
+                        (Path(record["worktreePath"]) / "task-change.txt").write_text("Auto PR task change.\n", encoding="utf-8")
                         remote_added = True
                         response, _ = self.call_cli("task", "outcome", task["id"], "completed", extra_environment=gh_environment)
                         self.assertEqual(self.assert_success(response)["outcome"], "completed")
@@ -2791,6 +2793,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.addCleanup(remove_fixture_origin, self.secondary, manual_remote)
         self.run_git(manual_worktree_path, "remote", "add", "origin", str(manual_remote))
         self.run_git(manual_worktree_path, "push", "origin", "main")
+        (manual_worktree_path / "task-change.txt").write_text("Manual PR task change.\n", encoding="utf-8")
         manual_create_environment = {
             "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture-manual-pr"),
             **gh_environment,
@@ -3153,6 +3156,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.addCleanup(remove_fixture_origin, source_repository, remote)
             self.run_git(Path(record["worktreePath"]), "remote", "add", "origin", str(remote))
             self.run_git(Path(record["worktreePath"]), "push", "origin", "main")
+            (Path(record["worktreePath"]) / "task-change.txt").write_text(f"Repository {index} task change.\n", encoding="utf-8")
 
         gh_directory = self.data_directory / "creation-gh-fixture"
         gh_directory.mkdir()
@@ -3197,6 +3201,72 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         fresh = self.assert_success(self.call_cli("task", "get", creating["id"])[0])
         self.assertEqual([record["pullRequestNumber"] for record in fresh["repositoryWorktrees"]], [501, 502])
+
+    # case-contract: test_task_pr_create_skips_unchanged_repositories | PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error. A task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert.
+    def test_task_pr_create_skips_unchanged_repositories(self):
+        def remove_fixture_origin(repository, expected_url):
+            current = subprocess.run(
+                ["git", "-C", str(repository), "remote", "get-url", "origin"],
+                check=False, capture_output=True, text=True,
+            )
+            if current.returncode == 0 and current.stdout.strip() == str(expected_url):
+                self.run_git(repository, "remote", "remove", "origin")
+
+        task = self.create_repo_task(
+            "Skip unchanged repositories", [self.primary, self.secondary],
+            merge_targets={self.primary: "main", self.secondary: "main"}, materialize=True,
+        )
+        self.clear_task_provider_session(task["id"])
+        remote_root = self.data_directory / "skip-unchanged-remotes"
+        self.assertFalse(remote_root.exists(), "Each case must start with an isolated remote fixture directory.")
+        remote_root.mkdir()
+        (remote_root / ".playhouse-test-owner").write_text("Playhouse bridge test owns these PR remotes.\n", encoding="utf-8")
+        for index, record in enumerate(task["repositoryWorktrees"]):
+            remote = remote_root / f"repository-{index}.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+            self.addCleanup(remove_fixture_origin, Path(record["repositoryPath"]), remote)
+            self.run_git(Path(record["worktreePath"]), "remote", "add", "origin", str(remote))
+            self.run_git(Path(record["worktreePath"]), "push", "origin", "main")
+        primary_worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        (primary_worktree / "task-change.txt").write_text("Only the primary repository changed.\n", encoding="utf-8")
+
+        gh_directory = self.data_directory / "skip-unchanged-gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_state = gh_directory / "state"
+        gh_state.write_text("", encoding="utf-8")
+        create_log = gh_directory / "create-calls"
+        gh_environment = {
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "PLAYHOUSE_E2E_GH_STATE_PATH": str(gh_state),
+            "PLAYHOUSE_E2E_GH_CALL_LOG": str(gh_directory / "view-calls"),
+            "PLAYHOUSE_E2E_GH_CREATE_LOG": str(create_log),
+            "PLAYHOUSE_E2E_GH_CREATE_FIRST_NUMBER": "501",
+        }
+        created = self.assert_success(self.call_cli("task", "pr", "create", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(created["repositoryWorktrees"][0]["pullRequestNumber"], 501)
+        self.assertIsNone(created["repositoryWorktrees"][1].get("pullRequestNumber"), "An unchanged repository must not get a pull request.")
+        create_targets = [line.split("\t", 2)[1] for line in create_log.read_text(encoding="utf-8").splitlines() if line.startswith("create\t")]
+        self.assertEqual(create_targets, [str(primary_worktree.resolve())], "gh create must run only for the changed repository.")
+        fresh = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(fresh["repositoryWorktrees"][0]["pullRequestNumber"], 501)
+        self.assertIsNone(fresh["repositoryWorktrees"][1].get("pullRequestNumber"))
+
+        # The secondary source repository keeps the origin its first task worktree added.
+        unchanged = self.create_repo_task(
+            "Nothing to propose", [self.secondary], merge_targets={self.secondary: "main"}, materialize=True,
+        )
+        self.clear_task_provider_session(unchanged["id"])
+        rejected, _ = self.call_cli("task", "pr", "create", unchanged["id"], expected_status=1, extra_environment=gh_environment)
+        self.assert_failure(rejected, "invalid_transition")
+        self.assertIn("No repository in this task has changes", rejected["error"]["message"])
+        self.assertEqual(
+            sum(line.startswith("create\t") for line in create_log.read_text(encoding="utf-8").splitlines()), 1,
+            "An all-unchanged task must not call gh create.",
+        )
+        self.assertIsNone(self.assert_success(self.call_cli("task", "get", unchanged["id"])[0])["repositoryWorktrees"][0].get("pullRequestNumber"))
 
     # case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
     def test_task_lifecycle_rollout_clears_records_and_clean_worktrees(self):

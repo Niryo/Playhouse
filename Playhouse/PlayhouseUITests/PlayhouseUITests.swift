@@ -2089,6 +2089,13 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try XCTUnwrap(created["id"] as? String)
         XCTAssertTrue(element("task-card-\(taskID)").waitForExistence(timeout: 5))
         XCTAssertFalse(element("task-auto-pr-toggle-\(taskID)").exists, "A Backlog task has no working-state PR controls yet.")
+        // A worktree shares its source repository's git config, so the origin remotes this
+        // case adds through its worktrees must not leak into later cases.
+        defer {
+            for repository in [fixture.primary, fixture.secondary] {
+                try? runGit(repository, "remote", "remove", "origin")
+            }
+        }
 
         openTask(named: "Auto PR toggle UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Auto PR toggle UI", whileTurnHeld: {
@@ -2119,6 +2126,8 @@ final class PlayhouseUITests: XCTestCase {
             try self.runGit(remote, "init", "--bare")
             try self.runGit(worktree, "remote", "add", "origin", remote.path)
             try self.runGit(worktree, "push", "origin", "main")
+            // GitHub rejects a pull request whose branch has no commits.
+            try "Auto PR task change.\n".write(to: worktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
 
             self.openTask(named: "Auto PR toggle UI")
         })
@@ -2163,6 +2172,7 @@ final class PlayhouseUITests: XCTestCase {
         try runGit(manualRemote, "init", "--bare")
         try runGit(manualWorktree, "remote", "add", "origin", manualRemote.path)
         try runGit(manualWorktree, "push", "origin", "main")
+        try "Manual PR task change.\n".write(to: manualWorktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
         manualButton.click()
         let manualPRLink = app.links["task-pr-link-\(manualTaskID)-502"]
         XCTAssertTrue(manualPRLink.waitForExistence(timeout: 10), "The manual PR flow must still work unchanged when Auto PR stays off.")
@@ -2295,6 +2305,7 @@ final class PlayhouseUITests: XCTestCase {
             let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String))
             try runGit(worktree, "remote", "add", "origin", remote.path)
             try runGit(worktree, "push", "origin", "main")
+            try "Repository \(index) task change.\n".write(to: worktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
         }
         let failurePath = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH"]))
         try "2\n".write(to: failurePath, atomically: true, encoding: .utf8)
@@ -2363,6 +2374,93 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(secondPRLink.label, "#1235")
         assertHoverEmphasis(for: prLink)
         attachScreenshot(named: "Done archive shows the linked pull request")
+    }
+
+    // case-contract: test_task_pr_create_skips_unchanged_repositories | PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error. A task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert.
+    func test_task_pr_create_skips_unchanged_repositories() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Skip unchanged UI", "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
+            "--merge-target", "\(fixture.primary.path)=main", "--merge-target", "\(fixture.secondary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Skip unchanged UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Skip unchanged UI")
+        element("back-to-board-button").click()
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+        XCTAssertTrue(terminateAppAndWait(app), "Close Playhouse before clearing the fixture provider session.")
+        try clearTaskProviderSession(taskID: taskID)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+
+        let records = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]]))
+        let remoteRoot = dataDirectory.appendingPathComponent("skip-unchanged-remotes", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remoteRoot.path), "Each case must start with isolated PR remotes.")
+        try FileManager.default.createDirectory(at: remoteRoot, withIntermediateDirectories: true)
+        try WorkspaceFixture.ownerContents.write(to: remoteRoot.appendingPathComponent(WorkspaceFixture.ownerMarker), atomically: true, encoding: .utf8)
+        for repository in [fixture.primary, fixture.secondary] {
+            XCTAssertFalse(try runGitOutput(repository, "remote").split(whereSeparator: \.isNewline).contains("origin"), "The isolated source fixture must not already have an origin remote.")
+        }
+        defer {
+            for repository in [fixture.primary, fixture.secondary] {
+                try? runGit(repository, "remote", "remove", "origin")
+            }
+        }
+        for (index, record) in records.enumerated() {
+            let remote = remoteRoot.appendingPathComponent("repository-\(index).git", isDirectory: true)
+            try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+            try runGit(remote, "init", "--bare")
+            let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String))
+            try runGit(worktree, "remote", "add", "origin", remote.path)
+            try runGit(worktree, "push", "origin", "main")
+        }
+        let primaryWorktree = URL(fileURLWithPath: try XCTUnwrap(records[0]["worktreePath"] as? String), isDirectory: true)
+        try "Only the primary repository changed.\n".write(to: primaryWorktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
+
+        let createPRButton = element("task-create-pr-\(taskID)")
+        XCTAssertTrue(createPRButton.waitForExistence(timeout: 5), "The two-repository task should expose its PRs action.")
+        createPRButton.click()
+        let primaryLink = app.links["task-pr-link-\(taskID)-501"]
+        XCTAssertTrue(primaryLink.waitForExistence(timeout: 30), "The changed repository should get its pull request.")
+        // The link can appear while the secondary repository is still being checked; wait for the operation to settle.
+        let remainingPRButton = element("task-create-pr-\(taskID)")
+        XCTAssertTrue(waitUntil({ remainingPRButton.exists && remainingPRButton.isEnabled }, timeout: 30), "The PR operation should finish for every repository.")
+        XCTAssertEqual(remainingPRButton.label, "PRs. Create pull requests for repositories without a linked pull request")
+        XCTAssertFalse(app.sheets.firstMatch.exists, "An unchanged repository must not fail the PR operation.")
+        let createdRecords = try XCTUnwrap(taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual(createdRecords[0]["pullRequestNumber"] as? Int, 501)
+        XCTAssertNil(createdRecords[1]["pullRequestNumber"], "The unchanged repository must keep no PR link.")
+        let createLogPath = try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CREATE_LOG"])
+        let createTargets = try String(contentsOfFile: createLogPath, encoding: .utf8).components(separatedBy: "\n")
+            .filter { $0.hasPrefix("create\t") }
+            .compactMap { $0.split(separator: "\t", maxSplits: 2).dropFirst().first.map(String.init) }
+            .map { $0.replacingOccurrences(of: "/private/tmp/", with: "/tmp/") }
+        XCTAssertEqual(createTargets, [primaryWorktree.resolvingSymlinksInPath().path.replacingOccurrences(of: "/private/tmp/", with: "/tmp/")], "gh create must run only for the changed repository.")
+        attachScreenshot(named: "Only the changed repository gets a pull request")
+
+        // The secondary source repository keeps the origin its first task worktree added.
+        let unchanged = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Nothing to propose UI", "--repo", fixture.secondary.path,
+            "--merge-target", "\(fixture.secondary.path)=main",
+        ])["result"] as? [String: Any])
+        let unchangedID = try XCTUnwrap(unchanged["id"] as? String)
+        openTask(named: "Nothing to propose UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Nothing to propose UI")
+        element("back-to-board-button").click()
+        XCTAssertEqual(try taskRecord(id: unchangedID)?["status"] as? String, "Review")
+        let unchangedButton = element("task-create-pr-\(unchangedID)")
+        XCTAssertTrue(unchangedButton.waitForExistence(timeout: 5))
+        unchangedButton.click()
+        let alertSheet = app.sheets.firstMatch
+        XCTAssertTrue(alertSheet.waitForExistence(timeout: 30), "A task with no changes should report why no pull request was opened.")
+        XCTAssertTrue(waitUntil({
+            self.element(containingAccessibilityText: "No repository in this task has changes").exists
+        }, timeout: 5), app.debugDescription)
+        attachScreenshot(named: "A task with no changes explains why no pull request was opened")
+        alertSheet.buttons["OK"].click()
+        XCTAssertNil((try taskRecord(id: unchangedID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"])
+        XCTAssertEqual(try String(contentsOfFile: createLogPath, encoding: .utf8).components(separatedBy: "\n").filter { $0.hasPrefix("create\t") }.count, 1, "An all-unchanged task must not call gh create.")
     }
 
     // case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.

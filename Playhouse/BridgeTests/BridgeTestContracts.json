@@ -380,6 +380,10 @@
     "expectation": "CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows exact PR numbers on the active task and Done archive, including four-digit values without grouping separators. Hovering the outer padded edge of each PR link triggers its feedback."
   },
   {
+    "id": "test_task_pr_create_skips_unchanged_repositories",
+    "expectation": "PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error. A task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert."
+  },
+  {
     "id": "test_app_override_rejects_incompatible_bundles",
     "expectation": "Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, test IDs that do not match the current worktree, and nonisolated test data before launching; the current app preserves a saved draft across restart."
   },
