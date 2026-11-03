@@ -1543,7 +1543,10 @@ private struct TaskCardView: View {
                 Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
                     .font(.system(size: 10))
             }
-            tokenCounter
+            // A zero counter says nothing yet, so it stays hidden until the task has sent tokens.
+            if task.counterTokens > 0 {
+                tokenCounter
+            }
         }
         .foregroundStyle(.tertiary)
         .allowsHitTesting(false)
