@@ -5693,7 +5693,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(steer_params["input"], [{"type": "text", "text": steer_message}])
         self.assertTrue(steer_params["expectedTurnId"], "Steering must identify the matching active turn.")
 
-    # case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
+    # case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
     def test_conversation_steers_and_queues_active_turn(self):
         task = self.create_repo_task("Active turn message controls", [self.primary])
         task_id = task["id"]
@@ -5827,6 +5827,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         while time.monotonic() < deadline and not targeted_ready.exists():
             time.sleep(0.02)
         self.assertTrue(targeted_ready.exists(), "A missed queued-row steer should begin its own targeted turn.")
+        delivering_queue, _ = self.call_cli("conversation", "queue-list", task_id)
+        delivering_item = next(item for item in self.assert_success(delivering_queue) if item["id"] == targeted_record["id"])
+        self.assertEqual(delivering_item["state"], "dispatching", "A follow-up stays durably claimed while its own turn runs.")
         overlap_text = "Queue this steer behind the targeted turn."
         Path(str(executable) + ".reject-next-steer").write_text("no active turn to steer\n", encoding="utf-8")
         overlap_steer, _ = self.call_cli(
@@ -5876,6 +5879,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         overlapping_row_result = self.assert_success(overlapping_row_steer)
         self.assertTrue(overlapping_row_result["accepted"])
         self.assertTrue(overlapping_row_result["queued"], "A missed queued-row steer should stay queued while targeted dispatch is active.")
+        returned_queue, _ = self.call_cli("conversation", "queue-list", task_id)
+        returned_item = next(item for item in self.assert_success(returned_queue) if item["id"] == missed_row_record["id"])
+        self.assertEqual(returned_item["state"], "queued", "A missed queued-row steer from the CLI returns to the waiting queue before the targeted turn ends.")
         targeted_release.write_text("Release targeted row delivery.\n", encoding="utf-8")
         self.finish_cli(targeted_row_process, targeted_row_command)
         deadline = time.monotonic() + 15

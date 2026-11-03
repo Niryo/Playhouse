@@ -5365,6 +5365,10 @@ final class ConversationManager {
             throw BridgeCommandError(code: "invalid_transition", message: "That follow-up is no longer available to steer.")
         }
         try tasks.reserveQueuedMessageForSteering(taskID: taskID, messageID: messageID)
+        // Windows hide a follow-up while it is reserved, so announce the reservation
+        // and, on every exit, its removal or return to the queue.
+        Self.bumpVisibleRevision(taskID)
+        defer { Self.bumpVisibleRevision(taskID) }
         do {
             let accepted = try await steer(taskID: taskID, text: item.text, imageDataURLs: item.imageDataURLs ?? [])
             if accepted {
@@ -5901,6 +5905,10 @@ final class ConversationManager {
                 do { item = try tasks.claimNextQueuedMessage(taskID: taskID, threadID: threadID, messageID: messageIDFilter) }
                 catch { break }
                 guard let item else { break }
+                // Windows hide a follow-up while it is claimed, so announce the claim
+                // and, however delivery ends, its removal or return as needs-action.
+                Self.bumpVisibleRevision(taskID)
+                defer { Self.bumpVisibleRevision(taskID) }
                 do {
                     _ = try await send(
                         taskID: taskID,
