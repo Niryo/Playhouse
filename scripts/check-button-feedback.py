@@ -8,6 +8,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "Playhouse" / "App"
 FILES = tuple(sorted(APP.rglob("*.swift")))
+# Files whose controls are menu-bar commands rather than views in the window.
+MENU_BAR_FILES = {"PlayhouseApp.swift", "DebugConversationImport/DebugConversationImport.swift"}
 CONTROL = re.compile(r"\b(Button(?=\s*(?:\(|\{))|Link(?=\s*\()|Menu(?=\s*\{))")
 
 
@@ -152,7 +154,7 @@ def main() -> int:
             # Window controls use `.nativeHelp`: SwiftUI's `.help` alone does not present its
             # tooltip for most controls in the main window. Menu items (menu-bar commands and
             # `Menu`/`.contextMenu` content) are native menu items and keep `.help`.
-            in_menu = name == "PlayhouseApp.swift" or any(a < start < b for a, b in menus)
+            in_menu = name in MENU_BAR_FILES or any(a < start < b for a, b in menus)
             help_modifier = r"\.help" if in_menu else r"\.nativeHelp"
             help_match = re.search(help_modifier + r"\(\s*(\"(?:\\.|[^\"\\])*\"|[^)\n]+)\s*\)", chain)
             if not help_match:

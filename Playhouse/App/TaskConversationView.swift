@@ -4,17 +4,37 @@ import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Shared by `CodeBlockTextView` and `SelectableAnnotationText`'s `sizeThatFits`: lays the given
-/// attributed string out in a throwaway text container at `width` and returns its used height.
-private func measuredTextHeight(for attributedText: NSAttributedString, width: CGFloat) -> CGFloat {
-    let storage = NSTextStorage(attributedString: attributedText)
-    let layoutManager = NSLayoutManager()
-    let container = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
-    container.lineFragmentPadding = 0
-    layoutManager.addTextContainer(container)
-    storage.addLayoutManager(layoutManager)
-    layoutManager.ensureLayout(for: container)
-    return layoutManager.usedRect(for: container).height
+/// Answers `sizeThatFits` for `CodeBlockTextView` and `SelectableAnnotationText`. One layout pass
+/// proposes several widths, so heights are kept per width until the text changes, and a single
+/// text system is reused instead of a throwaway one being built and torn down for each call.
+private final class TextHeightMeasurer {
+    private let storage = NSTextStorage()
+    private let layoutManager = NSLayoutManager()
+    private let container = NSTextContainer(size: .zero)
+    private var heights: [CGFloat: CGFloat] = [:]
+
+    init() {
+        container.lineFragmentPadding = 0
+        layoutManager.addTextContainer(container)
+        storage.addLayoutManager(layoutManager)
+    }
+
+    /// Replaces the measured text, which forgets every height measured for the previous text.
+    func setText(_ text: NSAttributedString) {
+        storage.setAttributedString(text)
+        heights.removeAll()
+    }
+
+    func height(forWidth width: CGFloat) -> CGFloat {
+        if let height = heights[width] { return height }
+        container.size = NSSize(width: width, height: .greatestFiniteMagnitude)
+        layoutManager.ensureLayout(for: container)
+        let height = layoutManager.usedRect(for: container).height
+        // A live window resize proposes a new width every frame; only the latest few recur.
+        if heights.count >= 8 { heights.removeAll() }
+        heights[width] = height
+        return height
+    }
 }
 
 @Observable
@@ -63,6 +83,148 @@ private struct AssistantMarkdownBlock: Identifiable {
         case .listItem, .orderedListItem, .paragraph: NSFont.systemFont(ofSize: 16)
         case .codeBlock: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
         case .table: NSFont.systemFont(ofSize: 14)
+        }
+    }
+}
+
+/// A reply's Markdown blocks as rendered: runs of prose share one text view, while each code
+/// block and table keeps its own card.
+private enum AssistantMarkdownSegment: Identifiable {
+    case prose([AssistantMarkdownBlock])
+    case card(AssistantMarkdownBlock)
+
+    var id: Int {
+        switch self {
+        case .prose(let blocks): blocks[0].id
+        case .card(let block): block.id
+        }
+    }
+
+    static func segments(of blocks: [AssistantMarkdownBlock]) -> [AssistantMarkdownSegment] {
+        var segments: [AssistantMarkdownSegment] = []
+        var prose: [AssistantMarkdownBlock] = []
+        for block in blocks {
+            switch block.kind {
+            case .codeBlock, .table:
+                if !prose.isEmpty { segments.append(.prose(prose)) }
+                prose.removeAll()
+                segments.append(.card(block))
+            case .heading, .listItem, .orderedListItem, .paragraph:
+                prose.append(block)
+            }
+        }
+        if !prose.isEmpty { segments.append(.prose(prose)) }
+        return segments
+    }
+}
+
+/// Consecutive prose blocks laid out as one attributed string. Comments keep block-relative
+/// offsets, so they survive a change in how blocks are grouped; this maps between those and
+/// positions in the combined text.
+private struct AssistantProseLayout {
+    private struct PlacedBlock {
+        let block: AssistantMarkdownBlock
+        /// The block's own text, after any list marker.
+        let contentRange: NSRange
+        /// The whole line, list marker included.
+        let lineRange: NSRange
+    }
+
+    let text: NSAttributedString
+    private let placed: [PlacedBlock]
+
+    var id: Int { placed[0].block.id }
+
+    var endsWithParagraph: Bool {
+        if case .paragraph = placed[placed.count - 1].block.kind { return true }
+        return false
+    }
+
+    init(blocks: [AssistantMarkdownBlock], responseAnnotations: [ResponseAnnotationReference]) {
+        let markerFont = NSFont.systemFont(ofSize: 16)
+        let text = NSMutableAttributedString()
+        var placed: [PlacedBlock] = []
+        for (index, block) in blocks.enumerated() {
+            let lineStart = text.length
+            let style = NSMutableParagraphStyle()
+            style.lineSpacing = 4
+            // Matches the gap separate block views had: their insets plus the stack's spacing,
+            // and the extra padding below a paragraph.
+            if case .paragraph = block.kind { style.paragraphSpacing = 20 } else { style.paragraphSpacing = 15 }
+            let marker: String? = switch block.kind {
+            case .listItem: "•"
+            case .orderedListItem(let number): "\(number)."
+            case .heading, .paragraph, .codeBlock, .table: nil
+            }
+            if let marker {
+                // Wrapped lines align under the text, past the widest marker ("10.", "100.").
+                let indent = ceil((marker as NSString).size(withAttributes: [.font: markerFont]).width) + 11
+                style.headIndent = indent
+                style.tabStops = [NSTextTab(textAlignment: .left, location: indent)]
+                text.append(NSAttributedString(string: marker + "\t", attributes: [
+                    .font: markerFont,
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                    .paragraphStyle: style,
+                ]))
+            }
+            let content = NSMutableAttributedString(
+                attributedString: TaskConversationView.markdownNSAttributedString(block.text, baseFont: block.font)
+            )
+            // Replaced here rather than by the text view, so offsets count the visible labels.
+            SelectableAnnotationText.replaceResponseAnnotationMarkers(in: content, references: responseAnnotations)
+            let contentRange = NSRange(location: text.length, length: content.length)
+            content.enumerateAttribute(.font, in: NSRange(location: 0, length: content.length)) { font, range, _ in
+                if font == nil { content.addAttribute(.font, value: block.font, range: range) }
+            }
+            content.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: content.length))
+            text.append(content)
+            placed.append(PlacedBlock(
+                block: block,
+                contentRange: contentRange,
+                lineRange: NSRange(location: lineStart, length: text.length - lineStart)
+            ))
+            if index < blocks.count - 1 {
+                text.append(NSAttributedString(string: "\n", attributes: [.font: block.font, .paragraphStyle: style]))
+            }
+        }
+        self.text = text
+        self.placed = placed
+    }
+
+    /// The comment's range in `text`, or nil when it belongs to blocks outside this run.
+    func range(of annotation: ConversationAnnotation) -> NSRange? {
+        guard let start = placed.first(where: { $0.block.id == annotation.blockID })?.contentRange,
+              let end = placed.first(where: { $0.block.id == annotation.endBlockID })?.contentRange,
+              (0...start.length).contains(annotation.startOffset),
+              (0...end.length).contains(annotation.endOffset) else { return nil }
+        let location = start.location + annotation.startOffset
+        let endLocation = end.location + annotation.endOffset
+        guard endLocation > location else { return nil }
+        return NSRange(location: location, length: endLocation - location)
+    }
+
+    /// A selection in `text` as block-relative positions, with list markers and line breaks at
+    /// its ends left out; nil when it covers no block text.
+    func blockPositions(of range: NSRange) -> (blockID: Int, startOffset: Int, endBlockID: Int, endOffset: Int)? {
+        guard let start = placed.first(where: { NSMaxRange($0.contentRange) > range.location }),
+              let end = placed.last(where: { $0.contentRange.location < NSMaxRange(range) }) else { return nil }
+        let startLocation = max(range.location, start.contentRange.location)
+        let endLocation = min(NSMaxRange(range), NSMaxRange(end.contentRange))
+        guard endLocation > startLocation else { return nil }
+        return (start.block.id, startLocation - start.contentRange.location,
+                end.block.id, endLocation - end.contentRange.location)
+    }
+
+    var accessibilityBlocks: [CommentTrackingTextView.AccessibilityBlock] {
+        placed.map { placed in
+            let content = (text.string as NSString).substring(with: placed.contentRange)
+            let (identifier, label): (String, String) = switch placed.block.kind {
+            case .heading: ("assistant-markdown-heading-\(placed.block.id)", content)
+            case .listItem: ("assistant-markdown-list-item-\(placed.block.id)", content)
+            case .orderedListItem(let number): ("assistant-markdown-ordered-list-item-\(placed.block.id)", "\(number). " + content)
+            case .paragraph, .codeBlock, .table: ("assistant-markdown-paragraph-\(placed.block.id)", content)
+            }
+            return CommentTrackingTextView.AccessibilityBlock(identifier: identifier, label: label, range: placed.lineRange)
         }
     }
 }
@@ -129,30 +291,37 @@ private struct CodeBlockCardView: View {
 private struct CodeBlockTextView: NSViewRepresentable {
     let attributedText: NSAttributedString
 
+    func makeCoordinator() -> TextHeightMeasurer {
+        TextHeightMeasurer()
+    }
+
     func makeNSView(context: Context) -> NSTextView {
-        let view = NSTextView()
+        // TextKit 1 lays out and draws all of the text; see SelectableAnnotationText.
+        let view = NSTextView(usingTextLayoutManager: false)
         view.isEditable = false
         view.isSelectable = true
         view.drawsBackground = false
         view.textContainerInset = .zero
         view.textContainer?.lineFragmentPadding = 0
-        view.isVerticallyResizable = true
+        view.isVerticallyResizable = false
+        view.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         view.isHorizontallyResizable = false
         view.autoresizingMask = [.width]
         view.textContainer?.widthTracksTextView = true
         view.textStorage?.setAttributedString(attributedText)
+        context.coordinator.setText(attributedText)
         return view
     }
 
     func updateNSView(_ view: NSTextView, context: Context) {
         guard view.textStorage?.string != attributedText.string else { return }
         view.textStorage?.setAttributedString(attributedText)
+        context.coordinator.setText(attributedText)
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView, context: Context) -> CGSize? {
         let width = max(40, proposal.width ?? 500)
-        guard let renderedText = nsView.textStorage else { return nil }
-        let contentHeight = measuredTextHeight(for: renderedText, width: width)
+        let contentHeight = context.coordinator.height(forWidth: width)
         return CGSize(width: width, height: ceil(contentHeight) + 2)
     }
 }
@@ -230,8 +399,11 @@ private struct TableBlockView: View {
 private struct ConversationAnnotation: Identifiable, Codable {
     let id: UUID
     let messageID: String
+    /// The comment starts `startOffset` into this block's text and ends `endOffset` into
+    /// `endBlockID`'s, so a comment on prose blocks rendered together can span several of them.
     let blockID: Int
     let startOffset: Int
+    let endBlockID: Int
     let endOffset: Int
     let text: String
     let comment: String
@@ -292,7 +464,61 @@ private final class CommentTrackingTextView: NSTextView {
     var hoverTrackingOwner: AnyObject?
     /// The whole message this block belongs to; copying a fully selected block copies it all.
     var wholeMessageText: String?
+    /// The prose blocks laid out in this view, exposed as their own accessibility elements so
+    /// each heading, paragraph, and list item stays identifiable though they share one view.
+    var accessibilityBlocks: [AccessibilityBlock] = [] {
+        didSet { if accessibilityBlocks != oldValue { blockElements = nil } }
+    }
+    /// Accessibility clients hold on to children between queries, so the elements live as long
+    /// as the blocks they describe.
+    private var blockElements: [BlockAccessibilityElement]?
     private var hoverTrackingArea: NSTrackingArea?
+
+    struct AccessibilityBlock: Equatable {
+        let identifier: String
+        let label: String
+        let range: NSRange
+    }
+
+    private final class BlockAccessibilityElement: NSAccessibilityElement {
+        weak var textView: NSTextView?
+        let range: NSRange
+
+        init(block: AccessibilityBlock, textView: NSTextView) {
+            self.textView = textView
+            range = block.range
+            super.init()
+            setAccessibilityRole(.group)
+            setAccessibilityLabel(block.label)
+            setAccessibilityIdentifier(block.identifier)
+            setAccessibilityParent(textView)
+        }
+
+        /// Computed on each query, since the view moves as the transcript scrolls. Placed
+        /// relative to the text view's own accessibility frame: converting through the window
+        /// misses the transcript's scroll offset for a text view taller than the viewport.
+        override func accessibilityFrame() -> NSRect {
+            guard let textView,
+                  let layoutManager = textView.layoutManager, let textContainer = textView.textContainer,
+                  NSMaxRange(range) <= (textView.string as NSString).length else { return .zero }
+            let glyphs = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            let bounds = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
+                .offsetBy(dx: textView.textContainerOrigin.x - textView.bounds.minX,
+                          dy: textView.textContainerOrigin.y - textView.bounds.minY)
+            // The text view is flipped, and screen coordinates grow upward from its bottom edge.
+            let viewFrame = textView.accessibilityFrame()
+            return NSRect(x: viewFrame.minX + bounds.minX, y: viewFrame.maxY - bounds.maxY,
+                          width: bounds.width, height: bounds.height)
+        }
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        let children = super.accessibilityChildren() ?? []
+        guard !accessibilityBlocks.isEmpty else { return children }
+        let elements = blockElements ?? accessibilityBlocks.map { BlockAccessibilityElement(block: $0, textView: self) }
+        blockElements = elements
+        return children + elements
+    }
 
     override func copy(_ sender: Any?) {
         guard let wholeMessageText, selectedRange() == NSRange(location: 0, length: string.utf16.count) else {
@@ -325,8 +551,13 @@ private final class CommentTrackingTextView: NSTextView {
 private struct AnnotationSelection: Identifiable {
     let id = UUID()
     let messageID: String
+    /// The text view showing the selection, which places its Add comment hint: the first block
+    /// of an assistant prose run, or 0 for a user message.
+    let anchorID: Int
     let blockID: Int
-    let range: NSRange
+    let startOffset: Int
+    let endBlockID: Int
+    let endOffset: Int
     let text: String
     let bounds: CGRect
 }
@@ -485,6 +716,10 @@ struct TaskConversationView: View {
     @State private var hasPausedResponse = false
     @State private var isPausingResponse = false
     @State private var queuedMessages: [QueuedConversationMessage] = []
+    /// A `.dispatching` follow-up is claimed for delivery: either reserved for a
+    /// steer, or sent as its own turn and kept in the store until that whole turn
+    /// ends. Only the others are still waiting for the user.
+    private var waitingFollowUps: [QueuedConversationMessage] { queuedMessages.filter { $0.state != .dispatching } }
     @State private var isSubmittingLiveMessage = false
     @State private var userInputRequest: ConversationUserInputRequest?
     // The live snapshot can still carry a request this window just answered.
@@ -2172,7 +2407,7 @@ struct TaskConversationView: View {
                                             GeometryReader { geometry in
                                                 Color.clear.preference(
                                                     key: ConversationLatestTurnTopKey.self,
-                                                    value: geometry.frame(in: .named(Self.conversationScrollCoordinateSpace)).minY
+                                                    value: geometry.frame(in: .named(Self.conversationContentCoordinateSpace)).minY
                                                 )
                                             }
                                         }
@@ -2244,11 +2479,16 @@ struct TaskConversationView: View {
                             GeometryReader { geometry in
                                 Color.clear.preference(
                                     key: ConversationTranscriptBottomKey.self,
-                                    value: geometry.frame(in: .named(Self.conversationScrollCoordinateSpace)).maxY
+                                    value: geometry.frame(in: .named(Self.conversationContentCoordinateSpace)).maxY
                                 )
                             }
                         }
                 }
+                // The latest turn's top and the transcript's bottom are measured in this
+                // space, which scrolls with them: only their difference is used, and
+                // scroll-relative values would publish state, and re-render the whole
+                // transcript, on every scroll frame.
+                .coordinateSpace(name: Self.conversationContentCoordinateSpace)
                 .padding(.horizontal, 28)
                 .padding(.vertical, 24)
                 .frame(maxWidth: 820)
@@ -2378,6 +2618,7 @@ struct TaskConversationView: View {
     }
 
     private static let conversationScrollCoordinateSpace = "conversation-transcript-scroll"
+    private static let conversationContentCoordinateSpace = "conversation-transcript-content"
 
     private var emptyConversationRepositoryTitle: String {
         var repositoryNames = task.repositoryWorktrees.map {
@@ -3028,11 +3269,14 @@ struct TaskConversationView: View {
                 if !visibleText.isEmpty {
                     SelectableAnnotationText(
                         text: visibleText,
-                        annotations: annotations.filter { $0.messageID == message.id && $0.blockID == 0 },
+                        highlightedRanges: annotations.filter { $0.messageID == message.id && $0.blockID == 0 }.map {
+                            NSRange(location: $0.startOffset, length: $0.endOffset - $0.startOffset)
+                        },
                         textColor: .white,
                         onSelection: { range, selectedText, bounds in
                             currentTextSelection = selectedText.isEmpty ? nil : AnnotationSelection(
-                                messageID: message.id, blockID: 0, range: range, text: selectedText, bounds: bounds
+                                messageID: message.id, anchorID: 0, blockID: 0, startOffset: range.location,
+                                endBlockID: 0, endOffset: NSMaxRange(range), text: selectedText, bounds: bounds
                             )
                         }
                     )
@@ -3040,7 +3284,7 @@ struct TaskConversationView: View {
                         // Anchored on the text like assistant blocks; as a ZStack sibling of the
                         // bubble the hint's popover ignored clicks on its controls.
                         .overlay(alignment: .topLeading) {
-                            selectionHint(messageID: message.id, blockID: 0)
+                            selectionHint(messageID: message.id, anchorID: 0)
                                 .offset(y: -16)
                         }
                         .padding(.horizontal, 16).padding(.vertical, 11)
@@ -3163,10 +3407,10 @@ struct TaskConversationView: View {
         }
     }
 
-    private func selectionHint(messageID: String, blockID: Int) -> some View {
+    private func selectionHint(messageID: String, anchorID: Int) -> some View {
         Group {
             if let selection = currentTextSelection,
-               selection.messageID == messageID, selection.blockID == blockID {
+               selection.messageID == messageID, selection.anchorID == anchorID {
                 GeometryReader { geometry in
                     Button {
                         annotationSelection = selection
@@ -3240,78 +3484,105 @@ struct TaskConversationView: View {
     ) -> some View {
         let blocks = Self.markdownBlocks(markdown)
         return VStack(alignment: .leading, spacing: 7) {
-            ForEach(blocks) { block in
-                switch block.kind {
-                case .heading(let level):
-                    selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
-                        .font(.system(size: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold))
-                        .accessibilityIdentifier("assistant-markdown-heading-\(block.id)")
-                case .listItem:
-                    // The marker is rendered through the same SelectableAnnotationText/NSTextView
-                    // plumbing as the content (see `markerText`), not a plain SwiftUI `Text`, so
-                    // both sides share identical font metrics and textContainerInset. Two
-                    // different text-layout engines (SwiftUI's vs. AppKit's) never report
-                    // identical line metrics for "the same" font size, so matching the engine is
-                    // what actually guarantees pixel alignment instead of a guessed padding value.
-                    HStack(alignment: .top, spacing: 7) {
-                        markerText("•")
-                        selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
-                            .accessibilityIdentifier("assistant-markdown-list-content-\(block.id)")
+            if let messageID {
+                ForEach(AssistantMarkdownSegment.segments(of: blocks)) { segment in
+                    switch segment {
+                    case .prose(let prose):
+                        assistantProseText(prose, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
+                    case .card(let block):
+                        markdownCard(block)
                     }
-                    .accessibilityElement(children: .combine)
-                    // The text views inside do not contribute to a combined label.
-                    .accessibilityLabel(Self.markdownPlainText(block.text))
-                    .accessibilityIdentifier("assistant-markdown-list-item-\(block.id)")
-                case .orderedListItem(let number):
-                    HStack(alignment: .top, spacing: 7) {
-                        markerText("\(number).")
-                        selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
-                            .accessibilityIdentifier("assistant-markdown-ordered-list-content-\(block.id)")
+                }
+            } else {
+                ForEach(blocks) { block in
+                    switch block.kind {
+                    case .heading(let level):
+                        markdownBlockText(block)
+                            .font(.system(size: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold))
+                            .accessibilityIdentifier("assistant-markdown-heading-\(block.id)")
+                    case .listItem:
+                        // The marker is rendered through SelectableAnnotationText/NSTextView, so
+                        // its baseline is AppKit's, as in a transcript reply's prose text.
+                        HStack(alignment: .top, spacing: 7) {
+                            markerText("•")
+                            markdownBlockText(block)
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(Self.markdownPlainText(block.text))
+                        .accessibilityIdentifier("assistant-markdown-list-item-\(block.id)")
+                    case .orderedListItem(let number):
+                        HStack(alignment: .top, spacing: 7) {
+                            markerText("\(number).")
+                            markdownBlockText(block)
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("\(number). " + Self.markdownPlainText(block.text))
+                        .accessibilityIdentifier("assistant-markdown-ordered-list-item-\(block.id)")
+                    case .codeBlock, .table:
+                        markdownCard(block)
+                    case .paragraph:
+                        markdownBlockText(block)
+                            .accessibilityIdentifier("assistant-markdown-paragraph-\(block.id)")
+                            .padding(.bottom, 5)
                     }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel("\(number). " + Self.markdownPlainText(block.text))
-                    .accessibilityIdentifier("assistant-markdown-ordered-list-item-\(block.id)")
-                case .codeBlock(let language):
-                    CodeBlockCardView(blockID: block.id, code: block.text, language: language, font: block.font)
-                        .accessibilityIdentifier("assistant-markdown-code-block-\(block.id)")
-                case .table(let headers, let alignments, let rows):
-                    TableBlockView(blockID: block.id, headers: headers, alignments: alignments, rows: rows, font: block.font)
-                case .paragraph:
-                    selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
-                        .accessibilityIdentifier("assistant-markdown-paragraph-\(block.id)")
-                        .padding(.bottom, 5)
                 }
             }
         }
     }
 
     @ViewBuilder
-    private func selectableAnnotationText(
-        _ block: AssistantMarkdownBlock,
-        messageID: String?,
-        responseAnnotations: [ResponseAnnotationReference] = [],
-        wholeMessageText: String? = nil
-    ) -> some View {
-        if let messageID {
-            SelectableAnnotationText(
-                text: Self.markdownPlainText(block.text),
-                annotations: annotations.filter { $0.messageID == messageID && $0.blockID == block.id },
-                responseAnnotations: responseAnnotations,
-                responseCommentSourcePrefix: "\(messageID):\(block.id)",
-                isAssistantText: true,
-                onSelection: { range, text, bounds in
-                    currentTextSelection = text.isEmpty ? nil : AnnotationSelection(messageID: messageID, blockID: block.id, range: range, text: text, bounds: bounds)
-                },
-                formattedText: Self.markdownNSAttributedString(block.text, baseFont: block.font),
-                font: block.font,
-                wholeMessageText: wholeMessageText
-            )
-                .fixedSize(horizontal: false, vertical: true)
-                .overlay(alignment: .topLeading) { selectionHint(messageID: messageID, blockID: block.id) }
-        } else {
-            let formatted = Self.markdownNSAttributedString(block.text, baseFont: block.font)
-            Text((try? AttributedString(formatted, including: \.appKit)) ?? Self.markdownAttributedText(block.text))
+    private func markdownCard(_ block: AssistantMarkdownBlock) -> some View {
+        switch block.kind {
+        case .codeBlock(let language):
+            CodeBlockCardView(blockID: block.id, code: block.text, language: language, font: block.font)
+                .accessibilityIdentifier("assistant-markdown-code-block-\(block.id)")
+        case .table(let headers, let alignments, let rows):
+            TableBlockView(blockID: block.id, headers: headers, alignments: alignments, rows: rows, font: block.font)
+        case .heading, .listItem, .orderedListItem, .paragraph:
+            EmptyView()
         }
+    }
+
+    /// One reply's consecutive prose blocks in a single text view, so a selection, and the
+    /// comment made on it, can run across headings, paragraphs, and list items.
+    private func assistantProseText(
+        _ blocks: [AssistantMarkdownBlock],
+        messageID: String,
+        responseAnnotations: [ResponseAnnotationReference],
+        wholeMessageText: String
+    ) -> some View {
+        let layout = AssistantProseLayout(blocks: blocks, responseAnnotations: responseAnnotations)
+        return SelectableAnnotationText(
+            text: layout.text.string,
+            highlightedRanges: annotations.filter { $0.messageID == messageID }.compactMap(layout.range(of:)),
+            responseAnnotations: responseAnnotations,
+            responseCommentSourcePrefix: "\(messageID):\(layout.id)",
+            isAssistantText: true,
+            onSelection: { range, text, bounds in
+                guard !text.isEmpty, let positions = layout.blockPositions(of: range) else {
+                    currentTextSelection = nil
+                    return
+                }
+                currentTextSelection = AnnotationSelection(
+                    messageID: messageID, anchorID: layout.id,
+                    blockID: positions.blockID, startOffset: positions.startOffset,
+                    endBlockID: positions.endBlockID, endOffset: positions.endOffset,
+                    text: text, bounds: bounds
+                )
+            },
+            formattedText: layout.text,
+            wholeMessageText: wholeMessageText,
+            accessibilityBlocks: layout.accessibilityBlocks
+        )
+            .fixedSize(horizontal: false, vertical: true)
+            .overlay(alignment: .topLeading) { selectionHint(messageID: messageID, anchorID: layout.id) }
+            .accessibilityIdentifier("assistant-markdown-prose-\(layout.id)")
+            .padding(.bottom, layout.endsWithParagraph ? 5 : 0)
+    }
+
+    private func markdownBlockText(_ block: AssistantMarkdownBlock) -> some View {
+        let formatted = Self.markdownNSAttributedString(block.text, baseFont: block.font)
+        return Text((try? AttributedString(formatted, including: \.appKit)) ?? Self.markdownAttributedText(block.text))
     }
 
     /// Renders a list marker ("•" or "1.") through the same `SelectableAnnotationText`/NSTextView
@@ -3326,7 +3597,7 @@ struct TaskConversationView: View {
         let markerWidth = NSAttributedString(string: marker, attributes: [.font: markerFont]).size().width
         return SelectableAnnotationText(
             text: marker,
-            annotations: [],
+            highlightedRanges: [],
             onSelection: { _, _, _ in },
             formattedText: NSAttributedString(string: marker, attributes: [
                 .font: markerFont,
@@ -3342,7 +3613,7 @@ struct TaskConversationView: View {
         guard annotationSelection?.id == selection.id else { return }
         annotations.append(ConversationAnnotation(
             id: UUID(), messageID: selection.messageID, blockID: selection.blockID,
-            startOffset: selection.range.location, endOffset: NSMaxRange(selection.range),
+            startOffset: selection.startOffset, endBlockID: selection.endBlockID, endOffset: selection.endOffset,
             text: selection.text, comment: annotationComment.trimmingCharacters(in: .whitespacesAndNewlines)
         ))
         annotationSelection = nil
@@ -3607,9 +3878,9 @@ struct TaskConversationView: View {
                     .accessibilityIdentifier("codex-chat-error")
             }
 
-            if !queuedMessages.isEmpty {
+            if !waitingFollowUps.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(queuedMessages) { queued in
+                    ForEach(waitingFollowUps) { queued in
                         HStack(spacing: 12) {
                             Image(systemName: "text.line.first.and.arrowtriangle.forward")
                                 .font(.system(size: 14, weight: .medium))
@@ -4337,7 +4608,7 @@ struct TaskConversationView: View {
                       let endOffset = source["endOffset"] as? Int else { continue }
                 restored.append(ConversationAnnotation(
                     id: UUID(), messageID: sourceID, blockID: blockID,
-                    startOffset: startOffset, endOffset: endOffset,
+                    startOffset: startOffset, endBlockID: source["endBlockID"] as? Int ?? blockID, endOffset: endOffset,
                     text: selectedText, comment: comment, pending: false
                 ))
             }
@@ -4449,10 +4720,13 @@ struct TaskConversationView: View {
             annotationPrompt = freeformText
         } else {
             let objects = pendingAnnotations.map { annotation in
-                ["text": annotation.text, "comment": annotation.comment,
-                 "source": ["messageId": annotation.messageID,
-                            "blockID": annotation.blockID,
-                            "startOffset": annotation.startOffset, "endOffset": annotation.endOffset]] as [String: Any]
+                var source: [String: Any] = ["messageId": annotation.messageID,
+                                             "blockID": annotation.blockID,
+                                             "startOffset": annotation.startOffset, "endOffset": annotation.endOffset]
+                // Only a comment spanning blocks names its end block, so one inside a block
+                // keeps the payload older history already carries.
+                if annotation.endBlockID != annotation.blockID { source["endBlockID"] = annotation.endBlockID }
+                return ["text": annotation.text, "comment": annotation.comment, "source": source] as [String: Any]
             }
             let data = try? JSONSerialization.data(withJSONObject: objects, options: [.sortedKeys])
             let json = data.flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
@@ -5892,7 +6166,8 @@ private final class ChatEditorTextView: NSTextView {
 
 private struct SelectableAnnotationText: NSViewRepresentable {
     let text: String
-    let annotations: [ConversationAnnotation]
+    /// Commented ranges of `text`, rendered orange.
+    let highlightedRanges: [NSRange]
     var responseAnnotations: [ResponseAnnotationReference] = []
     var responseCommentSourcePrefix = ""
     var isAssistantText = false
@@ -5901,6 +6176,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
     var formattedText: NSAttributedString? = nil
     var font = NSFont.systemFont(ofSize: 16)
     var wholeMessageText: String? = nil
+    var accessibilityBlocks: [CommentTrackingTextView.AccessibilityBlock] = []
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -5910,7 +6186,10 @@ private struct SelectableAnnotationText: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSTextView {
-        let view = CommentTrackingTextView()
+        // TextKit 2 lays out and draws only what it takes to be the visible part of a text view,
+        // which it misjudges inside a SwiftUI scroll view, leaving a reply taller than the
+        // viewport blank. Its layout manager is also needed for selection and hover hit-testing.
+        let view = CommentTrackingTextView(usingTextLayoutManager: false)
         view.isEditable = false
         view.isSelectable = true
         if isAssistantText {
@@ -5919,13 +6198,17 @@ private struct SelectableAnnotationText: NSViewRepresentable {
         view.drawsBackground = false
         view.textContainerInset = NSSize(width: 0, height: 5)
         view.textContainer?.lineFragmentPadding = 0
-        view.isVerticallyResizable = true
+        // SwiftUI sizes the view through sizeThatFits; a self-resizing text view grows from its
+        // bottom edge in the unflipped host and draws outside its frame until SwiftUI catches up.
+        view.isVerticallyResizable = false
+        view.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         view.isHorizontallyResizable = false
         view.autoresizingMask = [.width]
         view.textContainer?.widthTracksTextView = true
         view.delegate = context.coordinator
         context.coordinator.anchorView = view
         view.hoverTrackingOwner = context.coordinator
+        view.accessibilityBlocks = accessibilityBlocks
         view.updateTrackingAreas()
         update(view, coordinator: context.coordinator)
         context.coordinator.renderedKey = renderKey
@@ -5934,6 +6217,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
 
     func updateNSView(_ view: NSTextView, context: Context) {
         (view as? CommentTrackingTextView)?.wholeMessageText = wholeMessageText
+        (view as? CommentTrackingTextView)?.accessibilityBlocks = accessibilityBlocks
         context.coordinator.onSelection = onSelection
         context.coordinator.responseCommentSourcePrefix = responseCommentSourcePrefix
         context.coordinator.anchorView = view
@@ -5946,21 +6230,14 @@ private struct SelectableAnnotationText: NSViewRepresentable {
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView, context: Context) -> CGSize? {
         let width = max(40, proposal.width ?? 500)
-        guard let renderedText = nsView.textStorage else { return nil }
         // Laying the text out again is the costliest part of a transcript re-render, and its
         // result only changes with the width or with the text, which `update` replaces.
-        let contentHeight: CGFloat
-        if let measured = context.coordinator.measuredHeight, measured.width == width {
-            contentHeight = measured.height
-        } else {
-            contentHeight = measuredTextHeight(for: renderedText, width: width)
-            context.coordinator.measuredHeight = (width, contentHeight)
-        }
+        let contentHeight = context.coordinator.measurer.height(forWidth: width)
         return CGSize(width: width, height: ceil(contentHeight) + 2 * nsView.textContainerInset.height + 2)
     }
 
     private var renderKey: String {
-        responseCommentSourcePrefix + "|" + text + annotations.map { "\($0.startOffset):\($0.endOffset)" }.joined(separator: ",")
+        responseCommentSourcePrefix + "|" + text + highlightedRanges.map { "\($0.location):\($0.length)" }.joined(separator: ",")
             + responseAnnotations.map { "\($0.text):\($0.comment)" }.joined(separator: "|")
     }
 
@@ -5988,9 +6265,8 @@ private struct SelectableAnnotationText: NSViewRepresentable {
                 .paragraphStyle: style
             ])
         }
-        for annotation in annotations {
-            let range = NSRange(location: annotation.startOffset, length: annotation.endOffset - annotation.startOffset)
-            guard range.location >= 0, NSMaxRange(range) <= value.length else { continue }
+        for range in highlightedRanges {
+            guard range.location >= 0, range.length >= 0, NSMaxRange(range) <= value.length else { continue }
             value.addAttribute(.foregroundColor, value: NSColor.systemOrange, range: range)
         }
         Self.replaceResponseAnnotationMarkers(in: value, references: responseAnnotations)
@@ -5998,7 +6274,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
         view.textColor = textColor
         view.backgroundColor = .clear
         view.textStorage?.setAttributedString(value)
-        coordinator.measuredHeight = nil
+        coordinator.measurer.setText(view.textStorage ?? value)
         view.setSelectedRange(NSRange(location: 0, length: 0))
         coordinator.responseCommentContentDidChange()
     }
@@ -6006,7 +6282,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
     private static let responseCommentTextKey = NSAttributedString.Key("PlayhouseResponseCommentText")
     private static let responseCommentBodyKey = NSAttributedString.Key("PlayhouseResponseCommentBody")
 
-    private static func replaceResponseAnnotationMarkers(in value: NSMutableAttributedString, references: [ResponseAnnotationReference]) {
+    fileprivate static func replaceResponseAnnotationMarkers(in value: NSMutableAttributedString, references: [ResponseAnnotationReference]) {
         let pattern = #":(?:playhouse-annotation|codex-annotation)\{index=\"(\d+)\"\}"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
         let originalText = value.string as NSString
@@ -6037,7 +6313,9 @@ private struct SelectableAnnotationText: NSViewRepresentable {
         var responseCommentSourcePrefix: String
         weak var anchorView: NSTextView?
         var renderedKey = ""
-        var measuredHeight: (width: CGFloat, height: CGFloat)?
+        let measurer = TextHeightMeasurer()
+        /// Room above a selection for the Add comment hint, centered 22pt above it and 30pt tall.
+        private static let selectionHintClearance: CGFloat = 40
         private var responseCommentPopover: NSPopover?
         private var activeResponseCommentID: String?
         private var pendingResponseCommentSourceID: String?
@@ -6228,6 +6506,14 @@ private struct SelectableAnnotationText: NSViewRepresentable {
             var bounds = view.layoutManager?.boundingRect(forGlyphRange: glyphs, in: view.textContainer!) ?? .zero
             bounds.origin.x += view.textContainerOrigin.x
             bounds.origin.y += view.textContainerOrigin.y
+            // A selection that starts above the visible part of the transcript anchors its Add
+            // comment hint, which sits above the selection, to the top of what is still visible.
+            let visible = view.visibleRect
+            if bounds.minY < visible.minY, bounds.maxY > visible.minY {
+                let top = min(visible.minY + Self.selectionHintClearance, bounds.maxY)
+                bounds.size.height = bounds.maxY - top
+                bounds.origin.y = top
+            }
             onSelection(range, text, bounds)
         }
     }

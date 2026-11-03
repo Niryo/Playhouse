@@ -1353,9 +1353,18 @@ private struct TaskCardView: View {
     let onMoveToDone: (() -> Void)?
 
     var body: some View {
-        // Card rows, top to bottom: the title, the live updates, then the time
-        // on the left with the pull-request controls on the right.
+        // Card rows, top to bottom: the pull-request controls on the right
+        // (absent until the task has started and has a repository), the title,
+        // the live updates, then the time with the live token counter.
         VStack(alignment: .leading, spacing: 10) {
+            if showPullRequestControls {
+                HStack(spacing: 8) {
+                    Spacer(minLength: 8)
+                    pullRequestControls
+                }
+                .frame(minHeight: 30)
+            }
+
             HStack(spacing: 6) {
                 if task.title == "Generating title…" { ProgressView().controlSize(.small) }
                 Text(task.title)
@@ -1408,14 +1417,7 @@ private struct TaskCardView: View {
                     .allowsHitTesting(false)
             }
 
-            HStack(alignment: .center, spacing: 8) {
-                timeRow
-                Spacer(minLength: 8)
-                if showPullRequestControls {
-                    pullRequestControls
-                }
-            }
-            .frame(minHeight: showPullRequestControls ? 30 : nil)
+            timeRow
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1541,19 +1543,34 @@ private struct TaskCardView: View {
                 Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
                     .font(.system(size: 10))
             }
-            tokenUsageDot
+            // A zero counter says nothing yet, so it stays hidden until the task has sent tokens.
+            if task.counterTokens > 0 {
+                tokenCounter
+            }
         }
         .foregroundStyle(.tertiary)
         .allowsHitTesting(false)
     }
 
-    private var tokenUsageDot: some View {
-        Circle()
-            .fill(TokenUsageHeatmap.color(totalTokens: task.totalTokens, max: tokenUsageColorMax))
-            .frame(width: 8, height: 8)
-            .nativeHelp(TokenUsageHeatmap.label(totalTokens: task.totalTokens))
-            .accessibilityIdentifier("task-token-usage-dot-\(task.id.uuidString)")
-            .accessibilityLabel(TokenUsageHeatmap.label(totalTokens: task.totalTokens))
+    /// Everything the task has sent to the model so far, subagents included.
+    /// It climbs while a turn runs and keeps the heatmap colour, so the
+    /// configured ceiling still reads as "this task is getting expensive".
+    private var tokenCounter: some View {
+        let tokens = task.counterTokens
+        return Text(TokenUsageHeatmap.compact(tokens))
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .foregroundStyle(TokenUsageHeatmap.color(totalTokens: tokens, max: tokenUsageColorMax))
+            .contentTransition(.numericText())
+            .animation(.default, value: tokens)
+            .nativeHelp(counterDescription)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(counterDescription)
+            .accessibilityIdentifier("task-token-usage-counter-\(task.id.uuidString)")
+    }
+
+    private var counterDescription: String {
+        guard task.hasCallUsage else { return TokenUsageHeatmap.label(totalTokens: task.totalTokens) }
+        return "\(TokenUsageHeatmap.compact(task.totalSentTokens)) tokens sent · \(task.totalCalls) \(task.totalCalls == 1 ? "call" : "calls") · \(TokenUsageHeatmap.compact(task.finalTranscriptTokens)) final transcript"
     }
 
     @ViewBuilder
@@ -1704,44 +1721,141 @@ private struct TaskCardView: View {
     }
 }
 
+/// Where the session files the token map reads live, as this window's bridge
+/// requests would name them.
+private extension ProviderSessionHomes {
+    static var forThisApp: ProviderSessionHomes {
+        let configuration = DaemonClient.Configuration.fromEnvironment()
+        return .resolve(claudeConfigDirectory: configuration.claudeConfigDirectory, codexHome: configuration.codexHome)
+    }
+}
+
+/// What the raw input sheet opens on: one agent's item, or the start of its transcript.
+private struct RawInputFocus: Identifiable {
+    let id = UUID()
+    let agent: String?
+    let item: Int?
+    let inFinalTranscript: Bool
+}
+
+/// How each kind of context item is named on screen.
+private func contextKindName(_ kind: String) -> String {
+    switch ProviderContextKind(rawValue: kind) {
+    case .systemPrompt: "System prompt"
+    case .toolDefinition: "Tool definition"
+    case .hiddenOverhead: "Hidden overhead"
+    case .systemReminder: "Injected text"
+    case .userText: "User"
+    case .assistantText: "Assistant"
+    case .thinking: "Thinking"
+    case .toolCall: "Tool call"
+    case .toolResult: "Tool result"
+    case .image: "Image"
+    case .other, nil: "Other"
+    }
+}
+
+/// A bar whose length and heat follow an item's share of the largest one in view.
+private struct TokenShareBar: View {
+    let tokens: Int
+    let maxTokens: Int
+
+    var body: some View {
+        let fraction = maxTokens > 0 ? min(1, Double(tokens) / Double(maxTokens)) : 0
+        ZStack(alignment: .leading) {
+            Capsule().fill(Color.primary.opacity(0.07))
+            Capsule()
+                .fill(TokenUsageHeatmap.color(totalTokens: tokens, max: max(1, maxTokens)))
+                .frame(width: max(2, 72 * fraction))
+        }
+        .frame(width: 72, height: 6)
+        .accessibilityHidden(true)
+    }
+}
+
+/// A row of mutually exclusive choices, each its own button so it can be found by identifier.
+private struct ChoiceBar<Choice: Hashable>: View {
+    let choices: [(value: Choice, title: String, id: String)]
+    @Binding var selection: Choice
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(choices, id: \.id) { choice in
+                Button {
+                    selection = choice.value
+                } label: {
+                    Text(choice.title)
+                        .font(.system(size: 11, weight: selection == choice.value ? .semibold : .regular))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(RoundedRectangle(cornerRadius: 5).fill(selection == choice.value ? Color.accentColor.opacity(0.2) : Color.clear))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .buttonHoverPointer()
+                .nativeHelp(choice.title)
+                .accessibilityIdentifier(choice.id)
+                .accessibilityAddTraits(selection == choice.value ? .isSelected : [])
+            }
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+    }
+}
+
 /// A task's token accounting: the totals, the per-turn detail, and what each
-/// tool took part in.
+/// tool took part in, plus a map of what filled the context, read from the
+/// providers' own session files.
 private struct TokenStatsSheet: View {
+    private enum Section: String, CaseIterable, Identifiable {
+        case overview = "Overview"
+        case wasters = "Wasters"
+        case tools = "Tools & MCP"
+        case overhead = "Overhead"
+        var id: String { String(describing: self) }
+    }
+
     @Environment(\.dismiss) private var dismiss
     let taskID: UUID
     let taskTitle: String
     let modelContext: ModelContext
     @State private var summary: TaskTokenUsageSummary?
+    @State private var waste: TaskTokenWasteReport?
     @State private var didLoad = false
+    @State private var section = Section.overview
+    @State private var rawInputFocus: RawInputFocus?
 
     private static let number = IntegerFormatStyle<Int>().grouping(.automatic)
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Token stats")
-                    .font(.system(size: 19, weight: .semibold, design: .rounded))
-                Text(taskTitle)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-            if let summary, summary.totalTokens > 0 {
-                totals(summary)
-                Divider()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        tools(summary)
-                        turns(summary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Token stats")
+                        .font(.system(size: 19, weight: .semibold, design: .rounded))
+                    Text(taskTitle)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
-                .frame(maxHeight: 320)
-            } else if didLoad {
-                Text("No tokens recorded for this task yet.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("token-stats-empty")
+                Spacer()
+                Button("View raw input…", systemImage: "doc.text.magnifyingglass") {
+                    rawInputFocus = RawInputFocus(agent: nil, item: nil, inFinalTranscript: true)
+                }
+                .buttonHoverPointer()
+                .nativeHelp("Open the full input the model was sent, item by item")
+                .disabled(waste?.available != true)
+                .accessibilityIdentifier("token-stats-raw-input-button")
+            }
+            ChoiceBar(
+                choices: Section.allCases.map { ($0, $0.rawValue, "token-stats-section-\($0.id)") },
+                selection: $section
+            )
+            switch section {
+            case .overview: overview
+            case .wasters: map { wasters($0) }
+            case .tools: map { measuredTools($0) }
+            case .overhead: map { overhead($0) }
             }
             HStack {
                 Spacer()
@@ -1754,17 +1868,253 @@ private struct TokenStatsSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 520)
-        // Reads the transcript once per sheet presentation rather than on every
-        // SwiftUI re-render of this view.
+        .frame(width: 720)
+        // Keeps reading while the sheet is open, so a running turn's calls
+        // show up live. The map extends its parsed logs from where they
+        // stopped, so a poll only reads what the session files gained.
         .task {
-            summary = try? BoardTaskManager(modelContext: modelContext).tokenUsageSummary(taskID)
-            didLoad = true
+            while !Task.isCancelled {
+                let manager = BoardTaskManager(modelContext: modelContext)
+                summary = try? manager.tokenUsageSummary(taskID)
+                waste = try? await manager.tokenWasteReport(taskID, homes: .forThisApp)
+                didLoad = true
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+        .sheet(item: $rawInputFocus) { focus in
+            RawInputSheet(taskID: taskID, taskTitle: taskTitle, modelContext: modelContext, focus: focus)
+        }
+    }
+
+    @ViewBuilder
+    private var overview: some View {
+        if let summary, summary.totalTokens > 0 || summary.callUsage.available {
+            totals(summary)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    tools(summary)
+                    turns(summary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 320)
+        } else if didLoad {
+            Text("No tokens recorded for this task yet.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("token-stats-empty")
+        }
+    }
+
+    /// A map section, or why there is no map: the providers only log their
+    /// requests once a conversation has run with a version that writes them.
+    @ViewBuilder
+    private func map<Content: View>(@ViewBuilder _ content: @escaping (TaskTokenWasteReport) -> Content) -> some View {
+        if let waste, waste.available {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) { content(waste) }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(height: 420)
+        } else if didLoad {
+            Text("No request log for this task yet. Claude Code and Codex write one to their session files as the conversation runs.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("token-stats-map-unavailable")
+        }
+    }
+
+    private func sectionHeader(_ title: String, _ caption: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+            Text(caption)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func tokens(_ value: Int, id: String) -> some View {
+        Text(value.formatted(Self.number))
+            .font(.system(size: 11, weight: .medium))
+            .monospacedDigit()
+            .accessibilityIdentifier(id)
+    }
+
+    private func detail(_ text: String, id: String? = nil) -> some View {
+        Text(text)
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .accessibilityIdentifier(id ?? "")
+    }
+
+    private func agentLabel(_ id: String, in report: TaskTokenWasteReport) -> String {
+        report.agents.first { $0.id == id }?.label ?? id
+    }
+
+    @ViewBuilder
+    private func wasters(_ report: TaskTokenWasteReport) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader(
+                "Largest items",
+                "Ranked by the tokens each item added. ×N is how many requests carried it; show one to read its full text."
+            )
+            let largest = report.wasters.first?.tokens ?? 0
+            ForEach(Array(report.wasters.enumerated()), id: \.element.id) { index, item in
+                HStack(alignment: .center, spacing: 8) {
+                    TokenShareBar(tokens: item.tokens, maxTokens: largest)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(item.label)
+                                .font(.system(size: 11, weight: .medium))
+                                .lineLimit(1)
+                                .accessibilityIdentifier("token-stats-waster-\(index)-label")
+                            Text(contextKindName(item.kind))
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                            if !item.inFinalTranscript {
+                                Text("removed by compaction")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.orange)
+                                    .accessibilityIdentifier("token-stats-waster-\(index)-removed")
+                            }
+                        }
+                        detail(item.preview)
+                    }
+                    Spacer(minLength: 8)
+                    detail("×\(item.requests)", id: "token-stats-waster-\(index)-requests")
+                    tokens(item.tokens, id: "token-stats-waster-\(index)-tokens")
+                    Button("Show") {
+                        rawInputFocus = RawInputFocus(agent: item.agent, item: item.item, inFinalTranscript: item.inFinalTranscript)
+                    }
+                    .buttonHoverPointer()
+                    .nativeHelp("Show the full text the model received")
+                    .controlSize(.small)
+                    .accessibilityIdentifier("token-stats-waster-\(index)-show")
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("token-stats-waster-\(index)")
+            }
+        }
+        if !report.duplicates.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                sectionHeader("Repeated results", "Tool results whose text was sent more than once in the same agent.")
+                ForEach(Array(report.duplicates.enumerated()), id: \.element.id) { index, duplicate in
+                    HStack(spacing: 8) {
+                        Text(duplicate.label)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                        detail("\(duplicate.copies) copies of \(duplicate.tokensPerCopy.formatted(Self.number))", id: "token-stats-duplicate-\(index)-copies")
+                        Spacer(minLength: 8)
+                        tokens(duplicate.wastedTokens, id: "token-stats-duplicate-\(index)-wasted")
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("token-stats-duplicate-\(index)")
+                }
+            }
+        }
+        if !report.cacheMisses.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                sectionHeader("Cache misses", "Requests that re-sent most of the previous request's context without the prompt cache, paying for it again.")
+                ForEach(Array(report.cacheMisses.enumerated()), id: \.element.id) { index, miss in
+                    HStack(spacing: 8) {
+                        Text("Request \(miss.request)")
+                            .font(.system(size: 11))
+                            .accessibilityIdentifier("token-stats-cache-miss-\(index)-request")
+                        detail("\(agentLabel(miss.agent, in: report)) · \(miss.contextTokens.formatted(Self.number)) in context")
+                        Spacer(minLength: 8)
+                        tokens(miss.rewrittenTokens, id: "token-stats-cache-miss-\(index)-rewritten")
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("token-stats-cache-miss-\(index)")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func measuredTools(_ report: TaskTokenWasteReport) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("Tools", "Tokens each tool's calls and results added to the context, across every agent.")
+            let largest = report.tools.first?.totalTokens ?? 0
+            ForEach(report.tools) { tool in
+                HStack(spacing: 8) {
+                    TokenShareBar(tokens: tool.totalTokens, maxTokens: largest)
+                    Text(tool.id)
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    detail("\(tool.calls) \(tool.calls == 1 ? "call" : "calls") · largest \(tool.largestResultTokens.formatted(Self.number)) · average \(tool.averageResultTokens.formatted(Self.number))",
+                           id: "token-stats-measured-tool-\(tool.id)-calls")
+                    tokens(tool.totalTokens, id: "token-stats-measured-tool-\(tool.id)-total")
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("token-stats-measured-tool-\(tool.id)")
+            }
+        }
+        if !report.servers.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                sectionHeader("MCP servers", "What each server's calls added, and what its tool definitions cost on every request.")
+                ForEach(report.servers) { server in
+                    HStack(spacing: 8) {
+                        Text(server.id)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        detail("\(server.tools) tools · \(server.calls) calls · definitions \(server.definitionTokens.formatted(Self.number))",
+                               id: "token-stats-server-\(server.id)-detail")
+                        tokens(server.totalTokens, id: "token-stats-server-\(server.id)-total")
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("token-stats-server-\(server.id)")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func overhead(_ report: TaskTokenWasteReport) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("Sent with every request", "The system prompt and tool definitions each main agent carries, whatever the conversation does.")
+            let largest = report.overhead.first?.tokens ?? 0
+            ForEach(Array(report.overhead.enumerated()), id: \.element.id) { index, entry in
+                HStack(spacing: 8) {
+                    TokenShareBar(tokens: entry.tokens, maxTokens: largest)
+                    Text(entry.label)
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                        .accessibilityIdentifier("token-stats-overhead-\(index)-label")
+                    Spacer(minLength: 8)
+                    detail(entry.everyRequest ? "× every request" : "×\(entry.requests)", id: "token-stats-overhead-\(index)-requests")
+                    tokens(entry.tokens, id: "token-stats-overhead-\(index)-tokens")
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("token-stats-overhead-\(index)")
+            }
+        }
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("Agents", "Each agent's own requests, everything they sent, and the size of its final transcript.")
+            ForEach(report.agents) { agent in
+                HStack(spacing: 8) {
+                    Text(agent.label)
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    detail("\(agent.requests) requests · final \(agent.finalTranscriptTokens.formatted(Self.number))\(agent.compactions > 0 ? " · \(agent.compactions) compacted" : "")",
+                           id: "token-stats-agent-\(agent.id)-detail")
+                    tokens(agent.sentTokens, id: "token-stats-agent-\(agent.id)-sent")
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("token-stats-agent-\(agent.id)")
+            }
         }
     }
 
     private func totals(_ summary: TaskTokenUsageSummary) -> some View {
         VStack(alignment: .leading, spacing: 8) {
+            callTotals(summary.callUsage)
             Text(summary.totalTokens.formatted(Self.number))
                 .font(.system(size: 30, weight: .semibold, design: .rounded))
                 .accessibilityIdentifier("token-stats-total")
@@ -1787,6 +2137,49 @@ private struct TokenStatsSheet: View {
                 bucket("Cache read", summary.usage.cacheReadTokens)
                 bucket("Cache write", summary.usage.cacheCreationTokens)
             }
+        }
+    }
+
+    /// The two numbers a task is judged by: how large its transcript grew, and
+    /// how much it re-sent over all of its model calls, subagents included.
+    @ViewBuilder
+    private func callTotals(_ usage: TaskTokenUsageSummary.CallUsage) -> some View {
+        if usage.available {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 28) {
+                    headline("Final transcript size", usage.finalTranscriptTokens, id: "token-stats-final-transcript")
+                    headline("Total sent (incl. subagents)", usage.totalSentTokens, id: "token-stats-total-sent")
+                }
+                let subagents = usage.subagents
+                Text("\(usage.totalCalls) model \(usage.totalCalls == 1 ? "call" : "calls") · \(usage.mainAgent.calls) main, \(subagents.calls) across \(subagents.count) \(subagents.count == 1 ? "subagent" : "subagents")")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("token-stats-total-calls")
+                Text("Output \(usage.totalOutputTokens.formatted(Self.number))")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("token-stats-output")
+                Divider()
+                Text("Main agent turns")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+        } else {
+            Text("Call-level stats are not recorded for this task yet.")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .accessibilityIdentifier("token-stats-calls-unavailable")
+        }
+    }
+
+    private func headline(_ name: String, _ value: Int, id: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(name)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+            Text(value.formatted(Self.number))
+                .font(.system(size: 22, weight: .semibold, design: .rounded))
+                .accessibilityIdentifier(id)
         }
     }
 
@@ -1860,6 +2253,419 @@ private struct TokenStatsSheet: View {
                 .accessibilityIdentifier("token-stats-turn-\(turn.id)")
             }
         }
+    }
+}
+
+/// The input a task's model requests were sent, one row per item and each item
+/// once: the final transcript, or everything ever sent including what a
+/// compaction removed. Rows load a page at a time as the list scrolls.
+private struct RawInputSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let taskID: UUID
+    let taskTitle: String
+    let modelContext: ModelContext
+    let focus: RawInputFocus
+    @State private var agent: String?
+    @State private var scope: TaskRawInputScope
+    @State private var order = TaskRawInputOrder.transcript
+    @State private var query = ""
+    @State private var submittedQuery = ""
+    @State private var page: TaskRawInputPage?
+    @State private var rows: [TaskRawInputPage.Row] = []
+    @State private var isLoading = false
+    @State private var selected: Int?
+    @State private var scrollTarget: Int?
+
+    private static let pageSize = 100
+    private static let number = IntegerFormatStyle<Int>().grouping(.automatic)
+
+    /// Wide enough for the list beside the text, but never wider or taller than the screen.
+    private static var size: CGSize {
+        let visible = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1200, height: 800)
+        return CGSize(width: min(1120, max(800, visible.width - 60)), height: min(720, max(480, visible.height - 80)))
+    }
+
+    init(taskID: UUID, taskTitle: String, modelContext: ModelContext, focus: RawInputFocus) {
+        self.taskID = taskID
+        self.taskTitle = taskTitle
+        self.modelContext = modelContext
+        self.focus = focus
+        _agent = State(initialValue: focus.agent)
+        _scope = State(initialValue: focus.inFinalTranscript ? .finalTranscript : .everything)
+        _selected = State(initialValue: focus.item)
+    }
+
+    private var hasMore: Bool { rows.count < (page?.total ?? 0) }
+    private var reloadKey: String { "\(agent ?? "")|\(scope.rawValue)|\(order.rawValue)|\(submittedQuery)" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Raw input")
+                        .font(.system(size: 19, weight: .semibold, design: .rounded))
+                    Text(taskTitle)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                if let page {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text("\(page.total) \(page.total == 1 ? "item" : "items") · \(page.totalTokens.formatted(Self.number)) tokens")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("raw-input-summary")
+                        Text("\(rows.count) of \(page.total) loaded")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .accessibilityIdentifier("raw-input-loaded-rows")
+                    }
+                }
+            }
+            controls
+            HStack(alignment: .top, spacing: 0) {
+                list
+                    .frame(width: min(460, Self.size.width * 0.42))
+                Divider()
+                Group {
+                    if let selected {
+                        RawInputTextPane(taskID: taskID, modelContext: modelContext, agent: page?.agent ?? agent, item: selected)
+                            .id("\(page?.agent ?? agent ?? "")#\(selected)")
+                    } else {
+                        Text("Select an item to read the full text the model received.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .accessibilityIdentifier("raw-input-no-selection")
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .frame(maxHeight: .infinity)
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .buttonHoverPointer()
+                    .nativeHelp("Done")
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("close-raw-input-button")
+            }
+        }
+        .padding(20)
+        .frame(width: Self.size.width, height: Self.size.height)
+        .task(id: reloadKey) { await reload() }
+        // Item IDs belong to one agent's log; another agent's item with the same ID is unrelated.
+        .onChange(of: agent) { selected = nil }
+    }
+
+    private var controls: some View {
+        HStack(spacing: 10) {
+            if let page, page.agents.count > 1 {
+                Picker("Agent", selection: Binding(get: { agent ?? page.agent ?? "" }, set: { agent = $0 })) {
+                    ForEach(page.agents) { Text($0.label).tag($0.id) }
+                }
+                .frame(width: 240)
+                .accessibilityIdentifier("raw-input-agent-picker")
+            }
+            ChoiceBar(
+                choices: [
+                    (TaskRawInputScope.finalTranscript, "Final transcript", "raw-input-scope-final"),
+                    (TaskRawInputScope.everything, "Everything sent", "raw-input-scope-all"),
+                ],
+                selection: $scope
+            )
+            Picker("Order", selection: $order) {
+                Text("Transcript order").tag(TaskRawInputOrder.transcript)
+                Text("Largest first").tag(TaskRawInputOrder.size)
+                Text("Most tokens carried").tag(TaskRawInputOrder.rent)
+            }
+            .frame(width: 220)
+            .accessibilityIdentifier("raw-input-order-picker")
+            TextField("Search the full text", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { submittedQuery = query }
+                .accessibilityIdentifier("raw-input-search-field")
+        }
+    }
+
+    private var list: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(rows) { row in
+                        RawInputRowView(row: row, maxTokens: page?.maxTokens ?? 0, isSelected: row.id == selected)
+                            .id(row.id)
+                            .contentShape(Rectangle())
+                            .onTapGesture { selected = row.id }
+                            .onAppear {
+                                if row.id == rows.last?.id { Task { await loadMore() } }
+                            }
+                    }
+                    if hasMore {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(maxWidth: .infinity)
+                            .padding(8)
+                            .accessibilityIdentifier("raw-input-loading-more")
+                    } else if page != nil, rows.isEmpty {
+                        Text(submittedQuery.isEmpty ? "Nothing was sent yet." : "No item contains “\(submittedQuery)”.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .padding(12)
+                            .accessibilityIdentifier("raw-input-empty")
+                    }
+                }
+                .padding(.trailing, 8)
+            }
+            .accessibilityIdentifier("raw-input-list")
+            .onChange(of: scrollTarget) { _, target in
+                guard let target else { return }
+                proxy.scrollTo(target, anchor: .center)
+                scrollTarget = nil
+            }
+        }
+    }
+
+    private func fetch(offset: Int, focusing item: Int?) async -> TaskRawInputPage? {
+        try? await BoardTaskManager(modelContext: modelContext).rawInputPage(
+            taskID, homes: .forThisApp, agent: agent, scope: scope, order: order, query: submittedQuery,
+            offset: offset, limit: Self.pageSize, focus: item
+        )
+    }
+
+    /// Loads the first page, then on up to the selected item so the list can scroll to it.
+    private func reload() async {
+        isLoading = true
+        defer { isLoading = false }
+        guard let first = await fetch(offset: 0, focusing: selected) else { return }
+        page = first
+        rows = first.rows
+        if let position = first.focusPosition {
+            while rows.count <= position, let next = await fetch(offset: rows.count, focusing: nil), !next.rows.isEmpty {
+                rows += next.rows
+            }
+            scrollTarget = selected
+        }
+    }
+
+    private func loadMore() async {
+        guard hasMore, !isLoading else { return }
+        isLoading = true
+        defer { isLoading = false }
+        guard let next = await fetch(offset: rows.count, focusing: nil) else { return }
+        page = next
+        rows += next.rows
+    }
+}
+
+private struct RawInputRowView: View {
+    let row: TaskRawInputPage.Row
+    let maxTokens: Int
+    let isSelected: Bool
+
+    private static let number = IntegerFormatStyle<Int>().grouping(.automatic)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(contextKindName(row.kind))
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.primary.opacity(0.07)))
+                Text(row.label)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                    .accessibilityIdentifier("raw-input-row-\(row.id)-label")
+                if !row.inFinalTranscript {
+                    Text("removed")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                }
+                Spacer(minLength: 6)
+                Text("×\(row.requests)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                Text(row.tokens.formatted(Self.number))
+                    .font(.system(size: 11, weight: .medium))
+                    .monospacedDigit()
+                    .accessibilityIdentifier("raw-input-row-\(row.id)-tokens")
+            }
+            HStack(spacing: 6) {
+                TokenShareBar(tokens: row.tokens, maxTokens: maxTokens)
+                Text(row.preview)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? Color.accentColor.opacity(0.18) : Color.clear))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("raw-input-row-\(row.id)")
+    }
+}
+
+/// One item's full text, line-numbered, read from the session file a chunk at
+/// a time as it scrolls; a chunk always ends on a line break.
+private struct RawInputTextPane: View {
+    private struct Line: Identifiable {
+        let id: Int
+        let number: Int?
+        let text: String
+    }
+
+    let taskID: UUID
+    let modelContext: ModelContext
+    let agent: String?
+    let item: Int
+    @State private var header: TaskRawInputText?
+    @State private var lines: [Line] = []
+    @State private var nextOffset: Int? = 0
+    @State private var nextNumber = 1
+    /// A chunk with no line break in its second half ends mid-line; the next one continues that line.
+    @State private var continuesLine = false
+    @State private var loadedLength = 0
+    @State private var isLoading = false
+    @State private var failure: String?
+
+    private static let number = IntegerFormatStyle<Int>().grouping(.automatic)
+    /// A very long line (minified JSON, a base64 blob) wraps across rows of this many characters.
+    private static let segmentLength = 2_000
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let header {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(header.label)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                        .accessibilityIdentifier("raw-input-text-label")
+                    Text(contextKindName(header.kind))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                    Button("Copy all", systemImage: "doc.on.doc") { Task { await copyAll() } }
+                        .buttonHoverPointer()
+                        .nativeHelp("Copy this item's full text")
+                        .controlSize(.small)
+                        .accessibilityIdentifier("raw-input-copy-button")
+                    Button("Open in editor", systemImage: "square.and.pencil") { Task { await openInEditor() } }
+                        .buttonHoverPointer()
+                        .nativeHelp("Write this item's full text to a file and open it")
+                        .controlSize(.small)
+                        .accessibilityIdentifier("raw-input-open-editor-button")
+                }
+                Text("\(header.tokens.formatted(Self.number)) tokens · carried in \(header.requests) \(header.requests == 1 ? "request" : "requests") · \(header.totalLength.formatted(Self.number)) characters")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("raw-input-text-size")
+                Text("\(loadedLength.formatted(Self.number)) of \(header.totalLength.formatted(Self.number)) characters loaded")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityIdentifier("raw-input-text-loaded")
+                if let call = header.call {
+                    Text("Called as \(call)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("raw-input-text-call")
+                }
+                Divider()
+            } else if let failure {
+                Text(failure)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("raw-input-text-failure")
+            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(lines) { line in
+                        HStack(alignment: .top, spacing: 10) {
+                            Text(line.number.map(String.init) ?? "")
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 52, alignment: .trailing)
+                            Text(line.text.isEmpty ? " " : line.text)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .font(.system(size: 11, design: .monospaced))
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier(line.number.map { "raw-input-text-line-\($0)" } ?? "")
+                        .onAppear {
+                            if line.id == lines.last?.id { Task { await loadNextChunk() } }
+                        }
+                    }
+                }
+                .padding(.trailing, 8)
+            }
+            .accessibilityIdentifier("raw-input-text")
+        }
+        .padding(.leading, 12)
+        .task { await loadNextChunk() }
+    }
+
+    private func loadNextChunk() async {
+        guard let offset = nextOffset, !isLoading else { return }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let chunk = try await BoardTaskManager(modelContext: modelContext).rawInputText(
+                taskID, homes: .forThisApp, agent: agent, item: item, offset: offset, length: ProviderTokenMap.defaultTextChunk
+            )
+            header = chunk
+            append(chunk.text, isLast: chunk.nextOffset == nil)
+            nextOffset = chunk.nextOffset
+            loadedLength = chunk.nextOffset ?? chunk.totalLength
+        } catch {
+            failure = error.localizedDescription
+            nextOffset = nil
+        }
+    }
+
+    private func append(_ text: String, isLast: Bool) {
+        var parts = text.components(separatedBy: "\n")
+        let endsOnLineBreak = parts.last == ""
+        // A chunk that ends on a line break leaves one empty part after it.
+        if !isLast, endsOnLineBreak { parts.removeLast() }
+        var added: [Line] = []
+        for (index, part) in parts.enumerated() {
+            var rest = Substring(part)
+            let continuing = index == 0 && continuesLine
+            var number: Int? = continuing ? nil : nextNumber
+            repeat {
+                added.append(Line(id: lines.count + added.count, number: number, text: String(rest.prefix(Self.segmentLength))))
+                rest = rest.dropFirst(Self.segmentLength)
+                number = nil
+            } while !rest.isEmpty
+            if !continuing { nextNumber += 1 }
+        }
+        continuesLine = !isLast && !endsOnLineBreak
+        lines += added
+    }
+
+    private func fullText() async -> String? {
+        try? await BoardTaskManager(modelContext: modelContext).rawInputText(
+            taskID, homes: .forThisApp, agent: agent, item: item, offset: 0, length: Int.max
+        ).text
+    }
+
+    private func copyAll() async {
+        guard let text = await fullText() else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private func openInEditor() async {
+        guard let text = await fullText() else { return }
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("playhouse-raw-input-\(item).txt")
+        guard (try? text.write(to: file, atomically: true, encoding: .utf8)) != nil else { return }
+        NSWorkspace.shared.open(file)
     }
 }
 

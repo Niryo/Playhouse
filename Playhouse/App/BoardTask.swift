@@ -37,7 +37,7 @@ enum TokenUsageHeatmap {
     /// (`WorkspaceSupport.swift`) because `scripts/seed-task-pr-link.swift`
     /// compiles `BoardTask.swift` standalone as a small seeding utility and must
     /// not gain a dependency on the rest of the app module.
-    static let defaultColorMax = 1_000_000
+    static let defaultColorMax = 20_000_000
 
     /// Hue in SwiftUI's 0...1 space: 0.33 is green, 0.0 is red. Orange falls out
     /// of the interpolation between them, so the scale reads as one ramp.
@@ -56,6 +56,21 @@ enum TokenUsageHeatmap {
             saturation: 0.45 + 0.45 * fraction,
             brightness: 0.80
         )
+    }
+
+    /// The counter's compact form: `842`, `12.4K`, `273K`, `1.2M`.
+    static func compact(_ tokens: Int) -> String {
+        switch tokens {
+        case ..<1_000: return "\(Swift.max(0, tokens))"
+        case ..<100_000: return trimmed(Double(tokens) / 1_000) + "K"
+        case ..<999_500: return "\(Int((Double(tokens) / 1_000).rounded()))K"
+        default: return trimmed(Double(tokens) / 1_000_000) + "M"
+        }
+    }
+
+    private static func trimmed(_ value: Double) -> String {
+        let text = String(format: "%.1f", value)
+        return text.hasSuffix(".0") ? String(text.dropLast(2)) : text
     }
 
     static func label(totalTokens: Int) -> String {
@@ -174,6 +189,7 @@ final class BoardTask {
     var totalOutputTokens: Int = 0
     var totalCacheReadTokens: Int = 0
     var totalCacheCreationTokens: Int = 0
+    var callUsageSnapshotsData: Data?
     /// When true, moving this task to Review automatically creates its pull request(s)
     /// instead of waiting for the user to click the manual "PR" control.
     var autoCreatePullRequestOnReview: Bool = false

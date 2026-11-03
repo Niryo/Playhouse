@@ -14,6 +14,7 @@ final class DaemonClient: @unchecked Sendable {
         var codexExecutable: String?
         var claudeExecutable: String?
         var codexHome: String?
+        var claudeConfigDirectory: String?
         var serviceName: String
         var socketPath: String
 
@@ -27,6 +28,7 @@ final class DaemonClient: @unchecked Sendable {
                 codexExecutable: environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"],
                 claudeExecutable: environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"],
                 codexHome: environment["CODEX_HOME"],
+                claudeConfigDirectory: environment["PLAYHOUSE_E2E_CLAUDE_CONFIG_DIR"],
                 serviceName: serviceName,
                 socketPath: environment["PLAYHOUSE_BRIDGE_SOCKET_PATH"] ?? BridgeContract.socketURL(forServiceName: serviceName).path
             )
@@ -86,6 +88,7 @@ final class DaemonClient: @unchecked Sendable {
         if let codex = configuration.codexExecutable { request.arguments["__codexExecutable"] = .string(codex) }
         if let claude = configuration.claudeExecutable { request.arguments["__claudeExecutable"] = .string(claude) }
         if let codexHome = configuration.codexHome { request.arguments["__codexHome"] = .string(codexHome) }
+        if let claudeConfig = configuration.claudeConfigDirectory { request.arguments["__claudeConfigDirectory"] = .string(claudeConfig) }
         request.dataDirectory = configuration.dataDirectory
         request.defaultsSuite = configuration.defaultsSuite
         request.worktreeDirectory = configuration.worktreeDirectory

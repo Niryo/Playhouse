@@ -104,6 +104,9 @@ final class ClaudeSessionRunner {
     private var pendingControlRequests: [String: CheckedContinuation<[String: Any], Error>] = [:]
     private var activeMode: ConversationMode = .code
     private var pendingCommandUUIDs = Set<String>()
+    /// What each model call (by message ID) has reported so far, so the live
+    /// counter adds a call once and only its later growth after that.
+    private var liveCallUsage: [String: (sent: Int, output: Int)] = [:]
     private var sawCommandLifecycle = false
     private var sessionWasMissing = false
     private var turnCompletion = TurnCompletion()
@@ -686,6 +689,8 @@ final class ClaudeSessionRunner {
         }
     }
 
+    func debugImportReplay(_ message: [String: Any]) async { await handle(message) } // DEBUG-IMPORT: replays a recorded session line through the live handler.
+
     private func handle(_ message: [String: Any]) async {
         switch message["type"] as? String {
         case "control_response":
@@ -802,10 +807,35 @@ final class ClaudeSessionRunner {
         owner?.runnerStateChanged(self)
     }
 
+    /// Reports one model call as soon as the stream shows it. Claude Code
+    /// writes an `assistant` message per content block of a call, all sharing
+    /// the call's message ID, so the first sight counts the call and later
+    /// ones only add what its usage has since grown by.
+    private func reportLiveCall(_ body: [String: Any], agentID: String?) {
+        guard let id = body["id"] as? String, let payload = body["usage"] as? [String: Any] else { return }
+        let usage = ConversationTokenUsage(providerPayload: payload)
+        let sent = usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens
+        guard sent + usage.outputTokens > 0 else { return }
+        let previous = liveCallUsage[id]
+        guard previous?.sent != sent || previous?.output != usage.outputTokens else { return }
+        liveCallUsage[id] = (sent, usage.outputTokens)
+        tokenUsageHandler?(ConversationTurnUsageReport(
+            turnID: nil, usage: ConversationTokenUsage(), toolLabels: [],
+            liveCall: ConversationLiveCall(
+                agentID: agentID,
+                calls: previous == nil ? 1 : 0,
+                sentTokens: sent - (previous?.sent ?? 0),
+                outputTokens: usage.outputTokens - (previous?.output ?? 0),
+                contextTokens: sent
+            )
+        ))
+    }
+
     private func handleAssistant(_ message: [String: Any]) {
         guard let body = message["message"] as? [String: Any],
               let content = body["content"] as? [[String: Any]] else { return }
         let parentToolID = message["parent_tool_use_id"] as? String
+        reportLiveCall(body, agentID: parentToolID)
         let messageID = body["id"] as? String ?? UUID().uuidString
         if parentToolID == nil { noteParentResponseStarted() }
         for (index, block) in content.enumerated() {
@@ -1242,13 +1272,22 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     /// each one its own client (and thus its own child process with correctly
     /// scoped environment forwarding) instead of silently sharing one across
     /// directories that happen to share a process.
-    static func sharedPrimaryClient(executableOverride: String?, dataDirectory: String? = nil) -> ClaudeCodeClient {
+    /// Where Claude Code keeps its sessions: the override Playhouse launches it
+    /// with, else the user's own configuration directory.
+    var configDirectory: String {
+        configDirectoryOverride
+            ?? PlayhouseProcessEnvironment.current["CLAUDE_CONFIG_DIR"]
+            ?? NSHomeDirectory() + "/.claude"
+    }
+
+    static func sharedPrimaryClient(executableOverride: String?, configDirectoryOverride: String? = nil, dataDirectory: String? = nil) -> ClaudeCodeClient {
         let key = [
             executableOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "__default__",
             dataDirectory.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "",
+            configDirectoryOverride ?? "",
         ].joined(separator: "\u{1}")
         if let client = sharedPrimaryClients[key] { return client }
-        let client = ClaudeCodeClient(executableOverride: executableOverride, dataDirectory: dataDirectory)
+        let client = ClaudeCodeClient(executableOverride: executableOverride, configDirectoryOverride: configDirectoryOverride, dataDirectory: dataDirectory)
         sharedPrimaryClients[key] = client
         return client
     }
@@ -1722,5 +1761,71 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         let home = NSHomeDirectory()
         paths.append(contentsOf: ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])
         return Array(NSOrderedSet(array: paths)).compactMap { $0 as? String }.joined(separator: ":")
+    }
+}
+
+/// Reads a Claude Code session's per-call usage back from its own files.
+///
+/// The stream's `result` message sums a turn for the main agent only; the
+/// session files hold every model call, the main agent's in
+/// `<session>.jsonl` and each subagent's in `<session>/subagents/agent-*.jsonl`.
+/// A call is written once per content block, all lines sharing the call's
+/// message ID, so a call is counted by ID and the last line's usage wins.
+enum ClaudeSessionUsageReader {
+    static func read(sessionID: String, configDirectory: String) -> ConversationCallUsageSnapshot? {
+        guard let mainURL = sessionFile(sessionID: sessionID, configDirectory: configDirectory) else { return nil }
+        var snapshot = ConversationCallUsageSnapshot(provider: ConversationProvider.claude.rawValue, updatedAt: .now)
+        // Subagent lines belong to their own files, never to the main agent.
+        snapshot.main = usage(in: mainURL) { $0["isSidechain"] as? Bool != true }
+        for subagent in subagentFiles(mainFile: mainURL) {
+            let result = usage(in: subagent.file) { _ in true }
+            if !result.isEmpty { snapshot.subagents[subagent.agentID] = result }
+        }
+        return snapshot.totalCalls > 0 ? snapshot : nil
+    }
+
+    /// Each subagent's own file, `<session>/subagents/agent-<id>.jsonl`, by agent ID.
+    static func subagentFiles(mainFile: URL) -> [(agentID: String, file: URL)] {
+        let subagentDirectory = mainFile.deletingPathExtension().appendingPathComponent("subagents", isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(at: subagentDirectory, includingPropertiesForKeys: nil)) ?? []
+        return files
+            .filter { $0.pathExtension == "jsonl" && $0.lastPathComponent.hasPrefix("agent-") }
+            .map { (String($0.deletingPathExtension().lastPathComponent.dropFirst("agent-".count)), $0) }
+            .sorted { $0.agentID < $1.agentID }
+    }
+
+    static func sessionFile(sessionID: String, configDirectory: String) -> URL? {
+        let projects = URL(fileURLWithPath: configDirectory, isDirectory: true).appendingPathComponent("projects", isDirectory: true)
+        let directories = (try? FileManager.default.contentsOfDirectory(at: projects, includingPropertiesForKeys: nil)) ?? []
+        return directories
+            .map { $0.appendingPathComponent("\(sessionID).jsonl") }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// Sums the distinct calls in one file; `include` can drop lines that belong to another agent.
+    private static func usage(in file: URL, include: ([String: Any]) -> Bool) -> ConversationCallUsage {
+        guard let data = try? Data(contentsOf: file, options: .mappedIfSafe) else { return ConversationCallUsage() }
+        var order: [String] = []
+        var calls: [String: (sent: Int, output: Int)] = [:]
+        for line in data.split(separator: UInt8(ascii: "\n")) {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  object["type"] as? String == "assistant",
+                  include(object),
+                  let message = object["message"] as? [String: Any],
+                  let id = message["id"] as? String,
+                  let payload = message["usage"] as? [String: Any] else { continue }
+            let tokens = ConversationTokenUsage(providerPayload: payload)
+            let sent = tokens.inputTokens + tokens.cacheReadTokens + tokens.cacheCreationTokens
+            // Synthetic entries (local command output, interruptions) carry zeros.
+            guard sent + tokens.outputTokens > 0 else { continue }
+            if calls[id] == nil { order.append(id) }
+            calls[id] = (sent, tokens.outputTokens)
+        }
+        var result = ConversationCallUsage()
+        for id in order {
+            guard let call = calls[id] else { continue }
+            result.addCall(sentTokens: call.sent, outputTokens: call.output)
+        }
+        return result
     }
 }

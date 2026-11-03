@@ -262,6 +262,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = self.defaults_suite
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = arguments.service_name
         environment["CODEX_HOME"] = str(self.data_directory / "codex-home")
+        # The CLI forwards CLAUDE_CONFIG_DIR; a test sets its own rather than inherit the host's.
+        environment.pop("CLAUDE_CONFIG_DIR", None)
         environment.update(extra_environment or {})
         completed = subprocess.run(
             [str(self.cli), *map(str, command)],
@@ -292,6 +294,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = self.defaults_suite
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = arguments.service_name
         environment["CODEX_HOME"] = str(self.data_directory / "codex-home")
+        # The CLI forwards CLAUDE_CONFIG_DIR; a test sets its own rather than inherit the host's.
+        environment.pop("CLAUDE_CONFIG_DIR", None)
         environment.update(extra_environment or {})
         return subprocess.Popen(
             [str(self.cli), *map(str, command)],
@@ -2609,7 +2613,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own row above the card title and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task(
             "PR failure", [self.primary], merge_targets={self.primary: "main"}
@@ -2739,6 +2743,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
                         self.addCleanup(remove_fixture_origin, self.primary, remote)
                         self.run_git(Path(record["worktreePath"]), "remote", "add", "origin", str(remote))
                         self.run_git(Path(record["worktreePath"]), "push", "origin", "main")
+                        # GitHub rejects a pull request whose branch has no commits.
+                        (Path(record["worktreePath"]) / "task-change.txt").write_text("Auto PR task change.\n", encoding="utf-8")
                         remote_added = True
                         response, _ = self.call_cli("task", "outcome", task["id"], "completed", extra_environment=gh_environment)
                         self.assertEqual(self.assert_success(response)["outcome"], "completed")
@@ -2798,6 +2804,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.addCleanup(remove_fixture_origin, self.secondary, manual_remote)
         self.run_git(manual_worktree_path, "remote", "add", "origin", str(manual_remote))
         self.run_git(manual_worktree_path, "push", "origin", "main")
+        (manual_worktree_path / "task-change.txt").write_text("Manual PR task change.\n", encoding="utf-8")
         manual_create_environment = {
             "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture-manual-pr"),
             **gh_environment,
@@ -3160,6 +3167,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.addCleanup(remove_fixture_origin, source_repository, remote)
             self.run_git(Path(record["worktreePath"]), "remote", "add", "origin", str(remote))
             self.run_git(Path(record["worktreePath"]), "push", "origin", "main")
+            (Path(record["worktreePath"]) / "task-change.txt").write_text(f"Repository {index} task change.\n", encoding="utf-8")
 
         gh_directory = self.data_directory / "creation-gh-fixture"
         gh_directory.mkdir()
@@ -3204,6 +3212,72 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         fresh = self.assert_success(self.call_cli("task", "get", creating["id"])[0])
         self.assertEqual([record["pullRequestNumber"] for record in fresh["repositoryWorktrees"]], [501, 502])
+
+    # case-contract: test_task_pr_create_skips_unchanged_repositories | PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error. A task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert.
+    def test_task_pr_create_skips_unchanged_repositories(self):
+        def remove_fixture_origin(repository, expected_url):
+            current = subprocess.run(
+                ["git", "-C", str(repository), "remote", "get-url", "origin"],
+                check=False, capture_output=True, text=True,
+            )
+            if current.returncode == 0 and current.stdout.strip() == str(expected_url):
+                self.run_git(repository, "remote", "remove", "origin")
+
+        task = self.create_repo_task(
+            "Skip unchanged repositories", [self.primary, self.secondary],
+            merge_targets={self.primary: "main", self.secondary: "main"}, materialize=True,
+        )
+        self.clear_task_provider_session(task["id"])
+        remote_root = self.data_directory / "skip-unchanged-remotes"
+        self.assertFalse(remote_root.exists(), "Each case must start with an isolated remote fixture directory.")
+        remote_root.mkdir()
+        (remote_root / ".playhouse-test-owner").write_text("Playhouse bridge test owns these PR remotes.\n", encoding="utf-8")
+        for index, record in enumerate(task["repositoryWorktrees"]):
+            remote = remote_root / f"repository-{index}.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+            self.addCleanup(remove_fixture_origin, Path(record["repositoryPath"]), remote)
+            self.run_git(Path(record["worktreePath"]), "remote", "add", "origin", str(remote))
+            self.run_git(Path(record["worktreePath"]), "push", "origin", "main")
+        primary_worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        (primary_worktree / "task-change.txt").write_text("Only the primary repository changed.\n", encoding="utf-8")
+
+        gh_directory = self.data_directory / "skip-unchanged-gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_state = gh_directory / "state"
+        gh_state.write_text("", encoding="utf-8")
+        create_log = gh_directory / "create-calls"
+        gh_environment = {
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "PLAYHOUSE_E2E_GH_STATE_PATH": str(gh_state),
+            "PLAYHOUSE_E2E_GH_CALL_LOG": str(gh_directory / "view-calls"),
+            "PLAYHOUSE_E2E_GH_CREATE_LOG": str(create_log),
+            "PLAYHOUSE_E2E_GH_CREATE_FIRST_NUMBER": "501",
+        }
+        created = self.assert_success(self.call_cli("task", "pr", "create", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(created["repositoryWorktrees"][0]["pullRequestNumber"], 501)
+        self.assertIsNone(created["repositoryWorktrees"][1].get("pullRequestNumber"), "An unchanged repository must not get a pull request.")
+        create_targets = [line.split("\t", 2)[1] for line in create_log.read_text(encoding="utf-8").splitlines() if line.startswith("create\t")]
+        self.assertEqual(create_targets, [str(primary_worktree.resolve())], "gh create must run only for the changed repository.")
+        fresh = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(fresh["repositoryWorktrees"][0]["pullRequestNumber"], 501)
+        self.assertIsNone(fresh["repositoryWorktrees"][1].get("pullRequestNumber"))
+
+        # The secondary source repository keeps the origin its first task worktree added.
+        unchanged = self.create_repo_task(
+            "Nothing to propose", [self.secondary], merge_targets={self.secondary: "main"}, materialize=True,
+        )
+        self.clear_task_provider_session(unchanged["id"])
+        rejected, _ = self.call_cli("task", "pr", "create", unchanged["id"], expected_status=1, extra_environment=gh_environment)
+        self.assert_failure(rejected, "invalid_transition")
+        self.assertIn("No repository in this task has changes", rejected["error"]["message"])
+        self.assertEqual(
+            sum(line.startswith("create\t") for line in create_log.read_text(encoding="utf-8").splitlines()), 1,
+            "An all-unchanged task must not call gh create.",
+        )
+        self.assertIsNone(self.assert_success(self.call_cli("task", "get", unchanged["id"])[0])["repositoryWorktrees"][0].get("pullRequestNumber"))
 
     # case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
     def test_task_lifecycle_rollout_clears_records_and_clean_worktrees(self):
@@ -5173,7 +5247,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             any("<playhouse-handoff-context>" in message["text"] for message in final_history["messages"]),
             "Handoff context never appears in the visible transcript.",
         )
-    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details.
+    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload.
     def test_conversation_adds_ordered_text_annotations(self):
         task = self.create_repo_task("Conversation comments", [self.primary])
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -5189,7 +5263,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
                 "messageId": "assistant-message", "blockID": 0, "startOffset": 3, "endOffset": 15}},
             {"text": "second phrase with enough surrounding context to remain identifiable when the hint truncates a very long selected range",
              "comment": "Please clarify this response in detail, including how each part connects to the question. " * 8, "source": {
-                "messageId": "assistant-message", "blockID": 0, "startOffset": 22, "endOffset": 36}},
+                # A selection across paragraphs names the block it ends in.
+                "messageId": "assistant-message", "blockID": 0, "startOffset": 22, "endBlockID": 2, "endOffset": 36}},
         ]
         ordinary_text = "Keep the existing behavior too."
         prompt = (
@@ -5226,6 +5301,15 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Explain this",
             "Please clarify this response in detail, including how each part connects to the question. " * 8,
         ])
+        reloaded_comments = json.loads(
+            user_messages[-1]["text"].split("<response-comments>", 1)[1].split("</response-comments>", 1)[0]
+        )
+        self.assertNotIn("endBlockID", reloaded_comments[0]["source"], "A comment inside one block keeps the original source fields.")
+        self.assertEqual(
+            reloaded_comments[1]["source"],
+            {"messageId": "assistant-message", "blockID": 0, "startOffset": 22, "endBlockID": 2, "endOffset": 36},
+            "A comment across blocks keeps its start and end blocks after a fresh CLI/XPC history read.",
+        )
         self.assertIn(ordinary_text, user_messages[-1]["text"])
         current_goal, _ = self.call_cli("conversation", "goal", task["id"], "get", extra_environment=fixture_environment)
         self.assertIsNone(self.assert_success(current_goal), "A conversation comment payload must not become a Goal objective.")
@@ -5702,7 +5786,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(steer_params["input"], [{"type": "text", "text": steer_message}])
         self.assertTrue(steer_params["expectedTurnId"], "Steering must identify the matching active turn.")
 
-    # case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
+    # case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
     def test_conversation_steers_and_queues_active_turn(self):
         task = self.create_repo_task("Active turn message controls", [self.primary])
         task_id = task["id"]
@@ -5836,6 +5920,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         while time.monotonic() < deadline and not targeted_ready.exists():
             time.sleep(0.02)
         self.assertTrue(targeted_ready.exists(), "A missed queued-row steer should begin its own targeted turn.")
+        delivering_queue, _ = self.call_cli("conversation", "queue-list", task_id)
+        delivering_item = next(item for item in self.assert_success(delivering_queue) if item["id"] == targeted_record["id"])
+        self.assertEqual(delivering_item["state"], "dispatching", "A follow-up stays durably claimed while its own turn runs.")
         overlap_text = "Queue this steer behind the targeted turn."
         Path(str(executable) + ".reject-next-steer").write_text("no active turn to steer\n", encoding="utf-8")
         overlap_steer, _ = self.call_cli(
@@ -5885,6 +5972,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         overlapping_row_result = self.assert_success(overlapping_row_steer)
         self.assertTrue(overlapping_row_result["accepted"])
         self.assertTrue(overlapping_row_result["queued"], "A missed queued-row steer should stay queued while targeted dispatch is active.")
+        returned_queue, _ = self.call_cli("conversation", "queue-list", task_id)
+        returned_item = next(item for item in self.assert_success(returned_queue) if item["id"] == missed_row_record["id"])
+        self.assertEqual(returned_item["state"], "queued", "A missed queued-row steer from the CLI returns to the waiting queue before the targeted turn ends.")
         targeted_release.write_text("Release targeted row delivery.\n", encoding="utf-8")
         self.finish_cli(targeted_row_process, targeted_row_command)
         deadline = time.monotonic() + 15
@@ -7339,7 +7429,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         probe = self.data_directory / "codex-question-ownership-probe"
         core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
-                "ConversationModel", "ClaudeCodeClient", "ProcessCPUSampler", "ConversationTranscriptStore",
+                "ConversationModel", "ClaudeCodeClient", "ProviderRequestLog", "ProcessCPUSampler", "ConversationTranscriptStore",
                 "StandaloneChatStore", "BridgeCore"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine"):
@@ -8767,7 +8857,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(event.get("event") == "workspace.file.read.failed" and event.get("path") == "stale.txt" for event in diagnostics))
         self.assertNotIn("Shared working version.", json.dumps(diagnostics))
 
-    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory.
+    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes.
     def test_external_git_edits_and_commit_refresh_workspace_changes(self):
         repository = self.data_directory / "external-git"
         repository.mkdir()
@@ -8822,6 +8912,39 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(entries["tracked.txt"]["isUncommitted"])
         self.assertNotIn("base-only.txt", entries)
 
+        # Upstream moves ahead of a stale local base branch, and the task branch merges it.
+        origin = self.data_directory / "external-git-origin.git"
+        origin.mkdir()
+        self.run_git(origin, "init", "--bare", "--initial-branch=main")
+        self.run_git(repository, "remote", "add", "origin", str(origin))
+        self.run_git(repository, "push", "origin", "main")
+        (repository / "upstream-only.txt").write_text("Upstream commit.\n", encoding="utf-8")
+        self.run_git(repository, "add", "upstream-only.txt")
+        self.run_git(repository, "commit", "-m", "Upstream commit")
+        self.run_git(repository, "push", "origin", "main")
+        self.run_git(repository, "reset", "--hard", "HEAD~1")
+        self.run_git(worktree, "merge", "--no-edit", "origin/main")
+        (worktree / "post-merge.txt").write_text("Written after the merge.\n", encoding="utf-8")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        entries = {entry["path"]: entry for entry in self.assert_success(response)["unviewed"]}
+        self.assertEqual(set(entries), {"post-merge.txt", "tracked.txt", "untracked.txt"})
+        self.assertNotIn("upstream-only.txt", entries)
+        self.assertNotIn("base-only.txt", entries)
+        stale_base_diff = self.assert_success(self.changes_diff(task_id, "tracked.txt", "unviewed", repository=worktree))
+        self.assertEqual(stale_base_diff["original"], "Baseline.\n")
+
+        # A local base branch that is ahead of origin holds work the task was started from, so it stays the base.
+        self.run_git(repository, "merge", "--ff-only", "origin/main")
+        (repository / "local-ahead.txt").write_text("Local only.\n", encoding="utf-8")
+        self.run_git(repository, "add", "local-ahead.txt")
+        self.run_git(repository, "commit", "-m", "Unpushed local base commit")
+        self.run_git(worktree, "merge", "--no-edit", "main")
+        (worktree / "post-ahead.txt").write_text("Written after the local merge.\n", encoding="utf-8")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        entries = {entry["path"]: entry for entry in self.assert_success(response)["unviewed"]}
+        self.assertEqual(set(entries), {"post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"})
+        self.assertNotIn("local-ahead.txt", entries)
+
     def install_claude_fixture(self, name):
         """Installs the Claude Code protocol fixture and returns its turn environment."""
         source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
@@ -8833,19 +8956,30 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         return {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
 
-    # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. The task card shows a token usage dot whose tooltip reports the total, and the Token Stats context-menu item opens a modal showing the totals, the per-tool rollup and the per-turn breakdown.
+    # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and the Token Stats context-menu item opens a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
     def test_task_token_usage_records_claude_turn_breakdown(self):
         # Matches TURN_USAGE in scripts/fixtures/claude-code-fixture.py.
         expected_turn_usage = {
             "inputTokens": 1000, "outputTokens": 200, "cacheReadTokens": 300, "cacheCreationTokens": 100,
         }
         turn_total = sum(expected_turn_usage.values())
+        # Matches STORY_MAIN_CALLS / STORY_SUBAGENT_CALLS in the fixture: per turn, two main
+        # calls sending 550 and 650 (output 20 + 40) and two subagent calls sending 300 and
+        # 340 (output 10 + 15), with a repeated line and a zero-usage line to be ignored.
+        call_usage_per_turn = {
+            "totalCalls": 4, "totalSentTokens": 1840, "totalOutputTokens": 85, "finalTranscriptTokens": 650,
+        }
         environment = self.install_claude_fixture("claude-fixture-token-usage")
+        # The session files the fixture writes live under Claude Code's config directory.
+        session_files = self.data_directory / "claude-config"
+        file_environment = {**environment, "CLAUDE_CONFIG_DIR": str(session_files)}
         task_id = self.assert_success(self.call_cli(
             "task", "create", "--title", "Claude token usage", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )[0])["id"]
 
         empty = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        self.assertFalse(empty["callUsage"]["available"], "A task with no turns has no call-level usage yet.")
+        self.assertEqual(empty["callUsage"]["totalCalls"], 0)
         self.assertEqual(empty["totalTokens"], 0, "A task with no turns has recorded no tokens.")
         self.assertEqual(empty["turns"], [])
         self.assertEqual(empty["tools"], [])
@@ -8858,9 +8992,15 @@ class PlayhouseBridgeTests(unittest.TestCase):
         # flat per-result usage well past one turn's worth.
         self.assert_success(self.call_cli(
             "conversation", "send", task_id, "--message", "Tell me a story.",
-            extra_environment=environment,
+            extra_environment=file_environment,
         )[0])
         first = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        calls = first["callUsage"]
+        self.assertTrue(calls["available"])
+        for key, value in call_usage_per_turn.items():
+            self.assertEqual(calls[key], value, f"callUsage.{key} should count each call once, subagent included.")
+        self.assertEqual(calls["mainAgent"], {"calls": 2, "sentTokens": 1200, "outputTokens": 60, "finalTranscriptTokens": 650})
+        self.assertEqual(calls["subagents"], {"count": 1, "calls": 2, "sentTokens": 640, "outputTokens": 25})
         self.assertEqual(first["usage"], expected_turn_usage, "Claude's usage buckets should reach the task totals.")
         self.assertEqual(first["totalTokens"], turn_total)
         self.assertEqual(len(first["turns"]), 1, "The completed turn should be recorded once.")
@@ -8877,9 +9017,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
         self.assert_success(self.call_cli(
             "conversation", "send", task_id, "--message", "Tell me a story.",
-            extra_environment=environment,
+            extra_environment=file_environment,
         )[0])
         second = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        for key in ("totalCalls", "totalSentTokens", "totalOutputTokens"):
+            self.assertEqual(second["callUsage"][key], call_usage_per_turn[key] * 2, f"A second turn adds to callUsage.{key}.")
+        self.assertEqual(second["callUsage"]["finalTranscriptTokens"], 650)
+        self.assertEqual(second["callUsage"]["subagents"]["count"], 2, "Each turn's subagent has its own file.")
         self.assertEqual(second["totalTokens"], turn_total * 2, "A second turn adds to the running total.")
         self.assertEqual(second["usage"]["inputTokens"], expected_turn_usage["inputTokens"] * 2)
         self.assertEqual(len(second["turns"]), 2, "Each turn keeps its own row.")
@@ -8889,11 +9033,25 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Each turn row should carry only its own cost.",
         )
 
-    # case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, and the Token Stats modal shows those Codex totals in the app.
+        # With no readable session files the counts come from the stream alone,
+        # which is also what the card's counter follows while a turn is running.
+        live_id = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Claude live token usage", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli(
+            "conversation", "send", live_id, "--message", "Tell me a story.", extra_environment=environment,
+        )[0])
+        live = self.assert_success(self.call_cli("task", "token-usage", live_id)[0])["callUsage"]
+        for key, value in call_usage_per_turn.items():
+            self.assertEqual(live[key], value, f"The live stream should reach callUsage.{key}.")
+
+    # case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, Codex's input count includes its cached tokens, so the input bucket excludes them rather than counting them twice. Per-call usage notifications streamed before the turn ends, including those of a subagent thread that names its parent, reach the same call-level accounting once each (a repeated notification is ignored), and the Token Stats modal shows those Codex totals, call counts and final transcript size in the app.
     def test_task_token_usage_records_codex_turn_breakdown(self):
         # Matches TURN_USAGE in scripts/fixtures/codex-app-server-fixture.py.
+        # The fixture reports 900 input tokens of which 250 were cached; Codex's input
+        # count includes the cached part, so the input bucket keeps only the other 650.
         expected_turn_usage = {
-            "inputTokens": 900, "outputTokens": 150, "cacheReadTokens": 250, "cacheCreationTokens": 0,
+            "inputTokens": 650, "outputTokens": 150, "cacheReadTokens": 250, "cacheCreationTokens": 0,
         }
         turn_total = sum(expected_turn_usage.values())
         task_id = self.create_task(title="Codex token usage", roots=[self.primary])["id"]
@@ -8908,11 +9066,257 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(len(summary["turns"]), 1)
         self.assertEqual(summary["turns"][0]["provider"], "codex")
         self.assertEqual(summary["turns"][0]["totalTokens"], turn_total)
+        # The fixture streams two main-thread calls sending 700 and 900 (the second notification
+        # repeated) and one subagent call sending 300, so a repeat must not add a call.
+        calls = summary["callUsage"]
+        self.assertTrue(calls["available"])
+        self.assertEqual(
+            {key: calls[key] for key in ("totalCalls", "totalSentTokens", "totalOutputTokens", "finalTranscriptTokens")},
+            {"totalCalls": 3, "totalSentTokens": 1900, "totalOutputTokens": 80, "finalTranscriptTokens": 900},
+        )
+        self.assertEqual(calls["subagents"], {"count": 1, "calls": 1, "sentTokens": 300, "outputTokens": 10})
 
-    # case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to one million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's usage dot re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
+    def run_claude_token_waste_turn(self, title):
+        """One Claude fixture turn whose session file logs every request; see
+        write_waste_session in scripts/fixtures/claude-code-fixture.py."""
+        environment = self.install_claude_fixture("claude-fixture-token-waste")
+        environment["CLAUDE_CONFIG_DIR"] = str(self.data_directory / "claude-config")
+        task_id = self.create_task(title=title, provider="claude")["id"]
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Show token waste.", extra_environment=environment,
+        )[0])
+        return task_id, environment
+
+    # case-contract: test_task_token_waste_ranks_claude_items_by_size | A task with no conversation reports its token map unavailable, with no wasters, tools or agents. After a Claude Code fixture turn whose session file logs every request (a shape, blobs, and transcript lines referenced by hash, including a parallel tool call sent as one message), the map reads the main agent and its subagent, and the main agent's final transcript tokens equal its last request's context exactly. The largest item is the MCP tool's 1,000-line log, ranked by the tokens it added, flagged as removed by the compaction, and sharing the tokens of the request it arrived in with its call by characters. The tools rollup ranks that MCP tool first by tokens added, the MCP server rollup counts its defined and called tools and what its definitions cost, the overhead lists the system prompt, each built-in tool definition and the server's definitions as sent with every request, the README read twice is one repeated result, the request that re-sent its context without the prompt cache is the one cache miss, and the compaction is counted. The Token Stats modal shows these in its Wasters, Tools & MCP and Overhead sections.
+    def test_task_token_waste_ranks_claude_items_by_size(self):
+        empty_id = self.create_task(title="No conversation yet", provider="claude")["id"]
+        empty = self.assert_success(self.call_cli("task", "token-waste", empty_id)[0])
+        self.assertFalse(empty["available"], "A task with no conversation has nothing to map.")
+        self.assertEqual((empty["wasters"], empty["tools"], empty["agents"]), ([], [], []))
+
+        task_id, environment = self.run_claude_token_waste_turn("Claude token waste")
+        report = self.assert_success(self.call_cli("task", "token-waste", task_id, extra_environment=environment)[0])
+        self.assertTrue(report["available"])
+        agents = {agent["id"]: agent for agent in report["agents"]}
+        self.assertEqual(list(agents), ["claude", "claude/fxw"], "The main agent comes first, then each subagent file.")
+        # The fixture's main agent makes 66 requests and ends on a 3,160-token context.
+        self.assertEqual(
+            {key: agents["claude"][key] for key in ("requests", "finalTranscriptTokens", "compactions")},
+            {"requests": 66, "finalTranscriptTokens": 3160, "compactions": 1},
+        )
+        self.assertEqual(agents["claude/fxw"]["finalTranscriptTokens"], 1000)
+        # The usage summary sums the same session files by message ID; the two readers must agree.
+        call_usage = self.assert_success(self.call_cli("task", "token-usage", task_id, extra_environment=environment)[0])["callUsage"]
+        self.assertEqual(call_usage["mainAgent"]["sentTokens"], agents["claude"]["sentTokens"])
+        self.assertEqual(call_usage["mainAgent"]["finalTranscriptTokens"], agents["claude"]["finalTranscriptTokens"])
+
+        wasters = report["wasters"]
+        top = wasters[0]
+        self.assertEqual(
+            (top["label"], top["kind"], top["agent"], top["inFinalTranscript"]),
+            ("fixturelogs/query_logs", "toolResult", "claude", False),
+            "The MCP tool's log is the largest item, and the compaction removed it.",
+        )
+        self.assertEqual(top["requests"], 63, "Three requests before the 60 filler rounds carried the log.")
+        self.assertEqual(top["rentTokens"], top["tokens"] * 63)
+        self.assertEqual([item["tokens"] for item in wasters], sorted((item["tokens"] for item in wasters), reverse=True))
+        # The log and its call arrived together, adding 18,000 tokens split by characters.
+        rows = self.assert_success(self.call_cli(
+            "task", "raw-input", task_id, "--scope", "all", "--limit", "1000", extra_environment=environment,
+        )[0])["rows"]
+        log = next(row for row in rows if row["id"] == top["item"])
+        call = next(row for row in rows if row["kind"] == "toolCall" and row["label"] == "fixturelogs/query_logs")
+        self.assertEqual(top["tokens"], 18000 - 18000 * call["textLength"] // (call["textLength"] + log["textLength"]))
+        self.assertEqual(call["tokens"] + top["tokens"], 18000)
+
+        tools = report["tools"]
+        self.assertEqual([tool["id"] for tool in tools][:3], ["fixturelogs/query_logs", "Bash", "Read"])
+        self.assertEqual(
+            {key: tools[0][key] for key in ("server", "calls", "totalTokens", "resultTokens", "largestResultTokens")},
+            {"server": "fixturelogs", "calls": 1, "totalTokens": 18000, "resultTokens": top["tokens"], "largestResultTokens": top["tokens"]},
+        )
+        self.assertEqual(tools[1]["calls"], 62, "Sixty filler rounds (the first runs two tools) and the outcome report.")
+        self.assertEqual(tools[2]["calls"], 3, "README.md is read twice by the main agent and once by the subagent.")
+        server = report["servers"][0]
+        self.assertEqual((server["id"], server["tools"], server["calls"], server["totalTokens"]), ("fixturelogs", 2, 1, 18000))
+        self.assertGreater(server["definitionTokens"], 0, "Both tool definitions cost tokens on every request.")
+
+        overhead = {entry["label"]: entry for entry in report["overhead"]}
+        for label in ("System prompt (part 1)", "Tool definition: Bash", "Tool definition: Read", "MCP server fixturelogs · 2 tool definitions"):
+            self.assertIn(label, overhead)
+            self.assertTrue(overhead[label]["everyRequest"], f"{label} is sent with every request.")
+            self.assertEqual(overhead[label]["requests"], 66)
+        repeats = [entry for entry in report["duplicates"] if entry["agent"] == "claude"]
+        self.assertEqual([(entry["label"], entry["copies"]) for entry in repeats], [("Read", 2)])
+        self.assertEqual(repeats[0]["wastedTokens"], repeats[0]["tokensPerCopy"])
+        self.assertEqual(
+            [(miss["agent"], miss["request"]) for miss in report["cacheMisses"]], [("claude", 34)],
+            "Only the request that skipped the cache re-sent its context; adding the log is new content, not a miss.",
+        )
+
+    # case-contract: test_task_token_waste_ranks_codex_items_by_size | A Codex fixture turn whose thread and subagent have rollout files gives the same map from Codex's own format: a request was sent the instructions plus every item before its own output, the final transcript's tokens equal the last request's input exactly after a compaction replaced the history, Codex's unsaved tool definitions appear as one hidden-overhead item sent with every request, encrypted reasoning is shown by its size, the MCP tool's log is the largest item and was removed by the compaction, the repeated README read and the cache miss are reported, and the subagent's thread is its own agent. The raw input's final transcript lists the hidden overhead, the instructions and the replacement history once each without the removed log, and an item's full text, from a tool output or from the replacement history, reads back exactly as Codex saved it, in chunks, with its call named. The Token Stats modal shows the Codex wasters, the hidden overhead and the subagent, and showing the log opens its full text.
+    def test_task_token_waste_ranks_codex_items_by_size(self):
+        task_id = self.create_task(title="Codex token waste", roots=[self.primary])["id"]
+        self.complete_fixture_turn(task_id, executable_name="codex-fixture-token-waste", message="Show token waste.")
+        thread_id = self.assert_success(self.call_cli("task", "get", task_id)[0])["codexThreadID"]
+        report = self.assert_success(self.call_cli("task", "token-waste", task_id)[0])
+        self.assertTrue(report["available"])
+        agents = {agent["id"]: agent for agent in report["agents"]}
+        self.assertEqual(list(agents), ["codex", f"codex/{thread_id}-subagent"])
+        self.assertEqual(
+            {key: agents["codex"][key] for key in ("requests", "finalTranscriptTokens", "compactions")},
+            {"requests": 5, "finalTranscriptTokens": 4400, "compactions": 1},
+            "The final transcript is what the last request was sent, after the compaction.",
+        )
+        self.assertEqual(agents[f"codex/{thread_id}-subagent"]["finalTranscriptTokens"], 300)
+
+        top = report["wasters"][0]
+        self.assertEqual(
+            (top["label"], top["kind"], top["inFinalTranscript"], top["requests"]),
+            ("fixturelogs/query_logs", "toolResult", False, 3),
+        )
+        overhead = {entry["kind"]: entry for entry in report["overhead"]}
+        hidden = overhead["hiddenOverhead"]
+        self.assertEqual(hidden["label"], "Tool definitions and other context Codex does not save")
+        self.assertTrue(hidden["everyRequest"])
+        self.assertEqual(hidden["requests"], 5)
+        self.assertTrue(0 < hidden["tokens"] < 4000, "The first request's cost beyond its visible items.")
+        self.assertEqual(overhead["systemPrompt"]["label"], "Codex base instructions")
+        tools = {tool["id"]: tool for tool in report["tools"]}
+        self.assertEqual(report["tools"][0]["id"], "fixturelogs/query_logs")
+        self.assertEqual((tools["fixturelogs/query_logs"]["server"], tools["exec"]["calls"]), ("fixturelogs", 2))
+        self.assertEqual([(entry["label"], entry["copies"]) for entry in report["duplicates"]], [("exec", 2)])
+        self.assertEqual([(miss["agent"], miss["request"]) for miss in report["cacheMisses"]], [("codex", 4)])
+
+        rows = self.assert_success(self.call_cli("task", "raw-input", task_id, "--scope", "all", "--limit", "1000")[0])["rows"]
+        reasoning = next(row for row in rows if row["kind"] == "thinking")
+        self.assertEqual(reasoning["preview"], "[encrypted reasoning: 305 characters]")
+        self.assertEqual(rows[0]["kind"], "hiddenOverhead", "The hidden overhead leads everything sent.")
+
+        # The final transcript: hidden overhead, base instructions, then the
+        # compaction's replacement history and the message after it, each once.
+        final = self.assert_success(self.call_cli("task", "raw-input", task_id, "--limit", "1000")[0])
+        self.assertEqual(final["totalTokens"], 4400)
+        self.assertEqual(
+            [(row["kind"], row["label"]) for row in final["rows"]],
+            [("hiddenOverhead", "Tool definitions and other context Codex does not save"),
+             ("systemPrompt", "Codex base instructions"), ("userText", "User message"),
+             ("other", "Compaction summary"), ("userText", "User message")],
+        )
+        self.assertNotIn(top["item"], [row["id"] for row in final["rows"]], "The compaction removed the log.")
+
+        def full_text(item):
+            chunks, offset = [], 0
+            while True:
+                chunk = self.assert_success(self.call_cli(
+                    "task", "raw-input-text", task_id, "--item", str(item), "--offset", str(offset),
+                )[0])
+                chunks.append(chunk["text"])
+                if chunk.get("nextOffset") is None:
+                    return "".join(chunks), len(chunks), chunk
+                offset = chunk["nextOffset"]
+
+        log_text, log_chunks, log_chunk = full_text(top["item"])
+        expected_log = "".join(
+            f"2026-11-03T10:{index // 60 % 60:02d}:{index % 60:02d}Z INFO fixture log line {index:04d} "
+            f"{'NEEDLE-42 ' if index == 900 else ''}request ok path=/api/orc/builds/{index:04d}\n"
+            for index in range(1, 1001)
+        )
+        self.assertEqual(log_text, expected_log, "A Codex tool output reads back exactly as Codex saved it.")
+        self.assertGreater(log_chunks, 1)
+        self.assertTrue(log_chunk["call"].startswith("fixturelogs/query_logs"))
+        self.assertIn("5000", log_chunk["call"])
+        replaced_prompt = final["rows"][2]["id"]
+        self.assertEqual(full_text(replaced_prompt)[0], "Show token waste.", "An item of the replacement history reads back exactly.")
+        self.assertEqual(full_text(final["rows"][1]["id"])[0], "You are the Codex fixture. " * 80)
+
+    # case-contract: test_task_raw_input_pages_final_transcript_without_duplicates | A task with no conversation has no raw input: its page is empty and reading an item's text is not_found. After a Claude Code fixture turn, the raw input lists the final transcript with each item once across pages and without the log a compaction removed; the everything-sent scope adds what was removed, ordering by size lists the largest first, a search finds the log by a word only its full text contains, and a focus item reports its position. An item's full text reads back in chunks that end on a line break and join to the exact text, with the call that produced it named. An unknown agent or item is not_found, and an unknown order or a limit of zero is invalid_argument. In the app, View raw input opens the final transcript, scrolling loads the next page of rows, showing the largest waster opens it in the everything-sent scope with its full text, and scrolling that text reaches its last line.
+    def test_task_raw_input_pages_final_transcript_without_duplicates(self):
+        empty_id = self.create_task(title="No raw input yet", provider="claude")["id"]
+        empty = self.assert_success(self.call_cli("task", "raw-input", empty_id)[0])
+        self.assertEqual((empty["total"], empty["rows"], empty["agents"], empty.get("agent")), (0, [], [], None))
+        response, _ = self.call_cli("task", "raw-input-text", empty_id, "--item", "0", expected_status=3)
+        self.assert_failure(response, "not_found")
+
+        task_id, environment = self.run_claude_token_waste_turn("Claude raw input")
+
+        def raw_input(*options, expected_status=0):
+            response, _ = self.call_cli("task", "raw-input", task_id, *options, extra_environment=environment, expected_status=expected_status)
+            return response
+
+        first = self.assert_success(raw_input("--limit", "4"))
+        self.assertEqual((first["agent"], first["scope"], first["order"]), ("claude", "final", "transcript"))
+        # Shape (system prompt and four tools), the prompt's two blocks, the
+        # compaction summary, and the last call and result.
+        self.assertEqual((first["total"], first["totalTokens"]), (10, 3160))
+        final_ids = []
+        for offset in range(0, first["total"], 4):
+            page = self.assert_success(raw_input("--offset", str(offset), "--limit", "4"))
+            self.assertEqual(page["offset"], offset)
+            final_ids += [row["id"] for row in page["rows"]]
+            self.assertTrue(all(row["inFinalTranscript"] for row in page["rows"]))
+        self.assertEqual(len(final_ids), 10)
+        self.assertEqual(len(set(final_ids)), 10, "Each item appears once across pages.")
+        self.assertEqual(
+            [row["kind"] for row in first["rows"]], ["systemPrompt", "toolDefinition", "toolDefinition", "toolDefinition"],
+        )
+
+        everything = self.assert_success(raw_input("--scope", "all", "--limit", "1000"))
+        all_ids = [row["id"] for row in everything["rows"]]
+        self.assertEqual(len(all_ids), everything["total"])
+        self.assertEqual(len(set(all_ids)), len(all_ids), "Everything sent still lists each item once.")
+        self.assertGreater(everything["total"], 100, "Enough items to need a second page in the app.")
+        log = next(row for row in everything["rows"] if row["label"] == "fixturelogs/query_logs" and row["kind"] == "toolResult")
+        self.assertNotIn(log["id"], final_ids, "The compaction removed the log from the final transcript.")
+        self.assertEqual(
+            sorted(row["id"] for row in everything["rows"] if row["inFinalTranscript"]), sorted(final_ids),
+        )
+
+        largest = self.assert_success(raw_input("--scope", "all", "--order", "size", "--limit", "5"))
+        self.assertEqual(largest["rows"][0]["id"], log["id"])
+        self.assertEqual([row["tokens"] for row in largest["rows"]], sorted((row["tokens"] for row in largest["rows"]), reverse=True))
+        self.assertNotIn("NEEDLE-42", log["preview"], "The search word sits deep in the log, past its preview.")
+        found = self.assert_success(raw_input("--scope", "all", "--query", "NEEDLE-42"))
+        self.assertEqual([row["id"] for row in found["rows"]], [log["id"]])
+        focused = self.assert_success(raw_input("--scope", "all", "--limit", "1", "--focus", str(log["id"])))
+        self.assertEqual(focused["focusPosition"], all_ids.index(log["id"]))
+
+        chunks = []
+        offset = 0
+        while True:
+            chunk = self.assert_success(self.call_cli(
+                "task", "raw-input-text", task_id, "--item", str(log["id"]), "--offset", str(offset),
+                extra_environment=environment,
+            )[0])
+            self.assertEqual(chunk["offset"], offset)
+            chunks.append(chunk["text"])
+            # The last chunk has no next offset, so the key is absent.
+            if chunk.get("nextOffset") is None:
+                break
+            self.assertTrue(chunk["text"].endswith("\n"), "A chunk that is not the last ends on a line break.")
+            offset = chunk["nextOffset"]
+        self.assertGreater(len(chunks), 1, "A 1,000-line log reads back in more than one chunk.")
+        text = "".join(chunks)
+        self.assertEqual(len(text), chunk["totalLength"])
+        lines = text.splitlines()
+        self.assertEqual(len(lines), 1000)
+        self.assertIn("NEEDLE-42", lines[899])
+        self.assertTrue(lines[-1].endswith("/api/orc/builds/1000"))
+        self.assertTrue(chunk["call"].startswith("fixturelogs/query_logs"), "A tool result names the call that produced it.")
+        self.assertIn("5000", chunk["call"])
+
+        self.assert_failure(raw_input("--agent", "nope", expected_status=3), "not_found")
+        self.assert_failure(raw_input("--order", "bogus", expected_status=2), "invalid_argument")
+        self.assert_failure(raw_input("--limit", "0", expected_status=2), "invalid_argument")
+        response, _ = self.call_cli(
+            "task", "raw-input-text", task_id, "--item", "99999", extra_environment=environment, expected_status=3,
+        )
+        self.assert_failure(response, "not_found")
+
+    # case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
     def test_settings_token_usage_color_max_round_trip(self):
         settings = self.assert_success(self.call_cli("settings", "get")[0])
-        self.assertEqual(settings["tokenUsageColorMax"], 1_000_000, "The dot's scale tops out at a million tokens by default.")
+        self.assertEqual(settings["tokenUsageColorMax"], 20_000_000, "The counter's scale tops out at twenty million tokens by default.")
 
         updated = self.assert_success(self.call_cli("settings", "set-token-usage-color-max", "2400")[0])
         self.assertEqual(updated["tokenUsageColorMax"], 2400)

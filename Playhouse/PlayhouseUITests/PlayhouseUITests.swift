@@ -2004,7 +2004,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Done preserves the task worktree without merging")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own row above the card title and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -2030,6 +2030,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(activeCreateButton.waitForExistence(timeout: 5), "An active repository task should expose its PR action on the card.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.width, 30, "The PR action should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.height, 30, "The PR action should have a comfortable vertical hit target.")
+        // The control sits on its own row above the title, on the right; Backlog had no such row.
+        XCTAssertLessThanOrEqual(activeCreateButton.frame.maxY, element("task-title-\(taskID)").frame.minY, "The pull-request row should sit above the title.")
+        XCTAssertGreaterThan(activeCreateButton.frame.midX, element("task-card-\(taskID)").frame.midX, "The pull-request control should sit on the right.")
         assertHoverEmphasis(for: activeCreateButton)
         XCTAssertEqual(activeCreateButton.label, "PR. Create a pull request for each repository linked to this task")
         assertNativeHelpText(for: activeCreateButton, equals: "Create a pull request for each repository linked to this task")
@@ -2093,6 +2096,13 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try XCTUnwrap(created["id"] as? String)
         XCTAssertTrue(element("task-card-\(taskID)").waitForExistence(timeout: 5))
         XCTAssertFalse(element("task-auto-pr-toggle-\(taskID)").exists, "A Backlog task has no working-state PR controls yet.")
+        // A worktree shares its source repository's git config, so the origin remotes this
+        // case adds through its worktrees must not leak into later cases.
+        defer {
+            for repository in [fixture.primary, fixture.secondary] {
+                try? runGit(repository, "remote", "remove", "origin")
+            }
+        }
 
         openTask(named: "Auto PR toggle UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Auto PR toggle UI", whileTurnHeld: {
@@ -2123,6 +2133,8 @@ final class PlayhouseUITests: XCTestCase {
             try self.runGit(remote, "init", "--bare")
             try self.runGit(worktree, "remote", "add", "origin", remote.path)
             try self.runGit(worktree, "push", "origin", "main")
+            // GitHub rejects a pull request whose branch has no commits.
+            try "Auto PR task change.\n".write(to: worktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
 
             self.openTask(named: "Auto PR toggle UI")
         })
@@ -2167,6 +2179,7 @@ final class PlayhouseUITests: XCTestCase {
         try runGit(manualRemote, "init", "--bare")
         try runGit(manualWorktree, "remote", "add", "origin", manualRemote.path)
         try runGit(manualWorktree, "push", "origin", "main")
+        try "Manual PR task change.\n".write(to: manualWorktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
         manualButton.click()
         let manualPRLink = app.links["task-pr-link-\(manualTaskID)-502"]
         XCTAssertTrue(manualPRLink.waitForExistence(timeout: 10), "The manual PR flow must still work unchanged when Auto PR stays off.")
@@ -2299,6 +2312,7 @@ final class PlayhouseUITests: XCTestCase {
             let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String))
             try runGit(worktree, "remote", "add", "origin", remote.path)
             try runGit(worktree, "push", "origin", "main")
+            try "Repository \(index) task change.\n".write(to: worktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
         }
         let failurePath = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH"]))
         try "2\n".write(to: failurePath, atomically: true, encoding: .utf8)
@@ -2367,6 +2381,93 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(secondPRLink.label, "#1235")
         assertHoverEmphasis(for: prLink)
         attachScreenshot(named: "Done archive shows the linked pull request")
+    }
+
+    // case-contract: test_task_pr_create_skips_unchanged_repositories | PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error. A task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert.
+    func test_task_pr_create_skips_unchanged_repositories() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Skip unchanged UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
+            "--merge-target", "\(fixture.primary.path)=main", "--merge-target", "\(fixture.secondary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Skip unchanged UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Skip unchanged UI")
+        element("back-to-board-button").click()
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+        XCTAssertTrue(terminateAppAndWait(app), "Close Playhouse before clearing the fixture provider session.")
+        try clearTaskProviderSession(taskID: taskID)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+
+        let records = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]]))
+        let remoteRoot = dataDirectory.appendingPathComponent("skip-unchanged-remotes", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remoteRoot.path), "Each case must start with isolated PR remotes.")
+        try FileManager.default.createDirectory(at: remoteRoot, withIntermediateDirectories: true)
+        try WorkspaceFixture.ownerContents.write(to: remoteRoot.appendingPathComponent(WorkspaceFixture.ownerMarker), atomically: true, encoding: .utf8)
+        for repository in [fixture.primary, fixture.secondary] {
+            XCTAssertFalse(try runGitOutput(repository, "remote").split(whereSeparator: \.isNewline).contains("origin"), "The isolated source fixture must not already have an origin remote.")
+        }
+        defer {
+            for repository in [fixture.primary, fixture.secondary] {
+                try? runGit(repository, "remote", "remove", "origin")
+            }
+        }
+        for (index, record) in records.enumerated() {
+            let remote = remoteRoot.appendingPathComponent("repository-\(index).git", isDirectory: true)
+            try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+            try runGit(remote, "init", "--bare")
+            let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String))
+            try runGit(worktree, "remote", "add", "origin", remote.path)
+            try runGit(worktree, "push", "origin", "main")
+        }
+        let primaryWorktree = URL(fileURLWithPath: try XCTUnwrap(records[0]["worktreePath"] as? String), isDirectory: true)
+        try "Only the primary repository changed.\n".write(to: primaryWorktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
+
+        let createPRButton = element("task-create-pr-\(taskID)")
+        XCTAssertTrue(createPRButton.waitForExistence(timeout: 5), "The two-repository task should expose its PRs action.")
+        createPRButton.click()
+        let primaryLink = app.links["task-pr-link-\(taskID)-501"]
+        XCTAssertTrue(primaryLink.waitForExistence(timeout: 30), "The changed repository should get its pull request.")
+        // The link can appear while the secondary repository is still being checked; wait for the operation to settle.
+        let remainingPRButton = element("task-create-pr-\(taskID)")
+        XCTAssertTrue(waitUntil({ remainingPRButton.exists && remainingPRButton.isEnabled }, timeout: 30), "The PR operation should finish for every repository.")
+        XCTAssertEqual(remainingPRButton.label, "PRs. Create pull requests for repositories without a linked pull request")
+        XCTAssertFalse(app.sheets.firstMatch.exists, "An unchanged repository must not fail the PR operation.")
+        let createdRecords = try XCTUnwrap(taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual(createdRecords[0]["pullRequestNumber"] as? Int, 501)
+        XCTAssertNil(createdRecords[1]["pullRequestNumber"], "The unchanged repository must keep no PR link.")
+        let createLogPath = try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CREATE_LOG"])
+        let createTargets = try String(contentsOfFile: createLogPath, encoding: .utf8).components(separatedBy: "\n")
+            .filter { $0.hasPrefix("create\t") }
+            .compactMap { $0.split(separator: "\t", maxSplits: 2).dropFirst().first.map(String.init) }
+            .map { $0.replacingOccurrences(of: "/private/tmp/", with: "/tmp/") }
+        XCTAssertEqual(createTargets, [primaryWorktree.resolvingSymlinksInPath().path.replacingOccurrences(of: "/private/tmp/", with: "/tmp/")], "gh create must run only for the changed repository.")
+        attachScreenshot(named: "Only the changed repository gets a pull request")
+
+        // The secondary source repository keeps the origin its first task worktree added.
+        let unchanged = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Nothing to propose UI", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path,
+            "--merge-target", "\(fixture.secondary.path)=main",
+        ])["result"] as? [String: Any])
+        let unchangedID = try XCTUnwrap(unchanged["id"] as? String)
+        openTask(named: "Nothing to propose UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Nothing to propose UI")
+        element("back-to-board-button").click()
+        XCTAssertEqual(try taskRecord(id: unchangedID)?["status"] as? String, "Review")
+        let unchangedButton = element("task-create-pr-\(unchangedID)")
+        XCTAssertTrue(unchangedButton.waitForExistence(timeout: 5))
+        unchangedButton.click()
+        let alertSheet = app.sheets.firstMatch
+        XCTAssertTrue(alertSheet.waitForExistence(timeout: 30), "A task with no changes should report why no pull request was opened.")
+        XCTAssertTrue(waitUntil({
+            self.element(containingAccessibilityText: "No repository in this task has changes").exists
+        }, timeout: 5), app.debugDescription)
+        attachScreenshot(named: "A task with no changes explains why no pull request was opened")
+        alertSheet.buttons["OK"].click()
+        XCTAssertNil((try taskRecord(id: unchangedID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"])
+        XCTAssertEqual(try String(contentsOfFile: createLogPath, encoding: .utf8).components(separatedBy: "\n").filter { $0.hasPrefix("create\t") }.count, 1, "An all-unchanged task must not call gh create.")
     }
 
     // case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
@@ -2863,7 +2964,10 @@ final class PlayhouseUITests: XCTestCase {
 
         // A model can write its outcome command as answer text instead of running
         // it. The echo is hidden, and it counts only when it names this task.
-        let echoedAnswers = app.groups.matching(NSPredicate(format: "label == %@", "Fixture answer with an echoed outcome."))
+        // Scoped to message containers: a reply's paragraphs are labelled groups too.
+        let echoedAnswers = app.groups.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label == %@", "assistant-message-", "Fixture answer with an echoed outcome."
+        ))
         for (turnIndex, (echoedTaskID, expectedColumn)) in [(UUID().uuidString, "Blocked"), (taskID, "Review")].enumerated() {
             XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15), "The composer should accept the echoed-outcome turn.")
             composer.click()
@@ -6492,7 +6596,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(texts.contains("OK."))
     }
 
-    // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details.
+    // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload.
     func test_conversation_adds_ordered_text_annotations() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-goal-success").path
         let fixtureStateDirectory = dataDirectory.appendingPathComponent("comment-goal-fixture-state", isDirectory: true)
@@ -6902,17 +7006,22 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertGreaterThanOrEqual(markerY(), reloadedTranscript.frame.minY + 16)
             XCTAssertLessThanOrEqual(markerY(), reloadedTranscript.frame.maxY - 16)
         }
-        let assistantResponseLines = renderedCommentResponse.descendants(matching: .staticText).allElementsBoundByIndex
-            .compactMap { $0.value as? String }
+        // The reply's prose is one selectable text; each response line is its own paragraph in it.
+        let responseTexts = renderedCommentResponse.descendants(matching: .staticText).allElementsBoundByIndex
+        XCTAssertEqual(responseTexts.count, 1, "The reply's lines should share one selectable text.")
+        let assistantResponseLines = (responseTexts.first?.value as? String ?? "").components(separatedBy: "\n")
         XCTAssertEqual(assistantResponseLines.count, 2, "Each comment response should render on its own line.")
         XCTAssertTrue(assistantResponseLines[0].hasPrefix("1. "), "The first response should begin with its numbered comment link.")
         XCTAssertTrue(assistantResponseLines[1].hasPrefix("2. "), "The second response should begin with its numbered comment link.")
         XCTAssertFalse(assistantResponseLines.joined(separator: "\n").contains(":playhouse-annotation"),
                        "Protocol markers should be replaced by visible comment labels.")
         let firstMarkerCenterX = "1.".size(withAttributes: [.font: NSFont.systemFont(ofSize: 16)]).width / 2
-        let firstResponseLine = renderedCommentResponse.descendants(matching: .staticText).matching(
-            NSPredicate(format: "value BEGINSWITH %@", "1. ")
-        ).firstMatch
+        func responseLine(_ prefix: String) -> XCUIElement {
+            renderedCommentResponse.descendants(matching: .any).matching(NSPredicate(
+                format: "identifier BEGINSWITH %@ AND label BEGINSWITH %@", "assistant-markdown-paragraph-", prefix
+            )).firstMatch
+        }
+        let firstResponseLine = responseLine("1. ")
         revealReplyMarker(firstResponseLine, verticalOffset: 0.5)
         let markerPoint = firstResponseLine.coordinate(withNormalizedOffset: CGVector(
             dx: max(0.01, firstMarkerCenterX / max(1, firstResponseLine.frame.width)), dy: 0.5
@@ -6935,9 +7044,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(waitUntil({ commentHint.exists && commentHint.label.contains("Explain this phrase") }, timeout: 5),
                           "The first comment link should reliably reopen after pointer reentry.")
         }
-        let secondResponseLine = renderedCommentResponse.descendants(matching: .staticText).matching(
-            NSPredicate(format: "value BEGINSWITH %@", "2. ")
-        ).firstMatch
+        let secondResponseLine = responseLine("2. ")
         XCTAssertGreaterThan(secondResponseLine.frame.height, 40,
                              "The second response should wrap while its numbered link stays at the start.")
         revealReplyMarker(secondResponseLine, verticalOffset: 0.03)
@@ -7001,15 +7108,36 @@ final class PlayhouseUITests: XCTestCase {
 
         let emptyComposer = element("message-composer")
         XCTAssertTrue((emptyComposer.value as? String ?? "").isEmpty)
+        // Selecting all of the reply's text spans both response paragraphs, so this comment
+        // covers more than one block.
+        // Each paragraph is measured fully on screen: the pending-comment chip grows the composer,
+        // which can cover the end of the reply.
+        func orangePixels(in line: XCUIElement) -> Int {
+            XCTAssertTrue(scrollFullyIntoView(line, in: reloadedTranscript), "The reply paragraph should scroll fully into view.")
+            return orangePixelCount(in: line.screenshot())
+        }
+        let firstLineOrangeBefore = orangePixels(in: firstResponseLine)
+        let secondLineOrangeBefore = orangePixels(in: secondResponseLine)
         secondResponseLine.click()
         secondResponseLine.typeKey("a", modifierFlags: .command)
         let addCommentOnly = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
         XCTAssertTrue(addCommentOnly.waitForExistence(timeout: 5))
+        // The selection starts in the first paragraph, which can be scrolled above the
+        // transcript; the hint then stays at the top of the selection's visible part.
+        XCTAssertTrue(addCommentOnly.isHittable && reloadedTranscript.frame.contains(addCommentOnly.frame),
+                      "The Add comment hint should stay on screen when the selection starts above the visible transcript.")
         addCommentOnly.click()
         let commentOnlyField = element("comment-input-field")
         XCTAssertTrue(commentOnlyField.waitForExistence(timeout: 5))
         commentOnlyField.typeText("Explain this reply\r")
         XCTAssertTrue(element("pending-comment-count").waitForExistence(timeout: 5), "The comment-only selection should become a pending comment.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("pending-comment-count")).contains("1 comment"),
+                      "A selection across paragraphs should add one comment, not one per paragraph.")
+        XCTAssertGreaterThan(orangePixels(in: firstResponseLine), firstLineOrangeBefore + 5,
+                             "A comment across paragraphs should highlight its first paragraph.")
+        XCTAssertGreaterThan(orangePixels(in: secondResponseLine), secondLineOrangeBefore + 5,
+                             "A comment across paragraphs should highlight its last paragraph.")
+        attachScreenshot(named: "Comment spanning two reply paragraphs")
         XCTAssertTrue((emptyComposer.value as? String ?? "").isEmpty)
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({
@@ -7026,6 +7154,33 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(commentOnlyPayload.hasPrefix("<playhouse-comment-context>"),
                       "An empty-composer send should contain only the structured comment context.")
         XCTAssertTrue(commentOnlyPayload.contains("Explain this reply"))
+        let spanningPayload = try XCTUnwrap(commentOnlyPayload.components(separatedBy: "<response-comments>").last?
+            .components(separatedBy: "</response-comments>").first)
+        let spanningComments = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(spanningPayload.utf8)) as? [[String: Any]])
+        XCTAssertEqual(spanningComments.count, 1, "A selection across paragraphs should send one comment.")
+        let spanningSource = try XCTUnwrap(spanningComments.first?["source"] as? [String: Any])
+        XCTAssertEqual(spanningSource["messageId"] as? String, annotatedAssistantID)
+        let spanningStartBlock = try XCTUnwrap(spanningSource["blockID"] as? Int)
+        let spanningEndBlock = try XCTUnwrap(spanningSource["endBlockID"] as? Int,
+                                             "A comment across paragraphs should record the block it ends in.")
+        XCTAssertLessThan(spanningStartBlock, spanningEndBlock)
+        XCTAssertEqual(spanningSource["startOffset"] as? Int, 0)
+        let spanningText = try XCTUnwrap(spanningComments.first?["text"] as? String)
+        XCTAssertTrue(spanningText.contains("1. ") && spanningText.contains("2. "),
+                      "The commented text should include both paragraphs.")
+
+        // The cross-paragraph highlight is restored from the sent payload after reopening.
+        element("back-to-board-button").click()
+        openTask(named: "Comment source")
+        // Reopening shows only the newest turn; the commented reply is in an earlier one.
+        XCTAssertTrue(waitUntil({ firstResponseLine.exists }, timeout: 5) || revealWholeTranscript(),
+                      "The commented reply should render after reopening.")
+        XCTAssertTrue(firstResponseLine.waitForExistence(timeout: 10))
+        XCTAssertGreaterThan(orangePixels(in: firstResponseLine), firstLineOrangeBefore + 5,
+                             "Reopening should restore the cross-paragraph highlight on its first paragraph.")
+        XCTAssertGreaterThan(orangePixels(in: secondResponseLine), secondLineOrangeBefore + 5,
+                             "Reopening should restore the cross-paragraph highlight on its last paragraph.")
+        attachScreenshot(named: "Restored comment spanning two reply paragraphs")
     }
 
     // case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged.
@@ -7461,7 +7616,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(secondPersistedMessage.waitForExistence(timeout: 10), "Reopening the task should load the completed second send from the real app-server thread.")
     }
 
-    // case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
+    // case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
     func test_conversation_steers_and_queues_active_turn() throws {
         let sharedFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-steer-queue-serial-success-wait")
         let fixtureOwner = try String(contentsOf: WorkspaceFixture.root.appendingPathComponent(WorkspaceFixture.ownerMarker), encoding: .utf8)
@@ -7672,6 +7827,11 @@ final class PlayhouseUITests: XCTestCase {
         let targetedReady = URL(fileURLWithPath: sharedFixture.path + ".queued-turn-ready")
         let targetedRelease = URL(fileURLWithPath: sharedFixture.path + ".queued-turn-release")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: targetedReady.path) }, timeout: 10), "A row steer with no active turn should start a targeted own-turn delivery.")
+        let deliveringRow = try XCTUnwrap((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.first(where: { $0["id"] as? String == targetedID }))
+        XCTAssertEqual(deliveringRow["state"] as? String, "dispatching", "A follow-up stays durably claimed while its own turn runs.")
+        XCTAssertTrue(waitUntil({ !element("queued-message-text-\(targetedID)").exists }, timeout: 5), "A follow-up being delivered should leave the visible queue while its turn runs.")
+        XCTAssertFalse(element("steer-queued-message-\(targetedID)").exists, "A follow-up being delivered should not offer Steer.")
+        attachScreenshot(named: "Delivering follow-up leaves the queue")
         let overlapText = "Queue this steer behind the targeted turn."
         try "no active turn to steer\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
         let overlapSteer = try runCLI(["conversation", "steer", taskID, "--message", overlapText], extraEnvironment: [
@@ -7700,10 +7860,15 @@ final class PlayhouseUITests: XCTestCase {
         let missedRowOverlapID = try XCTUnwrap(missedRowOverlap["id"] as? String)
         try "expected active turn id stale-turn but found fixture-turn\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
         XCTAssertTrue(element("steer-queued-message-\(missedRowOverlapID)").waitForExistence(timeout: 5))
-        element("steer-queued-message-\(missedRowOverlapID)").click()
+        // Steer from the CLI, so this window learns of the requeue only through the bridge.
+        let missedRowSteer = try XCTUnwrap(try runCLI(["conversation", "queue-steer", taskID, missedRowOverlapID])["result"] as? [String: Any])
+        XCTAssertEqual(missedRowSteer["queued"] as? Bool, true, "A missed queued-row steer should stay queued while targeted dispatch is active.")
         XCTAssertTrue(waitUntil({
             ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).first(where: { $0["id"] as? String == missedRowOverlapID })?["state"] as? String == "queued"
         }, timeout: 10), "The missed queued-row steer should remain queued until the targeted turn ends.")
+        XCTAssertTrue(element("queued-message-text-\(missedRowOverlapID)").waitForExistence(timeout: 5), "A missed queued-row steer from the CLI should show its row again in the app before the targeted turn ends.")
+        XCTAssertTrue(element("steer-queued-message-\(missedRowOverlapID)").exists, "The returned row should offer Steer again.")
+        attachScreenshot(named: "Missed row steer returns to the queue")
         relaunchApp()
         openTask(named: "Active turn message controls")
         let relaunchedMissedRow = element("queued-message-text-\(missedRowOverlapID)")
@@ -7773,9 +7938,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(deliveredImages[0].hasPrefix("data:image/png;base64,"))
         let steerRequests = try XCTUnwrap(fixtureHistory["steerRequests"] as? [[String: Any]])
         let rejectedSteerRequests = fixtureHistory["rejectedSteerRequests"] as? [[String: Any]] ?? []
-        // The daemon owns the targeted turn too, so the CLI steer sent during it
-        // reaches Codex (and is rejected) before it queues.
-        XCTAssertEqual(rejectedSteerRequests.count, 4, "Rejected steers: \(rejectedSteerRequests.map { ($0["input"] as? [[String: Any]])?.first?["text"] as? String ?? "?" })")
+        // The daemon owns the targeted turns too, so both CLI steers sent during
+        // them (the overlap steer and the missed row steer) reach Codex and are
+        // rejected before they queue.
+        XCTAssertEqual(rejectedSteerRequests.count, 5, "Rejected steers: \(rejectedSteerRequests.map { ($0["input"] as? [[String: Any]])?.first?["text"] as? String ?? "?" })")
         XCTAssertEqual(steerRequests.count, 3)
         let activeTurnID = (fixtureHistory["messages"] as? [[String: Any]])?.first?["turnID"] as? String
         XCTAssertEqual(steerRequests[0]["expectedTurnId"] as? String, activeTurnID)
@@ -9200,16 +9366,28 @@ final class PlayhouseUITests: XCTestCase {
         // A long reply's label is a summary; its Markdown blocks carry the text.
         XCTAssertTrue(waitUntil({ self.transcriptContains("Implementation plan") }, timeout: 10), "The completed plan should appear automatically after reopening.")
         XCTAssertTrue(transcriptContains("Start with the workspace model.") && transcriptContains("A separate paragraph confirms readable spacing"),
-                      "Paragraphs should remain separate blocks after reopening.")
+                      "Both paragraphs should render after reopening.")
         XCTAssertFalse(transcriptContains("<proposed_plan>"), "The reloaded plan should hide its opening protocol wrapper.")
         XCTAssertFalse(transcriptContains("</proposed_plan>"), "The reloaded plan should hide its closing protocol wrapper.")
         let markdownContent = app.staticTexts.matching(
             NSPredicate(format: "value CONTAINS %@", "Implementation plan")
         ).firstMatch
         XCTAssertTrue(markdownContent.waitForExistence(timeout: 5), "The plan should render as one selectable Markdown text view.")
-        markdownContent.click()
-        markdownContent.typeKey("a", modifierFlags: .command)
-        markdownContent.typeKey("c", modifierFlags: .command)
+        let sharedProse = markdownContent.value as? String ?? ""
+        for text in ["Start with the workspace model.", "A separate paragraph confirms readable spacing",
+                     "Implementation detail 01", "Second numbered step"] {
+            XCTAssertTrue(sharedProse.contains(text), "The heading, paragraphs, and list items should share one selectable text: \(text)")
+        }
+        XCTAssertFalse(sharedProse.contains("console.log"), "A fenced code block should stay in its own card.")
+        // The shared text is taller than the viewport; click a line that is on screen.
+        let visibleOrderedItem = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-markdown-ordered-list-item-", "First numbered step"))
+            .firstMatch
+        XCTAssertTrue(visibleOrderedItem.waitForExistence(timeout: 5))
+        XCTAssertTrue(scrollFullyIntoView(visibleOrderedItem, in: element("conversation-scroll-view")))
+        visibleOrderedItem.click()
+        visibleOrderedItem.typeKey("a", modifierFlags: .command)
+        visibleOrderedItem.typeKey("c", modifierFlags: .command)
         let copiedPlan = NSPasteboard.general.string(forType: .string) ?? ""
         XCTAssertTrue(copiedPlan.contains("Implementation plan"), "Selecting all should include the plan heading.")
         XCTAssertTrue(copiedPlan.contains("Implementation detail 01"), "Selecting all should include the first list item.")
@@ -9965,7 +10143,11 @@ final class PlayhouseUITests: XCTestCase {
         composer.click()
         composer.typeText("Check legacy model attribution.")
         element("send-message-button").click()
-        XCTAssertTrue(waitUntil({ app.groups.matching(NSPredicate(format: "label == %@", "Answers received: Blue / fixture-secret.")).count >= 2 }, timeout: 15))
+        XCTAssertTrue(waitUntil({
+            app.groups.matching(NSPredicate(
+                format: "identifier BEGINSWITH %@ AND label == %@", "assistant-message-", "Answers received: Blue / fixture-secret."
+            )).count >= 2
+        }, timeout: 15))
         XCTAssertTrue(app.staticTexts["Codex"].exists, "A legacy reply without a stored model stays provider-only.")
         XCTAssertTrue(app.staticTexts["Codex · Luna"].exists, "The new turn is attributed to the model selected for that send.")
         XCTAssertEqual(app.staticTexts.matching(identifier: "message-time-item_assistant_fixture_1").count, 0,
@@ -11927,7 +12109,7 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
-    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory.
+    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes.
     func test_external_git_edits_and_commit_refresh_workspace_changes() throws {
         let repository = runDirectory.appendingPathComponent("external-git", isDirectory: true)
         try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
@@ -11988,9 +12170,45 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.element("workspace-change-unviewed-tracked.txt").value as? String == "Committed, primary" }, timeout: 10))
         XCTAssertFalse(committedEntries.contains { $0["path"] as? String == "base-only.txt" })
         attachScreenshot(named: "Branch changes exclude base-only commits and retain task commits")
+
+        // Upstream moves ahead of a stale local base branch, and the task branch merges it.
+        let origin = runDirectory.appendingPathComponent("external-git-origin.git", isDirectory: true)
+        try FileManager.default.createDirectory(at: origin, withIntermediateDirectories: true)
+        try runGit(origin, "init", "--bare", "--initial-branch=main")
+        try runGit(repository, "remote", "add", "origin", origin.path)
+        try runGit(repository, "push", "origin", "main")
+        try "Upstream commit.\n".write(to: repository.appendingPathComponent("upstream-only.txt"), atomically: true, encoding: .utf8)
+        try runGit(repository, "add", "upstream-only.txt")
+        try runGit(repository, "commit", "-m", "Upstream commit")
+        try runGit(repository, "push", "origin", "main")
+        try runGit(repository, "reset", "--hard", "HEAD~1")
+        try runGit(worktree, "merge", "--no-edit", "origin/main")
+        // A file written after the merge only appears once the sidebar has rescanned the merged
+        // branch, so waiting for its row proves the absence check below runs against fresh state.
+        try "Written after the merge.\n".write(to: worktree.appendingPathComponent("post-merge.txt"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(element("workspace-change-unviewed-post-merge.txt").waitForExistence(timeout: 10))
+        let staleBase = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        let staleBaseEntries = staleBase?["unviewed"] as? [[String: Any]] ?? []
+        XCTAssertEqual(staleBaseEntries.map { $0["path"] as? String }, ["post-merge.txt", "tracked.txt", "untracked.txt"])
+        XCTAssertFalse(element("workspace-change-unviewed-upstream-only.txt").exists)
+
+        // A local base branch that is ahead of origin holds work the task was started from, so it stays the base.
+        try runGit(repository, "merge", "--ff-only", "origin/main")
+        try "Local only.\n".write(to: repository.appendingPathComponent("local-ahead.txt"), atomically: true, encoding: .utf8)
+        try runGit(repository, "add", "local-ahead.txt")
+        try runGit(repository, "commit", "-m", "Unpushed local base commit")
+        try runGit(worktree, "merge", "--no-edit", "main")
+        try "Written after the local merge.\n".write(to: worktree.appendingPathComponent("post-ahead.txt"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(element("workspace-change-unviewed-post-ahead.txt").waitForExistence(timeout: 10))
+        let aheadBase = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        let aheadBaseEntries = aheadBase?["unviewed"] as? [[String: Any]] ?? []
+        XCTAssertEqual(aheadBaseEntries.map { $0["path"] as? String }, ["post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"])
+        XCTAssertFalse(element("workspace-change-unviewed-local-ahead.txt").exists)
+        XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").exists)
+        attachScreenshot(named: "Merged upstream commits are excluded when the local base branch is stale")
     }
 
-    // case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. The task card shows a token usage dot whose tooltip reports the total, and the Token Stats context-menu item opens a modal showing the totals, the per-tool rollup and the per-turn breakdown.
+    // case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and the Token Stats context-menu item opens a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
     func test_task_token_usage_records_claude_turn_breakdown() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-usage")
         launchApp(defaultParent: fixture.parent.path)
@@ -11999,9 +12217,9 @@ final class PlayhouseUITests: XCTestCase {
         ])["result"] as? [String: Any])?["id"] as? String)
         let card = app.buttons["Token usage task"]
         XCTAssertTrue(card.waitForExistence(timeout: 10))
-        let dot = element("task-token-usage-dot-\(taskID)")
-        XCTAssertTrue(dot.waitForExistence(timeout: 5), "A task card should carry its token usage dot.")
-        XCTAssertEqual(dot.label, "No tokens used yet", "A task with no turns reports no usage.")
+        let counter = element("task-token-usage-counter-\(taskID)")
+        XCTAssertFalse(counter.exists, "A task with no recorded tokens should hide its card counter.")
+        attachScreenshot(named: "Task card hides its counter before any tokens are recorded")
 
         card.rightClick()
         element("token-stats-task-menu-item").click()
@@ -12025,9 +12243,14 @@ final class PlayhouseUITests: XCTestCase {
             ["conversation", "send", taskID, "--message", "Tell me a story."],
             extraEnvironment: environment
         )
-        // Two fixture turns of 1,600 tokens each.
-        XCTAssertTrue(waitUntil({ dot.label == "3K tokens used" }, timeout: 15), "The dot should report the accumulated total, not one turn's.")
-        attachScreenshot(named: "Task card shows its token usage dot beside the time counter")
+        // Two fixture turns, each with two main-agent calls (sending 550 and 650)
+        // and two subagent calls (300 and 340): 8 calls, 3,680 sent, final context 650.
+        XCTAssertTrue(
+            waitUntil({ counter.label == "3.7K tokens sent · 8 calls · 650 final transcript" }, timeout: 15),
+            "The counter should report everything sent, subagents included, across both turns."
+        )
+        attachScreenshot(named: "Task card shows its live token counter beside the time")
+
 
         card.rightClick()
         let statsAction = element("token-stats-task-menu-item")
@@ -12039,6 +12262,10 @@ final class PlayhouseUITests: XCTestCase {
         // A SwiftUI Text reports its string as the accessibility value, not label.
         let total = element("token-stats-total")
         assertText("token-stats-total", equals: "3,200")
+        assertText("token-stats-final-transcript", equals: "650")
+        assertText("token-stats-total-sent", equals: "3,680")
+        assertText("token-stats-total-calls", equals: "8 model calls · 4 main, 4 across 2 subagents")
+        assertText("token-stats-output", equals: "Output 170")
         XCTAssertTrue(element("token-stats-tool-Bash").exists, "The rollup should name the tool the turns ran.")
         let turnRows = app.descendants(matching: .any).matching(NSPredicate(
             format: "identifier BEGINSWITH %@", "token-stats-turn-"
@@ -12051,9 +12278,14 @@ final class PlayhouseUITests: XCTestCase {
         let summary = try XCTUnwrap(try runCLI(["task", "token-usage", taskID])["result"] as? [String: Any])
         XCTAssertEqual(summary["totalTokens"] as? Int, 3_200)
         XCTAssertEqual((summary["turns"] as? [[String: Any]])?.count, 2)
+        let calls = try XCTUnwrap(summary["callUsage"] as? [String: Any])
+        XCTAssertEqual(calls["totalCalls"] as? Int, 8)
+        XCTAssertEqual(calls["totalSentTokens"] as? Int, 3_680)
+        XCTAssertEqual(calls["finalTranscriptTokens"] as? Int, 650)
+        XCTAssertEqual((calls["subagents"] as? [String: Any])?["count"] as? Int, 2)
     }
 
-    // case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, and the Token Stats modal shows those Codex totals in the app.
+    // case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, Codex's input count includes its cached tokens, so the input bucket excludes them rather than counting them twice. Per-call usage notifications streamed before the turn ends, including those of a subagent thread that names its parent, reach the same call-level accounting once each (a repeated notification is ignored), and the Token Stats modal shows those Codex totals, call counts and final transcript size in the app.
     func test_task_token_usage_records_codex_turn_breakdown() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Codex token usage", roots: [fixture.primary.path])
@@ -12098,13 +12330,20 @@ final class PlayhouseUITests: XCTestCase {
         try "Release the completed fixture turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
         _ = try finishCLIProcess(process)
 
-        // One Codex fixture turn of 1,300 tokens.
-        let dot = element("task-token-usage-dot-\(taskID)")
-        XCTAssertTrue(waitUntil({ dot.exists && dot.label == "1K tokens used" }, timeout: 15), "A Codex turn's usage should reach the card's dot.")
+        // One Codex fixture turn: 3 calls (two main sending 700 and 900, one subagent
+        // sending 300), 1,900 sent, and a final transcript of 900.
+        let counter = element("task-token-usage-counter-\(taskID)")
+        XCTAssertTrue(
+            waitUntil({ counter.exists && counter.label == "1.9K tokens sent · 3 calls · 900 final transcript" }, timeout: 15),
+            "A Codex turn's per-call usage, subagent included, should reach the card's counter."
+        )
 
         card.rightClick()
         element("token-stats-task-menu-item").click()
-        assertText("token-stats-total", equals: "1,300")
+        assertText("token-stats-total", equals: "1,050")
+        assertText("token-stats-final-transcript", equals: "900")
+        assertText("token-stats-total-sent", equals: "1,900")
+        assertText("token-stats-total-calls", equals: "3 model calls · 2 main, 1 across 1 subagent")
         attachScreenshot(named: "Token Stats modal shows a Codex turn's usage")
         element("close-token-stats-button").click()
 
@@ -12113,16 +12352,270 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(usage["cacheReadTokens"] as? Int, 250, "Codex's cached input maps onto the cache-read bucket.")
         XCTAssertEqual(usage["cacheCreationTokens"] as? Int, 0, "Codex reports no cache-write bucket.")
         XCTAssertEqual((summary["turns"] as? [[String: Any]])?.first?["provider"] as? String, "codex")
+        XCTAssertEqual(usage["inputTokens"] as? Int, 650, "Codex's input count includes its cached tokens, which are not counted twice.")
+        let calls = try XCTUnwrap(summary["callUsage"] as? [String: Any])
+        XCTAssertEqual(calls["totalCalls"] as? Int, 3)
+        XCTAssertEqual(calls["totalSentTokens"] as? Int, 1_900)
+        XCTAssertEqual(calls["totalOutputTokens"] as? Int, 80)
+        XCTAssertEqual(calls["finalTranscriptTokens"] as? Int, 900)
+        XCTAssertEqual((calls["subagents"] as? [String: Any])?["calls"] as? Int, 1)
     }
 
-    // case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to one million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's usage dot re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
+    /// The fixture log's size as the app formats it; the log is built the same
+    /// way as WASTE_LOG in scripts/fixtures/claude-code-fixture.py.
+    private enum WasteFixture {
+        static var logLength: String {
+            var length = 0
+            for index in 1...1000 {
+                let time = String(format: "2026-11-03T10:%02d:%02dZ", index / 60 % 60, index % 60)
+                let marker = index == 900 ? "NEEDLE-42 " : ""
+                let line = "\(time) INFO fixture log line \(String(format: "%04d", index)) \(marker)request ok path=/api/orc/builds/\(String(format: "%04d", index))\n"
+                length += line.unicodeScalars.count
+            }
+            return length.formatted(IntegerFormatStyle<Int>().grouping(.automatic))
+        }
+    }
+
+    /// Runs one Claude fixture turn whose session file logs every request (see
+    /// write_waste_session in scripts/fixtures/claude-code-fixture.py), with the
+    /// app reading the same Claude config directory the turn wrote to.
+    private func runClaudeTokenWasteTurn(title: String) throws -> (taskID: String, environment: [String: String]) {
+        var environment = try installClaudeFixture(named: "claude-fixture-ui-token-waste")
+        // The CLI forwards CLAUDE_CONFIG_DIR with its requests; the window's own
+        // bridge requests take the same directory from PLAYHOUSE_E2E_CLAUDE_CONFIG_DIR.
+        let claudeConfig = dataDirectory.appendingPathComponent("claude-config").path
+        environment["CLAUDE_CONFIG_DIR"] = claudeConfig
+        environment["PLAYHOUSE_E2E_CLAUDE_CONFIG_DIR"] = claudeConfig
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        let taskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        XCTAssertTrue(app.buttons[title].waitForExistence(timeout: 10))
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Show token waste."], extraEnvironment: environment)
+        return (taskID, environment)
+    }
+
+    private func openTokenStats(of title: String) {
+        app.buttons[title].rightClick()
+        let statsAction = element("token-stats-task-menu-item")
+        XCTAssertTrue(statsAction.waitForExistence(timeout: 5), "The task context menu should offer Token Stats.")
+        statsAction.click()
+        XCTAssertTrue(element("token-stats-section-overview").waitForExistence(timeout: 10), "Token Stats opens on its Overview section.")
+    }
+
+    /// `section` is the section's identifier suffix: wasters, tools, overhead or overview.
+    private func showTokenStatsSection(_ section: String) {
+        let tab = element("token-stats-section-\(section)")
+        XCTAssertTrue(tab.waitForExistence(timeout: 5), "Token Stats should offer its \(section) section.")
+        tab.click()
+    }
+
+    // case-contract: test_task_token_waste_ranks_claude_items_by_size | A task with no conversation reports its token map unavailable, with no wasters, tools or agents. After a Claude Code fixture turn whose session file logs every request (a shape, blobs, and transcript lines referenced by hash, including a parallel tool call sent as one message), the map reads the main agent and its subagent, and the main agent's final transcript tokens equal its last request's context exactly. The largest item is the MCP tool's 1,000-line log, ranked by the tokens it added, flagged as removed by the compaction, and sharing the tokens of the request it arrived in with its call by characters. The tools rollup ranks that MCP tool first by tokens added, the MCP server rollup counts its defined and called tools and what its definitions cost, the overhead lists the system prompt, each built-in tool definition and the server's definitions as sent with every request, the README read twice is one repeated result, the request that re-sent its context without the prompt cache is the one cache miss, and the compaction is counted. The Token Stats modal shows these in its Wasters, Tools & MCP and Overhead sections.
+    func test_task_token_waste_ranks_claude_items_by_size() throws {
+        let (taskID, environment) = try runClaudeTokenWasteTurn(title: "Claude token waste")
+        _ = try runCLI(["task", "create", "--title", "No conversation yet", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"])
+        XCTAssertTrue(app.buttons["No conversation yet"].waitForExistence(timeout: 10))
+        openTokenStats(of: "No conversation yet")
+        showTokenStatsSection("wasters")
+        XCTAssertTrue(element("token-stats-map-unavailable").waitForExistence(timeout: 10), "A task with no conversation has nothing to map.")
+        XCTAssertFalse(element("token-stats-raw-input-button").isEnabled, "There is no raw input to open yet.")
+        attachScreenshot(named: "A task with no conversation has no token map yet")
+        element("close-token-stats-button").click()
+        XCTAssertTrue(waitForDisappearance(element("token-stats-map-unavailable")))
+
+        openTokenStats(of: "Claude token waste")
+
+        showTokenStatsSection("wasters")
+        assertText("token-stats-waster-0-label", equals: "fixturelogs/query_logs")
+        XCTAssertTrue(element("token-stats-waster-0-removed").waitForExistence(timeout: 5), "The compaction removed the log.")
+        assertText("token-stats-waster-0-requests", equals: "×63")
+        let tokensPerCopy = try duplicateTokens(taskID: taskID, environment: environment)
+        assertText("token-stats-duplicate-0-copies", equals: "2 copies of \(tokensPerCopy)")
+        assertText("token-stats-cache-miss-0-request", equals: "Request 34")
+        attachScreenshot(named: "Wasters rank the MCP log first, then show the repeated read and the cache miss")
+
+        showTokenStatsSection("tools")
+        assertText("token-stats-measured-tool-fixturelogs/query_logs-total", equals: "18,000")
+        XCTAssertTrue(element("token-stats-measured-tool-Bash").exists, "Every tool that ran has its own row.")
+        assertText("token-stats-server-fixturelogs-total", equals: "18,000")
+        attachScreenshot(named: "Tools and MCP servers by the tokens they added")
+
+        showTokenStatsSection("overhead")
+        XCTAssertTrue(element(containingAccessibilityText: "MCP server fixturelogs · 2 tool definitions").waitForExistence(timeout: 5))
+        XCTAssertTrue(element(containingAccessibilityText: "System prompt (part 1)").exists)
+        XCTAssertTrue(element("token-stats-agent-claude/fxw").exists, "The subagent's file is its own agent.")
+        attachScreenshot(named: "Overhead sent with every request, and each agent")
+        element("close-token-stats-button").click()
+
+        let report = try XCTUnwrap(try runCLI(["task", "token-waste", taskID], extraEnvironment: environment)["result"] as? [String: Any])
+        let top = try XCTUnwrap((report["wasters"] as? [[String: Any]])?.first)
+        XCTAssertEqual(top["label"] as? String, "fixturelogs/query_logs")
+        XCTAssertEqual((report["tools"] as? [[String: Any]])?.first?["totalTokens"] as? Int, 18_000)
+    }
+
+    private func duplicateTokens(taskID: String, environment: [String: String]) throws -> String {
+        let report = try XCTUnwrap(try runCLI(["task", "token-waste", taskID], extraEnvironment: environment)["result"] as? [String: Any])
+        let tokens = try XCTUnwrap((report["duplicates"] as? [[String: Any]])?.first?["tokensPerCopy"] as? Int)
+        return tokens.formatted(IntegerFormatStyle<Int>().grouping(.automatic))
+    }
+
+    // case-contract: test_task_token_waste_ranks_codex_items_by_size | A Codex fixture turn whose thread and subagent have rollout files gives the same map from Codex's own format: a request was sent the instructions plus every item before its own output, the final transcript's tokens equal the last request's input exactly after a compaction replaced the history, Codex's unsaved tool definitions appear as one hidden-overhead item sent with every request, encrypted reasoning is shown by its size, the MCP tool's log is the largest item and was removed by the compaction, the repeated README read and the cache miss are reported, and the subagent's thread is its own agent. The raw input's final transcript lists the hidden overhead, the instructions and the replacement history once each without the removed log, and an item's full text, from a tool output or from the replacement history, reads back exactly as Codex saved it, in chunks, with its call named. The Token Stats modal shows the Codex wasters, the hidden overhead and the subagent, and showing the log opens its full text.
+    func test_task_token_waste_ranks_codex_items_by_size() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Codex token waste", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Codex token waste")
+        XCTAssertTrue(app.buttons["Codex token waste"].waitForExistence(timeout: 10))
+
+        // As in the Codex token usage case, the fixture holds the turn open
+        // until Playhouse reports its outcome, then completes it.
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-token-waste")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        let holdMarker = URL(fileURLWithPath: executable.path + ".hold-release")
+        let activeMarker = URL(fileURLWithPath: executable.path + ".turn-active")
+        let releaseMarker = URL(fileURLWithPath: executable.path + ".turn-release")
+        try Data().write(to: holdMarker)
+        try? FileManager.default.removeItem(at: activeMarker)
+        try? FileManager.default.removeItem(at: releaseMarker)
+        // The fixture writes its rollout under the Codex home the CLI forwards,
+        // which must be the one the window reads its session files from.
+        let process = try startCLIProcess(
+            ["conversation", "send", taskID, "--message", "Show token waste.", "--answer", "color=Blue", "--answer", "token=fixture-secret"],
+            extraEnvironment: [
+                "PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path,
+                "CODEX_HOME": dataDirectory.appendingPathComponent("codex-home").path,
+            ]
+        )
+        defer {
+            if process.process.isRunning {
+                try? "Release the active turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+                process.process.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: activeMarker)
+            try? FileManager.default.removeItem(at: releaseMarker)
+            try? FileManager.default.removeItem(at: holdMarker)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The fixture should hold the turn open for a CLI outcome report.")
+        _ = try runCLI(["task", "outcome", taskID, "completed"])
+        try "Release the completed fixture turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+        _ = try finishCLIProcess(process)
+        let threadID = try XCTUnwrap((try runCLI(["task", "get", taskID])["result"] as? [String: Any])?["codexThreadID"] as? String)
+
+        openTokenStats(of: "Codex token waste")
+        showTokenStatsSection("wasters")
+        assertText("token-stats-waster-0-label", equals: "fixturelogs/query_logs")
+        XCTAssertTrue(element("token-stats-waster-0-removed").waitForExistence(timeout: 5), "The compaction removed the log.")
+        assertText("token-stats-cache-miss-0-request", equals: "Request 4")
+        attachScreenshot(named: "Codex wasters rank the MCP log first")
+        element("token-stats-waster-0-show").click()
+        assertText("raw-input-text-label", equals: "fixturelogs/query_logs")
+        let firstLine = element("raw-input-text-line-1")
+        XCTAssertTrue(firstLine.waitForExistence(timeout: 10), "The Codex log's full text opens from its waster row.")
+        XCTAssertTrue(
+            accessibleLabelOrValue(of: firstLine).contains("2026-11-03T10:00:01Z INFO fixture log line 0001"),
+            "The first line is the log exactly as Codex saved it."
+        )
+        attachScreenshot(named: "Showing the Codex waster opens the log as Codex saved it")
+        element("close-raw-input-button").click()
+        showTokenStatsSection("overhead")
+        XCTAssertTrue(
+            element(containingAccessibilityText: "Tool definitions and other context Codex does not save").waitForExistence(timeout: 5),
+            "Codex's unsaved tool definitions show as one hidden-overhead line."
+        )
+        XCTAssertTrue(element("token-stats-agent-codex/\(threadID)-subagent").exists, "The subagent thread is its own agent.")
+        attachScreenshot(named: "Codex overhead includes the hidden tool definitions and the subagent")
+        element("close-token-stats-button").click()
+
+        let report = try XCTUnwrap(try runCLI(["task", "token-waste", taskID])["result"] as? [String: Any])
+        let overhead = try XCTUnwrap(report["overhead"] as? [[String: Any]])
+        XCTAssertTrue(overhead.contains { $0["kind"] as? String == "hiddenOverhead" && $0["everyRequest"] as? Bool == true })
+        XCTAssertEqual((report["agents"] as? [[String: Any]])?.first?["finalTranscriptTokens"] as? Int, 4_400)
+    }
+
+    // case-contract: test_task_raw_input_pages_final_transcript_without_duplicates | A task with no conversation has no raw input: its page is empty and reading an item's text is not_found. After a Claude Code fixture turn, the raw input lists the final transcript with each item once across pages and without the log a compaction removed; the everything-sent scope adds what was removed, ordering by size lists the largest first, a search finds the log by a word only its full text contains, and a focus item reports its position. An item's full text reads back in chunks that end on a line break and join to the exact text, with the call that produced it named. An unknown agent or item is not_found, and an unknown order or a limit of zero is invalid_argument. In the app, View raw input opens the final transcript, scrolling loads the next page of rows, showing the largest waster opens it in the everything-sent scope with its full text, and scrolling that text reaches its last line.
+    func test_task_raw_input_pages_final_transcript_without_duplicates() throws {
+        let (taskID, environment) = try runClaudeTokenWasteTurn(title: "Claude raw input")
+        let everything = try XCTUnwrap(try runCLI(
+            ["task", "raw-input", taskID, "--scope", "all", "--limit", "1000"], extraEnvironment: environment
+        )["result"] as? [String: Any])
+        let allRows = try XCTUnwrap(everything["rows"] as? [[String: Any]])
+        let lastRowID = try XCTUnwrap(allRows.last?["id"] as? Int)
+        XCTAssertGreaterThan(allRows.count, 100, "Enough items that the list needs a second page.")
+
+        openTokenStats(of: "Claude raw input")
+        let rawInputButton = element("token-stats-raw-input-button")
+        XCTAssertTrue(waitUntil({ rawInputButton.exists && rawInputButton.isEnabled }, timeout: 10), "The raw input opens once the map has loaded.")
+        rawInputButton.click()
+        assertText("raw-input-summary", equals: "10 items · 3,160 tokens")
+        XCTAssertTrue(element("raw-input-no-selection").exists)
+        attachScreenshot(named: "Raw input opens on the final transcript, each item once")
+
+        element("raw-input-scope-all").click()
+        let summary = element("raw-input-summary")
+        XCTAssertTrue(
+            waitUntil({ self.accessibleLabelOrValue(of: summary).hasPrefix("\(allRows.count) items") }, timeout: 10),
+            "Everything sent adds what the compaction removed."
+        )
+        let loadedRows = element("raw-input-loaded-rows")
+        assertText("raw-input-loaded-rows", equals: "100 of \(allRows.count) loaded")
+        XCTAssertFalse(element("raw-input-row-\(lastRowID)").exists, "Rows past the first page are not loaded yet.")
+        let list = element("raw-input-list")
+        let lastRow = element("raw-input-row-\(lastRowID)")
+        for _ in 0..<60 where !lastRow.exists {
+            list.scroll(byDeltaX: 0, deltaY: -800)
+        }
+        XCTAssertTrue(lastRow.waitForExistence(timeout: 10), "Scrolling to the end loads the next page of rows.")
+        XCTAssertTrue(
+            waitUntil({ self.accessibleLabelOrValue(of: loadedRows) == "\(allRows.count) of \(allRows.count) loaded" }, timeout: 10),
+            "The second page is fetched only once the list scrolls to its end."
+        )
+        attachScreenshot(named: "Scrolling the list loads the next page")
+        element("close-raw-input-button").click()
+
+        showTokenStatsSection("wasters")
+        let show = element("token-stats-waster-0-show")
+        XCTAssertTrue(show.waitForExistence(timeout: 5))
+        show.click()
+        assertText("raw-input-text-label", equals: "fixturelogs/query_logs")
+        let call = element("raw-input-text-call")
+        XCTAssertTrue(call.waitForExistence(timeout: 5), "A tool result names the call that produced it.")
+        let callText = accessibleLabelOrValue(of: call)
+        XCTAssertTrue(callText.contains("fixturelogs/query_logs") && callText.contains("5000"), "The call names the tool and its arguments: \(callText)")
+        XCTAssertTrue(element("raw-input-text-line-1").waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            waitUntil({ self.accessibleLabelOrValue(of: summary).hasPrefix("\(allRows.count) items") }, timeout: 10),
+            "A removed waster opens in the everything-sent scope."
+        )
+        attachScreenshot(named: "Showing the largest waster opens its full text")
+        let logLength = WasteFixture.logLength
+        let loadedText = element("raw-input-text-loaded")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: loadedText).hasSuffix("of \(logLength) characters loaded") }, timeout: 10))
+        XCTAssertFalse(
+            accessibleLabelOrValue(of: loadedText).hasPrefix("\(logLength) of"),
+            "Only the first chunk of the log is loaded before the text scrolls."
+        )
+        let text = element("raw-input-text")
+        let lastLine = element("raw-input-text-line-1000")
+        for _ in 0..<80 where !lastLine.exists {
+            text.scroll(byDeltaX: 0, deltaY: -1500)
+        }
+        XCTAssertTrue(lastLine.waitForExistence(timeout: 10), "Scrolling the text loads its later chunks up to the last line.")
+        assertText("raw-input-text-loaded", equals: "\(logLength) of \(logLength) characters loaded")
+        attachScreenshot(named: "Scrolling the log reaches its last line")
+        element("close-raw-input-button").click()
+        element("close-token-stats-button").click()
+    }
+
+    // case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
     func test_settings_token_usage_color_max_round_trip() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-max")
         launchApp(defaultParent: fixture.parent.path)
         let taskID = try XCTUnwrap((try runCLI([
-            "task", "create", "--title", "Dot heat task", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+            "task", "create", "--title", "Counter heat task", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any])?["id"] as? String)
-        XCTAssertTrue(app.buttons["Dot heat task"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Counter heat task"].waitForExistence(timeout: 10))
         // "Tell me a story." reports a task outcome, so it ends in exactly one
         // Claude result message instead of the several internal nudge turns an
         // outcome-less prompt would trigger in the same session.
@@ -12130,15 +12623,16 @@ final class PlayhouseUITests: XCTestCase {
             ["conversation", "send", taskID, "--message", "Tell me a story."],
             extraEnvironment: environment
         )
-        let dot = element("task-token-usage-dot-\(taskID)")
-        XCTAssertTrue(waitUntil({ dot.exists && dot.label == "1K tokens used" }, timeout: 15))
+        let counter = element("task-token-usage-counter-\(taskID)")
+        // One fixture turn sends 1,840 tokens over four calls (two of them a subagent's).
+        XCTAssertTrue(waitUntil({ counter.exists && counter.label == "1.8K tokens sent · 4 calls · 650 final transcript" }, timeout: 15))
 
         XCTAssertEqual(
-            (try runCLI(["settings", "get"])["result"] as? [String: Any])?["tokenUsageColorMax"] as? Int, 1_000_000,
-            "The dot's scale tops out at a million tokens by default."
+            (try runCLI(["settings", "get"])["result"] as? [String: Any])?["tokenUsageColorMax"] as? Int, 20_000_000,
+            "The counter's scale tops out at twenty million tokens by default."
         )
-        XCTAssertTrue(waitUntil({ self.isGreenDominant(dot) }, timeout: 10), "1,600 tokens of a million should still read as cool green.")
-        attachScreenshot(named: "Usage dot reads green against the default million-token ceiling")
+        XCTAssertTrue(waitUntil({ self.isGreenDominant(counter) }, timeout: 10), "1,840 tokens of twenty million should still read as cool green.")
+        attachScreenshot(named: "Token counter reads green against the default twenty-million ceiling")
 
         app.typeKey(",", modifierFlags: .command)
         let preferences = settingsWindow
@@ -12146,7 +12640,7 @@ final class PlayhouseUITests: XCTestCase {
         let maxField = preferences.descendants(matching: .any)
             .matching(identifier: "token-usage-color-max-field").firstMatch
         XCTAssertTrue(maxField.waitForExistence(timeout: 5), "Settings should expose the token usage maximum.")
-        XCTAssertEqual(maxField.value as? String, "1,000,000", "The field should show the stored maximum.")
+        XCTAssertEqual(maxField.value as? String, "20,000,000", "The field should show the stored maximum.")
         attachScreenshot(named: "Workspace Settings exposes the token usage color maximum")
         maxField.click()
         maxField.typeKey("a", modifierFlags: .command)
@@ -12157,8 +12651,8 @@ final class PlayhouseUITests: XCTestCase {
         app.typeKey("w", modifierFlags: .command)
         XCTAssertTrue(waitUntil({ !preferences.exists }, timeout: 5))
 
-        XCTAssertTrue(waitUntil({ self.isRedDominant(dot) }, timeout: 10), "The same usage should read hot once it reaches the ceiling.")
-        attachScreenshot(named: "Usage dot turns red once the ceiling drops to the task's own usage")
+        XCTAssertTrue(waitUntil({ self.isRedDominant(counter) }, timeout: 10), "The same usage should read hot once it reaches the ceiling.")
+        attachScreenshot(named: "Token counter turns red once the ceiling drops to the task's own usage")
 
         assertCLIError(
             try runCLI(["settings", "set-token-usage-color-max", "0"], expectedStatus: 2),
@@ -13245,6 +13739,36 @@ final class PlayhouseUITests: XCTestCase {
                 throw NSError(domain: "PlayhouseUITests", code: 4, userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(database))])
             }
         }
+    }
+
+    /// Scrolls `scrollView` until `element` sits fully inside it, or, for an element taller than
+    /// the scroll view, until its top edge is at the scroll view's top. Custom accessibility
+    /// elements, such as one paragraph of a reply's shared text, are not scrolled into view by a
+    /// click.
+    @discardableResult
+    private func scrollFullyIntoView(_ element: XCUIElement, in scrollView: XCUIElement, margin: CGFloat = 8) -> Bool {
+        for _ in 0..<40 {
+            let viewport = scrollView.frame
+            let frame = element.frame
+            let delta: CGFloat
+            if frame.height > viewport.height {
+                let offset = frame.minY - viewport.minY
+                if abs(offset) <= 4 { return true }
+                delta = -offset
+            } else {
+                // An element nearly as tall as the viewport fits only with a smaller margin.
+                let margin = min(margin, (viewport.height - frame.height) / 2)
+                if frame.minY < viewport.minY + margin {
+                    delta = viewport.minY + margin - frame.minY
+                } else if frame.maxY > viewport.maxY - margin {
+                    delta = viewport.maxY - margin - frame.maxY
+                } else {
+                    return true
+                }
+            }
+            scrollView.scroll(byDeltaX: 0, deltaY: max(-100, min(100, delta)))
+        }
+        return false
     }
 
     /// Opening a conversation renders only its newest turn, and older batches load as the

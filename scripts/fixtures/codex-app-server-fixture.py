@@ -75,9 +75,115 @@ TURN_USAGE = {
 TURN_USAGE_TOTAL = sum(TURN_USAGE.values())
 
 
+def breakdown(input_tokens, cached, output_tokens):
+    return {"inputTokens": input_tokens, "cachedInputTokens": cached, "cacheWriteInputTokens": 0,
+            "outputTokens": output_tokens, "reasoningOutputTokens": 0,
+            "totalTokens": input_tokens + output_tokens}
+
+
+def token_usage_notification(thread_id, turn_id, last, total):
+    return {"method": "thread/tokenUsage/updated", "params": {
+        "threadId": thread_id, "turnId": turn_id,
+        "tokenUsage": {"last": last, "total": total, "modelContextWindow": 258400}}}
+
+
+def call_usage_notifications(thread_id, turn_id):
+    """What a real app-server streams per model call, ahead of the turn's end.
+
+    The main thread makes two calls (sending 700 then 900 tokens, so the final
+    transcript is 900) and repeats the second notification; a subagent thread
+    announces itself with its parent and makes one call sending 300. Codex's
+    input count includes its cached tokens, so "sent" is the input count itself.
+    """
+    subagent = f"{thread_id}-subagent"
+    first, second = breakdown(700, 500, 30), breakdown(900, 600, 40)
+    cumulative = breakdown(1600, 1100, 70)
+    sub = breakdown(300, 100, 10)
+    return [
+        token_usage_notification(thread_id, turn_id, first, first),
+        token_usage_notification(thread_id, turn_id, second, cumulative),
+        token_usage_notification(thread_id, turn_id, second, cumulative),
+        {"method": "thread/started", "params": {"thread": {"id": subagent, "parentThreadId": thread_id}}},
+        token_usage_notification(subagent, f"{turn_id}-subagent", sub, sub),
+    ]
+
+
+# The token-waste rollout: what Codex writes to `$CODEX_HOME/sessions` for a
+# thread, with one `token_usage_record` per model request whose input adds up
+# exactly. An MCP tool returns a 1,000-line log, README.md is read twice, one
+# request misses the prompt cache, and a compaction drops the log from the
+# final context. A subagent thread gets its own small rollout.
+WASTE_LOG = "".join(
+    f"2026-11-03T10:{index // 60 % 60:02d}:{index % 60:02d}Z INFO fixture log line {index:04d} "
+    f"{'NEEDLE-42 ' if index == 900 else ''}request ok path=/api/orc/builds/{index:04d}\n"
+    for index in range(1, 1001)
+)
+WASTE_README = "Fixture README.\n" + "This project is a deterministic fixture for token accounting.\n" * 10
+
+
+def write_waste_rollouts(thread_id):
+    home = os.environ.get("CODEX_HOME")
+    if not home or not thread_id:
+        return
+    directory = Path(home) / "sessions" / "2026" / "11" / "03"
+    directory.mkdir(parents=True, exist_ok=True)
+
+    def item(payload):
+        return {"type": "response_item", "payload": payload}
+
+    def message(role, text):
+        kind = "output_text" if role == "assistant" else "input_text"
+        return item({"type": "message", "role": role, "content": [{"type": kind, "text": text}]})
+
+    def record(input_tokens, cached):
+        return {"type": "token_usage_record", "payload": {"usage": {
+            "input_tokens": input_tokens, "cached_input_tokens": cached, "output_tokens": 20}}}
+
+    main = [
+        {"type": "session_meta", "payload": {"id": thread_id, "base_instructions": {"text": "You are the Codex fixture. " * 80}}},
+        message("developer", "<permissions instructions>\nThe fixture may run any command.\n</permissions instructions>"),
+        message("user", "# AGENTS.md instructions for the fixture\nKeep answers short."),
+        message("user", "Show token waste."),
+        item({"type": "reasoning", "summary": [], "encrypted_content": "gAAAA" + "x" * 300}),
+        item({"type": "function_call", "namespace": "mcp__fixturelogs", "name": "query_logs",
+              "arguments": json.dumps({"stream": "orc", "limit": 5000}), "call_id": "call_waste_logs"}),
+        record(4000, 0),
+        item({"type": "function_call_output", "call_id": "call_waste_logs", "output": WASTE_LOG}),
+        item({"type": "custom_tool_call", "name": "exec", "input": "cat README.md", "call_id": "call_waste_read1"}),
+        record(19000, 3900),
+        item({"type": "custom_tool_call_output", "call_id": "call_waste_read1", "output": WASTE_README}),
+        item({"type": "custom_tool_call", "name": "exec", "input": "cat README.md", "call_id": "call_waste_read2"}),
+        record(19300, 18900),
+        item({"type": "custom_tool_call_output", "call_id": "call_waste_read2", "output": WASTE_README}),
+        message("assistant", "Logs and README checked."),
+        record(19600, 100),
+        {"type": "compacted", "payload": {"message": "", "replacement_history": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Show token waste."}]},
+            {"type": "compaction", "encrypted_content": "gAAAA" + "y" * 400},
+        ]}},
+        message("user", "Continue."),
+        record(4400, 3900),
+        message("assistant", "Token waste shown."),
+    ]
+    subagent = [
+        {"type": "session_meta", "payload": {"id": f"{thread_id}-subagent", "base_instructions": {"text": "You are a fixture subagent. " * 10}}},
+        message("user", "Find the README."),
+        record(300, 0),
+        message("assistant", "Found it."),
+    ]
+    for name, lines in ((thread_id, main), (f"{thread_id}-subagent", subagent)):
+        with open(directory / f"rollout-2026-11-03T10-00-00-{name}.jsonl", "w", encoding="utf-8") as handle:
+            for line in lines:
+                handle.write(json.dumps({"timestamp": "2026-11-03T10:00:00.000Z", **line}) + "\n")
+
+
 def write(value):
     if (isinstance(value, dict) and value.get("method") == "turn/completed"
             and "usage" not in value.get("params", {})):
+        params = value["params"]
+        for notification in call_usage_notifications(params.get("threadId"), (params.get("turn") or {}).get("id")):
+            sys.stdout.write(json.dumps(notification, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
         value = {**value, "params": {**value["params"], "usage": dict(TURN_USAGE)}}
     sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
     sys.stdout.flush()
@@ -867,6 +973,8 @@ def main():
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
                 return
+            if "-token-waste" in mode:
+                write_waste_rollouts(turn_thread_id)
             image_inputs = [item for item in turn_input if item.get("type") == "image"]
             turn_history = {
                 "userMessage": turn_message,

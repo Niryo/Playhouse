@@ -20,6 +20,7 @@
 		A10000000000000000000014 /* ConversationTranscriptStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* ConversationTranscriptStore.swift */; };
 		A10000000000000000000019 /* StandaloneChatStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000019 /* StandaloneChatStore.swift */; };
 		A1000000000000000000001A /* ConversationSubject.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001A /* ConversationSubject.swift */; };
+		A1000000000000000000001D /* ProviderRequestLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001D /* ProviderRequestLog.swift */; };
 		A10000000000000000000008 /* WorkspaceSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* WorkspaceSupport.swift */; };
 		A10000000000000000000009 /* BridgeCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* BridgeCore.swift */; };
 		A1000000000000000000000A /* BridgeContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* BridgeContract.swift */; };
@@ -36,6 +37,7 @@
 		A10000000000000000000018 /* BridgeSocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* BridgeSocket.swift */; };
 		A1000000000000000000001B /* ProcessCPUSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001B /* ProcessCPUSampler.swift */; };
 		A1000000000000000000001C /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002 /* GRDB */; };
+		A100000000000000000000DB /* DebugConversationImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000000000000000000DB /* DebugConversationImport.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -62,6 +64,7 @@
 		A20000000000000000000014 /* ConversationTranscriptStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscriptStore.swift; sourceTree = "<group>"; };
 		A20000000000000000000019 /* StandaloneChatStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StandaloneChatStore.swift; sourceTree = "<group>"; };
 		A2000000000000000000001A /* ConversationSubject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSubject.swift; sourceTree = "<group>"; };
+		A2000000000000000000001D /* ProviderRequestLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderRequestLog.swift; sourceTree = "<group>"; };
 		A2000000000000000000000A /* WorkspaceSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSupport.swift; sourceTree = "<group>"; };
 		A2000000000000000000000B /* BridgeCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeCore.swift; sourceTree = "<group>"; };
 		A2000000000000000000000C /* BridgeContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/BridgeContract.swift; sourceTree = "<group>"; };
@@ -79,6 +82,7 @@
 		A20000000000000000000017 /* RemoteConversationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteConversationManager.swift; sourceTree = "<group>"; };
 		A20000000000000000000018 /* BridgeSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/BridgeSocket.swift; sourceTree = "<group>"; };
 		A2000000000000000000001B /* ProcessCPUSampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessCPUSampler.swift; sourceTree = "<group>"; };
+		A200000000000000000000DB /* DebugConversationImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugConversationImport/DebugConversationImport.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -154,6 +158,7 @@
 				A20000000000000000000014 /* ConversationTranscriptStore.swift */,
 				A20000000000000000000019 /* StandaloneChatStore.swift */,
 				A2000000000000000000001A /* ConversationSubject.swift */,
+				A2000000000000000000001D /* ProviderRequestLog.swift */,
 				A2000000000000000000000A /* WorkspaceSupport.swift */,
 				A2000000000000000000000B /* BridgeCore.swift */,
 				A2000000000000000000000C /* BridgeContract.swift */,
@@ -164,6 +169,7 @@
 				A20000000000000000000017 /* RemoteConversationManager.swift */,
 				A20000000000000000000016 /* DaemonClient.swift */,
 				A2000000000000000000001B /* ProcessCPUSampler.swift */,
+				A200000000000000000000DB /* DebugConversationImport.swift */,
 			);
 			path = Playhouse/App;
 			sourceTree = "<group>";
@@ -367,6 +373,7 @@
 				"$(SRCROOT)/Playhouse/App/ConversationTranscriptStore.swift",
 				"$(SRCROOT)/Playhouse/App/StandaloneChatStore.swift",
 				"$(SRCROOT)/Playhouse/App/ConversationSubject.swift",
+				"$(SRCROOT)/Playhouse/App/ProviderRequestLog.swift",
 			);
 			name = "Build CLI and bridge daemon";
 			outputPaths = (
@@ -411,6 +418,7 @@
 				A10000000000000000000014 /* ConversationTranscriptStore.swift in Sources */,
 				A10000000000000000000019 /* StandaloneChatStore.swift in Sources */,
 				A1000000000000000000001A /* ConversationSubject.swift in Sources */,
+				A1000000000000000000001D /* ProviderRequestLog.swift in Sources */,
 				A10000000000000000000008 /* WorkspaceSupport.swift in Sources */,
 				A10000000000000000000009 /* BridgeCore.swift in Sources */,
 				A1000000000000000000000A /* BridgeContract.swift in Sources */,
@@ -421,6 +429,7 @@
 				A10000000000000000000017 /* RemoteConversationManager.swift in Sources */,
 				A10000000000000000000016 /* DaemonClient.swift in Sources */,
 				A1000000000000000000001B /* ProcessCPUSampler.swift in Sources */,
+				A100000000000000000000DB /* DebugConversationImport.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

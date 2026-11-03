@@ -2190,6 +2190,7 @@ final class BoardTaskManager {
                 throw BridgeCommandError(code: "invalid_transition", message: "Start the task conversation before creating a pull request so its repository worktree is ready.")
             }
             var records = originalRecords
+            var unchangedPaths: Set<String> = []
             for index in records.indices where records[index].pullRequestNumber == nil || records[index].pullRequestURL == nil {
                 do {
                     // `--head` skips gh's push flow, and `gh pr list` also needs a
@@ -2202,6 +2203,9 @@ final class BoardTaskManager {
                 if let existing = try await pullRequestService.findOpen(records[index], executable: gh) {
                     records[index].pullRequestNumber = existing.number
                     records[index].pullRequestURL = existing.url
+                } else if try await !worktreeService.hasCommitsAheadOfMergeTarget(records[index]) {
+                    // A repository the task never changed has nothing to propose.
+                    unchangedPaths.insert(records[index].repositoryPath)
                 }
             }
             let taskAfterLookup = try requireTask(id)
@@ -2210,10 +2214,16 @@ final class BoardTaskManager {
             }
             taskAfterLookup.repositoryWorktrees = records
             try await saveTaskContext(taskID: id)
-            return (gh, records, BoardTaskRecord(task: taskAfterLookup))
+            return (gh, records, unchangedPaths, BoardTaskRecord(task: taskAfterLookup))
         }
-        let (gh, records, lookedUpRecords) = lookup
-        guard records.contains(where: { $0.pullRequestNumber == nil || $0.pullRequestURL == nil }) else {
+        let (gh, records, unchangedPaths, lookedUpRecords) = lookup
+        func needsPullRequest(_ record: RepositoryWorktreeRecord) -> Bool {
+            (record.pullRequestNumber == nil || record.pullRequestURL == nil) && !unchangedPaths.contains(record.repositoryPath)
+        }
+        guard records.contains(where: needsPullRequest) else {
+            if records.allSatisfy({ $0.pullRequestNumber == nil }) {
+                throw BridgeCommandError(code: "invalid_transition", message: "No repository in this task has changes to open a pull request for.")
+            }
             return lookedUpRecords
         }
 
@@ -2266,7 +2276,7 @@ final class BoardTaskManager {
             }
             var updatedRecords = records
             var expectedRecords = records
-            for index in updatedRecords.indices where updatedRecords[index].pullRequestNumber == nil || updatedRecords[index].pullRequestURL == nil {
+            for index in updatedRecords.indices where needsPullRequest(updatedRecords[index]) {
                 let record = updatedRecords[index]
                 let pullRequest: GitHubPullRequestManager.PullRequest
                 if let existing = try await pullRequestService.findOpen(record, executable: gh) {
@@ -2670,7 +2680,13 @@ final class BoardTaskManager {
     /// breakdown rather than ahead of it: the modal (which reads the rows) and
     /// the diagnostics log both see the gap, instead of the dot silently
     /// counting a turn that never appears in the breakdown.
-    func recordTokenUsage(taskID: UUID, provider: ConversationProvider, report: ConversationTurnUsageReport) async throws {
+    func recordTokenUsage(
+        taskID: UUID, provider: ConversationProvider, sourceID: String, report: ConversationTurnUsageReport
+    ) async throws {
+        if let call = report.liveCall {
+            try await recordLiveCall(taskID: taskID, provider: provider, sourceID: sourceID, call: call)
+            return
+        }
         guard !report.usage.isEmpty else { return }
         if let turnID = report.turnID {
             try conversationTranscriptStore().mutate(taskID, turns: .none) { transcript in
@@ -2703,6 +2719,50 @@ final class BoardTaskManager {
         ])
     }
 
+    /// Adds one streamed model call to the session's snapshot, so the card's
+    /// counter climbs while the turn runs rather than jumping at its end.
+    private func recordLiveCall(taskID: UUID, provider: ConversationProvider, sourceID: String, call: ConversationLiveCall) async throws {
+        try await withTaskOperationLock(taskID) {
+            let task = try self.requireSubject(taskID)
+            var snapshots = task.callUsageSnapshots
+            let key = "\(provider.rawValue):\(sourceID)"
+            var snapshot = snapshots[key] ?? ConversationCallUsageSnapshot(provider: provider.rawValue, updatedAt: .now)
+            var agent = call.agentID.map { snapshot.subagents[$0] ?? ConversationCallUsage() } ?? snapshot.main
+            agent.calls += call.calls
+            agent.sentTokens += call.sentTokens
+            agent.outputTokens += call.outputTokens
+            if call.calls > 0 { agent.lastContextTokens = call.contextTokens }
+            if let agentID = call.agentID { snapshot.subagents[agentID] = agent } else { snapshot.main = agent }
+            snapshot.updatedAt = .now
+            snapshots[key] = snapshot
+            task.callUsageSnapshots = snapshots
+            try await self.saveTaskContext(taskID: taskID)
+        }
+    }
+
+    /// Replaces a Claude session's live-accumulated snapshot with what its
+    /// session files hold, which also covers every subagent's final calls and
+    /// the output counts that were still growing while streaming.
+    func refreshClaudeCallUsage(taskID: UUID, sessionID: String, configDirectory: String) async throws {
+        let snapshot = await Task.detached(priority: .utility) {
+            ClaudeSessionUsageReader.read(sessionID: sessionID, configDirectory: configDirectory)
+        }.value
+        guard var snapshot else { return }
+        try await withTaskOperationLock(taskID) {
+            let task = try self.requireSubject(taskID)
+            var snapshots = task.callUsageSnapshots
+            snapshot.updatedAt = .now
+            snapshots["\(ConversationProvider.claude.rawValue):\(sessionID)"] = snapshot
+            task.callUsageSnapshots = snapshots
+            try await self.saveTaskContext(taskID: taskID)
+        }
+        PlayhouseDiagnostics.record("task.call_usage.refreshed", fields: [
+            "taskID": taskID.uuidString,
+            "calls": String(snapshot.totalCalls),
+            "sentTokens": String(snapshot.totalSentTokens),
+        ])
+    }
+
     func tokenUsageSummary(_ id: UUID) throws -> TaskTokenUsageSummary {
         let task = try requireSubject(id)
         let rows = (try? conversationTranscriptStore().readState(id).tokenUsage) ?? []
@@ -2726,8 +2786,60 @@ final class BoardTaskManager {
                 .map { TaskTokenUsageSummary.Tool(id: $0.key, turnCount: $0.value.turnCount, totalTokens: $0.value.totalTokens) }
                 .sorted { lhs, rhs in
                     lhs.totalTokens != rhs.totalTokens ? lhs.totalTokens > rhs.totalTokens : lhs.id < rhs.id
-                }
+                },
+            callUsage: TaskTokenUsageSummary.CallUsage(snapshots: Array(task.callUsageSnapshots.values))
         )
+    }
+
+    /// The provider sessions whose files hold what this task's requests were
+    /// sent, the current provider's first so it is the default agent.
+    private func tokenMapSessions(_ id: UUID) throws -> [ProviderSessionReference] {
+        let subject = try requireSubject(id)
+        let snapshots = subject.callUsageSnapshots
+        let providers = [subject.conversationProvider] + ConversationProvider.allCases.filter { $0 != subject.conversationProvider }
+        return providers.compactMap { provider in
+            guard let sessionID = subject.conversationID(for: provider) else { return nil }
+            let subagents = snapshots["\(provider.rawValue):\(sessionID)"]?.subagents.keys.sorted() ?? []
+            return ProviderSessionReference(
+                provider: provider, sessionID: sessionID, subagentThreadIDs: provider == .codex ? subagents : []
+            )
+        }
+    }
+
+    /// What filled this task's context, ranked by the tokens each item, tool
+    /// and MCP server added, read from the providers' own session files.
+    func tokenWasteReport(_ id: UUID, homes: ProviderSessionHomes) async throws -> TaskTokenWasteReport {
+        let sessions = try tokenMapSessions(id)
+        return await Task.detached(priority: .userInitiated) {
+            ProviderTokenMap.wasteReport(taskID: id, agents: ProviderTokenMap.load(sessions: sessions, homes: homes))
+        }.value
+    }
+
+    /// One page of an agent's context: the final transcript, or everything ever sent.
+    func rawInputPage(
+        _ id: UUID, homes: ProviderSessionHomes, agent: String?, scope: TaskRawInputScope, order: TaskRawInputOrder,
+        query: String, offset: Int, limit: Int, focus: Int?
+    ) async throws -> TaskRawInputPage {
+        let sessions = try tokenMapSessions(id)
+        return try await Task.detached(priority: .userInitiated) {
+            try ProviderTokenMap.page(
+                taskID: id, agents: ProviderTokenMap.load(sessions: sessions, homes: homes), agent: agent,
+                scope: scope, order: order, query: query, offset: offset, limit: limit, focus: focus
+            )
+        }.value
+    }
+
+    /// One chunk of an item's full text, exactly as the model received it.
+    func rawInputText(
+        _ id: UUID, homes: ProviderSessionHomes, agent: String?, item: Int, offset: Int, length: Int
+    ) async throws -> TaskRawInputText {
+        let sessions = try tokenMapSessions(id)
+        return try await Task.detached(priority: .userInitiated) {
+            try ProviderTokenMap.text(
+                taskID: id, agents: ProviderTokenMap.load(sessions: sessions, homes: homes), agent: agent,
+                item: item, offset: offset, length: length
+            )
+        }.value
     }
 
     /// `reason` explains a `nil` percent: `"not_running"` for an idle or
@@ -5316,6 +5428,10 @@ final class ConversationManager {
             throw BridgeCommandError(code: "invalid_transition", message: "That follow-up is no longer available to steer.")
         }
         try tasks.reserveQueuedMessageForSteering(taskID: taskID, messageID: messageID)
+        // Windows hide a follow-up while it is reserved, so announce the reservation
+        // and, on every exit, its removal or return to the queue.
+        Self.bumpVisibleRevision(taskID)
+        defer { Self.bumpVisibleRevision(taskID) }
         do {
             let accepted = try await steer(taskID: taskID, text: item.text, imageDataURLs: item.imageDataURLs ?? [])
             if accepted {
@@ -5852,6 +5968,10 @@ final class ConversationManager {
                 do { item = try tasks.claimNextQueuedMessage(taskID: taskID, threadID: threadID, messageID: messageIDFilter) }
                 catch { break }
                 guard let item else { break }
+                // Windows hide a follow-up while it is claimed, so announce the claim
+                // and, however delivery ends, its removal or return as needs-action.
+                Self.bumpVisibleRevision(taskID)
+                defer { Self.bumpVisibleRevision(taskID) }
                 do {
                     _ = try await send(
                         taskID: taskID,
@@ -5972,6 +6092,10 @@ final class ConversationManager {
             PlayhouseDiagnostics.record("conversation.transcript.write_failed", fields: fields)
         }
     }
+
+    func debugImportRecordClaudeMessage(taskID: UUID, turnID: String, modelID: String?, _ message: ConversationMessage) { recordClaudeMessage(taskID: taskID, turnID: turnID, modelID: modelID, message) } // DEBUG-IMPORT:
+    func debugImportRecordClaudeActivity(taskID: UUID, turnID: String, _ activity: ConversationActivity) { recordClaudeActivity(taskID: taskID, turnID: turnID, activity) } // DEBUG-IMPORT:
+    func debugImportPrepareSegmentID(taskID: UUID) async throws -> String? { try await prepareSegment(task: tasks.conversationSubject(taskID))?.segmentID } // DEBUG-IMPORT:
 
     /// Claude reports a background agent's result on its task notification,
     /// outside the parent assistant response. Persist that report as a normal
@@ -6623,11 +6747,17 @@ final class ConversationManager {
                     let attributed = ConversationTurnUsageReport(
                         turnID: isHidden ? nil : (provider == .claude ? claudeTurnID : report.turnID),
                         usage: report.usage,
-                        toolLabels: isHidden ? [] : report.toolLabels
+                        toolLabels: isHidden ? [] : report.toolLabels,
+                        liveCall: report.liveCall
                     )
+                    let claudeConfigDirectory = (client as? ClaudeCodeClient)?.configDirectory
                     Task { @MainActor in
                         do {
-                            try await self.tasks.recordTokenUsage(taskID: taskID, provider: provider, report: attributed)
+                            try await self.tasks.recordTokenUsage(taskID: taskID, provider: provider, sourceID: threadID, report: attributed)
+                            // A Claude result closes a turn: settle the live counts against the session files.
+                            if provider == .claude, attributed.liveCall == nil, let claudeConfigDirectory {
+                                try await self.tasks.refreshClaudeCallUsage(taskID: taskID, sessionID: threadID, configDirectory: claudeConfigDirectory)
+                            }
                         } catch {
                             var fields = PlayhouseDiagnostics.errorFields(error)
                             fields["taskID"] = taskID.uuidString
@@ -7188,6 +7318,7 @@ final class PlayhouseBridgeRuntime {
 
             let codexExecutable = request.arguments["__codexExecutable"]?.string
             let claudeExecutable = request.arguments["__claudeExecutable"]?.string
+            let claudeConfigDirectory = request.arguments["__claudeConfigDirectory"]?.string
             // A window's requests run goals against one long-lived Codex client
             // that observes goal turns, as the window's own client used to.
             let guiRuntime = request.arguments["__guiRuntime"]?.bool == true
@@ -7196,7 +7327,7 @@ final class PlayhouseBridgeRuntime {
             func conversationClients(codexHome: String? = nil, goalFeatureEnabled: Bool = false) -> ConversationClients {
                 ConversationClients(
                     codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: codexHome ?? callerCodexHome, goalFeatureEnabled: goalFeatureEnabled, goalRuntimeEnabled: guiRuntime, dataDirectory: dataDirectory),
-                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, dataDirectory: dataDirectory)
+                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, configDirectoryOverride: claudeConfigDirectory, dataDirectory: dataDirectory)
                 )
             }
 
@@ -7233,6 +7364,36 @@ final class PlayhouseBridgeRuntime {
             case "task.token-usage":
                 let taskID = try request.requiredUUID("taskID")
                 result = try Self.value(taskManager.tokenUsageSummary(taskID))
+            case "task.token-waste":
+                let taskID = try request.requiredUUID("taskID")
+                let homes = ProviderSessionHomes.resolve(claudeConfigDirectory: claudeConfigDirectory, codexHome: callerCodexHome)
+                result = try Self.value(await taskManager.tokenWasteReport(taskID, homes: homes))
+            case "task.raw-input":
+                let taskID = try request.requiredUUID("taskID")
+                let homes = ProviderSessionHomes.resolve(claudeConfigDirectory: claudeConfigDirectory, codexHome: callerCodexHome)
+                result = try Self.value(await taskManager.rawInputPage(
+                    taskID, homes: homes,
+                    agent: request.arguments["agent"]?.string,
+                    scope: request.optionalChoice("scope", default: TaskRawInputScope.finalTranscript),
+                    order: request.optionalChoice("order", default: TaskRawInputOrder.transcript),
+                    query: request.arguments["query"]?.string ?? "",
+                    offset: request.optionalInteger("offset", in: 0...Int.max) ?? 0,
+                    limit: request.optionalInteger("limit", in: 1...1_000) ?? 100,
+                    focus: request.optionalInteger("focus", in: 0...Int.max)
+                ))
+            case "task.raw-input-text":
+                let taskID = try request.requiredUUID("taskID")
+                let homes = ProviderSessionHomes.resolve(claudeConfigDirectory: claudeConfigDirectory, codexHome: callerCodexHome)
+                guard let item = try request.optionalInteger("item", in: 0...Int.max) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Argument item must name an item of the raw input.")
+                }
+                result = try Self.value(await taskManager.rawInputText(
+                    taskID, homes: homes,
+                    agent: request.arguments["agent"]?.string,
+                    item: item,
+                    offset: request.optionalInteger("offset", in: 0...Int.max) ?? 0,
+                    length: request.optionalInteger("length", in: 1...Int.max) ?? ProviderTokenMap.defaultTextChunk
+                ))
             case "task.cpu-usage":
                 let taskID = try request.requiredUUID("taskID")
                 result = try Self.value(await taskManager.cpuUsage(taskID, dataDirectory: dataDirectory))
@@ -7978,6 +8139,32 @@ private extension BridgeRequest {
             throw BridgeCommandError(code: "invalid_argument", message: "The history limit must be a positive number of messages.")
         }
         return limit
+    }
+
+    /// A whole-number argument, sent by the CLI as text; out of `range` is a caller error.
+    func optionalInteger(_ name: String, in range: ClosedRange<Int>) throws -> Int? {
+        guard let raw = arguments[name] else { return nil }
+        let value: Int?
+        switch raw {
+        case .integer(let number): value = number
+        case .string(let text): value = Int(text)
+        default: value = nil
+        }
+        guard let value, range.contains(value) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Argument \(name) must be a whole number from \(range.lowerBound)\(range.upperBound == Int.max ? " up" : " to \(range.upperBound)").")
+        }
+        return value
+    }
+
+    /// One of a fixed set of named choices, `fallback` when the argument is absent.
+    func optionalChoice<Choice: RawRepresentable & CaseIterable>(_ name: String, default fallback: Choice) throws -> Choice
+    where Choice.RawValue == String {
+        guard let raw = arguments[name]?.string else { return fallback }
+        guard let choice = Choice(rawValue: raw) else {
+            let names = Choice.allCases.map(\.rawValue).joined(separator: ", ")
+            throw BridgeCommandError(code: "invalid_argument", message: "Argument \(name) must be one of: \(names).")
+        }
+        return choice
     }
 
     func requiredUUID(_ name: String) throws -> UUID {
