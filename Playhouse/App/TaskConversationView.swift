@@ -105,7 +105,7 @@ private struct CodeBlockCardView: View {
                 }
                 .buttonStyle(.plain)
                 .buttonHoverPointer()
-                .help("Copy code")
+                .nativeHelp("Copy code")
                 .accessibilityLabel("Copy code")
                 .accessibilityIdentifier("assistant-markdown-code-block-copy-\(blockID)")
             }
@@ -621,7 +621,12 @@ struct TaskConversationView: View {
     /// top of the viewport with its answer below.
     private var latestConversationTurnStartID: String? {
         let allMessages = conversationMessages
-        return allMessages.last(where: { $0.role == .user })?.id ?? allMessages.last?.id
+        // Prompts Playhouse sends on its own are not a turn the user started: anchoring the
+        // window there would hide the conversation the recovery is continuing.
+        // When redaction has replaced every user message, the placeholders are all there is to anchor on.
+        return allMessages.last(where: { $0.role == .user && !PrivatePromptPlaceholder.matches($0.text) })?.id
+            ?? allMessages.last(where: { $0.role == .user })?.id
+            ?? allMessages.last?.id
     }
 
     /// Height of the newest turn, from its question to the end of the
@@ -957,7 +962,7 @@ struct TaskConversationView: View {
                         .keyboardShortcut(.cancelAction)
                         .accessibilityIdentifier("close-chat-image-viewer")
                         .buttonHoverPointer()
-                        .help("Close the full-size image")
+                        .nativeHelp("Close the full-size image")
                     Image(nsImage: selectedChatImage)
                         .resizable()
                         .scaledToFit()
@@ -1139,7 +1144,7 @@ struct TaskConversationView: View {
                 }
                 .buttonHoverPointer()
                 .buttonStyle(.plain)
-                .help("Refresh workspace changes")
+                .nativeHelp("Refresh workspace changes")
                 .accessibilityLabel("Refresh workspace changes")
                 .accessibilityIdentifier("refresh-workspace-changes-button")
                 .disabled(isLoadingChanges)
@@ -1165,7 +1170,7 @@ struct TaskConversationView: View {
                         Task { await refreshWorkspaceChanges() }
                     }
                     .buttonHoverPointer()
-                    .help("Retry")
+                    .nativeHelp("Retry")
                     .font(.system(size: 11, weight: .medium))
                     .accessibilityIdentifier("retry-workspace-changes-button")
                 }
@@ -1294,7 +1299,7 @@ struct TaskConversationView: View {
                             }
                             .buttonHoverPointer()
                             .buttonStyle(.plain)
-                            .help("View \(entry.group.displayName) diff for \(entry.path)")
+                            .nativeHelp("View \(entry.group.displayName) diff for \(entry.path)")
                             .accessibilityLabel("\(entry.path), \(entry.status), \(entry.group.displayName)")
                             // The button is one accessibility element, so the name's color is reported here.
                             .accessibilityValue(entry.isUncommitted ? "Uncommitted, green" : "Committed, primary")
@@ -1310,7 +1315,7 @@ struct TaskConversationView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .buttonHoverPointer()
-                                .help("Mark as viewed")
+                                .nativeHelp("Mark as viewed")
                                 .accessibilityLabel("Mark \(entry.path) as viewed")
                                 .accessibilityIdentifier("mark-viewed-\(entry.path)")
                             }
@@ -1458,7 +1463,7 @@ struct TaskConversationView: View {
                 }
                 .buttonHoverPointer()
                 .buttonStyle(.plain)
-                .help("Close diff")
+                .nativeHelp("Close diff")
                 .accessibilityLabel("Close diff")
                 .accessibilityIdentifier("close-workspace-diff-button")
 
@@ -1547,7 +1552,7 @@ struct TaskConversationView: View {
                                 if let selectedChange { openDiff(selectedChange) }
                             }
                             .buttonHoverPointer()
-                            .help("Reload editor")
+                            .nativeHelp("Reload editor")
                             .font(.system(size: 11, weight: .medium))
                         }
                         .padding(24)
@@ -1700,7 +1705,7 @@ struct TaskConversationView: View {
             }
             .buttonHoverPointer()
             .buttonStyle(.plain)
-            .help("Back to Kanban")
+            .nativeHelp("Back to Kanban")
             .accessibilityLabel("Back to Kanban board")
             .accessibilityIdentifier("back-to-board-button")
 
@@ -1774,7 +1779,7 @@ struct TaskConversationView: View {
                         .background(Color.accentColor.opacity(0.1), in: Capsule())
                 }
                 .buttonHoverPointer()
-                .help("Edit repository settings for \(name)")
+                .nativeHelp("Edit repository settings for \(name)")
                 .buttonStyle(.plain)
                 .disabled(isReadOnly)
                 .popover(item: Binding(
@@ -1789,13 +1794,13 @@ struct TaskConversationView: View {
                         HStack {
                             Button("Remove Repository", role: .destructive) { removeConversationRepository(repository) }
                             .buttonHoverPointer()
-                            .help("Remove Repository")
+                            .nativeHelp("Remove Repository")
                                 .accessibilityIdentifier("remove-conversation-repository-button")
                             Spacer()
                             if repository.isPending {
                                 Button("Save") { saveConversationRepository(repository) }
                                     .buttonHoverPointer()
-                                    .help("Save repository settings")
+                                    .nativeHelp("Save repository settings")
                                     .buttonStyle(.borderedProminent)
                                     .accessibilityIdentifier("save-conversation-repository-button")
                             } else {
@@ -1818,7 +1823,7 @@ struct TaskConversationView: View {
                     .frame(width: 22, height: 22).background(Color.primary.opacity(0.07), in: Circle())
             }
             .buttonHoverPointer()
-            .buttonStyle(.plain).help("Add a repository").accessibilityLabel("Add repository")
+            .buttonStyle(.plain).nativeHelp("Add a repository").accessibilityLabel("Add repository")
             .accessibilityIdentifier("add-conversation-repository-button")
             // The popover content only refreshes with this view, so key it to the suggestions it lists.
             .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker.id(suggestedRepositoryPaths) }
@@ -1833,11 +1838,11 @@ struct TaskConversationView: View {
                     Text("Suggestions from \(parentFolderURL.path)")
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .help(parentFolderURL.path)
+                        .nativeHelp(parentFolderURL.path)
                     Spacer(minLength: 0)
                     Button("Change…") { chooseRepositoryParentFolder() }
                         .buttonHoverPointer()
-                        .help("Choose a different repository suggestion folder")
+                        .nativeHelp("Choose a different repository suggestion folder")
                         .disabled(isChoosingRepositoryParent)
                         .accessibilityIdentifier("choose-repository-suggestion-parent-button")
                 }
@@ -1849,7 +1854,7 @@ struct TaskConversationView: View {
                     .foregroundStyle(.secondary)
                 Button("Choose suggestion folder…") { chooseRepositoryParentFolder() }
                     .buttonHoverPointer()
-                    .help("Choose a folder to find repository suggestions")
+                    .nativeHelp("Choose a folder to find repository suggestions")
                     .disabled(isChoosingRepositoryParent)
                     .accessibilityIdentifier("choose-repository-suggestion-parent-button")
             }
@@ -1909,7 +1914,7 @@ struct TaskConversationView: View {
                                 }.frame(maxWidth: .infinity, alignment: .leading).padding(7).contentShape(Rectangle())
                             }
                             .buttonHoverPointer()
-                            .help("Select repository")
+                            .nativeHelp("Select repository")
                             .buttonStyle(.plain)
                             .background(index == repositorySuggestionIndex ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
                             .accessibilityIdentifier("conversation-repository-suggestion-\(repository.lastPathComponent)")
@@ -2087,7 +2092,7 @@ struct TaskConversationView: View {
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
                             .buttonHoverPointer()
-                            .help("Load 40 earlier messages.")
+                            .nativeHelp("Load 40 earlier messages.")
                             .accessibilityIdentifier("conversation-load-older-button")
                         }
                     }
@@ -2423,7 +2428,7 @@ struct TaskConversationView: View {
                 activityDisclosureButtonLabel
             }
             .buttonHoverPointer()
-            .help("Show or hide Codex activity details")
+            .nativeHelp("Show or hide Codex activity details")
             .buttonStyle(.plain)
             .accessibilityValue(isActivityExpanded ? "Expanded, down chevron" : "Collapsed, right chevron")
             .accessibilityHint("Shows Codex progress messages and completed activity details.")
@@ -2541,7 +2546,7 @@ struct TaskConversationView: View {
                 .padding(.vertical, 5)
             }
             .buttonHoverPointer()
-            .help("Open the read-only conversation for this agent")
+            .nativeHelp("Open the read-only conversation for this agent")
             .buttonStyle(.plain)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2729,7 +2734,7 @@ struct TaskConversationView: View {
                     Label("Back", systemImage: "arrow.left")
                 }
                 .buttonHoverPointer()
-                .help("Return to the parent conversation")
+                .nativeHelp("Return to the parent conversation")
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("subagent-back-button")
                 Text(activity.title).font(.system(size: 14, weight: .semibold))
@@ -2857,7 +2862,7 @@ struct TaskConversationView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .buttonHoverPointer()
-                                .help("Choose this answer for \(question.title)")
+                                .nativeHelp("Choose this answer for \(question.title)")
                                 .accessibilityIdentifier("async-question-option-\(message.id)-\(index)-\(optionIndex)")
                             }
                             TextField("Other answer", text: Binding(
@@ -2891,7 +2896,7 @@ struct TaskConversationView: View {
                 Button("Send answers") { submitAsyncQuestions(message) }
                     .buttonStyle(.borderedProminent)
                     .buttonHoverPointer()
-                    .help("Send your answers to \(provider.displayName)")
+                    .nativeHelp("Send your answers to \(provider.displayName)")
                     .disabled(isSubmittingLiveMessage || isLoadingHistory || questions.enumerated().contains { index, _ in
                         let key = asyncQuestionKey(messageID: message.id, index: index)
                         return (asyncQuestionAnswers[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -2984,7 +2989,7 @@ struct TaskConversationView: View {
                     .accessibilityLabel("Open attached image")
                     .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
                     .buttonHoverPointer()
-                    .help("Open image at full size")
+                    .nativeHelp("Open image at full size")
                 }
             }
             if !displayText.isEmpty {
@@ -3016,7 +3021,7 @@ struct TaskConversationView: View {
                         .accessibilityLabel("Open attached image")
                         .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
                         .buttonHoverPointer()
-                        .help("Open image at full size")
+                        .nativeHelp("Open image at full size")
                     }
                 }
                 let visibleText = Self.displayableUserText(message.text)
@@ -3176,7 +3181,7 @@ struct TaskConversationView: View {
                     }
                     .buttonStyle(.plain)
                     .buttonHoverPointer()
-                    .help("Add comment to selected text")
+                    .nativeHelp("Add comment to selected text")
                     .accessibilityIdentifier("add-comment-to-selection-button")
                     .frame(width: 112, height: 30)
                     .position(
@@ -3207,7 +3212,7 @@ struct TaskConversationView: View {
                             }
                             .buttonHoverPointer()
                             .buttonStyle(.plain)
-                            .help("Add comment")
+                            .nativeHelp("Add comment")
                             // Over a user message the button's own action never ran although the
                             // press reached it; a simultaneous tap does, and addAnnotation ignores
                             // the second call when both fire.
@@ -3544,7 +3549,7 @@ struct TaskConversationView: View {
                                 .accessibilityLabel("Open attached image")
                                 .accessibilityIdentifier("pending-chat-image-\(attachment.id)")
                                 .buttonHoverPointer()
-                                .help("Open image at full size")
+                                .nativeHelp("Open image at full size")
 
                                 Button {
                                     pendingImages.removeAll { $0.id == attachment.id }
@@ -3553,7 +3558,7 @@ struct TaskConversationView: View {
                                     Image(systemName: "xmark.circle.fill").foregroundStyle(.white, .black.opacity(0.7))
                                 }
                                 .buttonHoverPointer()
-                                .help("Remove image")
+                                .nativeHelp("Remove image")
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Remove image")
                             }
@@ -3587,7 +3592,7 @@ struct TaskConversationView: View {
                     }
                     .buttonHoverPointer()
                     .buttonStyle(.bordered)
-                    .help("Choose the folder that contains your repositories.")
+                    .nativeHelp("Choose the folder that contains your repositories.")
                     .accessibilityIdentifier("set-conversation-repository-root-button")
                 }
             }
@@ -3625,14 +3630,14 @@ struct TaskConversationView: View {
                                         .font(.system(size: 13, weight: .medium))
                                 }
                                 .buttonHoverPointer()
-                                .help("Retry this follow-up")
+                                .nativeHelp("Retry this follow-up")
                                 .accessibilityLabel("Retry follow-up")
                                 .accessibilityIdentifier("retry-queued-message-\(queued.id.uuidString)")
                             } else {
                                 Button("Steer") { steerQueuedMessage(queued) }
                                     .disabled(isSubmittingLiveMessage)
                                     .buttonHoverPointer()
-                                    .help("Send this follow-up to the active turn now")
+                                    .nativeHelp("Send this follow-up to the active turn now")
                                     .accessibilityIdentifier("steer-queued-message-\(queued.id.uuidString)")
                             }
                             Button { removeQueuedMessage(queued) } label: {
@@ -3640,7 +3645,7 @@ struct TaskConversationView: View {
                                     .font(.system(size: 13, weight: .medium))
                             }
                             .buttonHoverPointer()
-                            .help("Remove this follow-up")
+                            .nativeHelp("Remove this follow-up")
                             .accessibilityLabel("Remove follow-up")
                             .accessibilityIdentifier("remove-queued-message-\(queued.id.uuidString)")
                             Menu {
@@ -3660,7 +3665,7 @@ struct TaskConversationView: View {
                                     .contentShape(Rectangle())
                             }
                             .buttonHoverPointer()
-                            .help("More follow-up actions")
+                            .nativeHelp("More follow-up actions")
                             .menuStyle(.borderlessButton)
                             .accessibilityLabel("More follow-up actions")
                             .accessibilityIdentifier("queued-message-more-\(queued.id.uuidString)")
@@ -3710,18 +3715,18 @@ struct TaskConversationView: View {
                             }
                         }
                         Button(role: .destructive) { Task { await mutateGoal("clear") } } label: { Image(systemName: "trash") }
-                            .buttonHoverPointer().buttonStyle(.plain).help("Clear goal")
+                            .buttonHoverPointer().buttonStyle(.plain).nativeHelp("Clear goal")
                             .accessibilityLabel("Clear goal").accessibilityIdentifier("goal-clear-button")
                         Button { Task { await mutateGoal(activeGoal.status == "paused" ? "resume" : "pause") } } label: {
                             Image(systemName: activeGoal.status == "paused" ? "play.fill" : "pause")
                         }
-                            .buttonHoverPointer().buttonStyle(.plain).help(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
+                            .buttonHoverPointer().buttonStyle(.plain).nativeHelp(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
                             .accessibilityLabel(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
                             .accessibilityIdentifier("goal-pause-resume-button")
                         Button { isGoalExpanded.toggle() } label: { Image(systemName: isGoalExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") }
                             .frame(width: 30, height: 30)
                             .contentShape(Rectangle())
-                            .buttonHoverPointer().buttonStyle(.plain).help(isGoalExpanded ? "Collapse goal" : "Expand goal")
+                            .buttonHoverPointer().buttonStyle(.plain).nativeHelp(isGoalExpanded ? "Collapse goal" : "Expand goal")
                             .accessibilityLabel(isGoalExpanded ? "Collapse goal" : "Expand goal")
                             .accessibilityValue(isGoalExpanded ? "Expanded" : "Collapsed")
                             .accessibilityIdentifier("goal-expand-button")
@@ -3795,7 +3800,7 @@ struct TaskConversationView: View {
                 HStack(spacing: 12) {
                     Button { isShowingImagePicker = true } label: { Image(systemName: "paperclip") }
                     .buttonHoverPointer()
-                    .help("Attach image")
+                    .nativeHelp("Attach image")
                         .buttonStyle(.plain).accessibilityLabel("Attach image")
                         .accessibilityIdentifier("attach-chat-image-button")
                     Menu {
@@ -3844,7 +3849,7 @@ struct TaskConversationView: View {
                     }
                     .buttonHoverPointer()
                     .menuStyle(.borderlessButton)
-                    .help("Change conversation mode or add context")
+                    .nativeHelp("Change conversation mode or add context")
                     .accessibilityLabel(isEnteringGoal ? "Goal" : "Conversation mode: \(conversationMode.title)")
                     .accessibilityIdentifier("conversation-mode-menu")
 
@@ -3860,7 +3865,7 @@ struct TaskConversationView: View {
                         .buttonHoverPointer()
                         .buttonStyle(.plain)
                         .disabled(workspaceRootURLs.isEmpty || isLoadingHistory || isPreparingSubmittedMessage)
-                        .help("Switch to Code mode and start implementing this plan")
+                        .nativeHelp("Switch to Code mode and start implementing this plan")
                         .accessibilityIdentifier("start-implementing-button")
                     }
 
@@ -3891,7 +3896,7 @@ struct TaskConversationView: View {
                     }
                     .buttonStyle(.plain)
                     .buttonHoverPointer()
-                    .help("Choose a model and reasoning effort")
+                    .nativeHelp("Choose a model and reasoning effort")
                     .accessibilityLabel("Model: \(selectedModelName), effort: \(selectedEffort.title)")
                     .accessibilityValue(selectedModelName)
                     .accessibilityIdentifier("model-picker-menu")
@@ -3922,7 +3927,7 @@ struct TaskConversationView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .buttonHoverPointer()
-                                .help("Select \(model.name)")
+                                .nativeHelp("Select \(model.name)")
                                 .accessibilityIdentifier("model-option-\(model.id)")
                             }
                             Divider().padding(.vertical, 8)
@@ -3975,7 +3980,7 @@ struct TaskConversationView: View {
                                 .background(Color.primary.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
                         }
                         .buttonHoverPointer()
-                        .help("Pause \(provider.displayName) response")
+                        .nativeHelp("Pause \(provider.displayName) response")
                         .buttonStyle(.plain)
                         .disabled(isPausingResponse || !canPauseResponse)
                         .accessibilityLabel("Stop response")
@@ -3989,7 +3994,7 @@ struct TaskConversationView: View {
                                 .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 9))
                         }
                         .buttonHoverPointer()
-                        .help("Continue \(provider.displayName) response")
+                        .nativeHelp("Continue \(provider.displayName) response")
                         .buttonStyle(.plain)
                         .accessibilityLabel("Continue response")
                         .accessibilityIdentifier("continue-response-button")
@@ -4002,7 +4007,7 @@ struct TaskConversationView: View {
                                 .background(Color.accentColor, in: Circle())
                         }
                         .buttonHoverPointer()
-                        .help("Send message")
+                        .nativeHelp("Send message")
                         .buttonStyle(.plain)
                         .disabled(isSendDisabled)
                         .opacity(isSendDisabled ? 0.45 : 1)
@@ -4062,7 +4067,7 @@ struct TaskConversationView: View {
                                 Label(option.label, systemImage: isSelected ? "largecircle.fill.circle" : "circle")
                             }
                             .buttonHoverPointer()
-                            .help("Select answer: \(option.label)")
+                            .nativeHelp("Select answer: \(option.label)")
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("ai-question-option-\(question.id)-\(option.label)")
                             .accessibilityValue(isSelected ? "selected" : "not selected")
@@ -4075,7 +4080,7 @@ struct TaskConversationView: View {
                                 Label("Other", systemImage: userInputOtherSelected.contains(question.id) ? "largecircle.fill.circle" : "circle")
                             }
                             .buttonHoverPointer()
-                            .help("Select a free-text answer")
+                            .nativeHelp("Select a free-text answer")
                             .buttonStyle(.plain)
                             .accessibilityValue(userInputOtherSelected.contains(question.id) ? "selected" : "not selected")
                             TextField("Other answer", text: Binding(
@@ -4095,7 +4100,7 @@ struct TaskConversationView: View {
                 Task { @MainActor in await submitUserInput(request) }
             }
             .buttonHoverPointer()
-            .help("Submit answers")
+            .nativeHelp("Submit answers")
                 .buttonStyle(.borderedProminent)
                 .disabled(request.questions.contains { question in
                     let selections = userInputAnswers[question.id] ?? []
@@ -4820,6 +4825,13 @@ struct TaskConversationView: View {
             applyHistoryMessages(history)
             activities = history.activities
             providerBoundaries = history.providerBoundaries
+            // A recovery turn that applied an answer can die in the daemon while this window only
+            // follows it; history then offers the saved question again for retry.
+            if userInputRequest == nil, !providerTurnIsActive,
+               let saved = history.pendingUserInputRequest, saved.threadID == task.activeConversationID,
+               !answeredUserInputRequestIDs.contains(saved.id) {
+                userInputRequest = saved
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -5316,7 +5328,7 @@ struct TaskConversationView: View {
         .fixedSize()
         .buttonHoverPointer()
         .disabled(!canSwitchProvider)
-        .help(providerMenuHelp)
+        .nativeHelp(providerMenuHelp)
         .accessibilityLabel("Provider: \(provider.displayName)")
         .accessibilityValue(provider.rawValue)
         .accessibilityIdentifier("conversation-provider-menu")
@@ -5488,7 +5500,7 @@ struct TaskConversationView: View {
                         Image(systemName: "pencil").font(.system(size: 10, weight: .medium))
                     }
                     .buttonHoverPointer()
-                    .buttonStyle(.plain).help("Edit \(title)").accessibilityLabel("Edit \(title)")
+                    .buttonStyle(.plain).nativeHelp("Edit \(title)").accessibilityLabel("Edit \(title)")
                     .accessibilityIdentifier("\(identifier)-edit")
                 }
             }

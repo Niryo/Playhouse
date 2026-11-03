@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import Darwin
 import Foundation
+import ApplicationServices
 import XCTest
 import SQLite3
 
@@ -630,11 +631,11 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(codexFixtureExecutable) + ".assessment.history"), "A new conversation should not launch a separate repository assessment.")
 
         assertCLIError(
-            try runCLI(["task", "create", "--title", "   ", "--root", fixture.primary.path], expectedStatus: 2),
+            try runCLI(["task", "create", "--title", "   ", "--prompt", "Fixture task description.", "--root", fixture.primary.path], expectedStatus: 2),
             code: "invalid_argument"
         )
         let emptyRootTask = try XCTUnwrap(
-            try runCLI(["task", "create", "--title", "No roots"])["result"] as? [String: Any]
+            try runCLI(["task", "create", "--title", "No roots", "--prompt", "Fixture task description."])["result"] as? [String: Any]
         )
         XCTAssertEqual(emptyRootTask["workspaceRoots"] as? [String], [])
         XCTAssertTrue(try XCTUnwrap(emptyRootTask["repositoryWorktrees"] as? [[String: Any]]).isEmpty)
@@ -647,14 +648,14 @@ final class PlayhouseUITests: XCTestCase {
         _ = try runCLI(["settings", "set-parent", fixture.parent.path])
         assertCLIError(
             try runCLI(
-                ["task", "create", "--title", "Missing folder", "--root", fixture.missing.path],
+                ["task", "create", "--title", "Missing folder", "--prompt", "Fixture task description.", "--root", fixture.missing.path],
                 expectedStatus: 2
             ),
             code: "invalid_argument"
         )
         assertCLIError(
             try runCLI([
-                "task", "create", "--title", "Bad merge target", "--repo", fixture.primary.path,
+                "task", "create", "--title", "Bad merge target", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
                 "--merge-target", "\(fixture.primary.path)=not-a-local-branch"
             ], expectedStatus: 2),
             code: "invalid_argument"
@@ -834,7 +835,7 @@ final class PlayhouseUITests: XCTestCase {
     func test_task_creation_rejects_worktree_assigned_to_active_task() throws {
         launchApp(defaultParent: fixture.parent.path)
         let branch = "active-shared-\(UUID().uuidString.prefix(8).lowercased())"
-        let owner = try XCTUnwrap(try runCLI(["task", "create", "--title", "Active owner", "--repo", fixture.primary.path, "--branch", "\(fixture.primary.path)=\(branch)"])["result"] as? [String: Any])
+        let owner = try XCTUnwrap(try runCLI(["task", "create", "--title", "Active owner", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--branch", "\(fixture.primary.path)=\(branch)"])["result"] as? [String: Any])
         let ownerID = try XCTUnwrap(owner["id"] as? String)
         openNewTaskConversation()
         chooseRepositorySuggestion("primary")
@@ -873,7 +874,7 @@ final class PlayhouseUITests: XCTestCase {
 
         for title in ["Reservation contender one", "Reservation contender two"] {
             processes.append(try startCLIProcess([
-                "task", "create", "--title", title,
+                "task", "create", "--title", title, "--prompt", "Fixture task description.",
                 "--repo", fixture.primary.path,
                 "--branch", "\(fixture.primary.path)=\(branch)",
             ]))
@@ -947,7 +948,7 @@ final class PlayhouseUITests: XCTestCase {
         let failureDirectory = dataDirectory.appendingPathComponent("fetch-failure", isDirectory: true)
         try FileManager.default.createDirectory(at: failureDirectory, withIntermediateDirectories: true)
         _ = try runCLI(
-            ["task", "create", "--title", "Missing column read failure", "--root", fixture.primary.path],
+            ["task", "create", "--title", "Missing column read failure", "--prompt", "Fixture task description.", "--root", fixture.primary.path],
             extraEnvironment: ["PLAYHOUSE_DATA_DIRECTORY": failureDirectory.path]
         )
         let store = failureDirectory.appendingPathComponent("Playhouse-v2.store")
@@ -1151,7 +1152,7 @@ final class PlayhouseUITests: XCTestCase {
     func test_test_bundle_rejects_unisolated_data_directory() throws {
         launchApp(defaultParent: fixture.parent.path)
         let title = "Isolated board remains available"
-        let created = try runCLI(["task", "create", "--title", title])
+        let created = try runCLI(["task", "create", "--title", title, "--prompt", "Fixture task description."])
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
         assertTaskVisible(title, inColumn: "Backlog")
 
@@ -1208,7 +1209,7 @@ final class PlayhouseUITests: XCTestCase {
         let title = "Store write contention"
         _ = try runCLI(["settings", "set-parent", fixture.parent.path])
         let created = try XCTUnwrap(
-            try runCLI(["task", "create", "--title", title, "--repo", fixture.primary.path])["result"] as? [String: Any]
+            try runCLI(["task", "create", "--title", title, "--prompt", "Fixture task description.", "--repo", fixture.primary.path])["result"] as? [String: Any]
         )
         let taskID = try XCTUnwrap(created["id"] as? String)
         codexFixtureExecutable = fixtureExecutable.path
@@ -1328,7 +1329,7 @@ final class PlayhouseUITests: XCTestCase {
         let title = "Concurrent auto branch \(UUID().uuidString.prefix(8).lowercased())"
         var taskIDs: [String] = []
         for _ in 0..<2 {
-            let created = try runCLI(["task", "create", "--title", title, "--repo", fixture.primary.path])["result"] as? [String: Any]
+            let created = try runCLI(["task", "create", "--title", title, "--prompt", "Fixture task description.", "--repo", fixture.primary.path])["result"] as? [String: Any]
             taskIDs.append(try XCTUnwrap(created?["id"] as? String))
         }
 
@@ -1615,7 +1616,7 @@ final class PlayhouseUITests: XCTestCase {
         let archiveFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-archive-ui").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: archiveFixtureExecutable))
         for index in 1...39 {
-            let filler = try XCTUnwrap(try runCLI(["task", "create", "--title", "Archive page filler \(index)", "--root", fixture.custom.path])["result"] as? [String: Any])
+            let filler = try XCTUnwrap(try runCLI(["task", "create", "--title", "Archive page filler \(index)", "--prompt", "Fixture task description.", "--root", fixture.custom.path])["result"] as? [String: Any])
             let fillerID = try XCTUnwrap(filler["id"] as? String)
             _ = try runCLI(
                 ["conversation", "send", fillerID, "--message", "Echo the outcome command for \(fillerID).", "--answer", "color=Blue", "--answer", "token=fixture-secret"],
@@ -1623,7 +1624,7 @@ final class PlayhouseUITests: XCTestCase {
             )
             XCTAssertEqual(try XCTUnwrap((try runCLI(["task", "move", fillerID, "Done"])["result"] as? [String: Any])?["status"] as? String), "Done")
         }
-        let titleMatch = try XCTUnwrap(try runCLI(["task", "create", "--title", "fixture-secret title match", "--root", fixture.custom.path])["result"] as? [String: Any])
+        let titleMatch = try XCTUnwrap(try runCLI(["task", "create", "--title", "fixture-secret title match", "--prompt", "Fixture task description.", "--root", fixture.custom.path])["result"] as? [String: Any])
         let titleMatchID = try XCTUnwrap(titleMatch["id"] as? String)
         _ = try runCLI(
             ["conversation", "send", titleMatchID, "--message", "Echo the outcome command for \(titleMatchID).", "--answer", "color=Blue", "--answer", "token=fixture-secret"],
@@ -1687,7 +1688,7 @@ final class PlayhouseUITests: XCTestCase {
         var ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123, 456]).merging(Self.prCheckCooldownEnvironment) { $1 }
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Review PR conflict UI", "--repo", fixture.primary.path,
+            "task", "create", "--title", "Review PR conflict UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
@@ -1696,7 +1697,7 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         XCTAssertTrue(waitUntil({ element("task-card-\(taskID)").exists }, timeout: 10))
         let secondCreated = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Second Review PR conflict UI", "--repo", fixture.secondary.path,
+            "task", "create", "--title", "Second Review PR conflict UI", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path,
             "--merge-target", "\(fixture.secondary.path)=main",
         ])["result"] as? [String: Any])
         let secondTaskID = try XCTUnwrap(secondCreated["id"] as? String)
@@ -1815,7 +1816,7 @@ final class PlayhouseUITests: XCTestCase {
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123]).merging(Self.prCheckCooldownEnvironment) { $1 }
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Review sync push UI", "--repo", fixture.primary.path,
+            "task", "create", "--title", "Review sync push UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
@@ -1891,7 +1892,7 @@ final class PlayhouseUITests: XCTestCase {
         var ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123]).merging(Self.prCheckCooldownEnvironment) { $1 }
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Review sync conflict UI", "--repo", fixture.primary.path,
+            "task", "create", "--title", "Review sync conflict UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
@@ -1980,7 +1981,7 @@ final class PlayhouseUITests: XCTestCase {
     func test_task_done_preserves_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
-        _ = try runCLI(["task", "create", "--title", "Dirty done UI", "--repo", fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", "Dirty done UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path])
         openTask(named: "Dirty done UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Dirty done UI")
         element("back-to-board-button").click()
@@ -2008,7 +2009,7 @@ final class PlayhouseUITests: XCTestCase {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "PR failure UI", "--repo", fixture.primary.path,
+            "task", "create", "--title", "PR failure UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
@@ -2076,11 +2077,17 @@ final class PlayhouseUITests: XCTestCase {
 
     // case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a small Auto PR switch in place of the manual PR button, defaulting to off; the switch disappears once a pull request is linked or the task leaves the working states. Selecting Auto PR persists and is reflected across a fresh read. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. The last switch choice is remembered: tasks created after turning it on start on, and tasks created after turning it off start off. Toggling Auto PR for an unknown task is rejected.
     func test_task_auto_pr_toggle_creates_pull_request_on_review() throws {
+        // `git remote add` from a linked worktree writes the shared repository config, so the
+        // fixture repositories would otherwise keep this case's origin for the next one.
+        defer {
+            try? runGit(fixture.primary, "remote", "remove", "origin")
+            try? runGit(fixture.secondary, "remote", "remove", "origin")
+        }
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Auto PR toggle UI", "--repo", fixture.primary.path,
+            "task", "create", "--title", "Auto PR toggle UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
@@ -2128,15 +2135,15 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("task-auto-pr-toggle-\(taskID)").exists, "The toggle gives way to the linked PR once one exists.")
         attachScreenshot(named: "Auto PR created the pull request automatically once the task reached Review", fullScreen: true)
 
-        let stickyOn = try XCTUnwrap(try runCLI(["task", "create", "--title", "Sticky Auto PR on UI", "--root", fixture.primary.path])["result"] as? [String: Any])
+        let stickyOn = try XCTUnwrap(try runCLI(["task", "create", "--title", "Sticky Auto PR on UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
         XCTAssertEqual(stickyOn["autoCreatePullRequestOnReview"] as? Bool, true, "A task created after turning the switch on in the UI should start on.")
         let stickyOnID = try XCTUnwrap(stickyOn["id"] as? String)
         _ = try runCLI(["task", "pr", "auto", stickyOnID, "off"])
-        let stickyOff = try XCTUnwrap(try runCLI(["task", "create", "--title", "Sticky Auto PR off UI", "--root", fixture.primary.path])["result"] as? [String: Any])
+        let stickyOff = try XCTUnwrap(try runCLI(["task", "create", "--title", "Sticky Auto PR off UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
         XCTAssertEqual(stickyOff["autoCreatePullRequestOnReview"] as? Bool, false, "A task created after turning the switch off should start off.")
 
         let manualCreated = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Manual PR toggle default UI", "--repo", fixture.secondary.path,
+            "task", "create", "--title", "Manual PR toggle default UI", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path,
             "--merge-target", "\(fixture.secondary.path)=main",
         ])["result"] as? [String: Any])
         let manualTaskID = try XCTUnwrap(manualCreated["id"] as? String)
@@ -2170,7 +2177,7 @@ final class PlayhouseUITests: XCTestCase {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "PR conflict choice UI", "--repo", fixture.primary.path,
+            "task", "create", "--title", "PR conflict choice UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
@@ -2227,7 +2234,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(
             try runGitOutput(fixture.primary, "ls-remote", "--heads", "origin", try XCTUnwrap(completedRecord["branch"] as? String))
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-            "refs/heads/\(try XCTUnwrap(completedRecord["branch"] as? String))\t\(branchHead)",
+            "\(branchHead)\trefs/heads/\(try XCTUnwrap(completedRecord["branch"] as? String))",
             "A conflicted task branch should still be published for PR creation."
         )
         XCTAssertTrue(waitUntil({ prButton.isEnabled }, timeout: 10))
@@ -2242,7 +2249,7 @@ final class PlayhouseUITests: XCTestCase {
         // The fixture `gh` handles list/create and merged-state calls without GitHub sign-in.
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
-        let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Archived linked PR UI", "--repo", fixture.primary.path, "--repo", fixture.secondary.path])["result"] as? [String: Any])
+        let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Archived linked PR UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         openTask(named: "Archived linked PR UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Archived linked PR UI")
@@ -2257,7 +2264,7 @@ final class PlayhouseUITests: XCTestCase {
         element("done-archive-button").click()
 
         let activeCreated = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Active linked PR UI", "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
+            "task", "create", "--title", "Active linked PR UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
         ])["result"] as? [String: Any])
         let activeTaskID = try XCTUnwrap(activeCreated["id"] as? String)
         openTask(named: "Active linked PR UI")
@@ -2365,8 +2372,8 @@ final class PlayhouseUITests: XCTestCase {
     // case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
     func test_task_lifecycle_rollout_clears_records_and_clean_worktrees() throws {
         _ = try runCLI(["settings", "set-parent", fixture.parent.path])
-        let clean = try runCLI(["task", "create", "--title", "Rollout clean", "--repo", fixture.primary.path])
-        let dirty = try runCLI(["task", "create", "--title", "Rollout dirty", "--repo", fixture.secondary.path])
+        let clean = try runCLI(["task", "create", "--title", "Rollout clean", "--prompt", "Fixture task description.", "--repo", fixture.primary.path])
+        let dirty = try runCLI(["task", "create", "--title", "Rollout dirty", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path])
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let cleanTaskID = try XCTUnwrap((clean["result"] as? [String: Any])?["id"] as? String)
         let dirtyTaskID = try XCTUnwrap((dirty["result"] as? [String: Any])?["id"] as? String)
@@ -2469,7 +2476,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(named: "Status transitions")?["status"] as? String, "Backlog")
         assertTaskVisible("Status transitions", inColumn: "Backlog")
 
-        let blockedTask = try runCLI(["task", "create", "--title", "Blocked layout", "--root", fixture.secondary.path])
+        let blockedTask = try runCLI(["task", "create", "--title", "Blocked layout", "--prompt", "Fixture task description.", "--root", fixture.secondary.path])
         let blockedTaskID = try XCTUnwrap((blockedTask["result"] as? [String: Any])?["id"] as? String)
         let emptyFixture = try makeCodexFixture(emptyQuestions: true)
         assertCLIError(
@@ -3192,7 +3199,7 @@ final class PlayhouseUITests: XCTestCase {
         app.launchEnvironment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = questionFixture.path
         relaunchApp()
         let questionTask = try runCLI([
-            "task", "create", "--title", "Progress question",
+            "task", "create", "--title", "Progress question", "--prompt", "Fixture task description.",
             "--repo", fixture.primary.path, "--root", fixture.parent.path,
         ])["result"] as? [String: Any]
         let initialRepositories = try XCTUnwrap(questionTask?["repositoryWorktrees"] as? [[String: Any]])
@@ -3312,7 +3319,7 @@ final class PlayhouseUITests: XCTestCase {
     // case-contract: test_task_roots_set_get_order_deduplication_and_validation | Root editing preserves order, removes duplicates, rejects an empty list, and waits for an active conversation turn; a stale Git-folder validation is rejected after a newer folder edit, and the newer roots remain saved.
     func test_task_roots_set_get_order_deduplication_and_validation() throws {
         launchApp(defaultParent: fixture.parent.path)
-        _ = try runCLI(["task", "create", "--title", "Edit roots", "--repo", fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", "Edit roots", "--prompt", "Fixture task description.", "--repo", fixture.primary.path])
         openTask(named: "Edit roots")
         let taskID = try taskID(named: "Edit roots")
 
@@ -3357,7 +3364,7 @@ final class PlayhouseUITests: XCTestCase {
 
         let concurrentTitle = "Concurrent root edit"
         let concurrent = try runCLI([
-            "task", "create", "--title", concurrentTitle,
+            "task", "create", "--title", concurrentTitle, "--prompt", "Fixture task description.",
             "--repo", fixture.primary.path,
         ])["result"] as? [String: Any]
         let concurrentID = try XCTUnwrap(concurrent?["id"] as? String)
@@ -3400,7 +3407,7 @@ final class PlayhouseUITests: XCTestCase {
     func test_conversation_repository_picker_adds_repository_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
-        let created = try runCLI(["task", "create", "--title", "Header repository picker", "--root", fixture.primary.path])["result"] as? [String: Any]
+        let created = try runCLI(["task", "create", "--title", "Header repository picker", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any]
         let taskID = try XCTUnwrap(created?["id"] as? String)
         openTask(named: "Header repository picker")
         element("add-conversation-repository-button").click()
@@ -3539,7 +3546,7 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         let title = "Repository settings through UI"
         let created = try runCLI([
-            "task", "create", "--title", title,
+            "task", "create", "--title", title, "--prompt", "Fixture task description.",
             "--repo", fixture.primary.path,
         ])["result"] as? [String: Any]
         let taskID = try XCTUnwrap(created?["id"] as? String)
@@ -3643,7 +3650,7 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: try makeGitHoldEnvironment())
         let title = "Concurrent repository edit"
         let created = try runCLI([
-            "task", "create", "--title", title,
+            "task", "create", "--title", title, "--prompt", "Fixture task description.",
             "--repo", fixture.primary.path,
             "--root", fixture.custom.path,
         ])["result"] as? [String: Any]
@@ -3686,7 +3693,7 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
 
         let soleTitle = "Two repository removal through UI"
-        let sole = try runCLI(["task", "create", "--title", soleTitle, "--repo", fixture.primary.path, "--repo", fixture.secondary.path])["result"] as? [String: Any]
+        let sole = try runCLI(["task", "create", "--title", soleTitle, "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path])["result"] as? [String: Any]
         let soleID = try XCTUnwrap(sole?["id"] as? String)
         openTask(named: soleTitle)
         element("conversation-repository-badge-primary").click()
@@ -3712,7 +3719,7 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         let pendingTitle = "Pending repository removal through UI"
         let pending = try runCLI([
-            "task", "create", "--title", pendingTitle,
+            "task", "create", "--title", pendingTitle, "--prompt", "Fixture task description.",
             "--repo", fixture.primary.path,
             "--root", fixture.custom.path,
         ])["result"] as? [String: Any]
@@ -3733,7 +3740,7 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         let cleanTitle = "Clean active repository removal through API"
         let cleanActive = try runCLI([
-            "task", "create", "--title", cleanTitle,
+            "task", "create", "--title", cleanTitle, "--prompt", "Fixture task description.",
             "--repo", fixture.alternate.path,
             "--root", fixture.custom.path,
         ])["result"] as? [String: Any]
@@ -3768,7 +3775,7 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         let activeTitle = "Started repository removal through UI"
         let active = try runCLI([
-            "task", "create", "--title", activeTitle,
+            "task", "create", "--title", activeTitle, "--prompt", "Fixture task description.",
             "--repo", fixture.secondary.path,
             "--root", fixture.custom.path,
         ])["result"] as? [String: Any]
@@ -3826,7 +3833,7 @@ final class PlayhouseUITests: XCTestCase {
 
         element("back-to-board-button").click()
         let apiTitle = "Active API repository removal through UI"
-        let apiTask = try runCLI(["task", "create", "--title", apiTitle, "--repo", fixture.primary.path])["result"] as? [String: Any]
+        let apiTask = try runCLI(["task", "create", "--title", apiTitle, "--prompt", "Fixture task description.", "--repo", fixture.primary.path])["result"] as? [String: Any]
         let apiTaskID = try XCTUnwrap(apiTask?["id"] as? String)
         openTask(named: apiTitle)
         try completeCurrentTaskWithFixtureAnswers(taskTitle: apiTitle)
@@ -3856,12 +3863,15 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
 
         let pendingTitle = "Pending delete"
-        _ = try runCLI(["task", "create", "--title", pendingTitle, "--repo", fixture.secondary.path])
+        _ = try runCLI(["task", "create", "--title", pendingTitle, "--prompt", "Pending delete description.", "--repo", fixture.secondary.path])
         let pendingTask = try XCTUnwrap(taskRecord(named: pendingTitle))
         let pendingID = try XCTUnwrap(pendingTask["id"] as? String)
         let pendingRecord = try XCTUnwrap((pendingTask["repositoryWorktrees"] as? [[String: Any]])?.first)
         XCTAssertEqual(pendingRecord["isPending"] as? Bool, true)
         XCTAssertEqual(pendingRecord["worktreePath"] as? String, fixture.secondary.path)
+        let promptedCheck = try runCLI(["task", "delete-check", pendingID])
+        XCTAssertEqual((promptedCheck["result"] as? [String: Any])?["requiresConfirmation"] as? Bool, true, "A task with a saved prompt holds user content, so deleting it must confirm.")
+        _ = try runCLI(["task", "prompt", pendingID, "--text", ""])
         let pendingCheck = try runCLI(["task", "delete-check", pendingID])
         XCTAssertEqual((pendingCheck["result"] as? [String: Any])?["requiresConfirmation"] as? Bool, false)
         let keptTitle = "Kept preferences"
@@ -3916,7 +3926,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !self.isolatedPreferenceKeys().contains(keptPreference) }, timeout: 10))
 
         let cleanTitle = "Clean delete \(String(UUID().uuidString.prefix(8)).lowercased())"
-        _ = try runCLI(["task", "create", "--title", cleanTitle, "--repo", fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", cleanTitle, "--prompt", "Fixture task description.", "--repo", fixture.primary.path])
         openTask(named: cleanTitle)
         try completeCurrentTaskWithFixtureAnswers(taskTitle: cleanTitle)
         element("back-to-board-button").click()
@@ -3950,7 +3960,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: cleanPath) }, timeout: 10), "Deleting a clean started task must remove its managed worktree before the task record disappears.")
 
         let dirtyTitle = "Dirty delete \(String(UUID().uuidString.prefix(8)).lowercased())"
-        _ = try runCLI(["task", "create", "--title", dirtyTitle, "--repo", fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", dirtyTitle, "--prompt", "Fixture task description.", "--repo", fixture.primary.path])
         let dirtyID = try taskID(named: dirtyTitle)
         openTask(named: dirtyTitle)
         try completeCurrentTaskWithFixtureAnswers(taskTitle: dirtyTitle, prompt: "Prepare a task for deletion.")
@@ -4003,7 +4013,7 @@ final class PlayhouseUITests: XCTestCase {
         try runGit(brokenRepository, "commit", "-m", "Baseline")
         let failureTitle = "PRIVATE_DELETE_TITLE_\(String(UUID().uuidString.prefix(8)))"
         let failurePrompt = "PRIVATE_CONVERSATION_TEXT_\(String(UUID().uuidString.prefix(8)))"
-        _ = try runCLI(["task", "create", "--title", failureTitle, "--repo", brokenRepository.path])
+        _ = try runCLI(["task", "create", "--title", failureTitle, "--prompt", "Fixture task description.", "--repo", brokenRepository.path])
         openTask(named: failureTitle)
         try completeCurrentTaskWithFixtureAnswers(taskTitle: failureTitle, prompt: failurePrompt)
         element("back-to-board-button").click()
@@ -4442,7 +4452,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(try tasksFromBoardList().isEmpty, "The standalone chat must never appear on the board.")
 
         let coveringTask = try runCLI(
-            ["task", "create", "--title", "Covers standalone chat", "--repo", fixture.primary.path]
+            ["task", "create", "--title", "Covers standalone chat", "--prompt", "Fixture task description.", "--repo", fixture.primary.path]
         )["result"] as? [String: Any]
         let coveringTaskID = try XCTUnwrap(coveringTask?["id"] as? String)
         let coveringCard = element("task-card-\(coveringTaskID.uppercased())")
@@ -4589,6 +4599,7 @@ final class PlayhouseUITests: XCTestCase {
         let chatInstructions = (chatFixtureHistory["threadStartDeveloperInstructions"] as? String) ?? ""
         XCTAssertTrue(chatInstructions.contains("task create"), "The chat must be taught the Playhouse task CLI.")
         XCTAssertTrue(chatInstructions.contains("they always mean Playhouse"))
+        XCTAssertTrue(chatInstructions.contains("task create --title \"<title>\" --prompt"), "The chat must create tasks with a full description.")
         // Page titles reach the user as transcript separators, parsed from close-turn.
         // Assert the prohibition positively too: pinning only the old wording would let the
         // instruction come back phrased differently.
@@ -4804,7 +4815,7 @@ final class PlayhouseUITests: XCTestCase {
             "An earlier page keeps its messages in the chat transcript."
         )
         let boardTask = try XCTUnwrap(
-            (try runCLI(["task", "create", "--title", "Context page rejection"])["result"] as? [String: Any])?["id"] as? String
+            (try runCLI(["task", "create", "--title", "Context page rejection", "--prompt", "Fixture task description."])["result"] as? [String: Any])?["id"] as? String
         )
         let activePageID = try XCTUnwrap(
             ((try runCLI(["chat", "status"])["result"] as? [String: Any])?["activePage"] as? [String: Any])?["id"] as? String
@@ -5472,7 +5483,7 @@ final class PlayhouseUITests: XCTestCase {
             let titleFixtureExecutable = try XCTUnwrap(codexFixtureExecutable)
             launchApp(defaultParent: fixture.parent.path)
             let titleTask = try XCTUnwrap(
-                (try runCLI(["task", "create", "--title", "Untitled task", "--repo", fixture.primary.path])["result"] as? [String: Any])
+                (try runCLI(["task", "create", "--title", "Untitled task", "--prompt", "Fixture task description.", "--repo", fixture.primary.path])["result"] as? [String: Any])
             )
             let titleTaskID = try XCTUnwrap(titleTask["id"] as? String)
             XCTAssertEqual(try repositoryRecord(taskID: titleTaskID, repositoryPath: fixture.primary.path)?["branch"] as? String, "auto")
@@ -5557,7 +5568,7 @@ final class PlayhouseUITests: XCTestCase {
             launchApp(defaultParent: fixture.parent.path)
             let standaloneTitleTask = try XCTUnwrap(
                 (try runCLI([
-                    "task", "create", "--title", "Untitled task", "--root", fixture.primary.path
+                    "task", "create", "--title", "Untitled task", "--prompt", "Fixture task description.", "--root", fixture.primary.path
                 ])["result"] as? [String: Any])
             )
             let standaloneTitleTaskID = try XCTUnwrap(standaloneTitleTask["id"] as? String)
@@ -5585,7 +5596,7 @@ final class PlayhouseUITests: XCTestCase {
             element("back-to-board-button").click()
 
             let concurrentTitleTask = try XCTUnwrap(
-                (try runCLI(["task", "create", "--title", "Untitled task", "--repo", fixture.secondary.path])["result"] as? [String: Any])
+                (try runCLI(["task", "create", "--title", "Untitled task", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path])["result"] as? [String: Any])
             )
             let concurrentTitleTaskID = try XCTUnwrap(concurrentTitleTask["id"] as? String)
             let concurrentTitle = "Concurrent custom branch title"
@@ -5617,7 +5628,7 @@ final class PlayhouseUITests: XCTestCase {
             element("back-to-board-button").click()
 
             let recoveryTask = try XCTUnwrap(
-                (try runCLI(["task", "create", "--title", "Untitled task", "--repo", fixture.primary.path])["result"] as? [String: Any])
+                (try runCLI(["task", "create", "--title", "Untitled task", "--prompt", "Fixture task description.", "--repo", fixture.primary.path])["result"] as? [String: Any])
             )
             let recoveryTaskID = try XCTUnwrap(recoveryTask["id"] as? String)
             openTask(named: "Untitled task")
@@ -5653,7 +5664,7 @@ final class PlayhouseUITests: XCTestCase {
             app.terminate()
             launchApp(defaultParent: fixture.parent.path)
             let failureTask = try XCTUnwrap(
-                (try runCLI(["task", "create", "--title", "Untitled task", "--repo", fixture.primary.path])["result"] as? [String: Any])
+                (try runCLI(["task", "create", "--title", "Untitled task", "--prompt", "Fixture task description.", "--repo", fixture.primary.path])["result"] as? [String: Any])
             )
             let failureTaskID = try XCTUnwrap(failureTask["id"] as? String)
             XCTAssertEqual(try repositoryRecord(taskID: failureTaskID, repositoryPath: fixture.primary.path)?["branch"] as? String, "auto")
@@ -5809,7 +5820,7 @@ final class PlayhouseUITests: XCTestCase {
 
     private func exerciseStopDuringThinking(provider: String, title: String) throws {
         let task = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", title, "--root", fixture.primary.path, "--provider", provider,
+            "task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", provider,
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(task["id"] as? String)
         let fixtureName = provider == "codex" ? "codex-fixture-hold-interrupt" : "claude-fixture-ui"
@@ -5882,7 +5893,7 @@ final class PlayhouseUITests: XCTestCase {
         try exerciseStopDuringThinking(provider: "claude", title: "Claude stop while thinking")
     }
 
-    // case-contract: test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle | The bridge daemon starts on the first request, serves later requests from the same process, and stays alive while any connection (such as a window's runtime watcher) is open. A watcher receives the daemon's runtime snapshots as a turn starts and stops, and the daemon exits by itself once the last connection closes and no request is running; the next request starts a fresh daemon on demand without any manual step.
+    // case-contract: test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle | The bridge daemon starts on the first request, serves later requests from the same process, and stays alive while any connection (such as a window's runtime or CPU usage watcher) is open. A watcher receives the daemon's runtime snapshots as a turn starts and stops, and the daemon exits by itself once the last connection closes and no request is running; the next request starts a fresh daemon on demand without any manual step.
     func test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle() throws {
         // Its own daemon, separate from the one the UI runner keeps alive for every
         // case. The app starts it: the sandboxed test runner can only connect.
@@ -5905,7 +5916,7 @@ final class PlayhouseUITests: XCTestCase {
         // The open window is a watcher: it starts the daemon and keeps it alive.
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: graceEnvironment)
         let task = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Daemon watcher", "--root", fixture.primary.path, "--provider", "codex",
+            "task", "create", "--title", "Daemon watcher", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex",
         ], extraEnvironment: graceEnvironment)["result"] as? [String: Any])
         let taskID = try XCTUnwrap(task["id"] as? String)
         let firstPID = try daemonPID()
@@ -5959,7 +5970,7 @@ final class PlayhouseUITests: XCTestCase {
         // Its own daemon, so killing it leaves the UI runner's shared one alone.
         let daemonEnvironment = ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).death-\(UUID().uuidString.prefix(8))"]
         let task = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Daemon death", "--root", fixture.primary.path, "--provider", "codex",
+            "task", "create", "--title", "Daemon death", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(task["id"] as? String)
         func daemonPID() throws -> Int {
@@ -6016,7 +6027,7 @@ final class PlayhouseUITests: XCTestCase {
 
     private func exerciseRejectedStop(provider: String, title: String) throws {
         let task = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", title, "--root", fixture.primary.path, "--provider", provider,
+            "task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", provider,
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(task["id"] as? String)
         let fixtureName = provider == "codex" ? "codex-fixture-hold-reject-interrupt" : "claude-fixture-hold-reject-interrupt"
@@ -6069,7 +6080,7 @@ final class PlayhouseUITests: XCTestCase {
         try exerciseRejectedStop(provider: "claude", title: "Claude rejected stop")
     }
 
-    // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
+    // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly and saves a --prompt description without starting the task, rejecting a blank or missing prompt. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
     func test_conversation_provider_selection_persists_and_validates() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-provider-selection")
@@ -6089,7 +6100,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(settings["defaultProvider"] as? String, "codex", "Existing installs keep Codex as the default provider.")
         let unknownDefault = try runCLI(["settings", "set-default-provider", "gemini"], expectedStatus: 2)
         XCTAssertEqual((unknownDefault["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
-        _ = try runCLI(["task", "create", "--title", "Unknown provider UI", "--root", fixture.primary.path, "--provider", "gemini"], expectedStatus: 2)
+        _ = try runCLI(["task", "create", "--title", "Unknown provider UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "gemini"], expectedStatus: 2)
 
         try createTaskFixture(title: "Provider choice UI", roots: [fixture.primary.path])
         let taskID = try taskID(named: "Provider choice UI")
@@ -6158,8 +6169,16 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
 
         _ = try runCLI(["settings", "set-default-provider", "claude"])
-        let explicit = try XCTUnwrap(try runCLI(["task", "create", "--title", "Explicit Codex UI", "--root", fixture.primary.path, "--provider", "codex"])["result"] as? [String: Any])
+        let explicit = try XCTUnwrap(try runCLI(["task", "create", "--title", "Explicit Codex UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex"])["result"] as? [String: Any])
         XCTAssertEqual(explicit["conversationProvider"] as? String, "codex", "task create can choose a provider explicitly.")
+        let prompted = try XCTUnwrap(try runCLI(["task", "create", "--title", "Prompted UI", "--root", fixture.primary.path, "--prompt", "Full description of the work"])["result"] as? [String: Any])
+        XCTAssertEqual(prompted["savedPrompt"] as? String, "Full description of the work", "task create --prompt saves the description.")
+        XCTAssertEqual(prompted["status"] as? String, "Backlog", "A prompt on create must not start the task.")
+        XCTAssertNil(prompted["pendingSubmittedPrompt"], "A prompt on create must not be submitted.")
+        let blankPrompt = try runCLI(["task", "create", "--title", "Blank prompt UI", "--root", fixture.primary.path, "--prompt", "   "], expectedStatus: 2)
+        XCTAssertEqual((blankPrompt["error"] as? [String: Any])?["code"] as? String, "invalid_argument", "A blank --prompt is rejected.")
+        let missingPrompt = try runCLI(["task", "create", "--title", "Missing prompt UI", "--root", fixture.primary.path], expectedStatus: 2)
+        XCTAssertEqual((missingPrompt["error"] as? [String: Any])?["code"] as? String, "invalid_argument", "A missing --prompt is rejected.")
         openNewTaskConversation()
         XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").label.contains("Claude") }, timeout: 10), "New tasks use the default provider from settings.")
         closeConversationRepositoryPicker()
@@ -6285,7 +6304,7 @@ final class PlayhouseUITests: XCTestCase {
         codexFixtureExecutable = codexExecutable.path
         try? FileManager.default.removeItem(at: URL(fileURLWithPath: codexExecutable.path + ".history"))
         launchApp(defaultParent: fixture.parent.path)
-        let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Claude answer UI", "--root", fixture.primary.path, "--provider", "claude"])["result"] as? [String: Any])
+        let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Claude answer UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         openTask(named: "Claude answer UI")
         let picker = element("model-picker-menu")
@@ -6395,7 +6414,7 @@ final class PlayhouseUITests: XCTestCase {
         claudeFixtureExecutable = executable.path
         launchApp(defaultParent: fixture.parent.path)
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude resume recovery UI", "--root", fixture.primary.path, "--provider", "claude",
+            "task", "create", "--title", "Claude resume recovery UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         openTask(named: "Claude resume recovery UI")
@@ -7022,7 +7041,7 @@ final class PlayhouseUITests: XCTestCase {
             claudeFixtureExecutable = executable.path
             if index == 0 { launchApp(defaultParent: fixture.parent.path) } else { relaunchApp() }
             let created = try XCTUnwrap(try runCLI([
-                "task", "create", "--title", "Untitled task", "--repo", fixture.primary.path, "--provider", "claude"
+                "task", "create", "--title", "Untitled task", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--provider", "claude"
             ])["result"] as? [String: Any])
             let taskID = try XCTUnwrap(created["id"] as? String)
             XCTAssertEqual((created["repositoryWorktrees"] as? [[String: Any]])?.first?["branch"] as? String, "auto")
@@ -7086,11 +7105,11 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
 
         let first = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Held Claude conversation", "--repo", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Held Claude conversation", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let firstID = try XCTUnwrap(first["id"] as? String)
         let second = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Parallel Claude conversation", "--repo", fixture.secondary.path, "--provider", "claude"
+            "task", "create", "--title", "Parallel Claude conversation", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let secondID = try XCTUnwrap(second["id"] as? String)
         let ready = URL(fileURLWithPath: executable.path + ".concurrent-turn-ready")
@@ -7189,11 +7208,11 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
 
         let first = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Failing Claude conversation", "--repo", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Failing Claude conversation", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let firstID = try XCTUnwrap(first["id"] as? String)
         let second = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Unaffected Claude conversation", "--repo", fixture.secondary.path, "--provider", "claude"
+            "task", "create", "--title", "Unaffected Claude conversation", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let secondID = try XCTUnwrap(second["id"] as? String)
         let ready = URL(fileURLWithPath: executable.path + ".concurrent-turn-ready")
@@ -7262,11 +7281,11 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
 
         let stopped = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Stopped Claude conversation", "--repo", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Stopped Claude conversation", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let stoppedID = try XCTUnwrap(stopped["id"] as? String)
         let running = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Running Claude conversation", "--repo", fixture.secondary.path, "--provider", "claude"
+            "task", "create", "--title", "Running Claude conversation", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let runningID = try XCTUnwrap(running["id"] as? String)
         let ready = URL(fileURLWithPath: executable.path + ".interrupt-ready")
@@ -7348,7 +7367,7 @@ final class PlayhouseUITests: XCTestCase {
         codexFixtureExecutable = sharedFixture.path
         launchApp(defaultParent: fixture.parent.path)
 
-        let created = try runCLI(["task", "create", "--title", "Concurrent conversation sends", "--repo", fixture.primary.path])
+        let created = try runCLI(["task", "create", "--title", "Concurrent conversation sends", "--prompt", "Fixture task description.", "--repo", fixture.primary.path])
         let task = try XCTUnwrap(created["result"] as? [String: Any])
         let taskID = try XCTUnwrap(task["id"] as? String)
         XCTAssertEqual(task["status"] as? String, "Backlog")
@@ -8013,7 +8032,7 @@ final class PlayhouseUITests: XCTestCase {
         try? FileManager.default.removeItem(at: release)
         launchApp(defaultParent: fixture.parent.path)
         let created = try runCLI([
-            "task", "create", "--title", "Claude active image", "--root", fixture.primary.path, "--provider", "claude",
+            "task", "create", "--title", "Claude active image", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any]
         let taskID = try XCTUnwrap(created?["id"] as? String)
         openTask(named: "Claude active image")
@@ -8145,7 +8164,7 @@ final class PlayhouseUITests: XCTestCase {
         }
 
         launchApp(defaultParent: fixture.parent.path)
-        _ = try runCLI(["task", "create", "--title", title, "--root", fixture.primary.path, "--provider", provider])
+        _ = try runCLI(["task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", provider])
         if let modelID {
             _ = try runCLI(["conversation", "model", try taskID(named: title), "set", modelID])
         }
@@ -8252,7 +8271,7 @@ final class PlayhouseUITests: XCTestCase {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
         launchApp(defaultParent: fixture.primary.path)
-        _ = try runCLI(["task", "create", "--title", "Tool activity", "--root", fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", "Tool activity", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         let taskID = try taskID(named: "Tool activity")
         openTask(named: "Tool activity")
         let composer = element("message-composer")
@@ -8440,7 +8459,7 @@ final class PlayhouseUITests: XCTestCase {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-context-compaction").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
         launchApp(defaultParent: fixture.primary.path)
-        _ = try runCLI(["task", "create", "--title", "Context compaction", "--root", fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", "Context compaction", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         let taskID = try taskID(named: "Context compaction")
         openTask(named: "Context compaction")
         let composer = element("message-composer")
@@ -8634,7 +8653,7 @@ final class PlayhouseUITests: XCTestCase {
         claudeFixtureExecutable = executable.path
         launchApp(defaultParent: fixture.parent.path)
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude paged history", "--root", fixture.primary.path, "--provider", "claude",
+            "task", "create", "--title", "Claude paged history", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         let empty = try XCTUnwrap(try runCLI(["conversation", "history", taskID, "--limit", "10"])["result"] as? [String: Any])
@@ -8818,7 +8837,7 @@ final class PlayhouseUITests: XCTestCase {
             try? FileManager.default.removeItem(at: finalAnswerPause)
         }
         launchApp(defaultParent: fixture.parent.path)
-        _ = try runCLI(["task", "create", "--title", "Subagent delegation", "--root", fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", "Subagent delegation", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         let taskID = try taskID(named: "Subagent delegation")
         openTask(named: "Subagent delegation")
         let prompt = "Delegate this task."
@@ -9575,7 +9594,7 @@ final class PlayhouseUITests: XCTestCase {
         claudeFixtureExecutable = aliasesExecutable.path
         launchApp(defaultParent: fixture.parent.path)
         let claudeTask = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Alias-only Claude models", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Alias-only Claude models", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let claudeTaskID = try XCTUnwrap(claudeTask["id"] as? String)
         openTask(named: "Alias-only Claude models")
@@ -9844,7 +9863,7 @@ final class PlayhouseUITests: XCTestCase {
         claudeFixtureExecutable = claudeExecutable.path
         launchApp(defaultParent: fixture.parent.path)
         let claudeTask = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude cached models", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Claude cached models", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let claudeTaskID = try XCTUnwrap(claudeTask["id"] as? String)
         let seededClaudeModels = try XCTUnwrap((try runCLI(["conversation", "models", claudeTaskID])["result"] as? [String: Any])?["models"] as? [[String: Any]])
@@ -9883,7 +9902,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: claudeOwnerMarker, encoding: .utf8), claudeOwnerValue, "Only remove the test-owned executable after verifying its ownership marker.")
         try FileManager.default.removeItem(at: claudeExecutable)
         let offlineTask = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude cached offline", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Claude cached offline", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let offlineTaskID = try XCTUnwrap(offlineTask["id"] as? String)
         openTask(named: "Claude cached offline")
@@ -9973,7 +9992,7 @@ final class PlayhouseUITests: XCTestCase {
         try? FileManager.default.removeItem(at: URL(fileURLWithPath: executable.path + ".history"))
         launchApp(defaultParent: fixture.parent.path)
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude effort UI", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Claude effort UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         openTask(named: "Claude effort UI")
@@ -10040,7 +10059,7 @@ final class PlayhouseUITests: XCTestCase {
         )
         claudeFixtureExecutable = executable.path
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Empty Claude question", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Empty Claude question", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         launchApp(defaultParent: fixture.parent.path)
@@ -10071,7 +10090,7 @@ final class PlayhouseUITests: XCTestCase {
         )
         claudeFixtureExecutable = executable.path
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Restart-safe Claude question", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Restart-safe Claude question", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         launchApp(defaultParent: fixture.parent.path)
@@ -10167,7 +10186,7 @@ final class PlayhouseUITests: XCTestCase {
         )
         claudeFixtureExecutable = executable.path
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Restart-safe Claude plan question", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Restart-safe Claude plan question", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         launchApp(defaultParent: fixture.parent.path)
@@ -10230,7 +10249,7 @@ final class PlayhouseUITests: XCTestCase {
         try "Pause after status-only completion.\n".write(to: summaryPause, atomically: true, encoding: .utf8)
         defer { try? "Release summary notification.\n".write(to: summaryRelease, atomically: true, encoding: .utf8) }
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude background agent", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Claude background agent", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         launchApp(defaultParent: fixture.parent.path)
@@ -10314,7 +10333,7 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         let failedTask = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude failed background agent", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Claude failed background agent", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
         let failedTaskID = try XCTUnwrap(failedTask["id"] as? String)
         openTask(named: "Claude failed background agent")
@@ -10362,7 +10381,7 @@ final class PlayhouseUITests: XCTestCase {
         try "Pause after the last notification arrives mid-work.\n".write(to: wakePause, atomically: true, encoding: .utf8)
         defer { try? "Release the woken parent's final answer.\n".write(to: wakeRelease, atomically: true, encoding: .utf8) }
         let wakeTask = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude woken parent", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Claude woken parent", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
         let wakeTaskID = try XCTUnwrap(wakeTask["id"] as? String)
         openTask(named: "Claude woken parent")
@@ -10429,7 +10448,7 @@ final class PlayhouseUITests: XCTestCase {
             try? "Release.\n".write(to: stage("wake-release"), atomically: true, encoding: .utf8)
         }
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude background shell", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Claude background shell", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         launchApp(defaultParent: fixture.parent.path)
@@ -10479,7 +10498,7 @@ final class PlayhouseUITests: XCTestCase {
         try "Pause between the first and the woken turn's results.\n".write(to: stage("second-result-pause"), atomically: true, encoding: .utf8)
         defer { try? "Release.\n".write(to: stage("second-result-release"), atomically: true, encoding: .utf8) }
         let early = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude early background shell", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Claude early background shell", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
         let earlyID = try XCTUnwrap(early["id"] as? String)
         openTask(named: "Claude early background shell")
@@ -10536,7 +10555,7 @@ final class PlayhouseUITests: XCTestCase {
             try? FileManager.default.removeItem(at: steeredAnswerRelease)
         }
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude parked steer", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Claude parked steer", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         launchApp(defaultParent: fixture.parent.path)
@@ -10620,11 +10639,11 @@ final class PlayhouseUITests: XCTestCase {
             "PLAYHOUSE_E2E_CLAUDE_SLOW_WOKEN_SILENCE_SECONDS": "8",
         ]
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude consumed wake", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Claude consumed wake", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         let slowCreated = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude slow woken turn", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Claude slow woken turn", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
         let slowTaskID = try XCTUnwrap(slowCreated["id"] as? String)
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: graceEnvironment)
@@ -10713,7 +10732,7 @@ final class PlayhouseUITests: XCTestCase {
         )
         claudeFixtureExecutable = executable.path
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude private recovery failure", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Claude private recovery failure", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         launchApp(defaultParent: fixture.parent.path)
@@ -10771,7 +10790,7 @@ final class PlayhouseUITests: XCTestCase {
             encoding: .utf8
         )
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Restart-safe Codex question", "--root", fixture.primary.path
+            "task", "create", "--title", "Restart-safe Codex question", "--prompt", "Fixture task description.", "--root", fixture.primary.path
         ]) ["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         launchApp(defaultParent: fixture.parent.path)
@@ -10926,7 +10945,7 @@ final class PlayhouseUITests: XCTestCase {
             encoding: .utf8
         )
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Fail-closed secret recovery", "--root", fixture.primary.path
+            "task", "create", "--title", "Fail-closed secret recovery", "--prompt", "Fixture task description.", "--root", fixture.primary.path
         ]) ["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         launchApp(defaultParent: fixture.parent.path)
@@ -11003,10 +11022,10 @@ final class PlayhouseUITests: XCTestCase {
         )
         claudeFixtureExecutable = executable.path
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude question", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Claude question", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
-        _ = try runCLI(["task", "create", "--title", "Other provider conversation", "--root", fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", "Other provider conversation", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Claude question")
         element("message-composer").click()
@@ -11047,7 +11066,7 @@ final class PlayhouseUITests: XCTestCase {
         )
         claudeFixtureExecutable = executable.path
         let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude reminder question", "--root", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Claude reminder question", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         launchApp(defaultParent: fixture.parent.path)
@@ -11106,9 +11125,9 @@ final class PlayhouseUITests: XCTestCase {
         try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-restart-question"), to: restartFixture)
         codexFixtureExecutable = restartFixture.path
         try "Playhouse test owns this Codex protocol fixture (v1).\n".write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"), atomically: true, encoding: .utf8)
-        let target = try XCTUnwrap((try runCLI(["task", "create", "--title", "Repair original question", "--root", fixture.primary.path])["result"] as? [String: Any])?["id"] as? String)
-        let source = try XCTUnwrap((try runCLI(["task", "create", "--title", "Repair misplaced question", "--root", fixture.secondary.path])["result"] as? [String: Any])?["id"] as? String)
-        let stranger = try XCTUnwrap((try runCLI(["task", "create", "--title", "Repair wrong destination", "--root", fixture.alternate.path])["result"] as? [String: Any])?["id"] as? String)
+        let target = try XCTUnwrap((try runCLI(["task", "create", "--title", "Repair original question", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])?["id"] as? String)
+        let source = try XCTUnwrap((try runCLI(["task", "create", "--title", "Repair misplaced question", "--prompt", "Fixture task description.", "--root", fixture.secondary.path])["result"] as? [String: Any])?["id"] as? String)
+        let stranger = try XCTUnwrap((try runCLI(["task", "create", "--title", "Repair wrong destination", "--prompt", "Fixture task description.", "--root", fixture.alternate.path])["result"] as? [String: Any])?["id"] as? String)
         _ = try runCLI(["conversation", "send", target, "--message", "Ask a restart-safe question.", "--mode", "plan"], expectedStatus: 1)
         let strangerFixture = dataDirectory.appendingPathComponent("codex-fixture-title-success")
         try FileManager.default.copyItem(at: restartFixture, to: strangerFixture)
@@ -11171,10 +11190,10 @@ final class PlayhouseUITests: XCTestCase {
 
     // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn reports no outcome, so Playhouse drives a private status nudge; when that private turn cannot complete, the task settles in Blocked naming that reason instead of Waiting Response. A parallel conversation retains its own question and thread; the original conversation receives and answers a second question in its original Plan mode, and completing either conversation preserves the other pending request.
     func test_codex_questions_can_be_answered_over_cli_xpc() throws {
-        let created = try runCLI(["task", "create", "--title", "Codex questions", "--root", fixture.primary.path])
+        let created = try runCLI(["task", "create", "--title", "Codex questions", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         XCTAssertEqual(created["ok"] as? Bool, true)
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
-        let parallel = try runCLI(["task", "create", "--title", "Another conversation", "--root", fixture.secondary.path])
+        let parallel = try runCLI(["task", "create", "--title", "Another conversation", "--prompt", "Fixture task description.", "--root", fixture.secondary.path])
         let parallelID = try XCTUnwrap((parallel["result"] as? [String: Any])?["id"] as? String)
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-question-isolation-plan-slow").path
         launchApp(defaultParent: fixture.parent.path)
@@ -11293,7 +11312,7 @@ final class PlayhouseUITests: XCTestCase {
 
     // case-contract: test_codex_empty_question_request_is_rejected | A failed turn preserves its blocked reason and appears in the compact Blocked section above Backlog with a user-intervention indication; retrying clears that section, and the successful retry returns to Waiting Response without an explicit completed outcome.
     func test_codex_empty_question_request_is_rejected() throws {
-        let created = try runCLI(["task", "create", "--title", "Empty Codex questions", "--root", fixture.primary.path])
+        let created = try runCLI(["task", "create", "--title", "Empty Codex questions", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
         let emptyFixture = try makeCodexFixture(emptyQuestions: true).path
         let failedTurn = try runCLI(
@@ -11327,8 +11346,8 @@ final class PlayhouseUITests: XCTestCase {
 
     // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation, and keep the task In Progress through fresh CLI/XPC history reconciliation after provider exit until answered. Free-text questions expose a selectable Other choice, select it when text is entered, keep it exclusive of listed answers, and deliver the free-text answer through CLI/XPC and visible UI. Answering resumes the provider turn without status nudges while its own pending question is still being resolved; the resumed turn returns to Waiting Response once the pending question clears, and the recovered secret answer stays redacted everywhere.
     func test_codex_nonblocking_question_keeps_task_in_progress() throws {
-        _ = try runCLI(["task", "create", "--title", "Non-blocking question", "--root", fixture.primary.path])
-        _ = try runCLI(["task", "create", "--title", "Another non-blocking conversation", "--root", fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", "Non-blocking question", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", "Another non-blocking conversation", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-nonblocking-restart-question").path
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Non-blocking question")
@@ -11398,7 +11417,7 @@ final class PlayhouseUITests: XCTestCase {
 
     // case-contract: test_codex_async_questions_render_and_reply_as_followup | Async agentMessage questions retain choices and a free-text prompt in live updates and fresh CLI/XPC history, retain accepted-turn model attribution during an active history reload, stay separate from later assistant text, and receive validated answers through the shared manager during and after an active turn. The UI shows inline answer cards instead of raw bullet text, blocks incomplete answers, preserves answered cards across reopening, and displays both submitted answers and responses.
     func test_codex_async_questions_render_and_reply_as_followup() throws {
-        let created = try runCLI(["task", "create", "--title", "Async Codex question", "--root", fixture.primary.path])
+        let created = try runCLI(["task", "create", "--title", "Async Codex question", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-async-question").path
         launchApp(defaultParent: fixture.parent.path)
@@ -11479,7 +11498,7 @@ final class PlayhouseUITests: XCTestCase {
 
     // case-contract: test_codex_async_question_queued_answer_retries | An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response. A fresh `conversation answered-async` read lists no answered questions while the answer is pending and lists the question once it is delivered.
     func test_codex_async_question_queued_answer_retries() throws {
-        let created = try runCLI(["task", "create", "--title", "Queued async question", "--root", fixture.primary.path])
+        let created = try runCLI(["task", "create", "--title", "Queued async question", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-async-question-queued")
         codexFixtureExecutable = executable.path
@@ -11527,7 +11546,7 @@ final class PlayhouseUITests: XCTestCase {
 
     // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. The live turn's activity section renders open and folds away when the interrupted turn settles without an answer, on the conversation that stayed open; the interrupted turn adds no final answer and keeps the activity it reported. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     func test_codex_interrupted_turn_blocks_with_reason_and_can_retry() throws {
-        _ = try runCLI(["task", "create", "--title", "Interrupted turn", "--root", fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", "Interrupted turn", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-interrupted").path
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Interrupted turn")
@@ -11593,7 +11612,7 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 10), "A completed explicit retry should remove the queued item.")
         XCTAssertEqual(try taskRecord(id: interruptedID)?["savedPrompt"] as? String, queuedText, "The successfully retried follow-up should become the latest saved prompt.")
 
-        _ = try runCLI(["task", "create", "--title", "Reopen active turn", "--root", fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", "Reopen active turn", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         let cleanRestartFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold").path
         codexFixtureExecutable = cleanRestartFixtureExecutable
         try? FileManager.default.removeItem(atPath: cleanRestartFixtureExecutable + ".hold-used")
@@ -11639,7 +11658,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Playhouse resumes the saved conversation after a clean quit")
 
         let unexpectedTask = try XCTUnwrap(
-            (try runCLI(["task", "create", "--title", "Unexpected restart", "--root", fixture.primary.path])["result"] as? [String: Any])
+            (try runCLI(["task", "create", "--title", "Unexpected restart", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
         )
         let unexpectedTaskID = try XCTUnwrap(unexpectedTask["id"] as? String)
         let unexpectedRestartFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold").path
@@ -11698,7 +11717,7 @@ final class PlayhouseUITests: XCTestCase {
     // case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view lists every file changed from the task branch's recorded base in a Changes section below a collapsed Viewed section, including committed branch changes and current staged, unstaged, and untracked edits, and excluding commits unique to the base branch. Marking a file viewed saves its current contents, stages the file in Git, and adds a Viewed entry that keeps showing the reviewed work from the branch base to that snapshot. Work done after that review is listed again under Changes and diffed against the saved snapshot, so one file can appear in both sections at once; a path with no content in the branch base and no current file is zero net change and is hidden entirely, even with a stale viewed snapshot, rather than showing a ghost entry. Selecting text or JSON files opens a calculated side-by-side diff whose header names the baseline used. Viewed snapshots persist across fresh CLI/XPC connections. Files that aren't current Changes entries, including already-viewed and unknown paths, are rejected by the mark-viewed CLI operation, and the UI offers that action only for Changes entries. Uncommitted filenames are green. Opening one diff after another serves each file's own content from the side-by-side editor the app loads once per session, so a later diff reuses that warm editor instead of starting Monaco again. Diagnostics record inventory and file-read outcomes without logging file contents.
     func test_task_workspace_changes_group_staged_and_unstaged_diffs() throws {
         _ = try runCLI([
-            "task", "create", "--title", "Git changes", "--root", fixture.changes.path
+            "task", "create", "--title", "Git changes", "--prompt", "Fixture task description.", "--root", fixture.changes.path
         ])
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Git changes")
@@ -11920,7 +11939,7 @@ final class PlayhouseUITests: XCTestCase {
         try runGit(repository, "add", "tracked.txt")
         try runGit(repository, "commit", "-m", "Baseline")
 
-        let created = try runCLI(["task", "create", "--title", "External Git"])
+        let created = try runCLI(["task", "create", "--title", "External Git", "--prompt", "Fixture task description."])
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
         let added = try runCLI(["task", "repository", "add", taskID, "--repo", repository.path])
         let record = try XCTUnwrap(((added["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])?.first)
@@ -11976,7 +11995,7 @@ final class PlayhouseUITests: XCTestCase {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-usage")
         launchApp(defaultParent: fixture.parent.path)
         let taskID = try XCTUnwrap((try runCLI([
-            "task", "create", "--title", "Token usage task", "--root", fixture.primary.path, "--provider", "claude",
+            "task", "create", "--title", "Token usage task", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any])?["id"] as? String)
         let card = app.buttons["Token usage task"]
         XCTAssertTrue(card.waitForExistence(timeout: 10))
@@ -12101,7 +12120,7 @@ final class PlayhouseUITests: XCTestCase {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-max")
         launchApp(defaultParent: fixture.parent.path)
         let taskID = try XCTUnwrap((try runCLI([
-            "task", "create", "--title", "Dot heat task", "--root", fixture.primary.path, "--provider", "claude",
+            "task", "create", "--title", "Dot heat task", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any])?["id"] as? String)
         XCTAssertTrue(app.buttons["Dot heat task"].waitForExistence(timeout: 10))
         // "Tell me a story." reports a task outcome, so it ends in exactly one
@@ -12158,7 +12177,7 @@ final class PlayhouseUITests: XCTestCase {
         environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU_SECONDS"] = "25"
         launchApp(defaultParent: fixture.parent.path)
         let taskID = try XCTUnwrap((try runCLI([
-            "task", "create", "--title", "Claude CPU usage", "--root", fixture.primary.path, "--provider", "claude",
+            "task", "create", "--title", "Claude CPU usage", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any])?["id"] as? String)
         XCTAssertTrue(app.buttons["Claude CPU usage"].waitForExistence(timeout: 10))
 
@@ -12213,10 +12232,10 @@ final class PlayhouseUITests: XCTestCase {
         let environment = ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path]
         launchApp(defaultParent: fixture.parent.path)
         let busyID = try XCTUnwrap((try runCLI([
-            "task", "create", "--title", "Codex busy worktree", "--root", fixture.primary.path, "--provider", "codex",
+            "task", "create", "--title", "Codex busy worktree", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex",
         ])["result"] as? [String: Any])?["id"] as? String)
         let idleID = try XCTUnwrap((try runCLI([
-            "task", "create", "--title", "Codex idle worktree", "--root", fixture.secondary.path, "--provider", "codex",
+            "task", "create", "--title", "Codex idle worktree", "--prompt", "Fixture task description.", "--root", fixture.secondary.path, "--provider", "codex",
         ])["result"] as? [String: Any])?["id"] as? String)
         XCTAssertTrue(app.buttons["Codex busy worktree"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["Codex idle worktree"].waitForExistence(timeout: 10))
@@ -12675,7 +12694,7 @@ final class PlayhouseUITests: XCTestCase {
     }
 
     private func createTaskFixture(title: String, roots: [String]) throws {
-        var arguments = ["task", "create", "--title", title]
+        var arguments = ["task", "create", "--title", title, "--prompt", "Fixture task description."]
         for root in roots { arguments += ["--root", root] }
         let result = try runCLI(arguments)["result"] as? [String: Any]
         XCTAssertEqual(result?["title"] as? String, title)
@@ -13601,8 +13620,17 @@ final class PlayhouseUITests: XCTestCase {
             "CLI response was not a JSON object."
         )
         XCTAssertEqual(response["version"] as? Int, 1)
+        // `task create` requires a prompt, but most UI cases open the task's conversation and
+        // need an empty composer. Fixture creations carry a placeholder prompt that is cleared
+        // right away; cases that exercise the saved prompt pass their own text instead.
+        if expectedStatus == 0, arguments.starts(with: ["task", "create"]), arguments.contains(Self.fixtureTaskPrompt),
+           let createdID = (response["result"] as? [String: Any])?["id"] as? String {
+            _ = try runCLI(["task", "prompt", createdID, "--text", ""], extraEnvironment: extraEnvironment)
+        }
         return response
     }
+
+    private static let fixtureTaskPrompt = "Fixture task description."
 
     private func startCLIProcess(
         _ arguments: [String],
@@ -13752,12 +13780,38 @@ final class PlayhouseUITests: XCTestCase {
         return value
     }
 
+    /// Hovers the control until its native tooltip becomes visible outside it. Retries with real
+    /// mouse-moved events, because AppKit starts the tooltip delay from a move inside the control.
     private func assertNativeHelpText(for element: XCUIElement, equals expected: String) {
-        movePointerToHelpRunway(below: element)
-        Thread.sleep(forTimeInterval: 1.5)
-        let baseline = XCUIScreen.main.screenshot().image
-        element.hover()
-        XCTAssertTrue(waitForNativeHelpChange(from: baseline, near: element, timeout: 8), "Hovering should present the native help text ‘\(expected)’ outside the PR control.")
+        for attempt in 0..<3 {
+            // Tooltips only show for the active app's key window.
+            app.activate()
+            movePointerToHelpRunway(below: element)
+            Thread.sleep(forTimeInterval: 1.5)
+            let baseline = XCUIScreen.main.screenshot().image
+            // Enter the control, then keep moving inside it: AppKit starts its tooltip delay from
+            // a mouse-move within the tracking area, and a single jump in does not always count.
+            element.hover()
+            for dx in [0.35, 0.65, 0.45, 0.55] {
+                Thread.sleep(forTimeInterval: 0.15)
+                element.coordinate(withNormalizedOffset: CGVector(dx: dx, dy: 0.5 + CGFloat(attempt) * 0.05)).hover()
+            }
+            // Real mouse-moved events at the control's position, the way a trackpad delivers them.
+            let frame = element.frame
+            for step in 0..<6 {
+                let point = CGPoint(x: frame.midX - 4 + CGFloat(step % 3) * 4, y: frame.midY + CGFloat(step % 2) * 2)
+                CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            if waitForNativeHelpChange(from: baseline, near: element, timeout: 6, expectedHelpTag: expected) { return }
+        }
+        XCTFail("Hovering should present the native help text ‘\(expected)’ outside the PR control.")
+    }
+
+    private func helpTagIsShowing(_ text: String) -> Bool {
+        app.descendants(matching: .helpTag)
+            .matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@ OR title CONTAINS %@", text, text, text))
+            .firstMatch.exists
     }
 
     private func dismissNativeHelpText(named expected: String) {
@@ -13780,9 +13834,10 @@ final class PlayhouseUITests: XCTestCase {
         window.coordinate(withNormalizedOffset: offset).hover()
     }
 
-    private func waitForNativeHelpChange(from baseline: NSImage, near control: XCUIElement, timeout: TimeInterval) -> Bool {
+    private func waitForNativeHelpChange(from baseline: NSImage, near control: XCUIElement, timeout: TimeInterval, expectedHelpTag: String? = nil) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
+            if let expectedHelpTag, helpTagIsShowing(expectedHelpTag) { return true }
             let current = XCUIScreen.main.screenshot().image
             guard let changedPixels = changedPixelCount(near: control, before: baseline, after: current, step: 2, threshold: 0.12) else {
                 XCTFail("Could not compare the screenshot region outside the PR control.")

@@ -1999,11 +1999,16 @@ enum TaskThreadDeveloperInstructions {
             Manage the board with:
               \(quotedExecutable) task list
               \(quotedExecutable) task get <task-id>
-              \(quotedExecutable) task create --title "<title>" [--repo <repository-path>...] [--provider <codex|claude>]
+              \(quotedExecutable) task create --title "<title>" --prompt "<full description>" [--repo <repository-path>...] [--provider <codex|claude>]
               \(quotedExecutable) task move <task-id> <Backlog|In Progress|Blocked|Waiting Response|Review|Done>
               \(quotedExecutable) task rename <task-id> --title "<title>"
+              \(quotedExecutable) task prompt <task-id> --text "<prompt>"   (replace the saved description of an existing task)
               \(quotedExecutable) workspace repos list
-            A task created with no repository is a plain card; add repositories only when the user asks for work in a specific repo. Creating a task does not start it — the user runs it from the board. Report back the real task ID the CLI returned, and if a command fails, show the user what it said rather than claiming success.
+            A task created with no repository is a plain card; add repositories only when the user asks for work in a specific repo. Creating a task does not start it — the user runs it from the board.
+
+            `task create` requires --prompt: it is the task's full description, saved on the card in the same command. Never create a task with only a title. `--prompt` only saves the description: never submit or start the task (no `task prompt --submitted true`, no status change, no move), so it stays in Backlog. A good description is self-contained, because the agent that runs the task will not see this chat. Include the goal; background and context from this conversation (findings, numbers, file paths, decisions the user made); concrete requirements; where to look in the code; and acceptance criteria. Do this every time, without the user asking.
+
+            Report back the real task ID the CLI returned and say that the description was saved. If a command fails, show the user what it said rather than claiming success.
 
             This chat itself is not a task: it has no board status, no repository and no worktree, so task progress, task outcome and repository commands do not apply to this conversation. The conversation is split behind the scenes into titled "pages" so your live context stays small while the full history stays searchable.
             - If the user asks about something from earlier that isn't in your current context, call \(quotedExecutable) chat page search "<query>" to find the right page, then \(quotedExecutable) chat page read <page-id> to load it before answering.

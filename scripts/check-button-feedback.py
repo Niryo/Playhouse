@@ -117,12 +117,24 @@ def modifier_chain(source: str, end: int, declaration_indent: int) -> str:
     return "".join(chain)
 
 
+def menu_content_ranges(source: str) -> list[tuple[int, int]]:
+    """Spans of `Menu { ... }` and `.contextMenu { ... }` content, whose buttons become menu items."""
+    ranges = []
+    for match in re.finditer(r"(?<![A-Za-z])Menu\s*\{|\.contextMenu\s*\{", source):
+        opening = match.end() - 1
+        closing = matching(source, "{", "}", opening)
+        if closing is not None:
+            ranges.append((opening, closing))
+    return ranges
+
+
 def main() -> int:
     errors: list[str] = []
     controls_seen = 0
     for path in FILES:
         name = path.relative_to(APP).as_posix()
         source = path.read_text(encoding="utf-8")
+        menus = menu_content_ranges(source)
         for match in CONTROL.finditer(source):
             kind = match.group(1)
             start = match.start()
@@ -137,9 +149,15 @@ def main() -> int:
             chain = modifier_chain(source, end, indent)
             if ".buttonHoverPointer()" not in chain:
                 errors.append(f"{location}: {kind} is missing buttonHoverPointer()")
-            help_match = re.search(r"\.help\(\s*(\"(?:\\.|[^\"\\])*\"|[^)\n]+)\s*\)", chain)
+            # Window controls use `.nativeHelp`: SwiftUI's `.help` alone does not present its
+            # tooltip for most controls in the main window. Menu items (menu-bar commands and
+            # `Menu`/`.contextMenu` content) are native menu items and keep `.help`.
+            in_menu = name == "PlayhouseApp.swift" or any(a < start < b for a, b in menus)
+            help_modifier = r"\.help" if in_menu else r"\.nativeHelp"
+            help_match = re.search(help_modifier + r"\(\s*(\"(?:\\.|[^\"\\])*\"|[^)\n]+)\s*\)", chain)
             if not help_match:
-                errors.append(f"{location}: {kind} is missing a help hint")
+                errors.append(f"{location}: {kind} is missing a help hint"
+                              + ("" if in_menu else " (use .nativeHelp, not .help)"))
             else:
                 hint = help_match.group(1).strip().strip('"')
                 if not hint or hint == "Activate this button":

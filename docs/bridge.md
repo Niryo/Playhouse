@@ -10,8 +10,8 @@ The daemon accepts a versioned, length-prefixed JSON request over its socket, st
 | --- | --- |
 | `status` | Service and API version, and the daemon's process ID |
 | `board list` / `task list` | List persisted tasks |
-| `task create --title <title> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--root <folder>...]` | Create one worktree per Git repository, with optional extra context folders |
-| `task create --title <title> --root <folder> [--root <folder>...]` | Create a folder-only task without Git worktrees |
+| `task create --title <title> --prompt <text> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--root <folder>...]` | Create one worktree per Git repository, with optional extra context folders |
+| `task create --title <title> --prompt <text> --root <folder> [--root <folder>...]` | Create a folder-only task without Git worktrees |
 | `task get <task-id>` | Read a task and its thread/root state |
 | `task move <task-id> <Backlog\|Ready\|In Progress\|Done>` | Change task status |
 | `task rename <task-id> --title <title>` | Rename a task |
@@ -43,7 +43,7 @@ The daemon accepts a versioned, length-prefixed JSON request over its socket, st
 For example:
 
 ```sh
-./scripts/playhouse.sh task create --title "Update parser" --repo /work/parser --root /work/fixtures
+./scripts/playhouse.sh task create --title "Update parser" --prompt "Update the parser to ..." --repo /work/parser --root /work/fixtures
 ./scripts/playhouse.sh task move 33F746B9-3E5E-4D84-890A-257BDB01B66A "In Progress"
 ./scripts/playhouse.sh conversation send 33F746B9-3E5E-4D84-890A-257BDB01B66A --message "Inspect the parser and summarize its error handling."
 ```

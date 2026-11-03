@@ -159,13 +159,13 @@ struct KanbanBoardView: View {
                 }
             }
             .buttonHoverPointer()
-            .help("Delete Task")
+            .nativeHelp("Delete Task")
             .accessibilityIdentifier("confirm-delete-task-button")
             Button("Cancel", role: .cancel) {
                 taskBeingDeleted = nil
             }
             .buttonHoverPointer()
-            .help("Cancel task deletion")
+            .nativeHelp("Cancel task deletion")
             .accessibilityIdentifier("cancel-delete-task-button")
         } message: {
             Text("The task conversation and saved working folders will also be deleted.")
@@ -176,7 +176,7 @@ struct KanbanBoardView: View {
         )) {
             Button("OK", role: .cancel) { pullRequestError = nil }
             .buttonHoverPointer()
-            .help("Dismiss pull request error")
+            .nativeHelp("Dismiss pull request error")
         } message: {
             Text(pullRequestError ?? "Please try again.")
         }
@@ -186,7 +186,7 @@ struct KanbanBoardView: View {
         )) {
             Button("OK", role: .cancel) { doneMoveError = nil }
             .buttonHoverPointer()
-            .help("Dismiss pull request status error")
+            .nativeHelp("Dismiss pull request status error")
         } message: {
             Text(doneMoveError ?? "Please try again.")
         }
@@ -204,10 +204,10 @@ struct KanbanBoardView: View {
                 moveTask(id: id, to: .done, allowUnmergedPullRequests: true)
             }
             .buttonHoverPointer()
-            .help("Mark Done Anyway")
+            .nativeHelp("Mark Done Anyway")
             Button("Cancel", role: .cancel) { taskAwaitingUnmergedConfirmation = nil }
             .buttonHoverPointer()
-            .help("Cancel marking this task Done")
+            .nativeHelp("Cancel marking this task Done")
         } message: {
             Text("The pull request hasn't been merged. Marking this task Done will keep its worktree and branch as they are.")
         }
@@ -217,7 +217,7 @@ struct KanbanBoardView: View {
         )) {
             Button("OK", role: .cancel) { lifecycleResetNotice = nil }
                 .buttonHoverPointer()
-                .help("Dismiss worktree notice")
+                .nativeHelp("Dismiss worktree notice")
         } message: {
             Text(lifecycleResetNotice ?? "")
         }
@@ -226,7 +226,7 @@ struct KanbanBoardView: View {
                 saveError = nil
             }
             .buttonHoverPointer()
-            .help("Dismiss save error")
+            .nativeHelp("Dismiss save error")
         } message: {
             Text(saveError ?? "Please try again.")
         }
@@ -256,7 +256,7 @@ struct KanbanBoardView: View {
                     Spacer(minLength: 8)
                     Button("OK") { self.lifecycleResetNotice = nil }
                         .buttonHoverPointer()
-                        .help("Dismiss worktree notice")
+                        .nativeHelp("Dismiss worktree notice")
                         .accessibilityIdentifier("dismiss-task-lifecycle-reset-notice")
                 }
                 .padding(.horizontal, 18)
@@ -428,7 +428,7 @@ struct KanbanBoardView: View {
                 }
                     .buttonStyle(.plain)
                     .buttonHoverPointer()
-                    .help("Clear search")
+                    .nativeHelp("Clear search")
                     .accessibilityIdentifier("clear-board-search-button")
             }
             Button {
@@ -443,7 +443,7 @@ struct KanbanBoardView: View {
             }
             .buttonStyle(.plain)
             .buttonHoverPointer()
-            .help("Close search")
+            .nativeHelp("Close search")
             .accessibilityLabel("Close search")
             .accessibilityIdentifier("close-board-search-button")
         }
@@ -496,7 +496,7 @@ struct KanbanBoardView: View {
                 }
                 .buttonHoverPointer()
                 .buttonStyle(.bordered)
-                .help("Search tasks")
+                .nativeHelp("Search tasks")
                 .accessibilityLabel("Search tasks")
                 .accessibilityIdentifier("board-search-button")
 
@@ -509,7 +509,7 @@ struct KanbanBoardView: View {
                 }
                 .buttonHoverPointer()
                 .buttonStyle(.bordered)
-                .help("Browse completed tasks")
+                .nativeHelp("Browse completed tasks")
                 .accessibilityLabel("Done tasks")
                 .accessibilityIdentifier("done-archive-button")
 
@@ -522,7 +522,7 @@ struct KanbanBoardView: View {
                         .padding(.vertical, 3)
                 }
                 .buttonHoverPointer()
-                .help("Open the standalone chat")
+                .nativeHelp("Open the standalone chat")
                 .buttonStyle(.bordered)
                 .disabled(isOpeningChatSidebar)
                 .accessibilityIdentifier("chat-sidebar-button")
@@ -536,7 +536,7 @@ struct KanbanBoardView: View {
                         .padding(.vertical, 3)
                 }
                 .buttonHoverPointer()
-                .help("Create a new task")
+                .nativeHelp("Create a new task")
                 .buttonStyle(.borderedProminent)
                 .tint(WorkspaceTheme.accent)
                 .disabled(isCreatingNewTask)
@@ -558,7 +558,7 @@ struct KanbanBoardView: View {
                 Spacer()
                 Button { closeDoneArchive() } label: { Image(systemName: "xmark") }
                 .buttonHoverPointer()
-                .help("Close done tasks")
+                .nativeHelp("Close done tasks")
                     .buttonStyle(.plain).accessibilityLabel("Close done tasks")
                     .accessibilityIdentifier("close-done-archive-button")
             }
@@ -571,7 +571,7 @@ struct KanbanBoardView: View {
                 if !archiveSearchText.isEmpty {
                     Button { archiveSearchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
                     .buttonHoverPointer()
-                    .help("Clear archive search")
+                    .nativeHelp("Clear archive search")
                         .buttonStyle(.plain).accessibilityLabel("Clear archive search")
                         .accessibilityIdentifier("clear-archive-search-button")
                 }
@@ -602,7 +602,7 @@ struct KanbanBoardView: View {
                                     .padding(10).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                                 }
                                 .buttonHoverPointer()
-                                .help("Open task: \(task.title)")
+                                .nativeHelp("Open task: \(task.title)")
                                 .buttonStyle(.plain)
                                 .accessibilityIdentifier("done-archive-task-\(task.id.uuidString)")
                                 if !task.repositoryWorktrees.isEmpty {
@@ -646,7 +646,7 @@ struct KanbanBoardView: View {
             }
             .actionButtonHoverEmphasis()
             .buttonHoverPointer()
-            .help("Create a pull request for each repository linked to this completed task")
+            .nativeHelp("Create a pull request for each repository linked to this completed task")
             .disabled(taskCreatingPullRequests.contains(task.id))
             .frame(width: 30, height: 30)
             .contentShape(Rectangle())
@@ -667,7 +667,7 @@ struct KanbanBoardView: View {
                     }
                     .actionButtonHoverEmphasis()
                     .buttonHoverPointer()
-                    .help("Create pull requests for repositories without a linked pull request")
+                    .nativeHelp("Create pull requests for repositories without a linked pull request")
                     .disabled(taskCreatingPullRequests.contains(task.id))
                     .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
@@ -682,7 +682,7 @@ struct KanbanBoardView: View {
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
                             .actionButtonHoverEmphasis(padding: 5)
                             .buttonHoverPointer()
-                            .help(Text(verbatim: "Open pull request #\(number) in your browser"))
+                            .nativeHelp("Open pull request #\(number) in your browser")
                             .contentShape(Capsule())
                             .accessibilityIdentifier("done-archive-pr-link-\(task.id.uuidString)-\(number)")
                     }
@@ -1110,7 +1110,7 @@ private struct KanbanColumnView: View {
                     .controlSize(.small)
                     .accessibilityLabel("Add task to Backlog")
                     .accessibilityIdentifier("add-backlog-task-button")
-                    .help("Add task to Backlog")
+                    .nativeHelp("Add task to Backlog")
                 }
             }
             .padding(.horizontal, 3)
@@ -1440,7 +1440,7 @@ private struct TaskCardView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .buttonHoverPointer()
             .buttonStyle(.plain)
-            .help("Open task: \(task.title)")
+            .nativeHelp("Open task: \(task.title)")
             .accessibilityLabel(task.title)
             .accessibilityHint("Open task")
             .accessibilityIdentifier("task-card-\(task.id.uuidString)")
@@ -1551,7 +1551,7 @@ private struct TaskCardView: View {
         Circle()
             .fill(TokenUsageHeatmap.color(totalTokens: task.totalTokens, max: tokenUsageColorMax))
             .frame(width: 8, height: 8)
-            .help(TokenUsageHeatmap.label(totalTokens: task.totalTokens))
+            .nativeHelp(TokenUsageHeatmap.label(totalTokens: task.totalTokens))
             .accessibilityIdentifier("task-token-usage-dot-\(task.id.uuidString)")
             .accessibilityLabel(TokenUsageHeatmap.label(totalTokens: task.totalTokens))
     }
@@ -1574,7 +1574,7 @@ private struct TaskCardView: View {
                 }
                 .actionButtonHoverEmphasis(padding: 10)
                 .buttonHoverPointer()
-                .help("Create a pull request for each repository linked to this task")
+                .nativeHelp("Create a pull request for each repository linked to this task")
                 .disabled(isCreatingPullRequests)
                 .frame(width: 30, height: 30)
                 .contentShape(Rectangle())
@@ -1592,7 +1592,7 @@ private struct TaskCardView: View {
                     }
                     .actionButtonHoverEmphasis(padding: 10)
                     .buttonHoverPointer()
-                    .help("Create pull requests for repositories without a linked pull request")
+                    .nativeHelp("Create pull requests for repositories without a linked pull request")
                     .disabled(isCreatingPullRequests)
                     .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
@@ -1607,7 +1607,7 @@ private struct TaskCardView: View {
                     }
                     .actionButtonHoverEmphasis(padding: 10)
                     .buttonHoverPointer()
-                    .help("Complete task: all linked pull requests have merged")
+                    .nativeHelp("Complete task: all linked pull requests have merged")
                     .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
                     .accessibilityLabel("Green checkmark. Complete task, all linked pull requests merged")
@@ -1625,7 +1625,7 @@ private struct TaskCardView: View {
                         }
                         .actionButtonHoverEmphasis(padding: 10)
                         .buttonHoverPointer()
-                        .help("Resolve pull request conflicts with \(task.conversationProvider.displayName)")
+                        .nativeHelp("Resolve pull request conflicts with \(task.conversationProvider.displayName)")
                         .accessibilityLabel("Resolve pull request conflicts")
                         .accessibilityIdentifier("task-resolve-pr-conflicts-\(task.id.uuidString)")
                         .frame(minWidth: 30, minHeight: 30)
@@ -1639,8 +1639,9 @@ private struct TaskCardView: View {
                                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                                 .actionButtonHoverEmphasis(padding: 5)
                                 .buttonHoverPointer()
-                                .help(Text(verbatim: "Open pull request #\(number) in your browser"))
-                                .contentShape(Capsule())
+                                .nativeHelp("Open pull request #\(number) in your browser")
+                                .frame(minHeight: 30)
+                                .contentShape(Rectangle())
                                 .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
                         }
                     }
@@ -1678,7 +1679,7 @@ private struct TaskCardView: View {
         }
         .buttonStyle(.plain)
         .buttonHoverPointer()
-        .help(isOn ? "Auto PR is on: a pull request is created automatically when this task moves to Review" : "Auto PR is off: create the pull request yourself once this task moves to Review")
+        .nativeHelp(isOn ? "Auto PR is on: a pull request is created automatically when this task moves to Review" : "Auto PR is off: create the pull request yourself once this task moves to Review")
         .accessibilityLabel("Auto PR")
         .accessibilityValue(isOn ? "on" : "off")
         .accessibilityAddTraits(.isToggle)
@@ -1746,7 +1747,7 @@ private struct TokenStatsSheet: View {
                 Spacer()
                 Button("Done") { dismiss() }
                     .buttonHoverPointer()
-                    .help("Done")
+                    .nativeHelp("Done")
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("close-token-stats-button")
@@ -1888,14 +1889,14 @@ private struct RenameTaskSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 .buttonHoverPointer()
-                .help("Cancel")
+                .nativeHelp("Cancel")
                     .keyboardShortcut(.cancelAction)
                 Button("Save") {
                     onSave(normalizedTitle)
                     dismiss()
                 }
                 .buttonHoverPointer()
-                .help("Save")
+                .nativeHelp("Save")
                 .buttonStyle(.borderedProminent)
                 .disabled(normalizedTitle.isEmpty)
                 .accessibilityIdentifier("save-task-rename-button")
