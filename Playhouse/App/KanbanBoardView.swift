@@ -1353,18 +1353,10 @@ private struct TaskCardView: View {
     let onMoveToDone: (() -> Void)?
 
     var body: some View {
-        // Card rows, top to bottom: the pull-request controls on the right
-        // (absent until the task has started and has a repository), the title,
-        // the live updates, then the time with the live token counter.
+        // Card rows, top to bottom: the title, the live updates, the time with
+        // the live token counter, then the pull-request controls on the right
+        // (absent until the task has started and has a repository).
         VStack(alignment: .leading, spacing: 10) {
-            if showPullRequestControls {
-                HStack(spacing: 8) {
-                    Spacer(minLength: 8)
-                    pullRequestControls
-                }
-                .frame(minHeight: 30)
-            }
-
             HStack(spacing: 6) {
                 if task.title == "Generating title…" { ProgressView().controlSize(.small) }
                 Text(task.title)
@@ -1418,6 +1410,14 @@ private struct TaskCardView: View {
             }
 
             timeRow
+
+            if showPullRequestControls {
+                HStack(spacing: 8) {
+                    Spacer(minLength: 8)
+                    pullRequestControls
+                }
+                .frame(minHeight: 30)
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)

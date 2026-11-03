@@ -2003,7 +2003,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Done preserves the task worktree without merging")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own row above the card title and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -2029,8 +2029,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(activeCreateButton.waitForExistence(timeout: 5), "An active repository task should expose its PR action on the card.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.width, 30, "The PR action should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.height, 30, "The PR action should have a comfortable vertical hit target.")
-        // The control sits on its own row above the title, on the right; Backlog had no such row.
-        XCTAssertLessThanOrEqual(activeCreateButton.frame.maxY, element("task-title-\(taskID)").frame.minY, "The pull-request row should sit above the title.")
+        // The control sits on its own last row, below the title and the time row, on the right; Backlog had no such row.
+        XCTAssertGreaterThanOrEqual(activeCreateButton.frame.minY, element("task-title-\(taskID)").frame.maxY, "The pull-request row should sit below the title.")
+        XCTAssertGreaterThanOrEqual(activeCreateButton.frame.minY, element("task-token-usage-counter-\(taskID)").frame.maxY, "The pull-request row should sit below the time row.")
+        XCTAssertLessThanOrEqual(activeCreateButton.frame.maxY, element("task-card-\(taskID)").frame.maxY + 1, "The pull-request row should be the card's last row.")
         XCTAssertGreaterThan(activeCreateButton.frame.midX, element("task-card-\(taskID)").frame.midX, "The pull-request control should sit on the right.")
         assertHoverEmphasis(for: activeCreateButton)
         XCTAssertEqual(activeCreateButton.label, "PR. Create a pull request for each repository linked to this task")
@@ -2104,6 +2106,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(toggle.waitForExistence(timeout: 5), "An in-progress task with no linked PR should show the Auto PR switch.")
             XCTAssertFalse(self.element("task-create-pr-\(taskID)").exists, "The switch replaces the manual PR button while the task is in progress.")
             XCTAssertGreaterThanOrEqual(toggle.frame.height, 30, "The Auto PR switch should keep a comfortable hit target.")
+            XCTAssertGreaterThanOrEqual(toggle.frame.minY, self.element("task-working-duration-\(taskID)").frame.maxY, "The Auto PR switch should sit below the working-duration time row.")
             XCTAssertEqual(toggle.value as? String, "off")
             XCTAssertFalse(try XCTUnwrap(self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool), "Auto PR must default to off.")
             self.attachScreenshot(named: "Working task shows the Auto PR switch defaulting to off", fullScreen: true)
@@ -14281,7 +14284,14 @@ final class PlayhouseUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.5)
         let baseline = XCUIScreen.main.screenshot().image
         element.hover()
-        XCTAssertTrue(waitForNativeHelpChange(from: baseline, near: element, timeout: 8), "Hovering should present the native help text ‘\(expected)’ outside the PR control.")
+        // A single pointer warp from an area with no tracking views can show the
+        // hover emphasis without starting AppKit's tooltip timer; a small move
+        // inside the control delivers the mouse-moved event that starts it.
+        let shown = waitForNativeHelpChange(from: baseline, near: element, timeout: 4) || {
+            element.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.4)).hover()
+            return waitForNativeHelpChange(from: baseline, near: element, timeout: 6)
+        }()
+        XCTAssertTrue(shown, "Hovering should present the native help text ‘\(expected)’ outside the PR control.")
     }
 
     private func dismissNativeHelpText(named expected: String) {
