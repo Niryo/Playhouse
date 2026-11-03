@@ -327,7 +327,7 @@ enum WorkspaceChangeScanner {
             let statusByPath = Dictionary(statusRecords.map { ($0.path, $0) }) { existing, candidate in
                 existing.indexStatus == 63 && existing.worktreeStatus == 63 ? candidate : existing
             }
-            let baseRef = branchFromByRepository[repository.path] ?? "HEAD"
+            let baseRef = try comparisonBase(repository: repository, branchFrom: branchFromByRepository[repository.path] ?? "HEAD")
             let mergeBaseResult = try runGit(repository: repository, arguments: ["merge-base", baseRef, "HEAD"])
             guard mergeBaseResult.status == 0, let mergeBase = String(data: mergeBaseResult.output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !mergeBase.isEmpty else {
                 throw BridgeCommandError(code: "operation_failed", message: "Git couldn't find the common ancestor of \(baseRef) and the current branch in \(repository.path).")
@@ -444,7 +444,8 @@ enum WorkspaceChangeScanner {
         let repositoryURL = URL(fileURLWithPath: repository, isDirectory: true)
         let snapshot = viewedChanges.first { $0.repository == repository && $0.path == relativePath }
         func branchBaseBytes() throws -> Data {
-            let mergeBase = try runGit(repository: repositoryURL, arguments: ["merge-base", branchFrom, "HEAD"])
+            let baseRef = try comparisonBase(repository: repositoryURL, branchFrom: branchFrom)
+            let mergeBase = try runGit(repository: repositoryURL, arguments: ["merge-base", baseRef, "HEAD"])
             guard mergeBase.status == 0, let revision = String(data: mergeBase.output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
                 throw BridgeCommandError(code: "operation_failed", message: "Git couldn't find the branch comparison point.")
             }
@@ -474,6 +475,20 @@ enum WorkspaceChangeScanner {
             return WorkspaceFileDiff(repository: repository, path: relativePath, group: group, original: nil, modified: nil, isText: false, message: "This binary or non-UTF-8 file can't be shown as a text diff.")
         }
         return WorkspaceFileDiff(repository: repository, path: relativePath, group: group, original: original, modified: modified, isText: true, message: nil)
+    }
+
+    /// The ref a task's changes are measured against. A local branch such as `master` is rarely
+    /// fetched, so when its remote-tracking counterpart is at or ahead of it, measure against that
+    /// instead; otherwise every commit that landed upstream since the local branch was last
+    /// updated shows up as the task's own change. A local branch that is ahead of or diverged from
+    /// its remote holds work the task was started from, so it stays the base.
+    private static func comparisonBase(repository: URL, branchFrom: String) throws -> String {
+        let remoteRef = "refs/remotes/origin/\(branchFrom)"
+        guard try runGit(repository: repository, arguments: ["rev-parse", "--verify", "--quiet", "\(remoteRef)^{commit}"]).status == 0,
+              try runGit(repository: repository, arguments: ["merge-base", "--is-ancestor", branchFrom, remoteRef]).status == 0 else {
+            return branchFrom
+        }
+        return remoteRef
     }
 
     private static func parseStatus(_ data: Data) throws -> [StatusRecord] {
