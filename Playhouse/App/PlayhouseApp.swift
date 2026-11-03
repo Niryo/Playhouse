@@ -70,6 +70,7 @@ struct PlayhouseApp: App {
                 .help("Search tasks")
                 .keyboardShortcut("f", modifiers: .command)
             }
+            CommandMenu("Debug") { DebugConversationImportMenu(modelContainer: modelContainer) } // DEBUG-IMPORT:
         }
 
         Settings {
