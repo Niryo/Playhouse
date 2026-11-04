@@ -463,7 +463,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
 
     def read_watcher_snapshot(self, watcher, predicate, timeout=15, event_type="runtime_state"):
-        """Reads `conversation runtime --watch` (or `cpu-usage --watch`) event lines until one snapshot satisfies `predicate`."""
+        """Reads `--watch` event lines until one `event_type` snapshot satisfies `predicate`."""
         deadline = time.monotonic() + timeout
         seen = []
         while time.monotonic() < deadline:
@@ -479,7 +479,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             seen.append(event["payload"])
             if predicate(event["payload"]):
                 return event["payload"]
-        self.fail(f"No matching runtime snapshot arrived within {timeout}s; saw {seen}")
+        self.fail(f"No matching {event_type} snapshot arrived within {timeout}s; saw {seen}")
 
     @staticmethod
     def process_is_running(pid):
@@ -521,13 +521,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(second["processID"], daemon_pid, "Later requests should reuse the running daemon.")
 
         watcher = self.start_cli("conversation", "runtime", "--watch", extra_environment=environment, binary_output=True)
-        # A window also streams CPU usage; that stream must end with its connection too,
-        # or the daemon would never go idle after the window quits.
+        # A window also streams CPU usage; that subscription must end with its connection too.
         cpu_watcher = self.start_cli("conversation", "cpu-usage", "--watch", extra_environment=environment, binary_output=True)
         try:
             idle = self.read_watcher_snapshot(watcher, lambda snapshot: True)
             self.assertEqual(idle["activeThreadIDs"], [], "A daemon with no turns reports nothing active.")
-            self.read_watcher_snapshot(cpu_watcher, lambda snapshot: "percentByThreadID" in snapshot, event_type="cpu_usage_state")
+            cpu_idle = self.read_watcher_snapshot(cpu_watcher, lambda snapshot: True, event_type="cpu_usage_state")
+            self.assertEqual(cpu_idle["percentByThreadID"], {}, "A daemon with no turns samples no CPU usage.")
             time.sleep(4.5)
             self.assertTrue(self.process_is_running(daemon_pid), "An open watcher keeps the daemon alive past its idle grace.")
             self.assertEqual(
@@ -569,10 +569,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
             stopped = self.read_watcher_snapshot(watcher, lambda snapshot: thread_id not in snapshot["activeThreadIDs"])
             self.assertIn(thread_id, stopped["interruptedThreadIDs"])
         finally:
-            watcher.terminate()
-            watcher.wait(timeout=10)
-            cpu_watcher.terminate()
-            cpu_watcher.wait(timeout=10)
+            for open_watcher in (watcher, cpu_watcher):
+                open_watcher.terminate()
+                open_watcher.wait(timeout=10)
 
         self.assertTrue(
             self.wait_until_process_exits(daemon_pid, timeout=20),
@@ -3125,7 +3124,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
         self.run_git(self.primary, "remote", "remove", "origin")
 
-    # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows exact PR numbers on the active task and Done archive, including four-digit values without grouping separators. Hovering the outer padded edge of each PR link triggers its feedback.
+    # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows exact PR numbers on the active task and Done archive, including four-digit values without grouping separators, each with a hit target at least 30 points wide and tall. Hovering the outer padded edge of each PR link triggers its feedback.
     def test_done_archive_displays_existing_pull_request_link(self):
         task = self.create_repo_task("Archived linked PR", [self.primary, self.secondary], materialize=True)
         completed, _ = self.call_cli("task", "move", task["id"], "Done")
@@ -7643,19 +7642,19 @@ class PlayhouseBridgeTests(unittest.TestCase):
                 "History read mid-recovery must still include the conversation saved before the answer.",
             )
             runtime = self.assert_success(self.call_cli("conversation", "runtime")[0])
-            self.assertNotIn(
-                applying.get("activeConversationID") or task_id, runtime.get("pendingUserInput", {}),
+            self.assertEqual(
+                runtime.get("pendingUserInput", {}), {},
                 "The daemon's runtime state must not keep offering an answered question while its recovery turn runs.",
             )
-            self.assertEqual(runtime.get("pendingUserInput", {}), {}, runtime)
-            paged = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80")[0])
+            # A window reopening the task reads one stored page, a separate path from the full history.
+            applying_page = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80")[0])
             self.assertTrue(
-                any(m["role"] == "user" and m["text"] == "Ask a restart-safe structured question." for m in paged["messages"]),
+                any(m["role"] == "user" and m["text"] == "Ask a restart-safe structured question." for m in applying_page["messages"]),
                 "The newest history page read mid-recovery must still include the conversation saved before the answer.",
             )
             self.assertIsNone(
-                paged.get("pendingUserInputRequest"),
-                "A paged history read must also hide an answered question while its recovery turn runs.",
+                applying_page.get("pendingUserInputRequest"),
+                "A paged history read must not bring back the answered question while its recovery turn runs.",
             )
             self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
             # Kill the bridge daemon that owns the recovery turn before it can clean up.
@@ -7686,6 +7685,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(
             crashed.get("pendingUserInputRequest"), pending,
             "A recovery that dies mid-turn must show its question again for retry.",
+        )
+        crashed_page = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80")[0])
+        self.assertEqual(
+            crashed_page.get("pendingUserInputRequest"), pending,
+            "A paged history read must also show the question again once its recovery has died.",
         )
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
         for marker in (recovery_pause, recovery_ready, recovery_release):

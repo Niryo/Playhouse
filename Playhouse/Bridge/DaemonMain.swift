@@ -191,8 +191,7 @@ enum PlayhouseBridgeDaemonMain {
         }
         // A turn outlives the window that started it, but a subscription exists
         // only for its window: stop it when the peer goes away. Every streaming
-        // command ends in ".subscribe"; one that is not cancelled here would stay
-        // in flight forever and keep the daemon from ever going idle.
+        // command ends in `.subscribe`; one left running holds the daemon awake.
         if request.command.hasSuffix(".subscribe") {
             Thread.detachNewThread {
                 while let chunk = try? connection.readAvailable(), !chunk.isEmpty {}
