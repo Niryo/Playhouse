@@ -25,7 +25,7 @@ killall iconservicesagent 2>/dev/null || true
 killall Dock
 ```
 
-`run.sh` rebuilds the selected worktree's app, closes its previous instance, and launches the new one. macOS restarts `iconservicesagent` and Dock automatically. Restart Dock **after** the new app launches: restarting it earlier can leave the old running-app tile visible. For a linked worktree whose launcher rejects an inherited `PLAYHOUSE_DATA_DIRECTORY`, use `env -u PLAYHOUSE_DATA_DIRECTORY ./scripts/run.sh` in the middle step.
+`run.sh` rebuilds the selected worktree's app, closes its previous instance, and launches the new one. macOS restarts `iconservicesagent` and Dock automatically. Restart Dock **after** the new app launches: restarting it earlier can leave the old running-app tile visible. The launcher ignores a `PLAYHOUSE_DATA_DIRECTORY` inherited from another Playhouse app; if it rejects some other value, use `env -u PLAYHOUSE_DATA_DIRECTORY ./scripts/run.sh` in the middle step.
 
 ## Verify the actual Dock tile
 

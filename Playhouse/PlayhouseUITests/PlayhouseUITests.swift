@@ -519,10 +519,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(element("message-composer").value as? String, "Protected draft")
     }
 
-    // case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory; a saved conversation remains visible after an app restart.
+    // case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory. A saved conversation remains visible after an app restart.
     func test_worktree_app_profiles_isolate_identity_and_store() throws {
         let script = repositoryRoot.appendingPathComponent("scripts/app-profile.sh")
-        func profile(for worktree: URL) throws -> [String: String] {
+        func profileScriptEnvironment() throws -> [String: String] {
             let directGitPaths = [
                 "/opt/homebrew/bin/git",
                 "/usr/local/bin/git",
@@ -533,13 +533,16 @@ final class PlayhouseUITests: XCTestCase {
                 directGitPaths.first { FileManager.default.isExecutableFile(atPath: $0) },
                 "UI tests need a direct Git executable."
             )
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/bash")
-            process.arguments = [script.path, worktree.path]
             var environment = ProcessInfo.processInfo.environment
             let gitDirectory = URL(fileURLWithPath: directGitPath).deletingLastPathComponent().path
             environment["PATH"] = "\(gitDirectory):\(environment["PATH"] ?? "/usr/bin:/bin")"
-            process.environment = environment
+            return environment
+        }
+        func profile(for worktree: URL) throws -> [String: String] {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = [script.path, worktree.path]
+            process.environment = try profileScriptEnvironment()
             let output = Pipe()
             process.standardOutput = output
             process.standardError = output
@@ -568,6 +571,60 @@ final class PlayhouseUITests: XCTestCase {
             FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support/Playhouse/Worktrees/\($0)").path
         })
+        // scripts/run.sh launches with this resolver's directory. A value inherited
+        // from another Playhouse app's agent session gives way to the profile's own.
+        func launchDirectory(for worktree: URL, inherited: String?) throws -> (status: Int32, output: String, error: String) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = [
+                "-c", "source \"$1\"; playhouse_load_app_profile \"$2\"; playhouse_resolve_launch_data_directory",
+                "launch-check", script.path, worktree.path
+            ]
+            var environment = try profileScriptEnvironment()
+            environment["PLAYHOUSE_DATA_DIRECTORY"] = inherited
+            process.environment = environment
+            let output = Pipe()
+            let error = Pipe()
+            process.standardOutput = output
+            process.standardError = error
+            try process.run()
+            process.waitUntilExit()
+            return (
+                process.terminationStatus,
+                String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
+                String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            )
+        }
+        let primaryDirectory = try XCTUnwrap(primary["dataDirectory"])
+        let linkedDirectory = try XCTUnwrap(linked["dataDirectory"])
+        let otherLinkedDirectory = URL(fileURLWithPath: linkedDirectory).deletingLastPathComponent()
+            .appendingPathComponent("w0123456789abcdef").path
+        let acceptedLaunches: [(URL, String, String?, Bool)] = [
+            (fixture.existingWorktree, linkedDirectory, nil, false),
+            (fixture.existingWorktree, linkedDirectory, linkedDirectory, false),
+            (fixture.existingWorktree, linkedDirectory, primaryDirectory, true),
+            (fixture.existingWorktree, linkedDirectory, primaryDirectory + "/", true),
+            (fixture.existingWorktree, linkedDirectory, otherLinkedDirectory, true),
+            (fixture.primary, primaryDirectory, linkedDirectory, true)
+        ]
+        for (worktree, expected, inherited, ignored) in acceptedLaunches {
+            let result = try launchDirectory(for: worktree, inherited: inherited)
+            XCTAssertEqual(result.status, 0, result.error)
+            XCTAssertEqual(result.output.trimmingCharacters(in: .whitespacesAndNewlines), expected, "Inherited \(inherited ?? "nil")")
+            XCTAssertEqual(result.error.contains("inherited from another Playhouse app"), ignored, result.error)
+        }
+        let notAProfile = URL(fileURLWithPath: linkedDirectory).deletingLastPathComponent()
+            .appendingPathComponent("not-a-profile").path
+        for (worktree, inherited) in [
+            (fixture.existingWorktree, dataDirectory.path),
+            (fixture.existingWorktree, notAProfile),
+            (fixture.primary, dataDirectory.path)
+        ] {
+            let result = try launchDirectory(for: worktree, inherited: inherited)
+            XCTAssertEqual(result.status, 2, result.output)
+            XCTAssertEqual(result.output, "")
+            XCTAssertTrue(result.error.contains("PLAYHOUSE_DATA_DIRECTORY points elsewhere"), result.error)
+        }
         let launchedIdentifier = try XCTUnwrap(Bundle(url: appBundle)?.bundleIdentifier)
         let sourceProfile = try profile(for: repositoryRoot)
         XCTAssertTrue(launchedIdentifier.hasPrefix(try XCTUnwrap(sourceProfile["bundleID"]) + ".e2e."), "The test app must use the actual source checkout's identity, not a repository fixture's identity.")
