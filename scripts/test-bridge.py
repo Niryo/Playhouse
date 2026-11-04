@@ -3604,10 +3604,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli("task", "move", task_id, "Unknown", expected_status=2)
         self.assert_failure(response, "invalid_argument")
-        for status in ["In Progress", "Blocked", "Waiting Response", "Review", "Backlog"]:
+        for status in ["In Progress", "Blocked", "Waiting Response", "Backlog"]:
             response, _ = self.call_cli("task", "move", task_id, status, expected_status=2)
             self.assert_failure(response, "invalid_argument")
             self.assertIn("controlled by Codex", response["error"]["message"])
+        response, _ = self.call_cli("task", "move", task_id, "Review", expected_status=2)
+        self.assert_failure(response, "invalid_argument")
+        self.assertIn("Only a task in Waiting Response", response["error"]["message"])
         response, _ = self.call_cli("task", "move", task_id, "Done", expected_status=2)
         self.assert_failure(response, "invalid_argument")
         self.assertIn("Only a task in Review", response["error"]["message"])
@@ -3655,6 +3658,94 @@ class PlayhouseBridgeTests(unittest.TestCase):
         waiting = self.assert_success(self.call_cli("task", "get", waiting_id)[0])
         self.assertEqual(waiting["status"], "Waiting Response")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
+
+    # case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response, so a retry after the fix moves it to Review.
+    def test_waiting_response_task_moves_to_review_manually(self):
+        def remove_fixture_origin(repository, expected_url):
+            current = subprocess.run(
+                ["git", "-C", str(repository), "remote", "get-url", "origin"],
+                check=False, capture_output=True, text=True,
+            )
+            if current.returncode == 0 and current.stdout.strip() == str(expected_url):
+                self.run_git(repository, "remote", "remove", "origin")
+
+        backlog_id = self.create_task("Manual review backlog")["id"]
+        rejected, _ = self.call_cli("task", "move", backlog_id, "Review", expected_status=2)
+        self.assert_failure(rejected, "invalid_argument")
+        self.assertIn("Only a task in Waiting Response", rejected["error"]["message"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", backlog_id)[0])["status"], "Backlog")
+
+        task = self.create_repo_task("Manual review", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        self.seed_done_task_pull_request(task["id"], number=321)
+        # Work the turn left uncommitted; the Review gate must commit it.
+        (worktree / "manual-review.txt").write_text("Waiting turn output.\n", encoding="utf-8")
+
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-manual-review-question-flow"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        command = ["conversation", "send", task["id"], "--message", "Please ask your questions.", "--mode", "plan"]
+        process = self.start_cli(*command, extra_environment=environment)
+        try:
+            deadline = time.monotonic() + 60
+            pending = None
+            while process.poll() is None and time.monotonic() < deadline and pending is None:
+                history, _ = self.call_cli("conversation", "history", task["id"], extra_environment=environment)
+                pending = self.assert_success(history).get("pendingUserInputRequest")
+                if pending is None:
+                    time.sleep(0.1)
+            self.assertIsNotNone(pending, "The blocking question should hold the turn open.")
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Waiting Response")
+            # The pending question's turn still owns the worktree and the final status.
+            running, _ = self.call_cli("task", "move", task["id"], "Review", expected_status=2)
+            self.assert_failure(running, "invalid_argument")
+            self.assertIn("still running", running["error"]["message"])
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Waiting Response")
+            self.assertIn("manual-review.txt", self.run_git(worktree, "status", "--porcelain", "--untracked-files=all"))
+            answered, _ = self.call_cli(
+                "conversation", "answer-user-input", task["id"], pending["id"],
+                "--answer", "color=Blue", "--answer", "token=fixture-secret", extra_environment=environment,
+            )
+            self.assert_success(answered)
+            response, _ = self.finish_cli(process, command)
+            self.assert_success(response)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=20)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Waiting Response",
+                         "The answered turn settles in Waiting Response.")
+
+        # A sync that cannot reach the PR remote fails the move and leaves the task waiting.
+        missing_remote = self.data_directory / "manual-review-missing-origin.git"
+        self.addCleanup(remove_fixture_origin, self.primary, missing_remote)
+        self.run_git(worktree, "remote", "add", "origin", str(missing_remote))
+        failed, _ = self.call_cli("task", "move", task["id"], "Review", expected_status=1)
+        self.assert_failure(failed, "operation_failed")
+        self.assertIn("origin", failed["error"]["message"], "The failure should carry the git error for the unreachable PR remote.")
+        self.assertNotIn("still running", failed["error"]["message"])
+        waiting = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(waiting["status"], "Waiting Response", "A failed review sync must not move or block the task.")
+        self.run_git(self.primary, "remote", "remove", "origin")
+
+        moved = self.assert_success(self.call_cli("task", "move", task["id"], "Review")[0])
+        self.assertEqual(moved["status"], "Review")
+        self.assertIsNone(moved.get("statusMessage"))
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain", "--untracked-files=all").strip(), "",
+                         "Moving to Review should commit the PR-linked worktree's local changes like a completed turn.")
+        self.assertIn("manual-review.txt", self.run_git(worktree, "show", "--name-only", "--format=%s", "HEAD"))
+        reread = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(reread["status"], "Review")
+        self.assertEqual(reread["repositoryWorktrees"][0]["pullRequestNumber"], 321)
+        again = self.assert_success(self.call_cli("task", "move", task["id"], "Review")[0])
+        self.assertEqual(again["status"], "Review", "A task already in Review is returned unchanged.")
+        done = self.assert_success(self.call_cli("task", "move", task["id"], "Done", "--allow-unmerged")[0])
+        self.assertEqual(done["status"], "Done")
 
     # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private nudge prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
     def test_task_progress_reports_publish_persist_and_clear(self):

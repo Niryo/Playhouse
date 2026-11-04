@@ -276,6 +276,12 @@ struct RemoteConversationManager {
         }.decoded(PullRequestAutopilotOutcome.self)
     }
 
+    /// Review syncs pull request changes and may open PRs, which needs the
+    /// daemon's provider clients, so this move runs there rather than in-process.
+    func moveTaskToReview(taskID: UUID) async throws -> BoardTaskRecord {
+        try await daemon.call("task.move", ["taskID": id(taskID), "status": .string(TaskStatus.review.rawValue)]).decoded(BoardTaskRecord.self)
+    }
+
     func syncPullRequestChanges(taskID: UUID) async throws -> PullRequestSyncOutcome {
         try await daemon.call("task.pr.sync", ["taskID": id(taskID)]).decoded(PullRequestSyncOutcome.self)
     }

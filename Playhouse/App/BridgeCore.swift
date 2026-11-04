@@ -2293,6 +2293,8 @@ final class BoardTaskManager {
         guard let status = TaskStatus(rawValue: statusName) else {
             throw PlayhouseManagerError.invalidStatus(statusName)
         }
+        // Review has its own gate (`moveToReview`); every other status is set by
+        // the conversation itself.
         guard status == .done else {
             throw PlayhouseManagerError.invalidTransition("Task status is controlled by Codex. Start or continue a conversation to update it.")
         }
@@ -2332,6 +2334,63 @@ final class BoardTaskManager {
                 "status": task.status.rawValue
             ])
             return BoardTaskRecord(task: task)
+        }
+    }
+
+    /// The user's manual counterpart to a `completed` outcome: a task left in
+    /// Waiting Response moves to Review through the same review gate — its
+    /// pull request changes are synced first and its PR mode then applies.
+    /// A sync failure is reported and leaves the task in Waiting Response.
+    @discardableResult
+    func moveToReview(
+        _ id: UUID,
+        clients: ConversationClients,
+        settingsManager: WorkspaceSettingsManager? = nil
+    ) async throws -> BoardTaskRecord {
+        PlayhouseDiagnostics.record("task.move.review.started", fields: ["taskID": id.uuidString])
+        let initialTask = try requireTask(id)
+        if initialTask.status == .review { return BoardTaskRecord(task: initialTask) }
+        guard initialTask.status == .waitingResponse else {
+            throw PlayhouseManagerError.invalidTransition("Only a task in Waiting Response can move to Review.")
+        }
+        // A blocking question also shows Waiting Response while its turn is
+        // still running; that turn owns the worktree and the final status.
+        guard try !hasConversationTurnReservation(id) else {
+            throw PlayhouseManagerError.invalidTransition("This task's conversation turn is still running. Answer or stop it before moving the task to Review.")
+        }
+        // Hold the reservation so a turn started after the check above waits
+        // instead of writing files while the sync commits and pushes them.
+        let record = try await withConversationTurnReservation(id) {
+            _ = try await syncPullRequestChanges(id, clients: clients)
+            guard try await transitionLifecycleStatus(id, from: .waitingResponse, to: .review) != nil else {
+                throw PlayhouseManagerError.invalidTransition("The task's status changed before it could move to Review. Try again.")
+            }
+            return try get(id)
+        }
+        await createPullRequestsOnReviewIfNeeded(record, clients: clients, settingsManager: settingsManager)
+        PlayhouseDiagnostics.record("task.move.succeeded", fields: ["taskID": id.uuidString, "status": TaskStatus.review.rawValue])
+        return try get(id)
+    }
+
+    /// Opens the pull requests a task's PR mode asks for once it reaches
+    /// Review. A failure is recorded rather than thrown: the task stays in
+    /// Review and its card keeps the manual create action.
+    func createPullRequestsOnReviewIfNeeded(
+        _ record: BoardTaskRecord,
+        clients: ConversationClients,
+        settingsManager: WorkspaceSettingsManager?
+    ) async {
+        guard record.autoCreatePullRequestOnReview,
+              record.repositoryWorktrees.contains(where: { !$0.isPending && ($0.pullRequestNumber == nil || $0.pullRequestURL == nil) }) else {
+            return
+        }
+        do {
+            _ = try await createPullRequests(record.id, clients: clients, settingsManager: settingsManager)
+        } catch {
+            PlayhouseDiagnostics.record("task.review.auto_pr.failed", fields: [
+                "taskID": record.id.uuidString,
+                "error": error.localizedDescription
+            ])
         }
     }
 
@@ -7193,18 +7252,8 @@ final class ConversationManager {
                         )
                     } else {
                         let reviewRecord = try await tasks.setLifecycleStatus(taskID, to: .review)
-                        if reviewRecord.autoCreatePullRequestOnReview,
-                           reviewRecord.repositoryWorktrees.contains(where: { !$0.isPending && ($0.pullRequestNumber == nil || $0.pullRequestURL == nil) }) {
-                            phase = "review-auto-pr"
-                            do {
-                                _ = try await tasks.createPullRequests(taskID, clients: clients, settingsManager: settingsManager)
-                            } catch {
-                                PlayhouseDiagnostics.record("task.review.auto_pr.failed", fields: [
-                                    "taskID": taskID.uuidString,
-                                    "error": error.localizedDescription
-                                ])
-                            }
-                        }
+                        phase = "review-auto-pr"
+                        await tasks.createPullRequestsOnReviewIfNeeded(reviewRecord, clients: clients, settingsManager: settingsManager)
                     }
                 case .waitingResponse:
                     _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse)
@@ -7880,11 +7929,19 @@ final class PlayhouseBridgeRuntime {
             case "task.move":
                 let taskID = try request.requiredUUID("taskID")
                 let status = try request.requiredString("status")
-                result = try Self.value(await taskManager.move(
-                    taskID,
-                    to: status,
-                    allowUnmergedPullRequests: request.arguments["allowUnmergedPullRequests"]?.bool ?? false
-                ))
+                if status == TaskStatus.review.rawValue {
+                    result = try Self.value(await taskManager.moveToReview(
+                        taskID,
+                        clients: conversationClients(),
+                        settingsManager: settings
+                    ))
+                } else {
+                    result = try Self.value(await taskManager.move(
+                        taskID,
+                        to: status,
+                        allowUnmergedPullRequests: request.arguments["allowUnmergedPullRequests"]?.bool ?? false
+                    ))
+                }
             case "task.pr.auto":
                 let mode: PullRequestMode = request.arguments["enabled"]?.bool == true ? .pullRequest : .manual
                 result = try Self.value(await taskManager.setPullRequestMode(request.requiredUUID("taskID"), mode: mode))

@@ -3010,6 +3010,164 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ lowestTask.exists && lowestTask.isHittable }, timeout: 10), "Vertical board scrolling should make lower backlog tasks reachable.")
     }
 
+    // case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response, so a retry after the fix moves it to Review.
+    func test_waiting_response_task_moves_to_review_manually() throws {
+        let questionFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: questionFixture.path))
+        codexFixtureExecutable = questionFixture.path
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [321]).merging(Self.prCheckCooldownEnvironment) { $1 }
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+
+        // A PR-linked repository task that has already been worked on.
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Manual review menu", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let menuTaskID = try XCTUnwrap(created["id"] as? String)
+        XCTAssertEqual(
+            try runCLI([
+                "conversation", "send", menuTaskID, "--message", "Please ask your questions.", "--mode", "plan",
+                "--answer", "color=Blue", "--answer", "token=fixture-secret"
+            ])["ok"] as? Bool,
+            true
+        )
+        XCTAssertEqual(try taskRecord(id: menuTaskID)?["status"] as? String, "Waiting Response")
+        XCTAssertTrue(terminateAppAndWait(app))
+        try seedTaskPullRequest(taskID: menuTaskID, number: 321, url: "https://github.com/playhouse-test/fixture/pull/321")
+        let record = try XCTUnwrap((try taskRecord(id: menuTaskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+
+        try createTaskFixture(title: "Manual review backlog", roots: [fixture.alternate.path])
+        let backlogTaskID = try taskID(named: "Manual review backlog")
+        assertCLIError(try runCLI(["task", "move", backlogTaskID, "Review"], expectedStatus: 2), code: "invalid_argument")
+        XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
+        element("task-card-\(backlogTaskID)").rightClick()
+        XCTAssertTrue(element("rename-task-menu-item").waitForExistence(timeout: 5))
+        XCTAssertFalse(element("move-task-to-review-menu-item").exists, "Only Waiting Response cards offer Move to Review.")
+        app.typeKey(.escape, modifierFlags: [])
+
+        // A pending blocking question shows Waiting Response while its turn still runs.
+        openTask(named: "Manual review menu")
+        let modeMenu = element("conversation-mode-menu")
+        XCTAssertTrue(modeMenu.waitForExistence(timeout: 5))
+        modeMenu.click()
+        app.menuItems["Plan mode"].click()
+        element("message-composer").click()
+        element("message-composer").typeText("Please share your plan.")
+        element("send-message-button").click()
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertEqual(try taskRecord(id: menuTaskID)?["status"] as? String, "Waiting Response")
+        try "Waiting turn output.\n".write(to: worktree.appendingPathComponent("manual-review.txt"), atomically: true, encoding: .utf8)
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        assertTaskVisible("Manual review menu", inColumn: "Waiting Response")
+
+        let menuCard = element("task-card-\(menuTaskID)")
+        let moveToReview = element("move-task-to-review-menu-item")
+        let rejection = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
+        menuCard.rightClick()
+        XCTAssertTrue(moveToReview.waitForExistence(timeout: 5), "A Waiting Response card should offer Move to Review.")
+        moveToReview.click()
+        XCTAssertTrue(rejection.waitForExistence(timeout: 10), "Moving a task whose turn is still running should explain the rejection.")
+        XCTAssertTrue(rejection.staticTexts.matching(NSPredicate(format: "value == %@", "Couldn't move task to Review")).firstMatch.exists)
+        XCTAssertTrue(rejection.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "still running")).firstMatch.exists)
+        attachScreenshot(named: "Move to Review is rejected while the question's turn still runs")
+        rejection.buttons["OK"].click()
+        XCTAssertEqual(try taskRecord(id: menuTaskID)?["status"] as? String, "Waiting Response")
+        XCTAssertTrue(try runGitOutput(worktree, "status", "--porcelain", "--untracked-files=all").contains("manual-review.txt"),
+                      "A rejected move must leave the running turn's files untouched.")
+        assertTaskVisible("Manual review menu", inColumn: "Waiting Response")
+
+        openTask(named: "Manual review menu")
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5))
+        selectQuestionOption("Blue")
+        typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        // The status reads Waiting Response before the turn releases the task, so wait for the daemon.
+        let threadID = try XCTUnwrap(try taskRecord(id: menuTaskID)?["codexThreadID"] as? String)
+        XCTAssertTrue(waitUntil({
+            let runtime = (try? self.runCLI(["conversation", "runtime"]))?["result"] as? [String: Any]
+            return runtime != nil && !((runtime?["activeThreadIDs"] as? [String] ?? []).contains(threadID))
+                && (try? self.taskRecord(id: menuTaskID)?["status"] as? String) == "Waiting Response"
+        }, timeout: 30), "The answered turn should finish in Waiting Response.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+
+        // A pull request sync that fails reports the error and leaves the task waiting.
+        let missingRemote = runDirectory.appendingPathComponent("manual-review-missing-origin.git", isDirectory: true)
+        try runGit(fixture.primary, "remote", "add", "origin", missingRemote.path)
+        addTeardownBlock { [self] in
+            // The case removes it itself on success; only clean up after an early failure.
+            if (try? runGitOutput(fixture.primary, "remote"))?.split(whereSeparator: \.isNewline).contains("origin") == true {
+                try? runGit(fixture.primary, "remote", "remove", "origin")
+            }
+        }
+        menuCard.rightClick()
+        XCTAssertTrue(moveToReview.waitForExistence(timeout: 5))
+        moveToReview.click()
+        XCTAssertTrue(rejection.waitForExistence(timeout: 15), "A failed pull request sync should be shown to the user.")
+        XCTAssertTrue(rejection.staticTexts.matching(NSPredicate(format: "value == %@", "Couldn't move task to Review")).firstMatch.exists)
+        XCTAssertFalse(rejection.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "still running")).firstMatch.exists,
+                       "This alert should report the sync failure, not the finished turn.")
+        XCTAssertTrue(rejection.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "origin")).firstMatch.exists,
+                      "The alert should carry the git error for the unreachable PR remote.")
+        attachScreenshot(named: "A failed pull request sync keeps the task in Waiting Response")
+        rejection.buttons["OK"].click()
+        XCTAssertEqual(try taskRecord(id: menuTaskID)?["status"] as? String, "Waiting Response")
+        assertTaskVisible("Manual review menu", inColumn: "Waiting Response")
+        try runGit(fixture.primary, "remote", "remove", "origin")
+
+        menuCard.rightClick()
+        XCTAssertTrue(moveToReview.waitForExistence(timeout: 5))
+        attachScreenshot(named: "Waiting Response card context menu offers Move to Review")
+        moveToReview.click()
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: menuTaskID)?["status"] as? String) == "Review"
+        }, timeout: 15), "Move to Review should persist the Review status.")
+        assertTaskVisible("Manual review menu", inColumn: "Review")
+        XCTAssertNil(try taskRecord(id: menuTaskID)?["statusMessage"] as? String)
+        XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain", "--untracked-files=all"), "",
+                       "Moving to Review should commit the PR-linked worktree's local changes like a completed turn.")
+        XCTAssertTrue(try runGitOutput(worktree, "show", "--name-only", "--format=%s", "HEAD").contains("manual-review.txt"))
+        XCTAssertEqual((try taskRecord(id: menuTaskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"] as? Int, 321)
+
+        // Drag and drop: a Waiting Response card dropped on the Review column.
+        try createTaskFixture(title: "Manual review drag", roots: [fixture.secondary.path])
+        let dragTaskID = try taskID(named: "Manual review drag")
+        XCTAssertEqual(
+            try runCLI([
+                "conversation", "send", dragTaskID, "--message", "Please ask your questions.", "--mode", "plan",
+                "--answer", "color=Blue", "--answer", "token=fixture-secret"
+            ])["ok"] as? Bool,
+            true
+        )
+        XCTAssertEqual(try taskRecord(id: dragTaskID)?["status"] as? String, "Waiting Response")
+        assertTaskVisible("Manual review drag", inColumn: "Waiting Response")
+        attachScreenshot(named: "Waiting Response card before dragging it to Review")
+        let reviewColumn = element("column-review")
+        XCTAssertTrue(reviewColumn.waitForExistence(timeout: 5))
+        element("task-card-\(dragTaskID)").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.5, thenDragTo: reviewColumn.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)))
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: dragTaskID)?["status"] as? String) == "Review"
+        }, timeout: 15), "Dropping a Waiting Response card on Review should persist the Review status.")
+        assertTaskVisible("Manual review drag", inColumn: "Review")
+        assertTaskVisible("Manual review menu", inColumn: "Review")
+        XCTAssertFalse(element("column-heading-waiting-response").exists, "Waiting Response hides once both tasks moved to Review.")
+        attachScreenshot(named: "Both manually moved tasks rest in Review")
+
+        XCTAssertEqual(
+            (try runCLI(["task", "move", dragTaskID, "Review"])["result"] as? [String: Any])?["status"] as? String,
+            "Review",
+            "A task already in Review is returned unchanged."
+        )
+        moveTaskToDone(taskID: dragTaskID)
+        assertTaskVisible("Manual review menu", inColumn: "Review")
+        XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
+    }
+
     // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private nudge prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
