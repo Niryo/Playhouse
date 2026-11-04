@@ -316,7 +316,7 @@ enum PlayhouseCLI {
                 ])
             case "changes":
                 guard let action = tail.first else {
-                    throw CLIError.usage("Use: playhouse task changes list <task-id>, mark-viewed <task-id> --repository <path> --path <relative-path>, or diff <task-id> --repository <path> --path <relative-path> --group <unviewed|viewed>")
+                    throw CLIError.usage("Use: playhouse task changes list <task-id>, mark-viewed <task-id> --repository <path> --path <relative-path>, mark-unviewed <task-id> --repository <path> --path <relative-path>, mark-all-viewed <task-id>, or diff <task-id> --repository <path> --path <relative-path> --group <unviewed|viewed>")
                 }
                 switch action {
                 case "list":
@@ -344,6 +344,17 @@ enum PlayhouseCLI {
                         "repository": .string(try requiredFlag("--repository", flags: flags).first!),
                         "path": .string(try requiredFlag("--path", flags: flags).first!),
                     ])
+                case "mark-unviewed":
+                    guard tail.count >= 2 else { throw CLIError.usage("Use: playhouse task changes mark-unviewed <task-id> --repository <path> --path <relative-path>") }
+                    let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repository", "--path"])
+                    return BridgeRequest(command: "task.changes.mark-unviewed", arguments: [
+                        "taskID": .string(tail[1]),
+                        "repository": .string(try requiredFlag("--repository", flags: flags).first!),
+                        "path": .string(try requiredFlag("--path", flags: flags).first!),
+                    ])
+                case "mark-all-viewed":
+                    guard tail.count == 2 else { throw CLIError.usage("Use: playhouse task changes mark-all-viewed <task-id>") }
+                    return BridgeRequest(command: "task.changes.mark-all-viewed", arguments: ["taskID": .string(tail[1])])
                 default:
                     throw CLIError.usage("Unknown task changes operation '\(action)'.")
                 }
@@ -716,6 +727,8 @@ enum PlayhouseCLI {
       playhouse task changes list <task-id>
       playhouse task changes diff <task-id> --repository <path> --path <relative-path> --group <unviewed|viewed>
       playhouse task changes mark-viewed <task-id> --repository <path> --path <relative-path>
+      playhouse task changes mark-unviewed <task-id> --repository <path> --path <relative-path>
+      playhouse task changes mark-all-viewed <task-id>
       playhouse task delete <task-id>
       playhouse task delete-check <task-id>
       playhouse chat open

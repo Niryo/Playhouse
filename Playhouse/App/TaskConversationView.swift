@@ -905,6 +905,10 @@ struct TaskConversationView: View {
     @State private var subagentError: String?
     @State private var changeInventory = WorkspaceChangeInventory(unviewed: [], viewed: [])
     @State private var isViewedSectionExpanded = false
+    @AppStorage(WorkspaceSettings.workspaceChangesCollapsedKey, store: WorkspaceSettings.preferencesStore) private var isChangesSidebarCollapsed = false
+    /// The loading placeholder is for the first read only; later watcher refreshes keep the
+    /// current list (or empty state) on screen instead of flashing the spinner.
+    @State private var hasLoadedChanges = false
     @State private var isLoadingChanges = false
     @State private var changesNeedRefresh = false
     @State private var changeWatcher: WorkspaceChangeWatcher?
@@ -1641,9 +1645,69 @@ struct TaskConversationView: View {
         }
     }
 
+    @ViewBuilder
     private var taskSidebar: some View {
+        if isChangesSidebarCollapsed {
+            collapsedTaskSidebar
+        } else {
+            expandedTaskSidebar
+        }
+    }
+
+    private func setChangesSidebarCollapsed(_ collapsed: Bool) {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isChangesSidebarCollapsed = collapsed
+        }
+    }
+
+    /// A narrow rail that keeps the pending count visible while the sidebar is collapsed.
+    private var collapsedTaskSidebar: some View {
+        VStack(spacing: 8) {
+            Button {
+                setChangesSidebarCollapsed(false)
+            } label: {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 26, height: 24)
+            }
+            .buttonHoverPointer()
+            .buttonStyle(.plain)
+            .nativeHelp("Show changes")
+            .accessibilityLabel("Show changes")
+            .accessibilityIdentifier("expand-workspace-changes-button")
+
+            if !changeInventory.unviewed.isEmpty {
+                Text("\(changeInventory.unviewed.count)")
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Changes to review: \(changeInventory.unviewed.count)")
+                    .accessibilityIdentifier("collapsed-workspace-changes-count")
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.top, 16)
+        .frame(width: 38)
+        .frame(maxHeight: .infinity)
+        .background(WorkspaceTheme.panelBackground.opacity(0.62))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("task-sidebar-collapsed")
+    }
+
+    private var expandedTaskSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
+                Button {
+                    setChangesSidebarCollapsed(true)
+                } label: {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 22, height: 24)
+                }
+                .buttonHoverPointer()
+                .buttonStyle(.plain)
+                .nativeHelp("Hide changes")
+                .accessibilityLabel("Hide changes")
+                .accessibilityIdentifier("collapse-workspace-changes-button")
                 Text("Changes")
                     .font(.system(size: 13, weight: .semibold))
                     .accessibilityIdentifier("workspace-changes-title")
@@ -1660,7 +1724,7 @@ struct TaskConversationView: View {
                 .nativeHelp("Refresh workspace changes")
                 .accessibilityLabel("Refresh workspace changes")
                 .accessibilityIdentifier("refresh-workspace-changes-button")
-                .disabled(isLoadingChanges)
+                .disabled(!hasLoadedChanges)
             }
             .padding(.horizontal, 14)
             .padding(.top, 16)
@@ -1689,7 +1753,7 @@ struct TaskConversationView: View {
                 }
                 .padding(12)
                 .accessibilityIdentifier("workspace-changes-error")
-            } else if isLoadingChanges && changeInventory.isEmpty {
+            } else if !hasLoadedChanges {
                 ProgressView("Checking folders…")
                     .controlSize(.small)
                     .font(.system(size: 11))
@@ -1753,6 +1817,20 @@ struct TaskConversationView: View {
                     Image(systemName: isViewedSectionExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
+                } else if !entries.isEmpty {
+                    Button {
+                        Task { await markAllViewed() }
+                    } label: {
+                        Image(systemName: "checklist.checked")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 20, height: 18)
+                    }
+                    .buttonStyle(.plain)
+                    .buttonHoverPointer()
+                    .nativeHelp("Mark all as viewed")
+                    .accessibilityLabel("Mark all as viewed")
+                    .accessibilityIdentifier("mark-all-viewed-button")
                 }
             }
             .padding(.horizontal, 14)
@@ -1831,6 +1909,20 @@ struct TaskConversationView: View {
                                 .nativeHelp("Mark as viewed")
                                 .accessibilityLabel("Mark \(entry.path) as viewed")
                                 .accessibilityIdentifier("mark-viewed-\(entry.path)")
+                            } else {
+                                Button {
+                                    Task { await markUnviewed(entry) }
+                                } label: {
+                                    Image(systemName: "arrow.uturn.backward.circle")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 20, height: 22)
+                                }
+                                .buttonStyle(.plain)
+                                .buttonHoverPointer()
+                                .nativeHelp("Mark as unviewed")
+                                .accessibilityLabel("Mark \(entry.path) as unviewed")
+                                .accessibilityIdentifier("mark-unviewed-\(entry.path)")
                             }
                         }
                         .padding(.horizontal, 7)
@@ -2160,13 +2252,34 @@ struct TaskConversationView: View {
         }
     }
 
+    private func markUnviewed(_ entry: WorkspaceChangeEntry) async {
+        do {
+            try await workspaceManager.markUnviewed(for: task.id, repository: entry.repository, path: entry.path)
+            await refreshWorkspaceChanges()
+        } catch {
+            changesError = error.localizedDescription
+        }
+    }
+
+    private func markAllViewed() async {
+        do {
+            _ = try await workspaceManager.markAllViewed(for: task.id)
+            await refreshWorkspaceChanges()
+        } catch {
+            changesError = error.localizedDescription
+        }
+    }
+
     private func refreshWorkspaceChanges() async {
         guard !isLoadingChanges else {
             changesNeedRefresh = true
             return
         }
         isLoadingChanges = true
-        defer { isLoadingChanges = false }
+        defer {
+            isLoadingChanges = false
+            hasLoadedChanges = true
+        }
 
         repeat {
             changesNeedRefresh = false

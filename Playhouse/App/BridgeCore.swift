@@ -3686,13 +3686,21 @@ final class BoardTaskManager {
         return try modelContext.fetch(descriptor).first
     }
 
-    func setViewedWorkspaceChange(_ snapshot: WorkspaceViewedChange, taskID: UUID) async throws {
+    func setViewedWorkspaceChanges(_ newSnapshots: [WorkspaceViewedChange], taskID: UUID) async throws {
         let task = try requireTask(taskID)
         var snapshots = task.viewedWorkspaceChanges
-        snapshots.removeAll { $0.repository == snapshot.repository && $0.path == snapshot.path }
-        snapshots.append(snapshot)
+        for snapshot in newSnapshots {
+            snapshots.removeAll { $0.repository == snapshot.repository && $0.path == snapshot.path }
+            snapshots.append(snapshot)
+        }
         task.viewedWorkspaceChanges = snapshots
-        try await saveTaskContext(operation: "BoardTaskManager.setViewedWorkspaceChange", taskID: taskID)
+        try await saveTaskContext(operation: "BoardTaskManager.setViewedWorkspaceChanges", taskID: taskID)
+    }
+
+    func removeViewedWorkspaceChange(repository: String, path: String, taskID: UUID) async throws {
+        let task = try requireTask(taskID)
+        task.viewedWorkspaceChanges = task.viewedWorkspaceChanges.filter { !($0.repository == repository && $0.path == path) }
+        try await saveTaskContext(operation: "BoardTaskManager.removeViewedWorkspaceChange", taskID: taskID)
     }
 
     fileprivate func isRepositoryAttached(_ record: RepositoryWorktreeRecord, to taskID: UUID) throws -> Bool {
@@ -4419,7 +4427,37 @@ final class WorkspaceManager {
             throw BridgeCommandError(code: "not_found", message: "The file isn't currently an unviewed change.")
         }
         let snapshot = try await WorkspaceChangeScanner.captureViewedChange(workspaceRoots: task.workspaceRootPaths, repositoryPath: repository, relativePath: path)
-        try await taskManager.setViewedWorkspaceChange(snapshot, taskID: taskID)
+        try await taskManager.setViewedWorkspaceChanges([snapshot], taskID: taskID)
+    }
+
+    /// Marks every current Changes entry viewed in one save, returning how many were marked.
+    func markAllViewed(for taskID: UUID) async throws -> Int {
+        guard let taskManager else {
+            throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
+        }
+        let task = try taskManager.taskModel(taskID)
+        let inventory = try await changes(for: taskID)
+        guard !inventory.unviewed.isEmpty else { return 0 }
+        let snapshots = try await WorkspaceChangeScanner.captureViewedChanges(
+            workspaceRoots: task.workspaceRootPaths,
+            files: inventory.unviewed.map { ($0.repository, $0.path) }
+        )
+        try await taskManager.setViewedWorkspaceChanges(snapshots, taskID: taskID)
+        return snapshots.count
+    }
+
+    /// Drops a file's viewed snapshot so its whole change from the branch base is listed under
+    /// Changes again. The Git index is left as is: unviewing never discards staged work.
+    func markUnviewed(for taskID: UUID, repository: String, path: String) async throws {
+        guard let taskManager else {
+            throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
+        }
+        let repository = URL(fileURLWithPath: repository).standardizedFileURL.path
+        let inventory = try await changes(for: taskID)
+        guard inventory.viewed.contains(where: { $0.repository == repository && $0.path == path }) else {
+            throw BridgeCommandError(code: "not_found", message: "The file isn't currently a viewed change.")
+        }
+        try await taskManager.removeViewedWorkspaceChange(repository: repository, path: path, taskID: taskID)
     }
 
     func diff(
@@ -8201,6 +8239,16 @@ final class PlayhouseBridgeRuntime {
                     path: request.requiredString("path")
                 )
                 result = .object(["viewed": .boolean(true)])
+            case "task.changes.mark-all-viewed":
+                let count = try await workspaces.markAllViewed(for: request.requiredUUID("taskID"))
+                result = .object(["markedCount": .integer(count)])
+            case "task.changes.mark-unviewed":
+                try await workspaces.markUnviewed(
+                    for: request.requiredUUID("taskID"),
+                    repository: request.requiredString("repository"),
+                    path: request.requiredString("path")
+                )
+                result = .object(["viewed": .boolean(false)])
             case "task.changes.diff":
                 result = try Self.value(await workspaces.diff(
                     for: request.requiredUUID("taskID"),

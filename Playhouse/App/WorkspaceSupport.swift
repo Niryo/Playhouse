@@ -90,6 +90,8 @@ enum WorkspaceSettings {
     static let defaultParentFolderKey = "defaultWorkspaceParentFolderPath"
     static let lastSelectedRepositoriesKey = "lastSelectedRepositories"
     static let appearanceKey = "appearance"
+    /// Whether the task view's Changes sidebar is collapsed; one value shared by every task.
+    static let workspaceChangesCollapsedKey = "workspaceChangesCollapsed"
     static let defaultConversationProviderKey = "defaultConversationProvider"
     static let autoCreatePullRequestDefaultKey = "autoCreatePullRequestDefault"
     static let pullRequestModeDefaultKey = "pullRequestModeDefault"
