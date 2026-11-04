@@ -58,6 +58,9 @@ Principles that made the previous rounds work:
    `/tmp/playhouse-ui-tart-artifacts/<run>/playhouse-ui.*/` (`bridge-watcher.log`
    lists daemon deaths as `watcher exited rc=69`, plus the single `.xcresult`).
 
+   If this run is fully green and the round ends up changing nothing that the
+   suite depends on, it is also the confirmation run; step 9 does not repeat it.
+
 3. **Triage every failure to a root cause.** For each failed case gather, in this
    order, and stop when the cause is proven:
    - The `error:` line and the last `Waiting Ns for ...` step before it in the
@@ -96,11 +99,14 @@ Principles that made the previous rounds work:
    the visible UI case in exact parity (`scripts/check-test-parity.py`) whenever a
    contract or test changes.
 
-4. **Prove each fix.** Rerun the fixed case alone with
-   `scripts/test-ui-tart.sh --case <id> [--case <id>...]`. For order-dependent
-   failures rerun the alphabetical prefix that reproduced it, or the specific
-   earlier case that leaks state. If memory or a stall was involved, keep the
-   sampler running and read it. If a fix does not change the outcome, revert it.
+4. **Prove each fix with focused runs only.** Rerun only the fixed cases with
+   `scripts/test-ui-tart.sh --case <id> [--case <id>...]`; batch every case that is
+   ready into one invocation rather than one VM session per case. For
+   order-dependent failures rerun the alphabetical prefix that reproduced it, or the
+   specific earlier case that leaks state. If memory or a stall was involved, keep
+   the sampler running and read it. If a fix does not change the outcome, revert it.
+   Repeat steps 3 and 4 on whatever is still red until every failed case passes in
+   a focused run. Do not start another full run while any known failure is open.
 
 5. **Flakiness.** A case that failed in this run but passed in the previous
    nightly, or passed alone, is flaky until its cause is found. Typical causes seen
@@ -139,11 +145,15 @@ Principles that made the previous rounds work:
    `ui_verifier`, `architecture_reviewer`). Resolve findings, rerun the affected
    cases, and only then move on.
 
-9. **Confirm.** Run the full suite once more on the final tree with the sampler.
-   It must execute every contract case with no failure, skip, or incomplete
-   result, and the daemon peak must stay flat. If it is not green, go back to step
-   3; do not stop with a known-red suite unless an external blocker prevents any
-   progress, in which case report the exact blocker.
+9. **Confirm.** Skip this step if step 2 was green and nothing the suite depends
+   on has changed since. Otherwise run the full suite once more on the final tree
+   with the sampler. It must execute every contract case with no failure, skip, or
+   incomplete result, and the daemon peak must stay flat. If it is not green, go
+   back to steps 3 and 4 for only the cases that failed in this run, fix them with
+   focused runs until all are green, rerun the review in step 8 for those fixes,
+   then repeat this full run; do not redo steps 5 to 7. Do not stop with a
+   known-red suite unless an external blocker prevents any progress, in which case
+   report the exact blocker.
 
 10. **Report and commit.** Write `docs/nightly-tests/<YYYY-MM-DD>.md` with: totals
     and wall time of the first and final runs, the daemon peak, each failure with
