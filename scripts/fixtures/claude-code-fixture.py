@@ -602,6 +602,27 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         if not release.exists():
             raise TimeoutError("Timed out waiting for the agent image publication test.")
         text("msg_image_order", "Claude answer after the image.")
+    elif "show-tool-calls-inline" in user_text.lower():
+        # Commentary, then shell calls with their stated purpose and output, a
+        # failing call, and an MCP call whose arguments and result stay private,
+        # so the timeline can place each call after the text written before it.
+        def tool_call(tool_id, name, tool_input, output, is_error=False):
+            assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}])
+            write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tool_id, "content": output, "is_error": is_error},
+            ]}})
+        text("msg_timeline_intro", "I'll check the repository status first.")
+        tool_call("toolu_timeline_status", "Bash", {
+            "command": "git status --short && echo fixture-status-done", "description": "Check repository status",
+        }, "fixture-status-done")
+        text("msg_timeline_middle", "The status is clean. Next I'll list the files and run the check.")
+        tool_call("toolu_timeline_list", "Bash", {"command": "ls -1", "description": "List fixture files"},
+                  "README.md\nfixture-one.txt\nfixture-two.txt\nfixture-three.txt\nfixture-four.txt")
+        tool_call("toolu_timeline_fail", "Bash", {"command": "exit 3", "description": "Run the failing check"},
+                  "Exit code 3", is_error=True)
+        tool_call("toolu_timeline_mcp", "mcp__fixture__lookup", {"query": "timeline-private-argument"},
+                  "timeline-private-result")
+        text("msg_timeline_final", "Here is what ran:\n1. `git status --short` was clean.\n2. The check exited with code `3`.\n\n- Bullets read at text size\n- Inline `code` is tinted")
     elif "follow-active-turn" in user_text.lower():
         # Holds before any output, so a test can reopen the conversation first,
         # then again while commentary and a running tool are visible.

@@ -1152,6 +1152,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         var cursor: String?
         var visitedCursors = Set<String>()
         var historyItemOrder = 0
+        var timelineToolItems: [(item: [String: Any], anchor: String?)] = []
+        var timelineToolItemIndexes: [String: Int] = [:]
 
         repeat {
             var params: [String: Any] = [
@@ -1221,6 +1223,21 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 var latestTurnItem = item
                 latestTurnItem["_playhouseTurnID"] = entry["turnId"]
                 latestTurnItems.append(latestTurnItem)
+                if Self.timelineToolItemTypes.contains(item["type"] as? String ?? ""),
+                   let itemID = item["id"] as? String {
+                    // A repeated item updates the call but keeps the place it first took.
+                    let anchor = timelineToolItemIndexes[itemID].map { timelineToolItems[$0].anchor } ?? messages.last?.id
+                    let record = (item: latestTurnItem, anchor: anchor)
+                    if let index = timelineToolItemIndexes[itemID] {
+                        timelineToolItems[index] = record
+                    } else {
+                        timelineToolItemIndexes[itemID] = timelineToolItems.count
+                        timelineToolItems.append(record)
+                    }
+                    // Text after the call is a message of its own, below the call.
+                    lastAssistantTurnID = nil
+                    lastAssistantPhase = nil
+                }
                 if var message = Self.chatMessage(from: entry) {
                     message.timelineOrder = historyItemOrder
                     if message.role == .assistant,
@@ -1287,9 +1304,17 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             if let index = activityIndexes[key] { activities[index] = activity }
             else { activityIndexes[key] = activities.count; activities.append(activity) }
         }
+        let timelineActivities = timelineToolItems.compactMap { record -> ConversationActivity? in
+            guard let anchor = record.anchor, var activity = ConversationActivity.from(item: record.item),
+                  activity.isTimelineToolCall else { return nil }
+            activity.turnID = record.item["_playhouseTurnID"] as? String
+            activity.afterMessageID = anchor
+            return activity
+        }
         return ConversationHistory(
             messages: messages,
             activities: activities,
+            timelineActivities: timelineActivities,
             diff: ConversationTurnDiff.fromFileChangeItems(latestTurnItems)
         )
     }
@@ -1922,6 +1947,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             return nil
         }
     }
+
+    /// Thread items the conversation timeline shows as tool calls.
+    private static let timelineToolItemTypes: Set<String> = [
+        "commandExecution", "fileChange", "webSearch", "imageView", "mcpToolCall", "dynamicToolCall",
+    ]
 
     private static func messageTimestamp(entry: [String: Any], item: [String: Any]) -> Date? {
         for value in [entry["timestamp"], entry["createdAt"], item["timestamp"], item["createdAt"]] {
