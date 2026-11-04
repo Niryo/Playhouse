@@ -2695,7 +2695,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(record.get("pullRequestURL"))
         self.assertEqual(current["status"], "Done")
 
-    # case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a small Auto PR switch in place of the manual PR button, defaulting to off; the switch disappears once a pull request is linked or the task leaves the working states. Selecting Auto PR persists and is reflected across a fresh read. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. The last switch choice is remembered: tasks created after turning it on start on, and tasks created after turning it off start off. Toggling Auto PR for an unknown task is rejected.
+    # case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to Manual; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. The last switch choice is remembered: tasks created after turning it on start on, and tasks created after turning it off start off. Toggling Auto PR for an unknown task is rejected.
     def test_task_auto_pr_toggle_creates_pull_request_on_review(self):
         missing, _ = self.call_cli("task", "pr", "auto", str(uuid.uuid4()), "on", expected_status=3)
         self.assert_failure(missing, "not_found")
@@ -2713,10 +2713,22 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
         task = self.create_repo_task("Auto PR toggle", [self.primary], merge_targets={self.primary: "main"})
         self.assertFalse(task["autoCreatePullRequestOnReview"], "Auto PR must default to off so existing tasks are unaffected.")
-        enabled = self.assert_success(self.call_cli("task", "pr", "auto", task["id"], "on")[0])
+        self.assertEqual(task["pullRequestMode"], "manual")
+        autopilot = self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "autopilot")[0])
+        self.assertEqual(autopilot["pullRequestMode"], "autopilot")
+        self.assertTrue(autopilot["autoCreatePullRequestOnReview"], "Autopilot opens the pull request too.")
+        merge = self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "merge")[0])
+        self.assertEqual(merge["pullRequestMode"], "merge")
+        self.assertTrue(merge["autoCreatePullRequestOnReview"], "Merge mode opens the pull request too.")
+        invalid_mode, _ = self.call_cli("task", "pr", "mode", task["id"], "sometimes", expected_status=2)
+        self.assert_failure(invalid_mode, "invalid_argument")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["pullRequestMode"], "merge", "A rejected mode must not change the task.")
+        enabled = self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "pr")[0])
         self.assertTrue(enabled["autoCreatePullRequestOnReview"])
+        self.assertEqual(enabled["pullRequestMode"], "pr")
         reread = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertTrue(reread["autoCreatePullRequestOnReview"], "The toggle should persist across a fresh CLI connection.")
+        self.assertEqual(reread["pullRequestMode"], "pr")
 
         remote_root = self.data_directory / "auto-pr-remotes"
         remote_root.mkdir()
@@ -2850,6 +2862,256 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "The manual create flow must still work unchanged when Auto PR stays off.",
         )
 
+    def drive_held_fixture_command(self, task_id, command, outcome, executable_name="codex-fixture", on_hold=None, extra_environment=None):
+        """Runs a CLI command whose provider turn holds in the Codex fixture, calls
+        `on_hold` while the turn is active, reports `outcome`, and returns the
+        command's result."""
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / executable_name
+        hold_marker = Path(str(executable) + ".hold-release")
+        hold_marker.touch()
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable), **(extra_environment or {})}
+        active = Path(str(executable) + ".turn-active")
+        release = Path(str(executable) + ".turn-release")
+        active.unlink(missing_ok=True)
+        release.unlink(missing_ok=True)
+        process = self.start_cli(*command, extra_environment=environment)
+        held = 0
+        try:
+            deadline = time.monotonic() + 90
+            while process.poll() is None and time.monotonic() < deadline:
+                if active.exists() and not release.exists():
+                    if held == 0 and on_hold is not None:
+                        on_hold(environment)
+                    response, _ = self.call_cli("task", "outcome", task_id, outcome, extra_environment=environment)
+                    self.assertEqual(self.assert_success(response)["outcome"], outcome)
+                    held += 1
+                    release.write_text("Release the fixture turn.\n", encoding="utf-8")
+                time.sleep(0.02)
+            self.assertGreater(held, 0, "The command should have run a held provider turn.")
+            response, _ = self.finish_cli(process, command)
+        finally:
+            if process.poll() is None:
+                release.write_text("Release the fixture turn.\n", encoding="utf-8")
+                process.communicate(timeout=20)
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+            hold_marker.unlink(missing_ok=True)
+        return self.assert_success(response)
+
+    # case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only for an autopilot task; the board colours each linked PR number green, red, or orange by that health and keeps the mode pill beside linked PRs. Autopilot leaves a task inactive unless its mode is autopilot and it sits in Review. With checks still running it sends no turn, and the board re-probes only those autopilot PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop.
+    def test_task_pr_autopilot_fixes_red_pull_request_until_green(self):
+        missing, _ = self.call_cli("task", "pr", "autopilot", str(uuid.uuid4()), expected_status=3)
+        self.assert_failure(missing, "not_found")
+        task = self.create_repo_task("PR autopilot", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        self.assertEqual(task["status"], "Review")
+        self.seed_done_task_pull_request(task["id"], number=801)
+
+        gh_directory = self.data_directory / "autopilot-gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_state = gh_directory / "state"
+        gh_calls = gh_directory / "calls"
+        gh_environment = {"PATH": f"{gh_directory}:{os.environ.get('PATH', '')}"}
+
+        def set_pull_request(checks, threads=0):
+            gh_state.write_text(f"801=unmerged\n801.checks={checks}\n801.threads={threads}\n", encoding="utf-8")
+
+        def history_texts(role):
+            history = self.assert_success(self.call_cli(
+                "conversation", "history", task["id"],
+                extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture")},
+            )[0])
+            return [item["text"] for item in history["messages"] if item["role"] == role]
+
+        set_pull_request("failure", threads=1)
+        manual_status = self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(manual_status[0]["checks"], "failure")
+        self.assertEqual(manual_status[0]["failingChecks"], ["fixture-ci"])
+        self.assertEqual(manual_status[0]["health"], "red")
+        self.assertIsNone(manual_status[0].get("unresolvedReviewThreads"), "Only autopilot tasks read review threads.")
+        self.assertNotIn("threads 801", gh_calls.read_text(encoding="utf-8").splitlines())
+        inactive = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(inactive["action"], "inactive", "Autopilot must not act on a task whose mode is not autopilot.")
+        self.assertEqual(inactive["taskStatus"], "Review")
+
+        self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "autopilot")[0])
+        set_pull_request("pending")
+        user_messages_before = len(history_texts("user"))
+        pending = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(pending["action"], "pending")
+        self.assertEqual(pending["states"][0]["health"], "pending")
+        self.assertEqual(pending["states"][0]["unresolvedReviewThreads"], 0)
+        self.assertIn("threads 801", gh_calls.read_text(encoding="utf-8").splitlines(), "Autopilot reads the PR's review threads.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
+        self.assertEqual(len(history_texts("user")), user_messages_before, "Pending checks must not start a fix turn.")
+
+        set_pull_request("failure", threads=2)
+        observed = {}
+
+        def while_fixing(environment):
+            observed["status"] = self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"]
+            # The fix is pushed: the threads are answered and resolved, and CI reruns.
+            set_pull_request("pending")
+
+        fixed = self.drive_held_fixture_command(
+            task["id"], ["task", "pr", "autopilot", task["id"]], "completed",
+            on_hold=while_fixing, extra_environment=gh_environment,
+        )
+        self.assertEqual(fixed["action"], "fixed")
+        self.assertEqual(fixed["states"][0]["health"], "red")
+        self.assertEqual(fixed["states"][0]["unresolvedReviewThreads"], 2)
+        self.assertEqual(observed["status"], "In Progress", "A fix turn brings the task back to In Progress.")
+        self.assertEqual(fixed["taskStatus"], "Review", "Reporting completed returns the fixed task to Review.")
+        prompt = history_texts("user")[-1]
+        self.assertTrue(prompt.startswith("Playhouse autopilot:"), prompt)
+        for expected in ("#801", "failing checks: fixture-ci", "2 unresolved review threads", "critically", "reply", "resolve", "waiting-response", "Jira"):
+            self.assertIn(expected, prompt)
+        rerun = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(rerun["action"], "pending", "Rerunning checks after a fix are followed, not fixed again.")
+
+        set_pull_request("success")
+        user_messages_before = len(history_texts("user"))
+        green = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(green["action"], "green")
+        self.assertEqual(green["states"][0]["health"], "green")
+        self.assertEqual(len(history_texts("user")), user_messages_before, "A green PR needs no fix turn.")
+        self.assertNotIn("merged\t", (gh_directory / "create-calls").read_text(encoding="utf-8") if (gh_directory / "create-calls").exists() else "", "Autopilot alone never merges.")
+
+        # The same red state as the first fix comes back after green. Green reset the
+        # loop guard, so autopilot fixes it again, and the model may stop the loop.
+        set_pull_request("failure", threads=2)
+        waiting = self.drive_held_fixture_command(
+            task["id"], ["task", "pr", "autopilot", task["id"]], "waiting-response", extra_environment=gh_environment,
+        )
+        self.assertEqual(waiting["action"], "fixed", "Green must reset the loop guard so a repeated red state is fixed again.")
+        self.assertEqual(waiting["taskStatus"], "Waiting Response")
+        idle = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(idle["action"], "inactive", "Waiting Response stops the autopilot loop.")
+
+        # The user sends the task back to Review: autopilot tries the still-red PR once
+        # more, and when that fix changes nothing it stops with a reason.
+        self.complete_fixture_turn(task["id"])
+        retried = self.drive_held_fixture_command(
+            task["id"], ["task", "pr", "autopilot", task["id"]], "completed", extra_environment=gh_environment,
+        )
+        self.assertEqual(retried["action"], "fixed", "A user's message lets autopilot send the same red state again.")
+        user_messages_before = len(history_texts("user"))
+        stalled = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(stalled["action"], "stalled")
+        current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(current["status"], "Waiting Response")
+        self.assertIn("nothing changed", current["statusMessage"])
+        self.assertEqual(len(history_texts("user")), user_messages_before, "An unchanged red state must not be sent again.")
+
+        # Choosing the mode again restarts the streak; five fixes that never reach green
+        # exhaust it even though each one changed something.
+        self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "autopilot")[0])
+        self.complete_fixture_turn(task["id"])
+        for attempt in range(1, 6):
+            set_pull_request("failure", threads=attempt)
+            result = self.drive_held_fixture_command(
+                task["id"], ["task", "pr", "autopilot", task["id"]], "completed", extra_environment=gh_environment,
+            )
+            self.assertEqual(result["action"], "fixed", f"Fix attempt {attempt} should run.")
+        set_pull_request("failure", threads=6)
+        capped = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(capped["action"], "stalled")
+        capped_task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(capped_task["status"], "Waiting Response")
+        self.assertIn("5 fix turns", capped_task["statusMessage"])
+
+    # case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green with checks that actually ran and passed: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass with no unresolved threads it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace moves the task to Waiting Response explaining that merge mode needs checks that passed, without merging. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
+    def test_task_pr_merge_mode_merges_green_pull_request(self):
+        task = self.create_repo_task("PR merge mode", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        refused = self.create_repo_task("PR merge refused", [self.secondary], merge_targets={self.secondary: "main"}, materialize=True)
+        self.seed_done_task_pull_request(task["id"], number=811)
+        self.seed_done_task_pull_request(refused["id"], number=812)
+
+        gh_directory = self.data_directory / "merge-gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_state = gh_directory / "state"
+        gh_calls = gh_directory / "calls"
+        merge_log = gh_directory / "create-calls"
+        gh_environment = {"PATH": f"{gh_directory}:{os.environ.get('PATH', '')}"}
+        gh_state.write_text("811=unmerged\n811.checks=pending\n812=unmerged\n812.checks=none\n812.merge=Pull request is not mergeable: a review is required\n", encoding="utf-8")
+
+        def commit_head(worktree, committed_at=None):
+            # The no-checks grace runs from the head's commit time; pin it either way.
+            environment = dict(os.environ)
+            if committed_at:
+                environment.update({"GIT_AUTHOR_DATE": committed_at, "GIT_COMMITTER_DATE": committed_at})
+            subprocess.run(["git", "-C", str(worktree), "commit", "--allow-empty", "-m", "Fixture head"], check=True, capture_output=True, text=True, env=environment)
+
+        def merges():
+            return [line for line in merge_log.read_text(encoding="utf-8").splitlines() if line.startswith("merge")] if merge_log.exists() else []
+
+        chosen = self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "merge")[0])
+        self.assertEqual(chosen["pullRequestMode"], "merge")
+        self.assertTrue(chosen["autoCreatePullRequestOnReview"])
+        pending = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(pending["action"], "pending")
+        self.assertEqual(pending["states"][0]["unresolvedReviewThreads"], 0)
+        self.assertIn("threads 811", gh_calls.read_text(encoding="utf-8").splitlines(), "Merge mode reads review threads like autopilot.")
+        self.assertEqual(merges(), [], "Running checks must not be merged.")
+        commit_head(task["repositoryWorktrees"][0]["worktreePath"])
+        gh_state.write_text(gh_state.read_text(encoding="utf-8").replace("811.checks=pending", "811.checks=none"), encoding="utf-8")
+        no_checks = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(no_checks["action"], "pending", "A freshly pushed head may not have registered its checks yet.")
+        self.assertEqual(no_checks["taskStatus"], "Review")
+        self.assertEqual(merges(), [], "A head with no checks reported yet must not be merged.")
+        gh_state.write_text(gh_state.read_text(encoding="utf-8").replace("811.checks=none", "811.checks=pending"), encoding="utf-8")
+
+        gh_state.write_text(gh_state.read_text(encoding="utf-8").replace("811.checks=pending", "811.checks=success"), encoding="utf-8")
+        merged = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(merged["action"], "merged")
+        self.assertEqual(merged["mergedPullRequests"], [811])
+        self.assertTrue(merged["states"][0]["merged"])
+        self.assertEqual(merges(), ["merged\t811\t--squash"], "A green PR is merged once with the first allowed method.")
+        merge_call = [line for line in merge_log.read_text(encoding="utf-8").splitlines() if line.startswith("merged\t811")]
+        self.assertEqual(len(merge_call), 1)
+        self.assertEqual(merged["taskStatus"], "Review", "Merging leaves the task in Review for the user to complete.")
+        again = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(again["action"], "merged")
+        self.assertIsNone(again.get("mergedPullRequests"), "An already-merged PR is reported, not merged again.")
+        self.assertEqual(len(merges()), 1, "An already-merged PR is not merged again.")
+        status = self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=gh_environment)[0])
+        self.assertTrue(status[0]["merged"])
+
+        # Long past the grace with still no checks: merge mode stops and says why.
+        commit_head(refused["repositoryWorktrees"][0]["worktreePath"], committed_at="2020-01-01T00:00:00Z")
+        self.assert_success(self.call_cli("task", "pr", "mode", refused["id"], "merge")[0])
+        no_ci = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(no_ci["action"], "stalled")
+        no_ci_task = self.assert_success(self.call_cli("task", "get", refused["id"])[0])
+        self.assertEqual(no_ci_task["status"], "Waiting Response")
+        self.assertIn("GitHub reports no checks", no_ci_task["statusMessage"])
+        self.assertEqual(merges(), ["merged\t811\t--squash"], "No checks must never be merged.")
+
+        # The user sends it back to Review; checks pass, but GitHub refuses the merge. The
+        # `repo.methods` line, written after #811 merged, disallows squash from here on.
+        self.complete_fixture_turn(refused["id"])
+        gh_state.write_text(gh_state.read_text(encoding="utf-8").replace("812.checks=none", "812.checks=success") + "repo.methods=merge,rebase\n", encoding="utf-8")
+        stalled = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(stalled["action"], "stalled")
+        current = self.assert_success(self.call_cli("task", "get", refused["id"])[0])
+        self.assertEqual(current["status"], "Waiting Response")
+        self.assertIn("couldn't merge pull request #812", current["statusMessage"])
+        self.assertIn("a review is required", current["statusMessage"])
+        self.assertEqual(merges()[-1], "merge-failed\t812\t--merge")
+        idle = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(idle["action"], "inactive", "A refused merge does not retry.")
+
     # case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 20 seconds, with focus events during cooldown coalesced into one trailing refresh. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
     def test_review_pr_conflicts_probe_and_verify(self):
         task = self.create_repo_task("Review PR conflict probe", [self.primary, self.secondary], materialize=True)
@@ -2867,7 +3129,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         executable = directory / "gh"
         executable.write_text(
             "#!/bin/sh\n"
-            "if [ \"$1\" != pr ] || [ \"$2\" != view ] || { [ \"$3\" != 123 ] && [ \"$3\" != 456 ]; } || [ \"$4\" != --json ] || [ \"$5\" != mergedAt,mergeable,headRefOid ]; then\n"
+            "if [ \"$1\" != pr ] || [ \"$2\" != view ] || { [ \"$3\" != 123 ] && [ \"$3\" != 456 ]; } || [ \"$4\" != --json ] || [ \"$5\" != mergedAt,mergeable,headRefOid,statusCheckRollup ]; then\n"
             "  echo 'Unexpected gh fixture command' >&2\n"
             "  exit 2\n"
             "fi\n"
@@ -2877,7 +3139,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             f"mergeable=$(awk -F= -v number=\"$3\" '$1 == number {{ print $2 }}' {shlex.quote(str(state))})\n"
             "head=$(git rev-parse HEAD)\n"
             "if [ \"$mergeable\" = HEAD_MISMATCH ]; then head=remote-head-not-pushed; mergeable=MERGEABLE; fi\n"
-            "if [ \"$mergeable\" = CONFLICTING ]; then printf '{\"mergedAt\":null,\"mergeable\":\"CONFLICTING\",\"headRefOid\":\"%s\"}\\n' \"$head\"; else printf '{\"mergedAt\":null,\"mergeable\":\"MERGEABLE\",\"headRefOid\":\"%s\"}\\n' \"$head\"; fi\n",
+            "if [ \"$mergeable\" = CONFLICTING ]; then printf '{\"mergedAt\":null,\"mergeable\":\"CONFLICTING\",\"headRefOid\":\"%s\",\"statusCheckRollup\":[]}\\n' \"$head\"; else printf '{\"mergedAt\":null,\"mergeable\":\"MERGEABLE\",\"headRefOid\":\"%s\",\"statusCheckRollup\":[]}\\n' \"$head\"; fi\n",
             encoding="utf-8",
         )
         executable.chmod(0o755)
