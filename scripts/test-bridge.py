@@ -6083,7 +6083,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(steer_params["input"], [{"type": "text", "text": steer_message}])
         self.assertTrue(steer_params["expectedTurnId"], "Steering must identify the matching active turn.")
 
-    # case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
+    # case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up with its attached image, clears the preview, and marks the row with its image count; the queued image persists across reopening without returning to the composer, and malformed queued images fail validation. Its row Steer uses the active turn ID, delivers both text and image to the provider, appears in the transcript with its image, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
     def test_conversation_steers_and_queues_active_turn(self):
         task = self.create_repo_task("Active turn message controls", [self.primary])
         task_id = task["id"]
@@ -6148,10 +6148,24 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assertTrue(self.assert_success(removed)["removed"])
             persisted, _ = self.call_cli("conversation", "queue-list", task_id)
             self.assertEqual({item["id"] for item in self.assert_success(persisted)}, {queued_record["id"], missed_item["id"]})
-            steerable, _ = self.call_cli("conversation", "queue", task_id, "--message", "Steer this queued follow-up now.")
+            invalid_queue, _ = self.call_cli(
+                "conversation", "queue", task_id, "--message", "Reject this queued image.", "--image", str(invalid_image),
+                expected_status=2,
+            )
+            self.assertEqual(invalid_queue["error"]["code"], "invalid_argument", "A queued follow-up must validate its images.")
+            steerable, _ = self.call_cli(
+                "conversation", "queue", task_id, "--message", "Steer this queued follow-up now.", "--image", str(steer_image)
+            )
             steerable_record = self.assert_success(steerable)
+            self.assertTrue(steerable_record["imageDataURLs"][0].startswith("data:image/png;base64,"), "A queued follow-up should keep its image.")
+            persisted, _ = self.call_cli("conversation", "queue-list", task_id)
+            steerable_item = next(item for item in self.assert_success(persisted) if item["id"] == steerable_record["id"])
+            self.assertEqual(steerable_item["imageDataURLs"], steerable_record["imageDataURLs"], "A fresh read should return the queued image.")
             queued_steer, _ = self.call_cli("conversation", "queue-steer", task_id, steerable_record["id"])
-            self.assertTrue(self.assert_success(queued_steer)["accepted"])
+            queued_steer_result = self.assert_success(queued_steer)
+            self.assertTrue(queued_steer_result["accepted"])
+            self.assertFalse(queued_steer_result["queued"])
+            self.assertEqual(queued_steer_result["images"], steerable_record["imageDataURLs"], "A queued-row steer should report the image it delivered.")
             persisted, _ = self.call_cli("conversation", "queue-list", task_id)
             self.assertEqual({item["id"] for item in self.assert_success(persisted)}, {queued_record["id"], missed_item["id"]})
             missed_row_item, _ = self.call_cli("conversation", "queue", task_id, "--message", "Keep this after a missed row steer.")
@@ -6197,7 +6211,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(steer["input"][1]["type"], "image")
         self.assertTrue(steer["input"][1]["url"].startswith("data:image/png;base64,"))
         self.assertEqual(steer["expectedTurnId"], protocol_history["messages"][0]["turnID"])
-        self.assertEqual(protocol_history["steerRequests"][1]["input"], [{"type": "text", "text": "Steer this queued follow-up now."}])
+        self.assertEqual(
+            protocol_history["steerRequests"][1]["input"],
+            [{"type": "text", "text": "Steer this queued follow-up now."}, {"type": "image", "url": steerable_record["imageDataURLs"][0]}],
+            "Steering a queued row should deliver its image to the active turn, not only its text.",
+        )
         self.assertEqual(protocol_history["steerRequests"][1]["expectedTurnId"], protocol_history["messages"][0]["turnID"])
         queue_after_completion, _ = self.call_cli("conversation", "queue-list", task_id)
         self.assertEqual(self.assert_success(queue_after_completion), [], "Successful dispatch must be durable and nonduplicating across reload.")

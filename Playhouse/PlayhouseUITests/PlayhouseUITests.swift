@@ -7943,7 +7943,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(secondPersistedMessage.waitForExistence(timeout: 10), "Reopening the task should load the completed second send from the real app-server thread.")
     }
 
-    // case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
+    // case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up with its attached image, clears the preview, and marks the row with its image count; the queued image persists across reopening without returning to the composer, and malformed queued images fail validation. Its row Steer uses the active turn ID, delivers both text and image to the provider, appears in the transcript with its image, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
     func test_conversation_steers_and_queues_active_turn() throws {
         let sharedFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-steer-queue-serial-success-wait")
         let fixtureOwner = try String(contentsOf: WorkspaceFixture.root.appendingPathComponent(WorkspaceFixture.ownerMarker), encoding: .utf8)
@@ -8023,6 +8023,11 @@ final class PlayhouseUITests: XCTestCase {
             extraEnvironment: ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": sharedFixture.path]
         )
         assertCLIError(invalidSteer, code: "invalid_argument")
+        let invalidQueue = try runCLI(
+            ["conversation", "queue", taskID, "--message", "Reject this queued image.", "--image", invalidImage.path],
+            expectedStatus: 2
+        )
+        assertCLIError(invalidQueue, code: "invalid_argument")
         let cliImage = dataDirectory.appendingPathComponent("cli-steer.png")
         let cliBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         try XCTUnwrap(cliBitmap.representation(using: .png, properties: [:])).write(to: cliImage)
@@ -8104,8 +8109,12 @@ final class PlayhouseUITests: XCTestCase {
         let retainedQueue = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
         let retainedQueueIDs = retainedQueue?.compactMap { $0["id"] as? String } ?? []
         XCTAssertTrue(retainedQueueIDs.contains(retainedQueueID), "Removing an unknown ID must leave existing queued follow-ups unchanged.")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setData(uiPNG, forType: .png)
         composer.click()
         composer.typeText(rowSteeringText)
+        composer.typeKey("v", modifierFlags: .command)
+        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "The queued follow-up's image should be previewed before Return.")
         XCTAssertEqual(composer.value as? String, rowSteeringText, "The native composer should contain the second follow-up before Return.")
         let activeTurnControl = element("pause-response-button")
         XCTAssertEqual(activeTurnControl.label, "Stop response", "The fixture turn should still be active before queueing a second follow-up.")
@@ -8113,13 +8122,28 @@ final class PlayhouseUITests: XCTestCase {
         composer.typeKey(.return, modifierFlags: [])
         let acceptedQueue = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
         XCTAssertTrue(acceptedQueue?.contains(where: { $0["text"] as? String == rowSteeringText }) == true, "Return should queue the typed follow-up while the active turn is held. activeControl=\(element("pause-response-button").label), composer=\(composer.value as? String ?? "<none>"), error=\(element("codex-chat-error").exists ? element("codex-chat-error").label : "<none>"), fixtureHeld=\(FileManager.default.fileExists(atPath: ready.path))")
-        let acceptedQueueID = try XCTUnwrap(acceptedQueue?.first(where: { $0["text"] as? String == rowSteeringText })?["id"] as? String)
+        let acceptedQueueItem = try XCTUnwrap(acceptedQueue?.first(where: { $0["text"] as? String == rowSteeringText }))
+        let acceptedQueueID = try XCTUnwrap(acceptedQueueItem["id"] as? String)
+        let acceptedQueueImages = try XCTUnwrap(acceptedQueueItem["imageDataURLs"] as? [String], "Return should queue the attached image with the follow-up.")
+        XCTAssertEqual(acceptedQueueImages.count, 1)
+        XCTAssertTrue(acceptedQueueImages[0].hasPrefix("data:image/png;base64,"))
+        XCTAssertFalse(element("pending-chat-images").exists, "Queueing a follow-up should clear its image preview.")
+        XCTAssertTrue(element("queued-message-images-\(acceptedQueueID)").waitForExistence(timeout: 5), "A queued row should show that it carries an image.")
+        XCTAssertEqual(element("queued-message-images-\(acceptedQueueID)").label, "1 attached image")
+        attachScreenshot(named: "Queued follow-up with an attached image")
+        element("back-to-board-button").click()
+        openTask(named: "Active turn message controls")
+        XCTAssertTrue(element("queued-message-images-\(acceptedQueueID)").waitForExistence(timeout: 10), "The queued row's image should persist across reopening.")
+        XCTAssertFalse(element("pending-chat-images").exists, "A queued image must not return to the composer after reopening.")
+        let imagesBeforeRowSteer = transcriptImages.count
         element("steer-queued-message-\(acceptedQueueID)").click()
         XCTAssertTrue(waitUntil({
             !((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).contains { $0["id"] as? String == acceptedQueueID }
         }, timeout: 10), "Steering a queued row should remove it after successful delivery.")
         XCTAssertFalse(element("queued-message-text-\(acceptedQueueID)").exists, "Successful steering should remove the queued text from its row.")
         XCTAssertTrue(transcriptMessage(rowSteeringText).waitForExistence(timeout: 10), "Per-row steering should appear in the active conversation.")
+        XCTAssertTrue(waitUntil({ transcriptImages.count == imagesBeforeRowSteer + 1 }, timeout: 10), "A steered queued row should show its image in the transcript. \(app.debugDescription)")
+        attachScreenshot(named: "Steered queued follow-up shows its image")
         composer.click()
         composer.typeText("Remove this queued row.")
         composer.typeKey(.return, modifierFlags: [])
@@ -8282,7 +8306,11 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(uiSteerInput[1]["type"], "image")
         XCTAssertTrue(uiSteerInput[1]["url"]?.hasPrefix("data:image/png;base64,") == true)
         XCTAssertEqual(steerRequests[2]["expectedTurnId"] as? String, activeTurnID, "Queued-row Steer must target the current turn.")
-        XCTAssertEqual(steerRequests[2]["input"] as? [[String: String]], [["type": "text", "text": rowSteeringText]])
+        XCTAssertEqual(
+            steerRequests[2]["input"] as? [[String: String]],
+            [["type": "text", "text": rowSteeringText], ["type": "image", "url": acceptedQueueImages[0]]],
+            "Steering a queued row should deliver its image to the active turn, not only its text."
+        )
     }
 
     // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer attachment, a user transcript attachment, or an agent-published assistant image opens the original image in a large viewer, which can be closed to return to the conversation; a published assistant image preserves the original file bytes.
