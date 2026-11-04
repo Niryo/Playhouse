@@ -2864,7 +2864,7 @@ private struct PullRequestModePill: View {
                 }
                 .buttonStyle(.plain)
                 .buttonHoverPointer()
-                .help("\(shownMode.helpText). Click to change.")
+                .help("How Playhouse handles this task's pull request. \(shownMode.helpText). Click to choose another mode.")
                 .accessibilityLabel("Pull request mode")
                 .accessibilityValue(shownMode.rawValue)
                 .accessibilityIdentifier("task-pr-mode-\(taskID.uuidString)")

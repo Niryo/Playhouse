@@ -278,10 +278,10 @@ enum PullRequestMode: String, CaseIterable, Codable, Sendable {
 
     var helpText: String {
         switch self {
-        case .manual: "Manual: create the pull request yourself once this task moves to Review"
-        case .pullRequest: "PR: a pull request is created automatically when this task moves to Review"
-        case .autopilot: "Green: create the pull request, then keep fixing failing checks and review comments until it's green"
-        case .merge: "Merge: everything Green does, then merge the pull request once it's green"
+        case .manual: "Manual: you open the pull request yourself"
+        case .pullRequest: "PR: open the pull request when the task reaches Review"
+        case .autopilot: "Green: open the PR, then fix failing checks and review comments until it's green"
+        case .merge: "Merge: like Green, then merge the PR once it's green"
         }
     }
 }
