@@ -1769,7 +1769,9 @@ private struct TaskCardView: View {
                                 .actionButtonHoverEmphasis(padding: 5)
                                 .buttonHoverPointer()
                                 .help(Text(verbatim: "Open pull request #\(number) in your browser\(health.map { " (\(Self.healthDescription($0)))" } ?? "")"))
-                                .contentShape(Capsule())
+                                // The chip stays compact; the click target keeps the 30 pt minimum of its sibling actions.
+                                .frame(minWidth: 30, minHeight: 30)
+                                .contentShape(Rectangle())
                                 .accessibilityValue(health?.rawValue ?? "unknown")
                                 .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
                         }
@@ -1835,18 +1837,32 @@ private struct TaskCardView: View {
         .accessibilityIdentifier("task-pr-mode-\(task.id.uuidString)")
     }
 
-    /// Once a PR is linked, the mode control is gone; this keeps autopilot
-    /// switchable (on, or back to plain PR) so the user can stop or start the loop.
+    /// Once a PR is linked, the mode control is gone; this small "Auto" switch keeps
+    /// autopilot switchable (on, or back to plain PR) so the user can stop or start the loop.
     private var autopilotToggle: some View {
         let isOn = task.pullRequestAutopilot
         return Button {
             onSetPullRequestMode(isOn ? .pullRequest : .autopilot)
         } label: {
-            Image(systemName: "arrow.triangle.2.circlepath")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(isOn ? Color.accentColor : Color.secondary.opacity(0.6))
-                .frame(minWidth: 30, minHeight: 30)
-                .contentShape(Rectangle())
+            HStack(spacing: 5) {
+                Text("Auto")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Capsule()
+                    .fill(isOn ? Color.accentColor : Color.primary.opacity(0.18))
+                    .frame(width: 22, height: 13)
+                    .overlay(alignment: isOn ? .trailing : .leading) {
+                        Circle()
+                            .fill(.white)
+                            .frame(width: 11, height: 11)
+                            .shadow(color: .black.opacity(0.25), radius: 0.5, y: 0.5)
+                            .padding(1)
+                    }
+                    .animation(.easeInOut(duration: 0.15), value: isOn)
+            }
+            .fixedSize()
+            .frame(minWidth: 30, minHeight: 30)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .buttonHoverPointer()
