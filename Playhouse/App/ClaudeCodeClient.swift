@@ -899,11 +899,19 @@ final class ClaudeSessionRunner {
               let content = body["content"] as? [[String: Any]] else { return }
         for block in content where block["type"] as? String == "tool_result" {
             guard let toolID = block["tool_use_id"] as? String, var activity = toolActivities[toolID] else { continue }
+            let output = ClaudeCodeClient.resultText(block["content"])
             // A backgrounded Agent/Task call's tool_result only confirms the launch,
             // not completion; its real outcome arrives later as a system task event.
-            if backgroundedToolUseIDs.contains(toolID) { continue }
+            // The launch confirmation is still what the call returned.
+            if backgroundedToolUseIDs.contains(toolID) {
+                if activity.isTimelineToolCall, activity.input != nil, !output.isEmpty {
+                    activity.output = String(output.suffix(2_000))
+                    toolActivities[toolID] = activity
+                    activityHandler?(activity)
+                }
+                continue
+            }
             let isError = block["is_error"] as? Bool ?? false
-            let output = ClaudeCodeClient.resultText(block["content"])
             var detail = activity.detail
             if !output.isEmpty, activity.toolKind != "mcp" {
                 detail = [detail, String(output.suffix(2_000))].filter { !$0.isEmpty }.joined(separator: "\n")
@@ -915,7 +923,12 @@ final class ClaudeSessionRunner {
                 id: activity.id, title: activity.title, detail: detail, status: isError ? "failed" : "completed",
                 childThreadID: activity.childThreadID, agentPath: activity.agentPath, model: activity.model,
                 toolKind: activity.toolKind, server: activity.server, tool: activity.tool,
-                durationMs: duration, turnID: activity.turnID
+                durationMs: duration, turnID: activity.turnID,
+                summary: activity.summary, input: activity.input,
+                // Only a call with an IN block shows what it returned; a file read's
+                // contents, say, would just repeat the file.
+                output: activity.isTimelineToolCall && activity.input != nil && !output.isEmpty
+                    ? String(output.suffix(2_000)) : activity.output
             )
             if let duration { activityDurations[activity.id] = duration }
             toolActivities[toolID] = activity
@@ -1010,7 +1023,7 @@ final class ClaudeSessionRunner {
                     toolKind: existing.toolKind, server: existing.server, tool: existing.tool,
                     durationMs: duration ?? existing.durationMs, turnID: existing.turnID, backgroundTaskID: taskID,
                     backgroundTaskSummary: isShell ? nil : summary ?? existing.backgroundTaskSummary
-                )
+                ).preservingTimelineFields(of: existing)
                 if let duration { activityDurations[activity.id] = duration }
                 toolActivities[toolUseID] = activity
                 activityHandler?(activity)
@@ -1156,7 +1169,7 @@ final class ClaudeSessionRunner {
                 id: activity.id, title: activity.title, detail: activity.detail, status: "completed",
                 childThreadID: activity.childThreadID, agentPath: activity.agentPath, model: activity.model,
                 toolKind: activity.toolKind, server: activity.server, tool: activity.tool, turnID: activity.turnID
-            )
+            ).preservingTimelineFields(of: activity)
             toolActivities[id] = activity
             activityHandler?(activity)
         }
@@ -1681,6 +1694,29 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     }
 
     static func activity(toolID: String, name: String, input: [String: Any], status: String, turnID: String?) -> ConversationActivity {
+        var activity = baseActivity(toolID: toolID, name: name, input: input, status: status, turnID: turnID)
+        guard activity.isTimelineToolCall else { return activity }
+        func string(_ key: String) -> String? { (input[key] as? String).flatMap { $0.isEmpty ? nil : $0 } }
+        switch name {
+        case "Bash":
+            activity.summary = string("description")
+            activity.input = string("command").map { String($0.prefix(ConversationActivity.timelineInputLimit)) }
+        case "Edit", "MultiEdit", "Write", "NotebookEdit", "Read":
+            activity.summary = string("file_path") ?? string("notebook_path")
+        case "Grep", "Glob":
+            activity.summary = [string("pattern"), string("path")].compactMap { $0 }.joined(separator: " in ")
+        case "WebSearch":
+            activity.summary = string("query")
+        case "WebFetch":
+            activity.summary = string("url")
+        default:
+            // MCP and other tools keep their arguments and raw results private.
+            break
+        }
+        return activity
+    }
+
+    private static func baseActivity(toolID: String, name: String, input: [String: Any], status: String, turnID: String?) -> ConversationActivity {
         func string(_ key: String) -> String? { (input[key] as? String).flatMap { $0.isEmpty ? nil : $0 } }
         switch name {
         case "Bash":

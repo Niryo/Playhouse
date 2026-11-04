@@ -1136,14 +1136,15 @@ enum GitHubPullRequestManager {
 }
 
 /// The combined CI state of a pull request's head commit. `none` is a head with
-/// no checks at all (past the registration grace), which reads as green.
+/// no checks at all (past the registration grace), which reads as green and, in
+/// merge mode, merges.
 enum PullRequestChecksState: String, Codable, Sendable {
     case success, failure, pending, none
 }
 
 /// The colour a linked PR number shows on its task card.
 enum PullRequestHealth: String, Codable, Sendable {
-    case green, red, pending
+    case green, red, pending, merged
 }
 
 struct PullRequestReviewState: Codable, Sendable {
@@ -1178,7 +1179,7 @@ struct PullRequestReviewState: Codable, Sendable {
         self.checks = checks
         self.failingChecks = failingChecks
         self.unresolvedReviewThreads = unresolvedReviewThreads
-        if merged { health = .green }
+        if merged { health = .merged }
         else if checks == .failure || mergeable == "CONFLICTING" { health = .red }
         else if checks == .pending { health = .pending }
         else { health = .green }
@@ -4514,6 +4515,9 @@ final class ConversationManager {
                 let start = messageLimit.map { max(0, end - $0) } ?? 0
                 history.earlierMessageCount = start
                 history.messages = Array(history.messages[start..<end])
+                history.timelineActivities = ConversationActivity.visibleTimelineActivities(
+                    history.timelineActivities, visibleMessageIDs: Set(history.messages.map(\.id)), excludedTurnIDs: []
+                )
             }
         }
         var hydratedImageMessages = 0
@@ -4624,9 +4628,13 @@ final class ConversationManager {
             return message
         }
         let earlierTurnIDs = visibleTurns.dropLast().map(\.id)
+        let pageMessageIDs = Set(pageMessages.map(\.id))
         return ConversationHistory(
             messages: Array(pageMessages),
             activities: try store.subagentActivities(taskID, turnIDs: earlierTurnIDs) + (latestTurn?.activities ?? []),
+            timelineActivities: ConversationActivity.visibleTimelineActivities(
+                composed.timelineActivities, visibleMessageIDs: pageMessageIDs, excludedTurnIDs: []
+            ),
             diff: nil,
             answeredAsyncQuestionIDs: try tasks.answeredAsyncQuestionIDs(taskID: taskID),
             pendingUserInputRequest: visiblePendingUserInputRequest(taskID: taskID, transcript: state),
@@ -4665,6 +4673,15 @@ final class ConversationManager {
                 activities: transcript.pendingSensitiveUserInputRedaction == true
                     ? []
                     : codex.activities.filter { $0.turnID.map(Self.sensitiveCodexTurnIDs(transcript).contains) != true },
+                timelineActivities: transcript.pendingSensitiveUserInputRedaction == true
+                    ? []
+                    : ConversationActivity.visibleTimelineActivities(
+                        codex.timelineActivities,
+                        visibleMessageIDs: Set(Self.codexMessagesForDisplay(codex.messages, transcript: transcript).map(\.id)),
+                        excludedTurnIDs: Self.sensitiveCodexTurnIDs(transcript).union(codex.messages.filter {
+                            $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text)
+                        }.compactMap(\.turnID))
+                    ),
                 diff: Self.shouldHideCodexDiff(transcript, codex: codex) ? nil : codex.diff,
                 answeredAsyncQuestionIDs: answered,
                 pendingUserInputRequest: visiblePendingUserInputRequest(taskID: taskID, transcript: transcript)
@@ -4704,6 +4721,7 @@ final class ConversationManager {
                 ? standaloneChatMessagesRestoringEarlierPages(taskID: taskID, messages)
                 : messages,
             activities: transcript.pendingSensitiveUserInputRedaction == true ? [] : composed.activities,
+            timelineActivities: composed.timelineActivities,
             diff: transcript.pendingSensitiveUserInputRedaction == true ? nil : composed.diff,
             answeredAsyncQuestionIDs: answered,
             pendingUserInputRequest: visiblePendingUserInputRequest(taskID: taskID, transcript: transcript),
@@ -5051,7 +5069,10 @@ final class ConversationManager {
                 "messageCount": String(history.messages.count),
                 "activityCount": String(history.activities.count)
             ]))
-            return ConversationHistory(messages: history.messages, activities: activities, diff: history.diff)
+            return ConversationHistory(
+                messages: history.messages, activities: activities,
+                timelineActivities: history.timelineActivities, diff: history.diff
+            )
         } catch {
             var fields: [String: String]
             if hasSensitiveRecoveryState && sensitiveUserInputAnswerValues.isEmpty {
@@ -5208,13 +5229,26 @@ final class ConversationManager {
             activities = codexActivities.filter { !$0.isContextCompaction } + compactions
             diff = Self.shouldHideCodexDiff(transcript, codex: codex) ? nil : codex?.diff
         }
-        return ConversationHistory(
+        // Every turn's tool calls, each placed after the message it followed.
+        var timelineActivities: [ConversationActivity] = []
+        if transcript.pendingSensitiveUserInputRedaction != true {
+            let visibleTurns = transcript.turns.filter { !privateTranscriptReminderTurnIDs.contains($0.id) }
+            timelineActivities = ConversationActivity.visibleTimelineActivities(
+                (codex?.timelineActivities ?? []) + visibleTurns.flatMap(\.activities),
+                visibleMessageIDs: Set(messages.map(\.id)),
+                excludedTurnIDs: sensitiveTurnIDs.union(privateReminderTurnIDs).union(allSensitiveTurnIDs)
+                    .union(privateTranscriptReminderTurnIDs)
+            )
+        }
+        var history = ConversationHistory(
             messages: messages,
             activities: activities,
             diff: diff,
             pendingUserInputRequest: transcript.pendingUserInputRequest,
             providerBoundaries: boundaries
         )
+        history.timelineActivities = timelineActivities
+        return history
     }
 
     /// Reads a subagent's work without resuming or changing its turn.
@@ -5736,6 +5770,9 @@ final class ConversationManager {
     }
 
     func queueMessage(taskID: UUID, text: String, imageDataURLs: [String] = [], asyncQuestionItemID: String? = nil) throws -> QueuedConversationMessage {
+        guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
+        }
         defer { Self.bumpVisibleRevision(taskID) }
         return try tasks.enqueueConversationMessage(
             taskID: taskID,
@@ -5772,7 +5809,7 @@ final class ConversationManager {
         try tasks.removeQueuedMessage(taskID: taskID, messageID: messageID)
     }
 
-    func steerQueuedMessage(taskID: UUID, messageID: UUID) async throws -> (message: String, accepted: Bool) {
+    func steerQueuedMessage(taskID: UUID, messageID: UUID) async throws -> (message: String, imageDataURLs: [String], accepted: Bool) {
         let item = try tasks.queuedConversationMessages(taskID: taskID).first { $0.id == messageID }
         guard let item, item.state == .queued else {
             throw BridgeCommandError(code: "invalid_transition", message: "That follow-up is no longer available to steer.")
@@ -5798,7 +5835,7 @@ final class ConversationManager {
                     Self.pendingQueuedTaskDispatchIDs.insert(taskID)
                 }
             }
-            return (item.text, accepted)
+            return (item.text, item.imageDataURLs ?? [], accepted)
         } catch {
             try? tasks.finishQueuedMessageSteering(taskID: taskID, messageID: messageID, accepted: false)
             throw error
@@ -6416,7 +6453,7 @@ final class ConversationManager {
                             isContextCompaction: existing.isContextCompaction, turnID: existing.turnID,
                             timelineOrder: existing.timelineOrder, backgroundTaskID: existing.backgroundTaskID,
                             backgroundTaskSummary: activity.backgroundTaskSummary ?? existing.backgroundTaskSummary
-                        )
+                        ).preservingTimelineFields(of: existing).preservingTimelineFields(of: activity)
                         transcript.turns[turnIndex].activities[existingIndex] = updatedActivity
                         let reportTurnIndex = transcript.turns.lastIndex(where: { $0.id == turnID }) ?? turnIndex
                         let reportTurnID = transcript.turns[reportTurnIndex].id
@@ -6432,8 +6469,14 @@ final class ConversationManager {
                 var activity = activity
                 activity.turnID = turnID
                 if let existing = transcript.turns[index].activities.firstIndex(where: { $0.id == activity.id }) {
+                    activity = activity.preservingTimelineFields(of: transcript.turns[index].activities[existing])
                     transcript.turns[index].activities[existing] = activity
                 } else {
+                    // Claude reports a call after the text written before it, so the
+                    // turn's latest message is the one this call follows.
+                    if activity.isTimelineToolCall, activity.afterMessageID == nil {
+                        activity.afterMessageID = transcript.turns[index].messages.last?.id
+                    }
                     transcript.turns[index].activities.append(activity)
                 }
                 let targetTurnID = transcript.turns[index].id
@@ -7002,6 +7045,13 @@ final class ConversationManager {
                             : history.activities.filter { activity in
                                 activity.turnID.map { !allPrivateTurnIDs.contains($0) } ?? true
                             },
+                        timelineActivities: hideProviderDetails
+                            ? []
+                            : ConversationActivity.visibleTimelineActivities(
+                                history.timelineActivities,
+                                visibleMessageIDs: Set(attributedMessages.map(\.id)),
+                                excludedTurnIDs: allPrivateTurnIDs
+                            ),
                         diff: hideProviderDetails ? nil : history.diff,
                         answeredAsyncQuestionIDs: (try? self.tasks.answeredAsyncQuestionIDs(taskID: taskID)) ?? [],
                         pendingUserInputRequest: history.pendingUserInputRequest,
@@ -7294,6 +7344,7 @@ final class ConversationManager {
         return ConversationHistory(
             messages: restored,
             activities: history.activities,
+            timelineActivities: history.timelineActivities,
             diff: history.diff,
             answeredAsyncQuestionIDs: history.answeredAsyncQuestionIDs,
             pendingUserInputRequest: history.pendingUserInputRequest,
@@ -7444,15 +7495,8 @@ final class ConversationManager {
         case .green:
             try await tasks.resetPullRequestAutopilotAttempts(taskID)
             guard task.pullRequestAutoMerge else { return try outcome("green", states) }
-            // A head with no checks may be one GitHub hasn't started CI for yet;
-            // merging is irreversible, so it waits for checks that actually passed.
-            guard states.filter({ !$0.merged }).allSatisfy({ $0.checks == .success }) else {
-                // Past the registration grace, no checks means this repository has
-                // no CI; say so instead of silently never merging.
-                let reason = "Merge mode merges only once checks have run and passed, and GitHub reports no checks for this pull request. Merge it yourself, or switch the task to Auto."
-                _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse, message: reason)
-                return try outcome("stalled", states, reason: reason)
-            }
+            // A head with no checks yet is still pending inside the registration grace,
+            // so `.none` here is a repository without CI: it merges on mergeability alone.
             // GitHub may still be computing mergeability; merge once it says MERGEABLE.
             guard states.filter({ !$0.merged }).allSatisfy({ $0.mergeable == "MERGEABLE" }) else {
                 return try outcome("pending", states)
@@ -8241,7 +8285,10 @@ final class PlayhouseBridgeRuntime {
                 let taskID = try request.requiredUUID("taskID")
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 switch request.command {
-                case "conversation.queue": result = try Self.value(conversations.queueMessage(taskID: taskID, text: request.requiredString("message")))
+                case "conversation.queue":
+                    result = try Self.value(conversations.queueMessage(
+                        taskID: taskID, text: request.arguments["message"]?.string ?? "", imageDataURLs: request.arguments["images"]?.strings ?? []
+                    ))
                 case "conversation.queue.list": result = .array(try conversations.queuedMessages(taskID: taskID).map { try Self.value($0) })
                 case "conversation.queue.retry":
                     let retried = try await conversations.retryQueuedMessage(taskID: taskID, messageID: request.requiredUUID("messageID"), onUpdate: { update in
@@ -8255,7 +8302,10 @@ final class PlayhouseBridgeRuntime {
                     result = .object(["removed": .boolean(true)])
                 case "conversation.queue.steer":
                     let steered = try await conversations.steerQueuedMessage(taskID: taskID, messageID: request.requiredUUID("messageID"))
-                    result = .object(["text": .string(steered.message), "accepted": .boolean(true), "queued": .boolean(!steered.accepted)])
+                    result = .object([
+                        "text": .string(steered.message), "images": .array(steered.imageDataURLs.map(BridgeValue.string)),
+                        "accepted": .boolean(true), "queued": .boolean(!steered.accepted)
+                    ])
                 default:
                     let accepted = try await conversations.steer(taskID: taskID, text: request.arguments["message"]?.string ?? "", imageDataURLs: request.arguments["images"]?.strings ?? [])
                     if request.arguments["queueIfMissed"]?.bool == false {

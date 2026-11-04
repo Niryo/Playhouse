@@ -196,11 +196,21 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
     /// The explicit result summary from Claude's terminal task notification.
     /// Activity detail may contain progress text before that notification.
     var backgroundTaskSummary: String? = nil
+    /// A one-line description of the call (a command's stated purpose, a file
+    /// path), shown beside the tool's name in the conversation timeline.
+    var summary: String? = nil
+    /// What the tool was given and what it returned, as the timeline's IN and
+    /// OUT blocks show them; nil when the call has no meaningful text for it.
+    var input: String? = nil
+    var output: String? = nil
+    /// The message this call followed, which places the call in the
+    /// conversation timeline; nil for calls recorded before Playhouse kept it.
+    var afterMessageID: String? = nil
 
     private enum CodingKeys: String, CodingKey {
         case id, title, detail, status, childThreadID, agentPath, model, reasoningEffort
         case toolKind, server, tool, durationMs, startedAt, isContextCompaction, turnID, timelineOrder
-        case backgroundTaskID, backgroundTaskSummary
+        case backgroundTaskID, backgroundTaskSummary, summary, input, output, afterMessageID
     }
 
     init(
@@ -221,7 +231,11 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         turnID: String? = nil,
         timelineOrder: Int? = nil,
         backgroundTaskID: String? = nil,
-        backgroundTaskSummary: String? = nil
+        backgroundTaskSummary: String? = nil,
+        summary: String? = nil,
+        input: String? = nil,
+        output: String? = nil,
+        afterMessageID: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -241,6 +255,10 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         self.timelineOrder = timelineOrder
         self.backgroundTaskID = backgroundTaskID
         self.backgroundTaskSummary = backgroundTaskSummary
+        self.summary = summary
+        self.input = input
+        self.output = output
+        self.afterMessageID = afterMessageID
     }
 
     init(from decoder: Decoder) throws {
@@ -263,6 +281,48 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         timelineOrder = try values.decodeIfPresent(Int.self, forKey: .timelineOrder)
         backgroundTaskID = try values.decodeIfPresent(String.self, forKey: .backgroundTaskID)
         backgroundTaskSummary = try values.decodeIfPresent(String.self, forKey: .backgroundTaskSummary)
+        summary = try values.decodeIfPresent(String.self, forKey: .summary)
+        input = try values.decodeIfPresent(String.self, forKey: .input)
+        output = try values.decodeIfPresent(String.self, forKey: .output)
+        afterMessageID = try values.decodeIfPresent(String.self, forKey: .afterMessageID)
+    }
+
+    /// Whether the conversation timeline shows this call as a tool row of its
+    /// own: agents and context compaction have dedicated rows instead, and
+    /// Playhouse's own progress and outcome reports are bookkeeping, not work.
+    var isTimelineToolCall: Bool {
+        !isSubagent && !isContextCompaction
+            && input.map { TaskProgressReportInstructions.reportCommand(in: $0) == nil } != false
+    }
+
+    /// The longest command text the timeline's IN block keeps.
+    static let timelineInputLimit = 4_000
+
+    /// Timeline calls visible next to `visibleMessageIDs`: calls from excluded (private or
+    /// sensitive) turns and calls whose message isn't shown are left out, so every history
+    /// path hides the same ones.
+    static func visibleTimelineActivities(
+        _ activities: [ConversationActivity],
+        visibleMessageIDs: Set<String>,
+        excludedTurnIDs: Set<String>
+    ) -> [ConversationActivity] {
+        activities.filter { activity in
+            activity.isTimelineToolCall
+                && activity.turnID.map(excludedTurnIDs.contains) != true
+                && activity.afterMessageID.map(visibleMessageIDs.contains) == true
+        }
+    }
+
+    /// Carries what an update to this call doesn't restate (its timeline
+    /// position, input, and output) over from the version already recorded.
+    func preservingTimelineFields(of existing: ConversationActivity) -> ConversationActivity {
+        var merged = self
+        merged.summary = summary ?? existing.summary
+        merged.input = input ?? existing.input
+        merged.output = output ?? existing.output
+        merged.afterMessageID = afterMessageID ?? existing.afterMessageID
+        merged.startedAt = startedAt ?? existing.startedAt
+        return merged
     }
 
     var isSubagent: Bool { childThreadID != nil }
@@ -377,7 +437,10 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
                 tool: "Bash",
                 durationMs: item["durationMs"] as? Int ?? measuredDurationMs,
                 startedAt: startedAt,
-                turnID: turnID
+                turnID: turnID,
+                summary: cwd.map { "in \($0)" },
+                input: command.isEmpty ? nil : String(command.prefix(ConversationActivity.timelineInputLimit)),
+                output: output.flatMap { $0.isEmpty ? nil : String($0.suffix(2_000)) }
             )
         case "fileChange":
             let changes = item["changes"] as? [[String: Any]] ?? []
@@ -543,6 +606,9 @@ struct ConversationTurnDiff: Codable, Equatable {
 struct ConversationHistory: Codable, Equatable {
     var messages: [ConversationMessage]
     let activities: [ConversationActivity]
+    /// Tool calls from every returned turn, each placed after the message it
+    /// followed (`afterMessageID`), so earlier turns show their work too.
+    var timelineActivities: [ConversationActivity] = []
     let diff: ConversationTurnDiff?
     var answeredAsyncQuestionIDs: [String] = []
     var pendingUserInputRequest: ConversationUserInputRequest?
