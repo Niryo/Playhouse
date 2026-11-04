@@ -6923,7 +6923,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(texts.contains("OK."))
     }
 
-    // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload.
+    // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload. User messages render in a neutral gray, input-style bubble with a thin light border and light text rather than the blue accent fill.
     func test_conversation_adds_ordered_text_annotations() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-goal-success").path
         let fixtureStateDirectory = dataDirectory.appendingPathComponent("comment-goal-fixture-state", isDirectory: true)
@@ -7133,6 +7133,13 @@ final class PlayhouseUITests: XCTestCase {
         }
         XCTAssertTrue(userView.frame.midY > transcriptScrollView.frame.minY + 20,
                       "The earlier user message should be visible before selecting its text.")
+        let userBubbleScreenshot = userView.screenshot()
+        let userBubbleAttachment = XCTAttachment(screenshot: userBubbleScreenshot)
+        userBubbleAttachment.name = "User message bubble element"
+        userBubbleAttachment.lifetime = .keepAlways
+        add(userBubbleAttachment)
+        assertGrayBorderedUserBubble(userBubbleScreenshot.image)
+        attachScreenshot(named: "User message gray bordered bubble")
         func selectPrefix(_ view: XCUIElement) {
             view.click()
             view.typeKey("a", modifierFlags: .command)
@@ -14902,6 +14909,57 @@ final class PlayhouseUITests: XCTestCase {
             }
         }
         return changed
+    }
+
+    /// Checks the user bubble by comparing its colors with each other rather than with exact
+    /// values, because an element screenshot's color conversion shifts absolute gray levels.
+    /// The fill is the dominant neutral gray and is lighter than the transcript background (read
+    /// from the bottom-left timestamp row). The text is much lighter, the left and right edges
+    /// carry a lighter stroke, and no blue accent remains.
+    private func assertGrayBorderedUserBubble(_ image: NSImage, file: StaticString = #filePath, line: UInt = #line) {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            XCTFail("Could not read user bubble pixels.", file: file, line: line)
+            return
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        func color(_ x: Int, _ y: Int) -> NSColor? { bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) }
+        func neutralLuminance(_ color: NSColor) -> CGFloat? {
+            let components = [color.redComponent, color.greenComponent, color.blueComponent]
+            guard components.max()! - components.min()! < 0.04 else { return nil }
+            return components.reduce(0, +) / 3
+        }
+        var buckets: [Int: Int] = [:]
+        var sampled = 0
+        var bluePixels = 0
+        for x in stride(from: 0, to: cgImage.width, by: 2) {
+            for y in stride(from: 0, to: cgImage.height, by: 2) {
+                guard let pixel = color(x, y) else { continue }
+                sampled += 1
+                if pixel.blueComponent > pixel.redComponent + 0.25 && pixel.blueComponent > pixel.greenComponent + 0.1 { bluePixels += 1 }
+                if let luminance = neutralLuminance(pixel), luminance < 0.5 { buckets[Int(luminance * 50), default: 0] += 1 }
+            }
+        }
+        XCTAssertEqual(bluePixels, 0, "User messages should no longer render a blue accent bubble.", file: file, line: line)
+        guard let (fillBucket, fillCount) = buckets.max(by: { $0.value < $1.value }),
+              let background = color(2, cgImage.height - 2).flatMap(neutralLuminance) else {
+            XCTFail("The user bubble should have a neutral gray fill over a neutral background.", file: file, line: line)
+            return
+        }
+        let fill = (CGFloat(fillBucket) + 0.5) / 50
+        XCTAssertGreaterThan(Double(fillCount) / Double(max(sampled, 1)), 0.3,
+                             "The gray fill should dominate the user bubble.", file: file, line: line)
+        XCTAssertGreaterThan(fill, background + 0.05,
+                             "The bubble fill (\(fill)) should be a lighter gray than the transcript background (\(background)).",
+                             file: file, line: line)
+        let lightText = pixelCount(in: image, step: 2) { neutralLuminance($0).map { $0 > fill + 0.4 } ?? false }
+        XCTAssertGreaterThan(lightText, 20, "User message text should stay light on the gray bubble.", file: file, line: line)
+        func edgeIsStroked(_ y: Int, _ xs: [Int]) -> Bool {
+            xs.contains { x in color(x, y).flatMap(neutralLuminance).map { $0 > fill + 0.05 && $0 < fill + 0.3 } ?? false }
+        }
+        let rows = stride(from: cgImage.height * 15 / 100, to: cgImage.height * 65 / 100, by: max(1, cgImage.height / 20))
+        let edge = 0..<min(6, cgImage.width)
+        XCTAssertTrue(rows.contains { edgeIsStroked($0, Array(edge)) && edgeIsStroked($0, edge.map { cgImage.width - 1 - $0 }) },
+                      "The user bubble should have a thin light border on both sides of its gray fill.", file: file, line: line)
     }
 
     private func orangePixelCount(in screenshot: XCUIScreenshot) -> Int {
