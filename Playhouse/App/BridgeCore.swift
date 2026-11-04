@@ -1136,7 +1136,8 @@ enum GitHubPullRequestManager {
 }
 
 /// The combined CI state of a pull request's head commit. `none` is a head with
-/// no checks at all (past the registration grace), which reads as green.
+/// no checks at all (past the registration grace), which reads as green and, in
+/// merge mode, merges.
 enum PullRequestChecksState: String, Codable, Sendable {
     case success, failure, pending, none
 }
@@ -7444,15 +7445,8 @@ final class ConversationManager {
         case .green:
             try await tasks.resetPullRequestAutopilotAttempts(taskID)
             guard task.pullRequestAutoMerge else { return try outcome("green", states) }
-            // A head with no checks may be one GitHub hasn't started CI for yet;
-            // merging is irreversible, so it waits for checks that actually passed.
-            guard states.filter({ !$0.merged }).allSatisfy({ $0.checks == .success }) else {
-                // Past the registration grace, no checks means this repository has
-                // no CI; say so instead of silently never merging.
-                let reason = "Merge mode merges only once checks have run and passed, and GitHub reports no checks for this pull request. Merge it yourself, or switch the task to Auto."
-                _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse, message: reason)
-                return try outcome("stalled", states, reason: reason)
-            }
+            // A head with no checks yet is still pending inside the registration grace,
+            // so `.none` here is a repository without CI: it merges on mergeability alone.
             // GitHub may still be computing mergeability; merge once it says MERGEABLE.
             guard states.filter({ !$0.merged }).allSatisfy({ $0.mergeable == "MERGEABLE" }) else {
                 return try outcome("pending", states)

@@ -2405,7 +2405,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Autopilot stops with a reason when nothing changed since its last fix", fullScreen: true)
     }
 
-    // case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green with checks that actually ran and passed: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass with no unresolved threads it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace moves the task to Waiting Response explaining that merge mode needs checks that passed, without merging. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
+    // case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass (or the head has had no checks past the registration grace, as in a repository without CI) with no unresolved threads and GitHub reporting it mergeable, it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace is merged all the same. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
     func test_task_pr_merge_mode_merges_green_pull_request() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         var ghEnvironment = try makeGitHubStateFixture(expectedNumbers: []).merging(Self.prCheckCooldownEnvironment) { $1 }
@@ -2474,18 +2474,20 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review", "Merging leaves the task in Review for the user to complete.")
         attachScreenshot(named: "Merge mode merged the green PR and the card offers completion", fullScreen: true)
 
-        // Long past the grace with still no checks: merge mode stops and says why.
+        // Long past the grace with still no checks (a repository without CI): merge mode
+        // still attempts the merge; GitHub refuses it, so the task stops with GitHub's reason.
         try commitHead(refusedID, committedAt: "2020-01-01T00:00:00Z")
         try selectPullRequestMode("merge", taskID: refusedID)
-        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: refusedID)?["status"] as? String) == "Waiting Response" }, timeout: 20), "No checks past the grace should stop merge mode in Waiting Response.")
-        XCTAssertTrue((try taskRecord(id: refusedID)?["statusMessage"] as? String ?? "").contains("GitHub reports no checks"))
-        XCTAssertTrue(merges().filter { $0.contains("\t812\t") }.isEmpty, "No checks must never be merged.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: refusedID)?["status"] as? String) == "Waiting Response" }, timeout: 20), "A refused merge of a PR with no checks should stop merge mode in Waiting Response.")
+        let noCIReason = try taskRecord(id: refusedID)?["statusMessage"] as? String ?? ""
+        XCTAssertTrue(noCIReason.contains("couldn't merge pull request #812") && !noCIReason.contains("no checks"), noCIReason)
+        XCTAssertEqual(merges().filter { $0.contains("\t812\t") }, ["merge-failed\t812\t--squash"], "No checks past the grace is still merged, with the first allowed method.")
         assertTaskVisible("PR merge refused UI", inColumn: "Waiting Response")
-        attachScreenshot(named: "Merge mode stops when GitHub reports no checks", fullScreen: true)
+        attachScreenshot(named: "Merge mode attempts the merge when GitHub reports no checks", fullScreen: true)
 
-        // The user sends it back to Review; checks pass, but GitHub refuses the merge. The
+        // The user sends it back to Review; GitHub still refuses the merge. The
         // `repo.methods` line, written after #811 merged, disallows squash from here on.
-        try (try String(contentsOf: stateURL, encoding: .utf8)).replacingOccurrences(of: "812.checks=none", with: "812.checks=success")
+        try (try String(contentsOf: stateURL, encoding: .utf8))
             .appending("repo.methods=merge,rebase\n").write(to: stateURL, atomically: true, encoding: .utf8)
         openTask(named: "PR merge refused UI")
         // Settling covers Review, the probe, the daemon's merge attempt, and its refusal.
@@ -2495,7 +2497,7 @@ final class PlayhouseUITests: XCTestCase {
         let reason = try taskRecord(id: refusedID)?["statusMessage"] as? String ?? ""
         XCTAssertTrue(reason.contains("couldn't merge pull request #812") && reason.contains("a review is required"), reason)
         assertTaskVisible("PR merge refused UI", inColumn: "Waiting Response")
-        XCTAssertEqual(merges().filter { $0.contains("\t812\t") }, ["merge-failed\t812\t--merge"], "A refused merge is not retried.")
+        XCTAssertEqual(merges().filter { $0.contains("\t812\t") }, ["merge-failed\t812\t--squash", "merge-failed\t812\t--merge"], "A refused merge is not retried within a pass.")
         attachScreenshot(named: "A refused merge stops in Waiting Response with GitHub's reason", fullScreen: true)
     }
 

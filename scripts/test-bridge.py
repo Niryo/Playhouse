@@ -3028,7 +3028,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(capped_task["status"], "Waiting Response")
         self.assertIn("5 fix turns", capped_task["statusMessage"])
 
-    # case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green with checks that actually ran and passed: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass with no unresolved threads it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace moves the task to Waiting Response explaining that merge mode needs checks that passed, without merging. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
+    # case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass (or the head has had no checks past the registration grace, as in a repository without CI) with no unresolved threads and GitHub reporting it mergeable, it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace is merged all the same. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
     def test_task_pr_merge_mode_merges_green_pull_request(self):
         task = self.create_repo_task("PR merge mode", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
         refused = self.create_repo_task("PR merge refused", [self.secondary], merge_targets={self.secondary: "main"}, materialize=True)
@@ -3088,20 +3088,23 @@ class PlayhouseBridgeTests(unittest.TestCase):
         status = self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=gh_environment)[0])
         self.assertTrue(status[0]["merged"])
 
-        # Long past the grace with still no checks: merge mode stops and says why.
+        # Long past the grace with still no checks (a repository without CI): merge mode
+        # still attempts the merge. GitHub refuses it here (a required review), so the
+        # task stops in Waiting Response with GitHub's reason.
         commit_head(refused["repositoryWorktrees"][0]["worktreePath"], committed_at="2020-01-01T00:00:00Z")
         self.assert_success(self.call_cli("task", "pr", "mode", refused["id"], "merge")[0])
         no_ci = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], extra_environment=gh_environment)[0])
         self.assertEqual(no_ci["action"], "stalled")
         no_ci_task = self.assert_success(self.call_cli("task", "get", refused["id"])[0])
         self.assertEqual(no_ci_task["status"], "Waiting Response")
-        self.assertIn("GitHub reports no checks", no_ci_task["statusMessage"])
-        self.assertEqual(merges(), ["merged\t811\t--squash"], "No checks must never be merged.")
+        self.assertIn("couldn't merge pull request #812", no_ci_task["statusMessage"])
+        self.assertNotIn("no checks", no_ci_task["statusMessage"])
+        self.assertEqual(merges(), ["merged\t811\t--squash", "merge-failed\t812\t--squash"], "No checks past the grace is still merged, with the first allowed method.")
 
-        # The user sends it back to Review; checks pass, but GitHub refuses the merge. The
+        # The user sends it back to Review; GitHub still refuses the merge. The
         # `repo.methods` line, written after #811 merged, disallows squash from here on.
         self.complete_fixture_turn(refused["id"])
-        gh_state.write_text(gh_state.read_text(encoding="utf-8").replace("812.checks=none", "812.checks=success") + "repo.methods=merge,rebase\n", encoding="utf-8")
+        gh_state.write_text(gh_state.read_text(encoding="utf-8") + "repo.methods=merge,rebase\n", encoding="utf-8")
         stalled = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], extra_environment=gh_environment)[0])
         self.assertEqual(stalled["action"], "stalled")
         current = self.assert_success(self.call_cli("task", "get", refused["id"])[0])
