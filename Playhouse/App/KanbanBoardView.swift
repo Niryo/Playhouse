@@ -274,61 +274,75 @@ struct KanbanBoardView: View {
                 .accessibilityIdentifier("task-lifecycle-reset-notice")
             }
 
-            ScrollView([.horizontal, .vertical]) {
-                HStack(alignment: .top, spacing: 16) {
-                    ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
-                        if status == .backlog {
-                            let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
-                            VStack(spacing: 12) {
-                                if hasBlockedTasks {
-                                    kanbanColumn(.blocked, minHeight: 220)
-                                        .transition(.opacity.combined(with: .move(edge: .top)))
+            HStack(spacing: 0) {
+                ScrollView([.horizontal, .vertical]) {
+                    HStack(alignment: .top, spacing: 16) {
+                        ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
+                            if status == .backlog {
+                                let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
+                                VStack(spacing: 12) {
+                                    if hasBlockedTasks {
+                                        kanbanColumn(.blocked, minHeight: 220)
+                                            .transition(.opacity.combined(with: .move(edge: .top)))
+                                    }
+                                    kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
                                 }
-                                kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
-                            }
-                            .frame(width: 264)
-                            .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
-                        } else if status == .inProgress {
-                            let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
-                            VStack(spacing: 12) {
-                                if hasWaitingResponseTasks {
-                                    kanbanColumn(.waitingResponse, minHeight: 220)
-                                        .transition(.opacity.combined(with: .move(edge: .top)))
-                                }
-                                kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
-                            }
-                            .frame(width: 264)
-                            .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
-                        } else {
-                            kanbanColumn(status)
                                 .frame(width: 264)
+                                .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
+                            } else if status == .inProgress {
+                                let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
+                                VStack(spacing: 12) {
+                                    if hasWaitingResponseTasks {
+                                        kanbanColumn(.waitingResponse, minHeight: 220)
+                                            .transition(.opacity.combined(with: .move(edge: .top)))
+                                    }
+                                    kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
+                                }
+                                .frame(width: 264)
+                                .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
+                            } else {
+                                kanbanColumn(status)
+                                    .frame(width: 264)
+                            }
                         }
                     }
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 30)
+                    .padding(.top, 22)
+                    .padding(.bottom, 28)
                 }
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 30)
-                .padding(.top, 22)
-                .padding(.bottom, 28)
+                .scrollIndicators(.visible)
+                .background(WorkspaceTheme.windowBackground)
+                .scrollContentBackground(.hidden)
+                .accessibilityIdentifier("board-columns-scroll-view")
+
+                // A fixed gutter beside the scroll view rather than an overlay, so the opened
+                // drawer never covers a column and stays put while scrolling.
+                DoneDropDrawer(
+                    isOpen: draggedTaskID != nil,
+                    isActive: $isDoneTargetActive,
+                    onDrop: { moveTask(id: $0, to: .done) }
+                )
             }
-            .scrollIndicators(.visible)
-            .background(WorkspaceTheme.windowBackground)
-            .scrollContentBackground(.hidden)
-            .accessibilityIdentifier("board-columns-scroll-view")
-            .overlay(alignment: .trailing) {
-                if draggedTaskID != nil {
-                    HStack(spacing: 10) {
-                        DoneDropTarget(isActive: $isDoneTargetActive, onDrop: { moveTask(id: $0, to: .done) })
-                            .frame(width: 104, height: 480)
-                            .accessibilityIdentifier("task-done-drop-target")
-                            .transition(.opacity.combined(with: .move(edge: .trailing)))
-                    }
-                    .padding(.trailing, 12)
-                    .background(LinearGradient(colors: [WorkspaceTheme.windowBackground.opacity(0), WorkspaceTheme.windowBackground.opacity(0.96)], startPoint: .leading, endPoint: .trailing))
-                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+        }
+        .task(id: draggedTaskID) {
+            // SwiftUI reports no end for a drag that lands outside every drop target (for
+            // example a card dropped back in place), and the drag session consumes the
+            // mouse-up, so watch the button itself. The grace period lets a real drop finish
+            // against the open drawer before it closes.
+            guard draggedTaskID != nil else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(120))
+                guard NSEvent.pressedMouseButtons & 1 == 0 else { continue }
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled else { return }
+                if NSEvent.pressedMouseButtons & 1 == 0 {
+                    draggedTaskID = nil
+                    isDoneTargetActive = false
+                    return
                 }
             }
         }
-        .background(DragEndEventMonitor(draggedTaskID: $draggedTaskID))
         .overlay(alignment: .topTrailing) {
             if isShowingBoardSearch {
                 boardSearchBar
@@ -1071,70 +1085,52 @@ struct KanbanBoardView: View {
 
 }
 
-private struct DragEndEventMonitor: NSViewRepresentable {
-    @Binding var draggedTaskID: UUID?
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(draggedTaskID: $draggedTaskID)
-    }
-
-    func makeNSView(context: Context) -> NSView {
-        context.coordinator.install()
-        return NSView(frame: .zero)
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        context.coordinator.draggedTaskID = $draggedTaskID
-    }
-
-    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        coordinator.uninstall()
-    }
-
-    final class Coordinator {
-        var draggedTaskID: Binding<UUID?>
-        private var mouseUpMonitor: Any?
-
-        init(draggedTaskID: Binding<UUID?>) {
-            self.draggedTaskID = draggedTaskID
-        }
-
-        func install() {
-            guard mouseUpMonitor == nil else { return }
-            mouseUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
-                guard let self, self.draggedTaskID.wrappedValue != nil else { return event }
-                self.draggedTaskID.wrappedValue = nil
-                return event
-            }
-        }
-
-        func uninstall() {
-            if let mouseUpMonitor {
-                NSEvent.removeMonitor(mouseUpMonitor)
-                self.mouseUpMonitor = nil
-            }
-        }
-    }
-}
-
-private struct DoneDropTarget: View {
+private struct DoneDropDrawer: View {
+    let isOpen: Bool
     @Binding var isActive: Bool
     let onDrop: (UUID) -> Void
 
+    private static let tabWidth: CGFloat = 44
+    private static let tabHeight: CGFloat = 168
+    private static let gap: CGFloat = 10
+    private static let trailingMargin: CGFloat = 10
+    /// How much of the tab's leading edge stays visible while no drag is in progress.
+    private static let peekWidth: CGFloat = 5
+
     var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "checkmark.circle")
-                .font(.system(size: 24, weight: .medium))
+        // The gutter keeps its width so the board never reflows; only the tab slides, from
+        // a sliver peeking at the window edge to fully open while a card is dragged.
+        tab
+            .frame(width: Self.tabWidth, height: Self.tabHeight)
+            .scaleEffect(isActive ? 1.06 : 1)
+            .offset(x: isOpen ? 0 : Self.tabWidth + Self.trailingMargin - Self.peekWidth)
+            .padding(.leading, Self.gap)
+            .padding(.trailing, Self.trailingMargin)
+            .frame(maxHeight: .infinity)
+            .clipped()
+            .animation(.spring(response: 0.34, dampingFraction: 0.84), value: isOpen)
+            .animation(.easeOut(duration: 0.14), value: isActive)
+    }
+
+    private var tab: some View {
+        VStack(spacing: 7) {
+            Image(systemName: "checkmark")
+                .font(.system(size: 14, weight: .bold))
             Text("Done")
-                .font(.system(size: 12, weight: .semibold))
-            Text("Merge and archive")
-                .font(.system(size: 10))
-                .multilineTextAlignment(.center)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
         }
         .foregroundStyle(isActive ? Color.white : TaskStatus.done.accent)
+        .opacity(isOpen ? 1 : 0)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(isActive ? TaskStatus.done.accent : TaskStatus.done.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(TaskStatus.done.accent.opacity(0.35), lineWidth: 1))
+        .background(
+            isActive ? TaskStatus.done.accent : TaskStatus.done.accent.opacity(isOpen ? 0.12 : 0.45),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(TaskStatus.done.accent.opacity(isActive ? 0 : 0.45), lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .onDrop(of: [.plainText], isTargeted: $isActive) { providers in
             guard let provider = providers.first else { return false }
             _ = provider.loadObject(ofClass: NSString.self) { value, _ in
@@ -1144,7 +1140,9 @@ private struct DoneDropTarget: View {
             return true
         }
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("task-done-drop-target")
         .accessibilityLabel("Move task to Done")
+        .accessibilityValue(isOpen ? "Open" : "Resting")
         .accessibilityHint("Drop a reviewed task here to move it to Done.")
     }
 }
