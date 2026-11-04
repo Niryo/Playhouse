@@ -4,6 +4,7 @@ import Darwin
 import Foundation
 import XCTest
 import SQLite3
+import Vision
 
 private struct RunningCLIProcess {
     let process: Process
@@ -2003,7 +2004,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Done preserves the task worktree without merging")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own row above the card title and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -2029,8 +2030,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(activeCreateButton.waitForExistence(timeout: 5), "An active repository task should expose its PR action on the card.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.width, 30, "The PR action should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.height, 30, "The PR action should have a comfortable vertical hit target.")
-        // The control sits on its own row above the title, on the right; Backlog had no such row.
-        XCTAssertLessThanOrEqual(activeCreateButton.frame.maxY, element("task-title-\(taskID)").frame.minY, "The pull-request row should sit above the title.")
+        // The control sits on its own last row, below the title and the time row, on the right; Backlog had no such row.
+        XCTAssertGreaterThanOrEqual(activeCreateButton.frame.minY, element("task-title-\(taskID)").frame.maxY, "The pull-request row should sit below the title.")
+        XCTAssertGreaterThanOrEqual(activeCreateButton.frame.minY, element("task-token-usage-counter-\(taskID)").frame.maxY, "The pull-request row should sit below the time row.")
+        XCTAssertLessThanOrEqual(activeCreateButton.frame.maxY, element("task-card-\(taskID)").frame.maxY + 1, "The pull-request row should be the card's last row.")
         XCTAssertGreaterThan(activeCreateButton.frame.midX, element("task-card-\(taskID)").frame.midX, "The pull-request control should sit on the right.")
         assertHoverEmphasis(for: activeCreateButton)
         XCTAssertEqual(activeCreateButton.label, "PR. Create a pull request for each repository linked to this task")
@@ -2106,6 +2109,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(toggle.waitForExistence(timeout: 5), "An in-progress task with no linked PR should show the Auto PR switch.")
             XCTAssertFalse(self.element("task-create-pr-\(taskID)").exists, "The switch replaces the manual PR button while the task is in progress.")
             XCTAssertGreaterThanOrEqual(toggle.frame.height, 30, "The Auto PR switch should keep a comfortable hit target.")
+            XCTAssertGreaterThanOrEqual(toggle.frame.minY, self.element("task-working-duration-\(taskID)").frame.maxY, "The Auto PR switch should sit below the working-duration time row.")
             XCTAssertEqual(toggle.value as? String, "off")
             XCTAssertFalse(try XCTUnwrap(self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool), "Auto PR must default to off.")
             self.attachScreenshot(named: "Working task shows the Auto PR switch defaulting to off", fullScreen: true)
@@ -6183,7 +6187,7 @@ final class PlayhouseUITests: XCTestCase {
         try exerciseRejectedStop(provider: "claude", title: "Claude rejected stop")
     }
 
-    // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly and saves a --prompt description without starting the task, rejecting a blank or missing prompt. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
+    // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly and saves a --prompt description without starting the task, rejecting a blank or missing prompt; the UI shows that task in Backlog with the description unsent in its composer. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
     func test_conversation_provider_selection_persists_and_validates() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-provider-selection")
@@ -6278,6 +6282,15 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(prompted["savedPrompt"] as? String, "Full description of the work", "task create --prompt saves the description.")
         XCTAssertEqual(prompted["status"] as? String, "Backlog", "A prompt on create must not start the task.")
         XCTAssertNil(prompted["pendingSubmittedPrompt"], "A prompt on create must not be submitted.")
+        assertTaskVisible("Prompted UI", inColumn: "Backlog")
+        openTask(named: "Prompted UI")
+        XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String) == "Full description of the work" }, timeout: 10),
+                      "The created task's composer should hold its saved description.")
+        XCTAssertTrue(element("empty-conversation").exists, "A description saved on create must not have been sent.")
+        attachScreenshot(named: "Task created with a prompt shows its description unsent in the composer")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertEqual(try taskRecord(id: try XCTUnwrap(prompted["id"] as? String))?["status"] as? String, "Backlog", "Opening the task must not start it.")
         let blankPrompt = try runCLI(["task", "create", "--title", "Blank prompt UI", "--root", fixture.primary.path, "--prompt", "   "], expectedStatus: 2)
         XCTAssertEqual((blankPrompt["error"] as? [String: Any])?["code"] as? String, "invalid_argument", "A blank --prompt is rejected.")
         let missingPrompt = try runCLI(["task", "create", "--title", "Missing prompt UI", "--root", fixture.primary.path], expectedStatus: 2)
@@ -10256,7 +10269,7 @@ final class PlayhouseUITests: XCTestCase {
         assertTaskVisible("Empty Claude question", inColumn: "Blocked")
     }
 
-    // case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
+    // case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, which still shows the question that started it, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
     func test_claude_pending_question_recovers_after_provider_process_restarts() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-restart-question")
         try FileManager.default.copyItem(
@@ -10315,9 +10328,12 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         openTask(named: "Restart-safe Claude question")
-        // Reopening pins the newest turn, which is the answer the recovery turn is applying.
+        // The private answer placeholder is not a turn the user started, so reopening anchors on
+        // the question that started this conversation and keeps it in view.
         XCTAssertTrue(waitUntil({ self.transcriptContains("[Private answer sent after restart]") }, timeout: 10),
                       "The reopened conversation should load its saved history.")
+        XCTAssertTrue(transcriptContains("Ask a restart-safe structured question."),
+                      "Reopening mid-recovery must still show the conversation the recovery continues.")
         XCTAssertFalse(waitUntil({ self.element("conversation-user-input-request").exists }, timeout: 2),
                        "Reopening the task mid-recovery must not bring back the answered question.")
         let applyingHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
@@ -12459,13 +12475,24 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((report["tools"] as? [[String: Any]])?.first?["totalTokens"] as? Int, 18_000)
     }
 
+    /// Rows of the raw input list are drawn lazily; scrolls the list until one is on screen.
+    private func revealRawInputRow(_ identifier: String) {
+        let row = element(identifier)
+        let list = element("raw-input-list")
+        XCTAssertTrue(list.waitForExistence(timeout: 10))
+        for _ in 0..<20 where !row.exists {
+            list.scroll(byDeltaX: 0, deltaY: -300)
+        }
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "\(identifier) should be on screen after scrolling the list.")
+    }
+
     private func duplicateTokens(taskID: String, environment: [String: String]) throws -> String {
         let report = try XCTUnwrap(try runCLI(["task", "token-waste", taskID], extraEnvironment: environment)["result"] as? [String: Any])
         let tokens = try XCTUnwrap((report["duplicates"] as? [[String: Any]])?.first?["tokensPerCopy"] as? Int)
         return tokens.formatted(IntegerFormatStyle<Int>().grouping(.automatic))
     }
 
-    // case-contract: test_task_token_waste_ranks_codex_items_by_size | A Codex fixture turn whose thread and subagent have rollout files gives the same map from Codex's own format: a request was sent the instructions plus every item before its own output, the final transcript's tokens equal the last request's input exactly after a compaction replaced the history, Codex's unsaved tool definitions appear as one hidden-overhead item sent with every request, encrypted reasoning is shown by its size, the MCP tool's log is the largest item and was removed by the compaction, the repeated README read and the cache miss are reported, and the subagent's thread is its own agent. The raw input's final transcript lists the hidden overhead, the instructions and the replacement history once each without the removed log, and an item's full text, from a tool output or from the replacement history, reads back exactly as Codex saved it, in chunks, with its call named. The Token Stats modal shows the Codex wasters, the hidden overhead and the subagent, and showing the log opens its full text.
+    // case-contract: test_task_token_waste_ranks_codex_items_by_size | A Codex fixture turn whose thread and subagent have rollout files gives the same map from Codex's own format: a request was sent the instructions plus every item before its own output, the final transcript's tokens equal the last request's input exactly after a compaction replaced the history, Codex's unsaved tool definitions appear as one hidden-overhead item sent with every request, encrypted reasoning is shown by its size, the MCP tool's log is the largest item and was removed by the compaction, the repeated README read and the cache miss are reported, and the subagent's thread is its own agent. The raw input's final transcript lists the hidden overhead, the instructions and the replacement history once each without the removed log, and an item's full text, from a tool output or from the replacement history, reads back exactly as Codex saved it, in chunks, with its call named. The single-request scope rebuilds each Codex request from the rollout and labels it reconstructed: the latest request is the final transcript in order, request 4 flags both README reads and both of their outputs as exact duplicates, each request's items add up to the input Codex reported with its cached share as cache read and no cache write, and the JSON export holds the base instructions and the input items exactly as saved. The Token Stats modal shows the Codex wasters, the hidden overhead and the subagent, showing the log opens its full text, and the raw input's single request reads as reconstructed, with request 4's duplicates flagged.
     func test_task_token_waste_ranks_codex_items_by_size() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Codex token waste", roots: [fixture.primary.path])
@@ -12532,6 +12559,25 @@ final class PlayhouseUITests: XCTestCase {
         )
         XCTAssertTrue(element("token-stats-agent-codex/\(threadID)-subagent").exists, "The subagent thread is its own agent.")
         attachScreenshot(named: "Codex overhead includes the hidden tool definitions and the subagent")
+
+        element("token-stats-raw-input-button").click()
+        let requestScope = element("raw-input-scope-request")
+        XCTAssertTrue(requestScope.waitForExistence(timeout: 10))
+        requestScope.click()
+        assertText("raw-input-request-number", equals: "Request 5 of 5")
+        assertText("raw-input-request-exactness", equals: "Reconstructed")
+        XCTAssertTrue(
+            accessibleLabelOrValue(of: element("raw-input-request-note")).hasPrefix("Reconstructed: Codex resends the whole history"),
+            "The view says how the Codex request was rebuilt."
+        )
+        assertText("raw-input-request-usage", equals: "Reported input 4,400 (uncached 500 · cache read 3,900) · items add up to 4,400 · 0 repeated")
+        element("raw-input-request-previous").click()
+        assertText("raw-input-request-number", equals: "Request 4 of 5")
+        revealRawInputRow("raw-input-request-row-11")
+        assertText("raw-input-request-row-9-repeat", equals: "Duplicate 1 of 2")
+        assertText("raw-input-request-row-11-repeat", equals: "Duplicate 2 of 2 · first at #10")
+        attachScreenshot(named: "A reconstructed Codex request flags the README read sent twice")
+        element("close-raw-input-button").click()
         element("close-token-stats-button").click()
 
         let report = try XCTUnwrap(try runCLI(["task", "token-waste", taskID])["result"] as? [String: Any])
@@ -12612,6 +12658,94 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Scrolling the log reaches its last line")
         element("close-raw-input-button").click()
         element("close-token-stats-button").click()
+    }
+
+    // case-contract: test_task_raw_input_single_request_lists_resumed_instruction_copies_in_order | After a Claude Code fixture session that resumes once its AGENTS.md changed, the raw input's single-request scope lists every item one request sent, in order and with nothing merged, and shows the latest request by default. A request after the resume carries both instruction copies in order, which differ and so are not flagged, while the date reminder sent twice word for word is flagged as a duplicate; a request before the resume carries one copy and no duplicates, and a search keeps each row's position. Each request reports Claude's input with its cache-read and cache-write split, and its items' sizes add up to that input. The request is labelled exact; its text export gives every item's full text under a header naming any duplicate, and its JSON export is the request body with the logged parameters, cache markers, system prompt, tools and messages verbatim, an earlier request's messages being a prefix of a later one's. A request number past the last is not_found, and zero or an unknown export format is invalid_argument. In the app, choosing Single request shows the latest request with its usage, both instruction copies unflagged and the repeated date reminder flagged, stepping back to a request before the resume shows one copy and no flags, Latest returns to the last request, and Copy all copies the whole request as JSON.
+    func test_task_raw_input_single_request_lists_resumed_instruction_copies_in_order() throws {
+        var environment = try installClaudeFixture(named: "claude-fixture-ui-instruction-resume")
+        let claudeConfig = dataDirectory.appendingPathComponent("claude-config").path
+        environment["CLAUDE_CONFIG_DIR"] = claudeConfig
+        environment["PLAYHOUSE_E2E_CLAUDE_CONFIG_DIR"] = claudeConfig
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        let title = "Claude instruction resume"
+        let taskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        XCTAssertTrue(app.buttons[title].waitForExistence(timeout: 10))
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Show instruction resume."], extraEnvironment: environment)
+
+        openTokenStats(of: title)
+        let rawInputButton = element("token-stats-raw-input-button")
+        XCTAssertTrue(waitUntil({ rawInputButton.exists && rawInputButton.isEnabled }, timeout: 10), "The raw input opens once the map has loaded.")
+        rawInputButton.click()
+        let requestScope = element("raw-input-scope-request")
+        XCTAssertTrue(requestScope.waitForExistence(timeout: 10), "The raw input offers a single-request scope.")
+        requestScope.click()
+        assertText("raw-input-request-number", equals: "Request 5 of 5")
+        assertText("raw-input-summary", equals: "16 items · 9,100 tokens")
+        assertText("raw-input-request-exactness", equals: "Exact")
+        assertText(
+            "raw-input-request-usage",
+            equals: "Reported input 9,100 (uncached 2 · cache read 9,000 · cache write 98) · items add up to 9,100 · 2 repeated · source sdk"
+        )
+        XCTAssertFalse(element("raw-input-request-next").isEnabled, "The latest request is the last one.")
+        XCTAssertFalse(element("raw-input-request-latest").isEnabled)
+        XCTAssertTrue(element("raw-input-request-time").exists, "The request shows when it was sent.")
+        XCTAssertTrue(element("raw-input-request-row-3").exists)
+        XCTAssertFalse(element("raw-input-request-row-3-repeat").exists, "The two AGENTS.md copies differ, so neither is flagged.")
+        assertText("raw-input-request-row-4-repeat", equals: "Duplicate 1 of 2")
+        revealRawInputRow("raw-input-request-row-13")
+        XCTAssertTrue(element("raw-input-request-row-11").exists)
+        XCTAssertFalse(element("raw-input-request-row-11-repeat").exists)
+        assertText("raw-input-request-row-12-repeat", equals: "Duplicate 2 of 2 · first at #5")
+        XCTAssertTrue(element("raw-input-request-row-13").exists)
+        XCTAssertFalse(element("raw-input-request-row-13-repeat").exists, "The resumed prompt itself is not a repeat.")
+        attachScreenshot(named: "The latest request lists both AGENTS.md copies in order and flags the date reminder sent twice")
+
+        element("raw-input-request-row-11").click()
+        let secondLine = element("raw-input-text-line-2")
+        XCTAssertTrue(secondLine.waitForExistence(timeout: 10), "Selecting the second copy opens its full text.")
+        XCTAssertTrue(
+            accessibleLabelOrValue(of: secondLine).contains("Instruction files were re-read when this session started"),
+            "The second copy is the instructions re-read on resume."
+        )
+        attachScreenshot(named: "The re-read AGENTS.md copy, selected in the request")
+
+        let previous = element("raw-input-request-previous")
+        previous.click()
+        assertText("raw-input-request-number", equals: "Request 4 of 5")
+        previous.click()
+        assertText("raw-input-request-number", equals: "Request 3 of 5")
+        assertText("raw-input-summary", equals: "10 items · 4,400 tokens")
+        XCTAssertTrue(element("raw-input-request-row-3").waitForExistence(timeout: 5), "The first copy was already sent.")
+        XCTAssertFalse(element("raw-input-request-row-3-repeat").exists, "Before the resume the instructions were sent once.")
+        XCTAssertFalse(element("raw-input-request-row-11").exists, "Request 3 sent only ten items.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("raw-input-request-usage")).contains("items add up to 4,400 · 0 repeated"))
+        attachScreenshot(named: "A request before the resume carries one AGENTS.md copy and no repeats")
+
+        element("raw-input-request-latest").click()
+        assertText("raw-input-request-number", equals: "Request 5 of 5")
+        element("raw-input-export-format-json").click()
+        NSPasteboard.general.clearContents()
+        element("raw-input-request-copy-button").click()
+        assertText("raw-input-request-export-status", equals: "Copied request 5 as JSON: 16 items")
+        let copied = try XCTUnwrap(NSPasteboard.general.string(forType: .string), "Copy all puts the request on the pasteboard.")
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(copied.utf8)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.count, 9, "The whole request, every message it sent.")
+        let resumed = try XCTUnwrap((messages[6]["content"] as? [[String: Any]])?.first?["text"] as? String)
+        XCTAssertTrue(resumed.contains("Instruction files were re-read"))
+        let original = try XCTUnwrap((messages[0]["content"] as? [[String: Any]])?.first?["text"] as? String)
+        XCTAssertTrue(original.contains("Codebase and user instructions are shown below"))
+        XCTAssertEqual(body["model"] as? String, "claude-fixture")
+        attachScreenshot(named: "Copy all copies the whole request as JSON")
+        element("close-raw-input-button").click()
+        element("close-token-stats-button").click()
+
+        let page = try XCTUnwrap(try runCLI(
+            ["task", "raw-input", taskID, "--scope", "request", "--request", "3"], extraEnvironment: environment
+        )["result"] as? [String: Any])
+        XCTAssertEqual((page["request"] as? [String: Any])?["repeatedItems"] as? Int, 0)
     }
 
     // case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
@@ -14318,7 +14452,6 @@ final class PlayhouseUITests: XCTestCase {
             app.activate()
             movePointerToHelpRunway(below: element)
             Thread.sleep(forTimeInterval: 1.5)
-            let baseline = XCUIScreen.main.screenshot().image
             // Enter the control, then keep moving inside it: AppKit starts its tooltip delay from
             // a mouse-move within the tracking area, and a single jump in does not always count.
             element.hover()
@@ -14333,9 +14466,35 @@ final class PlayhouseUITests: XCTestCase {
                 CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
                 Thread.sleep(forTimeInterval: 0.1)
             }
-            if waitForNativeHelpChange(from: baseline, near: element, timeout: 6, expectedHelpTag: expected) { return }
+            if waitUntil({ self.nativeHelpTextIsVisible(expected) }, timeout: 6) { return }
         }
         XCTFail("Hovering should present the native help text ‘\(expected)’ outside the PR control.")
+    }
+
+    /// The tooltip counts as shown only when its own text is on screen: as a help tag in the
+    /// accessibility tree, or read off the screen. The control shows only "PR", so the help text
+    /// cannot come from anywhere but the tooltip; a changed-pixels check would pass on any update.
+    private func nativeHelpTextIsVisible(_ expected: String) -> Bool {
+        helpTagIsShowing(expected) || screenTextContains(expected)
+    }
+
+    private func screenTextContains(_ expected: String) -> Bool {
+        guard let image = XCUIScreen.main.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return false
+        }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try? VNImageRequestHandler(cgImage: image).perform([request])
+        // A tooltip wraps across lines, so compare word sequences without line breaks or punctuation.
+        func words(_ text: String) -> String {
+            text.lowercased()
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+        }
+        let onScreen = words((request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " "))
+        return onScreen.contains(words(expected))
     }
 
     private func helpTagIsShowing(_ text: String) -> Bool {
@@ -14347,9 +14506,8 @@ final class PlayhouseUITests: XCTestCase {
     private func dismissNativeHelpText(named expected: String) {
         let element = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS %@", expected)).firstMatch
-        let baseline = XCUIScreen.main.screenshot().image
         movePointerToHelpRunway(below: element)
-        XCTAssertTrue(waitForNativeHelpChange(from: baseline, near: element, timeout: 8), "Moving away should dismiss the native help text ‘\(expected)’ outside the PR control.")
+        XCTAssertTrue(waitUntil({ !self.nativeHelpTextIsVisible(expected) }, timeout: 8), "Moving away should dismiss the native help text ‘\(expected)’ outside the PR control.")
     }
 
     private func movePointerToHelpRunway(below control: XCUIElement) {
@@ -14362,53 +14520,6 @@ final class PlayhouseUITests: XCTestCase {
             dy: (target.y - windowFrame.minY) / windowFrame.height
         )
         window.coordinate(withNormalizedOffset: offset).hover()
-    }
-
-    private func waitForNativeHelpChange(from baseline: NSImage, near control: XCUIElement, timeout: TimeInterval, expectedHelpTag: String? = nil) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            if let expectedHelpTag, helpTagIsShowing(expectedHelpTag) { return true }
-            let current = XCUIScreen.main.screenshot().image
-            guard let changedPixels = changedPixelCount(near: control, before: baseline, after: current, step: 2, threshold: 0.12) else {
-                XCTFail("Could not compare the screenshot region outside the PR control.")
-                return false
-            }
-            if changedPixels > 100 { return true }
-            Thread.sleep(forTimeInterval: 0.25)
-        } while Date() < deadline
-        return false
-    }
-
-    private func changedPixelCount(near control: XCUIElement, before: NSImage, after: NSImage, step: Int, threshold: CGFloat) -> Int? {
-        guard let beforeCG = before.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              let afterCG = after.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              beforeCG.width == afterCG.width, beforeCG.height == afterCG.height else { return nil }
-        let window = app.windows.firstMatch
-        let windowFrame = window.frame
-        guard windowFrame.width > 0, windowFrame.height > 0,
-              let windowCG = window.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-        let scaleX = CGFloat(windowCG.width) / windowFrame.width
-        let scaleY = CGFloat(windowCG.height) / windowFrame.height
-        guard scaleX > 0, scaleY > 0 else { return nil }
-        let screenBounds = CGRect(origin: .zero, size: CGSize(width: CGFloat(beforeCG.width) / scaleX, height: CGFloat(beforeCG.height) / scaleY))
-        let frame = control.frame
-        let hoverExclusion = CGRect(x: frame.minX - 45, y: screenBounds.minY, width: frame.width + 90, height: screenBounds.height)
-        let beforeBitmap = NSBitmapImageRep(cgImage: beforeCG)
-        let afterBitmap = NSBitmapImageRep(cgImage: afterCG)
-        var changed = 0
-        for x in stride(from: 0, to: beforeCG.width, by: step) {
-            for y in stride(from: 0, to: beforeCG.height, by: step) {
-                let point = CGPoint(x: CGFloat(x) / scaleX, y: CGFloat(y) / scaleY)
-                guard screenBounds.contains(point), !hoverExclusion.contains(point),
-                      let beforeColor = beforeBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
-                      let afterColor = afterBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
-                let delta = abs(beforeColor.redComponent - afterColor.redComponent)
-                    + abs(beforeColor.greenComponent - afterColor.greenComponent)
-                    + abs(beforeColor.blueComponent - afterColor.blueComponent)
-                if delta > threshold { changed += 1 }
-            }
-        }
-        return changed
     }
 
     private static func isOrangePixel(_ color: NSColor) -> Bool {

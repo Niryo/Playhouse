@@ -2612,7 +2612,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own row above the card title and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task(
             "PR failure", [self.primary], merge_targets={self.primary: "main"}
@@ -4941,7 +4941,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(recovered_record["savedPrompt"], stale_prompt)
         self.assertIsNone(recovered_record.get("pendingSubmittedPrompt"))
 
-    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly and saves a --prompt description without starting the task, rejecting a blank or missing prompt. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
+    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly and saves a --prompt description without starting the task, rejecting a blank or missing prompt; the UI shows that task in Backlog with the description unsent in its composer. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
     def test_conversation_provider_selection_persists_and_validates(self):
         settings = self.assert_success(self.call_cli("settings", "get")[0])
         self.assertEqual(settings["defaultProvider"], "codex", "Existing installs keep Codex as the default provider.")
@@ -7587,7 +7587,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn("question", failed.get("error", {}).get("message", "").lower())
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Blocked")
 
-    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
+    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, which still shows the question that started it, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
     def test_claude_pending_question_recovers_after_provider_process_restarts(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-restart-question"
@@ -9158,7 +9158,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Only the request that skipped the cache re-sent its context; adding the log is new content, not a miss.",
         )
 
-    # case-contract: test_task_token_waste_ranks_codex_items_by_size | A Codex fixture turn whose thread and subagent have rollout files gives the same map from Codex's own format: a request was sent the instructions plus every item before its own output, the final transcript's tokens equal the last request's input exactly after a compaction replaced the history, Codex's unsaved tool definitions appear as one hidden-overhead item sent with every request, encrypted reasoning is shown by its size, the MCP tool's log is the largest item and was removed by the compaction, the repeated README read and the cache miss are reported, and the subagent's thread is its own agent. The raw input's final transcript lists the hidden overhead, the instructions and the replacement history once each without the removed log, and an item's full text, from a tool output or from the replacement history, reads back exactly as Codex saved it, in chunks, with its call named. The Token Stats modal shows the Codex wasters, the hidden overhead and the subagent, and showing the log opens its full text.
+    # case-contract: test_task_token_waste_ranks_codex_items_by_size | A Codex fixture turn whose thread and subagent have rollout files gives the same map from Codex's own format: a request was sent the instructions plus every item before its own output, the final transcript's tokens equal the last request's input exactly after a compaction replaced the history, Codex's unsaved tool definitions appear as one hidden-overhead item sent with every request, encrypted reasoning is shown by its size, the MCP tool's log is the largest item and was removed by the compaction, the repeated README read and the cache miss are reported, and the subagent's thread is its own agent. The raw input's final transcript lists the hidden overhead, the instructions and the replacement history once each without the removed log, and an item's full text, from a tool output or from the replacement history, reads back exactly as Codex saved it, in chunks, with its call named. The single-request scope rebuilds each Codex request from the rollout and labels it reconstructed: the latest request is the final transcript in order, request 4 flags both README reads and both of their outputs as exact duplicates, each request's items add up to the input Codex reported with its cached share as cache read and no cache write, and the JSON export holds the base instructions and the input items exactly as saved. The Token Stats modal shows the Codex wasters, the hidden overhead and the subagent, showing the log opens its full text, and the raw input's single request reads as reconstructed, with request 4's duplicates flagged.
     def test_task_token_waste_ranks_codex_items_by_size(self):
         task_id = self.create_task(title="Codex token waste", roots=[self.primary])["id"]
         self.complete_fixture_turn(task_id, executable_name="codex-fixture-token-waste", message="Show token waste.")
@@ -9233,6 +9233,46 @@ class PlayhouseBridgeTests(unittest.TestCase):
         replaced_prompt = final["rows"][2]["id"]
         self.assertEqual(full_text(replaced_prompt)[0], "Show token waste.", "An item of the replacement history reads back exactly.")
         self.assertEqual(full_text(final["rows"][1]["id"])[0], "You are the Codex fixture. " * 80)
+
+        # One request at a time, rebuilt from the rollout: Codex resends the
+        # whole history, so a request is everything saved before its output.
+        def single(*options, expected_status=0):
+            response, _ = self.call_cli("task", "raw-input", task_id, "--scope", "request", "--limit", "1000", *options,
+                                        expected_status=expected_status)
+            return response
+
+        latest = self.assert_success(single())
+        request = latest["request"]
+        self.assertEqual(
+            {key: request.get(key) for key in ("number", "count", "latest", "exact", "contextTokens", "itemTokens",
+                                                "inputTokens", "cacheReadTokens", "cacheWriteTokens")},
+            {"number": 5, "count": 5, "latest": 5, "exact": False, "contextTokens": 4400, "itemTokens": 4400,
+             "inputTokens": 500, "cacheReadTokens": 3900, "cacheWriteTokens": None},
+            "Codex reports no cache writes; its cached input is the cache-read share.",
+        )
+        self.assertTrue(request["note"].startswith("Reconstructed: Codex resends the whole history"))
+        self.assertEqual([row["id"] for row in latest["rows"]], [row["id"] for row in final["rows"]],
+                         "The latest request is the final transcript, in order.")
+        repeated = self.assert_success(single("--request", "4"))
+        self.assertEqual((repeated["request"]["items"], repeated["request"]["itemTokens"], repeated["request"]["contextTokens"]), (12, 19600, 19600))
+        self.assertEqual(
+            [(row["position"], row["label"], row["repeated"]["copy"]) for row in repeated["rows"] if row.get("repeated")],
+            [(8, "exec", 1), (9, "exec", 1), (10, "exec", 2), (11, "exec", 2)],
+            "Both README reads and both of their outputs were sent in request 4.",
+        )
+        first_request = self.assert_success(single("--request", "1"))["request"]
+        self.assertEqual((first_request["items"], first_request["itemTokens"], first_request["contextTokens"], first_request["repeatedItems"]),
+                         (5, 4000, 4000, 0))
+        body = json.loads(self.assert_success(self.call_cli(
+            "task", "raw-input-export", task_id, "--request", "1", "--format", "json",
+        )[0])["text"])
+        self.assertEqual(body["instructions"], "You are the Codex fixture. " * 80)
+        self.assertEqual(body["input"], [
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "<permissions instructions>\nThe fixture may run any command.\n</permissions instructions>"}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "# AGENTS.md instructions for the fixture\nKeep answers short."}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Show token waste."}]},
+        ], "The input items exactly as Codex saved them; the unsaved tool definitions are left out.")
+        self.assert_failure(single("--request", "6", expected_status=3), "not_found")
 
     # case-contract: test_task_raw_input_pages_final_transcript_without_duplicates | A task with no conversation has no raw input: its page is empty and reading an item's text is not_found. After a Claude Code fixture turn, the raw input lists the final transcript with each item once across pages and without the log a compaction removed; the everything-sent scope adds what was removed, ordering by size lists the largest first, a search finds the log by a word only its full text contains, and a focus item reports its position. An item's full text reads back in chunks that end on a line break and join to the exact text, with the call that produced it named. An unknown agent or item is not_found, and an unknown order or a limit of zero is invalid_argument. In the app, View raw input opens the final transcript, scrolling loads the next page of rows, showing the largest waster opens it in the everything-sent scope with its full text, and scrolling that text reaches its last line.
     def test_task_raw_input_pages_final_transcript_without_duplicates(self):
@@ -9316,6 +9356,119 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "task", "raw-input-text", task_id, "--item", "99999", extra_environment=environment, expected_status=3,
         )
         self.assert_failure(response, "not_found")
+
+    # case-contract: test_task_raw_input_single_request_lists_resumed_instruction_copies_in_order | After a Claude Code fixture session that resumes once its AGENTS.md changed, the raw input's single-request scope lists every item one request sent, in order and with nothing merged, and shows the latest request by default. A request after the resume carries both instruction copies in order, which differ and so are not flagged, while the date reminder sent twice word for word is flagged as a duplicate; a request before the resume carries one copy and no duplicates, and a search keeps each row's position. Each request reports Claude's input with its cache-read and cache-write split, and its items' sizes add up to that input. The request is labelled exact; its text export gives every item's full text under a header naming any duplicate, and its JSON export is the request body with the logged parameters, cache markers, system prompt, tools and messages verbatim, an earlier request's messages being a prefix of a later one's. A request number past the last is not_found, and zero or an unknown export format is invalid_argument. In the app, choosing Single request shows the latest request with its usage, both instruction copies unflagged and the repeated date reminder flagged, stepping back to a request before the resume shows one copy and no flags, Latest returns to the last request, and Copy all copies the whole request as JSON.
+    def test_task_raw_input_single_request_lists_resumed_instruction_copies_in_order(self):
+        environment = self.install_claude_fixture("claude-fixture-instruction-resume")
+        environment["CLAUDE_CONFIG_DIR"] = str(self.data_directory / "claude-config")
+        task_id = self.create_task(title="Claude instruction resume", provider="claude")["id"]
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Show instruction resume.", extra_environment=environment,
+        )[0])
+
+        def single(*options, expected_status=0):
+            response, _ = self.call_cli(
+                "task", "raw-input", task_id, "--scope", "request", "--limit", "1000", *options,
+                extra_environment=environment, expected_status=expected_status,
+            )
+            return response
+
+        def export(*options, expected_status=0):
+            response, _ = self.call_cli(
+                "task", "raw-input-export", task_id, *options, extra_environment=environment, expected_status=expected_status,
+            )
+            return response
+
+        latest = self.assert_success(single())
+        request = latest["request"]
+        self.assertEqual(
+            {key: request[key] for key in ("number", "count", "latest", "items", "repeatedItems", "exact")},
+            {"number": 5, "count": 5, "latest": 5, "items": 16, "repeatedItems": 2, "exact": True},
+            "The latest request is shown by default, with every item it sent.",
+        )
+        self.assertEqual(
+            {key: request.get(key) for key in ("contextTokens", "inputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens")},
+            {"contextTokens": 9100, "inputTokens": 2, "cacheReadTokens": 9000, "cacheWriteTokens": 98, "outputTokens": 5},
+            "Claude's own usage for that request, with its cache split.",
+        )
+        self.assertEqual(request["itemTokens"], 9100, "The items' sizes add up to the input Claude reported.")
+        self.assertTrue(request["note"].startswith("Exact: rebuilt from Claude Code's request log"))
+        self.assertIn("add up to the input the provider reported", request["tokenNote"])
+        rows = latest["rows"]
+        self.assertEqual([row["position"] for row in rows], list(range(16)), "Every item in the order it was sent, none merged.")
+        self.assertEqual(
+            [row["kind"] for row in rows],
+            ["systemPrompt", "toolDefinition", "toolDefinition",
+             "systemReminder", "systemReminder", "userText", "toolCall", "toolResult", "toolCall", "toolResult", "assistantText",
+             "systemReminder", "systemReminder", "userText", "toolCall", "toolResult"],
+        )
+        first_copy, second_copy = rows[3], rows[11]
+        self.assertTrue(first_copy["preview"].startswith("<system-reminder> Codebase and user instructions are shown below."))
+        self.assertTrue(second_copy["preview"].startswith("<system-reminder> Instruction files were re-read"))
+        self.assertNotEqual(first_copy["id"], second_copy["id"], "Two copies of AGENTS.md, not one item listed twice.")
+        for row in (first_copy, second_copy):
+            self.assertNotIn("repeated", row, "Two different texts are not flagged, however alike.")
+        for copy, row in enumerate((rows[4], rows[12]), start=1):
+            self.assertEqual(row["repeated"], {"first": 4, "copy": copy, "copies": 2})
+        self.assertEqual([row["position"] for row in rows if row.get("repeated")], [4, 12])
+        self.assertEqual(sum(row["tokens"] for row in rows), 9100)
+
+        before = self.assert_success(single("--request", "3"))
+        self.assertEqual((before["request"]["number"], before["request"]["items"], before["request"]["repeatedItems"]), (3, 10, 0))
+        self.assertEqual(before["request"]["itemTokens"], before["request"]["contextTokens"])
+        copies = [row for row in before["rows"] if "Contents of /fixture/repo/AGENTS.md" in row["preview"]]
+        self.assertEqual([(row["position"], row["id"]) for row in copies], [(3, first_copy["id"])], "Before the resume only the first copy was sent.")
+        self.assertEqual(
+            [row["position"] for row in rows if "Contents of /fixture/repo/AGENTS.md" in row["preview"]], [3, 11],
+            "After the resume both copies were sent, in order.",
+        )
+        self.assertFalse(any(row.get("repeated") for row in before["rows"]))
+        for number, context in ((1, 4000), (2, 4300), (4, 9000)):
+            summary = self.assert_success(single("--request", str(number), "--limit", "1"))["request"]
+            self.assertEqual((summary["contextTokens"], summary["itemTokens"]), (context, context), f"Request {number} adds up.")
+        found = self.assert_success(single("--query", "Also run the checks"))
+        self.assertEqual([row["position"] for row in found["rows"]], [11], "A search keeps each row's position.")
+
+        def full_text(item):
+            return self.assert_success(self.call_cli(
+                "task", "raw-input-text", task_id, "--item", str(item), "--length", "1000000", extra_environment=environment,
+            )[0])["text"]
+
+        body_export = self.assert_success(export("--format", "json"))
+        self.assertEqual((body_export["request"], body_export["format"], body_export["exact"], body_export["items"]), (5, "json", True, 16))
+        body = json.loads(body_export["text"])
+        self.assertEqual((body["model"], body["max_tokens"]), ("claude-fixture", 1000), "The logged request parameters.")
+        self.assertEqual(body["system"], [{"type": "text", "text": "You are the Claude Code fixture. " * 20, "cache_control": {"type": "ephemeral"}}])
+        self.assertEqual([tool["name"] for tool in body["tools"]], ["Bash", "Read"])
+        messages = body["messages"]
+        self.assertEqual([message["role"] for message in messages], ["user", "assistant", "user", "assistant", "user", "assistant", "user", "assistant", "user"])
+        self.assertEqual(messages[0]["content"][0]["text"], full_text(first_copy["id"]))
+        self.assertEqual(messages[0]["content"][2], {"type": "text", "text": "Start the fixture work."})
+        self.assertEqual(messages[5]["content"], [{"type": "text", "text": "First turn done."}])
+        self.assertEqual(messages[6]["content"][0]["text"], full_text(second_copy["id"]))
+        self.assertEqual(messages[6]["content"][1], messages[0]["content"][1], "The date reminder was sent twice word for word.")
+        self.assertEqual(messages[7]["content"][0]["input"], {"command": "echo resumed"})
+        self.assertEqual(messages[8]["content"][0]["tool_use_id"], "toolu_resume_bash2")
+        earlier = json.loads(self.assert_success(export("--format", "json", "--request", "3"))["text"])
+        self.assertEqual(len(earlier["messages"]), 5)
+        self.assertEqual(earlier["messages"], messages[:5], "An earlier request is a prefix of the later one.")
+
+        readable = self.assert_success(export("--request", "5"))
+        self.assertEqual(readable["format"], "text")
+        text = readable["text"]
+        self.assertTrue(text.startswith("Request 5 of 5 · Claude main agent"))
+        self.assertIn("Reported input: 9100 tokens (uncached 2 · cache read 9000 · cache write 98)", text)
+        self.assertEqual(text.count("\n===== #"), 16, "One header per item sent.")
+        for position, repeat in ((4, "duplicate 1 of 2"), (12, "duplicate 2 of 2")):
+            row = rows[position]
+            self.assertIn(f"\n===== #{position + 1} · {row['kind']} · {row['label']} · {row['tokens']} tokens · {repeat} =====\n", text)
+        self.assertIn(full_text(second_copy["id"]), text, "Each item's full text, verbatim.")
+        self.assertLess(text.index(full_text(first_copy["id"])), text.index(full_text(second_copy["id"])), "The copies stay in the order sent.")
+
+        self.assert_failure(single("--request", "6", expected_status=3), "not_found")
+        self.assert_failure(single("--request", "0", expected_status=2), "invalid_argument")
+        self.assert_failure(export("--request", "9", expected_status=3), "not_found")
+        self.assert_failure(export("--format", "yaml", expected_status=2), "invalid_argument")
 
     # case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
     def test_settings_token_usage_color_max_round_trip(self):

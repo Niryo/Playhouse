@@ -186,6 +186,48 @@ def write_waste_session(session_id):
     ], sidechain=True)
 
 
+# The instruction-resume session: Claude Code's request log for a session
+# that resumed after AGENTS.md changed. The resumed prompt carries the new
+# copy while the first prompt's copy stays in the history, so every request
+# after the resume sends both; the date reminder is sent again word for word.
+RESUME_AGENTS = "/fixture/repo/AGENTS.md"
+RESUME_RULES = "# Fixture rules\n" + "- Keep answers short.\n" * 40
+RESUME_FIRST_INSTRUCTIONS = (
+    "<system-reminder>\nCodebase and user instructions are shown below. Be sure to adhere to these instructions.\n\n"
+    f"Contents of {RESUME_AGENTS} (project instructions, checked into the codebase):\n\n{RESUME_RULES}</system-reminder>"
+)
+RESUME_REREAD_INSTRUCTIONS = (
+    "<system-reminder>\nInstruction files were re-read when this session started; these differ from their earlier copies.\n\n"
+    f"Contents of {RESUME_AGENTS} (project instructions, checked into the codebase):\n\n{RESUME_RULES}- Also run the checks.\n</system-reminder>"
+)
+RESUME_DATE = "<system-reminder>\nToday's date is 2026-11-03.\n</system-reminder>"
+
+
+def write_resume_session(session_id):
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not config or not session_id:
+        return
+    project = Path(config) / "projects" / "-fixture-project"
+    project.mkdir(parents=True, exist_ok=True)
+    tool = lambda name, description: {"name": name, "description": description,
+                                      "input_schema": {"type": "object", "properties": {"value": {"type": "string"}}}}
+    prompt = lambda instructions, words: {"role": "user", "content": [
+        {"type": "text", "text": instructions}, {"type": "text", "text": RESUME_DATE}, {"type": "text", "text": words}]}
+    write_request_log(project / f"{session_id}.jsonl", "resume", {
+        "system": [{"type": "text", "text": "You are the Claude Code fixture. " * 20}],
+        "tools": [tool("Bash", "Run a shell command."), tool("Read", "Read a file.")],
+    }, [
+        ("blob", [prompt(RESUME_FIRST_INSTRUCTIONS, "Start the fixture work.")], 4000),
+        ("turn", [("toolu_resume_read", "Read", {"file_path": "README.md"}, WASTE_README)], 4300),
+        ("turn", [("toolu_resume_bash1", "Bash", {"command": "echo first"}, "first")], 4400),
+        ("end", "First turn done."),
+        ("resume", [prompt(RESUME_REREAD_INSTRUCTIONS, "Continue after the resume.")], 9000),
+        ("turn", [("toolu_resume_bash2", "Bash", {"command": "echo resumed"}, "resumed")], 9100),
+        ("end", "Resumed turn done."),
+    ], params={"model": "claude-fixture", "max_tokens": 1000},
+       cache_control=[{"path": ["system", 0], "value": {"type": "ephemeral"}}])
+
+
 def main_session_steps():
     prompt = {"role": "user", "content": [
         {"type": "text", "text": "<system-reminder>\nFixture project instructions: keep answers short.\n</system-reminder>"},
@@ -212,15 +254,17 @@ def main_session_steps():
     return steps
 
 
-def write_request_log(path, prefix, shape, steps, sidechain=False):
+def write_request_log(path, prefix, shape, steps, sidechain=False, params=None, cache_control=None):
     """Writes each step's request, the transcript lines it added, and the
-    assistant line carrying the usage of the request before it."""
+    assistant line carrying the usage of the request before it. A `resume`
+    step sends the last answer and a new prompt on top of the history."""
     shape_hash = hashlib.sha256(json.dumps(shape, sort_keys=True).encode()).hexdigest()
     lines = [{"type": "api-request-shape", "shapeHash": shape_hash, "shape": shape}]
     chain = []
     previous = None
     previous_context = 0
     pending_output = None
+    last_answer = None
 
     def request(tail, context, keep, miss=False):
         nonlocal previous, previous_context
@@ -229,6 +273,10 @@ def write_request_log(path, prefix, shape, steps, sidechain=False):
                  "querySource": "sdk", "timestamp": "2026-11-03T10:00:00.000Z"}
         if previous:
             entry["base"] = previous
+        if params:
+            entry["params"] = params
+        if cache_control:
+            entry["cacheControl"] = cache_control
         lines.append(entry)
         if miss:
             usage = {"input_tokens": 50, "cache_read_input_tokens": 0, "cache_creation_input_tokens": context - 50, "output_tokens": 5}
@@ -266,9 +314,18 @@ def write_request_log(path, prefix, shape, steps, sidechain=False):
             chain += tail
         elif kind == "end":
             request_id, usage = pending_output
+            answer = [{"type": "text", "text": step[1]}]
             lines.append({"type": "assistant", "isSidechain": sidechain, "requestRef": request_id,
-                          "message": {"id": f"msg_{request_id}", "role": "assistant",
-                                      "content": [{"type": "text", "text": step[1]}], "usage": usage}})
+                          "message": {"id": f"msg_{request_id}", "role": "assistant", "content": answer, "usage": usage}})
+            last_answer = message_hash({"role": "assistant", "content": answer})
+        elif kind == "resume":
+            hashes = [last_answer]
+            for message in step[1]:
+                digest = message_hash(message)
+                lines.append({"type": "api-request-blob", "hash": digest, "message": message})
+                hashes.append(digest)
+            pending_output = request(hashes, step[2], len(chain))
+            chain += hashes
     with open(path, "a", encoding="utf-8") as handle:
         for line in lines:
             handle.write(json.dumps(line) + "\n")
@@ -600,8 +657,11 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         number = match.group(1)
         for index in range(1, 31):
             text(f"msg_long_{number}_{index}", f"Long history turn {number}, message {index}.")
-    elif "token waste" in user_text.lower():
-        write_waste_session(argument("--session-id") or argument("--resume"))
+    elif "token waste" in user_text.lower() or "instruction resume" in user_text.lower():
+        if "instruction resume" in user_text.lower():
+            write_resume_session(argument("--session-id") or argument("--resume"))
+        else:
+            write_waste_session(argument("--session-id") or argument("--resume"))
         text("msg_waste_answer", "Token waste shown.")
         progress_clear = report_command(instructions, " task progress clear ")
         outcome = report_command(instructions, " task outcome ", "completed")
