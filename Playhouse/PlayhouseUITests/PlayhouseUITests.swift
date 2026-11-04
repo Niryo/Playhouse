@@ -2037,7 +2037,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try runGitOutput(remote, "show", "refs/heads/\(branch):\(conflictPath)"), "resolved local and remote versions")
     }
 
-    // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns, opens only while a card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
+    // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
     func test_task_done_preserves_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3034,6 +3034,165 @@ final class PlayhouseUITests: XCTestCase {
             boardViewport.scroll(byDeltaX: 0, deltaY: -300)
         }
         XCTAssertTrue(waitUntil({ lowestTask.exists && lowestTask.isHittable }, timeout: 10), "Vertical board scrolling should make lower backlog tasks reachable.")
+    }
+
+    // case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response, so a retry after the fix moves it to Review.
+    func test_waiting_response_task_moves_to_review_manually() throws {
+        let questionFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: questionFixture.path))
+        codexFixtureExecutable = questionFixture.path
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [321]).merging(Self.prCheckCooldownEnvironment) { $1 }
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+
+        // A PR-linked repository task that has already been worked on.
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Manual review menu", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let menuTaskID = try XCTUnwrap(created["id"] as? String)
+        XCTAssertEqual(
+            try runCLI([
+                "conversation", "send", menuTaskID, "--message", "Please ask your questions.", "--mode", "plan",
+                "--answer", "color=Blue", "--answer", "token=fixture-secret"
+            ])["ok"] as? Bool,
+            true
+        )
+        XCTAssertEqual(try taskRecord(id: menuTaskID)?["status"] as? String, "Waiting Response")
+        XCTAssertTrue(terminateAppAndWait(app))
+        try seedTaskPullRequest(taskID: menuTaskID, number: 321, url: "https://github.com/playhouse-test/fixture/pull/321")
+        let record = try XCTUnwrap((try taskRecord(id: menuTaskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+
+        try createTaskFixture(title: "Manual review backlog", roots: [fixture.alternate.path])
+        let backlogTaskID = try taskID(named: "Manual review backlog")
+        assertCLIError(try runCLI(["task", "move", backlogTaskID, "Review"], expectedStatus: 2), code: "invalid_argument")
+        XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
+        element("task-card-\(backlogTaskID)").rightClick()
+        XCTAssertTrue(element("rename-task-menu-item").waitForExistence(timeout: 5))
+        XCTAssertFalse(element("move-task-to-review-menu-item").exists, "Only Waiting Response cards offer Move to Review.")
+        app.typeKey(.escape, modifierFlags: [])
+
+        // A pending blocking question shows Waiting Response while its turn still runs.
+        openTask(named: "Manual review menu")
+        let modeMenu = element("conversation-mode-menu")
+        XCTAssertTrue(modeMenu.waitForExistence(timeout: 5))
+        modeMenu.click()
+        app.menuItems["Plan mode"].click()
+        element("message-composer").click()
+        element("message-composer").typeText("Please share your plan.")
+        element("send-message-button").click()
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertEqual(try taskRecord(id: menuTaskID)?["status"] as? String, "Waiting Response")
+        try "Waiting turn output.\n".write(to: worktree.appendingPathComponent("manual-review.txt"), atomically: true, encoding: .utf8)
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        assertTaskVisible("Manual review menu", inColumn: "Waiting Response")
+
+        let menuCard = element("task-card-\(menuTaskID)")
+        let moveToReview = element("move-task-to-review-menu-item")
+        let rejection = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
+        menuCard.rightClick()
+        XCTAssertTrue(moveToReview.waitForExistence(timeout: 5), "A Waiting Response card should offer Move to Review.")
+        moveToReview.click()
+        XCTAssertTrue(rejection.waitForExistence(timeout: 10), "Moving a task whose turn is still running should explain the rejection.")
+        XCTAssertTrue(rejection.staticTexts.matching(NSPredicate(format: "value == %@", "Couldn't move task to Review")).firstMatch.exists)
+        XCTAssertTrue(rejection.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "still running")).firstMatch.exists)
+        attachScreenshot(named: "Move to Review is rejected while the question's turn still runs")
+        rejection.buttons["OK"].click()
+        XCTAssertEqual(try taskRecord(id: menuTaskID)?["status"] as? String, "Waiting Response")
+        XCTAssertTrue(try runGitOutput(worktree, "status", "--porcelain", "--untracked-files=all").contains("manual-review.txt"),
+                      "A rejected move must leave the running turn's files untouched.")
+        assertTaskVisible("Manual review menu", inColumn: "Waiting Response")
+
+        openTask(named: "Manual review menu")
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5))
+        selectQuestionOption("Blue")
+        typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        // The status reads Waiting Response before the turn releases the task, so wait for the daemon.
+        let threadID = try XCTUnwrap(try taskRecord(id: menuTaskID)?["codexThreadID"] as? String)
+        XCTAssertTrue(waitUntil({
+            let runtime = (try? self.runCLI(["conversation", "runtime"]))?["result"] as? [String: Any]
+            return runtime != nil && !((runtime?["activeThreadIDs"] as? [String] ?? []).contains(threadID))
+                && (try? self.taskRecord(id: menuTaskID)?["status"] as? String) == "Waiting Response"
+        }, timeout: 30), "The answered turn should finish in Waiting Response.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+
+        // A pull request sync that fails reports the error and leaves the task waiting.
+        let missingRemote = runDirectory.appendingPathComponent("manual-review-missing-origin.git", isDirectory: true)
+        try runGit(fixture.primary, "remote", "add", "origin", missingRemote.path)
+        addTeardownBlock { [self] in
+            // The case removes it itself on success; only clean up after an early failure.
+            if (try? runGitOutput(fixture.primary, "remote"))?.split(whereSeparator: \.isNewline).contains("origin") == true {
+                try? runGit(fixture.primary, "remote", "remove", "origin")
+            }
+        }
+        menuCard.rightClick()
+        XCTAssertTrue(moveToReview.waitForExistence(timeout: 5))
+        moveToReview.click()
+        XCTAssertTrue(rejection.waitForExistence(timeout: 15), "A failed pull request sync should be shown to the user.")
+        XCTAssertTrue(rejection.staticTexts.matching(NSPredicate(format: "value == %@", "Couldn't move task to Review")).firstMatch.exists)
+        XCTAssertFalse(rejection.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "still running")).firstMatch.exists,
+                       "This alert should report the sync failure, not the finished turn.")
+        XCTAssertTrue(rejection.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "origin")).firstMatch.exists,
+                      "The alert should carry the git error for the unreachable PR remote.")
+        attachScreenshot(named: "A failed pull request sync keeps the task in Waiting Response")
+        rejection.buttons["OK"].click()
+        XCTAssertEqual(try taskRecord(id: menuTaskID)?["status"] as? String, "Waiting Response")
+        assertTaskVisible("Manual review menu", inColumn: "Waiting Response")
+        try runGit(fixture.primary, "remote", "remove", "origin")
+
+        menuCard.rightClick()
+        XCTAssertTrue(moveToReview.waitForExistence(timeout: 5))
+        attachScreenshot(named: "Waiting Response card context menu offers Move to Review")
+        moveToReview.click()
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: menuTaskID)?["status"] as? String) == "Review"
+        }, timeout: 15), "Move to Review should persist the Review status.")
+        assertTaskVisible("Manual review menu", inColumn: "Review")
+        XCTAssertNil(try taskRecord(id: menuTaskID)?["statusMessage"] as? String)
+        XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain", "--untracked-files=all"), "",
+                       "Moving to Review should commit the PR-linked worktree's local changes like a completed turn.")
+        XCTAssertTrue(try runGitOutput(worktree, "show", "--name-only", "--format=%s", "HEAD").contains("manual-review.txt"))
+        XCTAssertEqual((try taskRecord(id: menuTaskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"] as? Int, 321)
+
+        // Drag and drop: a Waiting Response card dropped on the Review column.
+        try createTaskFixture(title: "Manual review drag", roots: [fixture.secondary.path])
+        let dragTaskID = try taskID(named: "Manual review drag")
+        XCTAssertEqual(
+            try runCLI([
+                "conversation", "send", dragTaskID, "--message", "Please ask your questions.", "--mode", "plan",
+                "--answer", "color=Blue", "--answer", "token=fixture-secret"
+            ])["ok"] as? Bool,
+            true
+        )
+        XCTAssertEqual(try taskRecord(id: dragTaskID)?["status"] as? String, "Waiting Response")
+        assertTaskVisible("Manual review drag", inColumn: "Waiting Response")
+        attachScreenshot(named: "Waiting Response card before dragging it to Review")
+        let reviewColumn = element("column-review")
+        XCTAssertTrue(reviewColumn.waitForExistence(timeout: 5))
+        element("task-card-\(dragTaskID)").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.5, thenDragTo: reviewColumn.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)))
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: dragTaskID)?["status"] as? String) == "Review"
+        }, timeout: 15), "Dropping a Waiting Response card on Review should persist the Review status.")
+        assertDoneDrawerResting("after a Waiting Response card is dropped on Review")
+        assertTaskVisible("Manual review drag", inColumn: "Review")
+        assertTaskVisible("Manual review menu", inColumn: "Review")
+        XCTAssertFalse(element("column-heading-waiting-response").exists, "Waiting Response hides once both tasks moved to Review.")
+        attachScreenshot(named: "Both manually moved tasks rest in Review")
+
+        XCTAssertEqual(
+            (try runCLI(["task", "move", dragTaskID, "Review"])["result"] as? [String: Any])?["status"] as? String,
+            "Review",
+            "A task already in Review is returned unchanged."
+        )
+        moveTaskToDone(taskID: dragTaskID)
+        assertTaskVisible("Manual review menu", inColumn: "Review")
+        XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
     }
 
     // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private nudge prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
@@ -6949,7 +7108,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(texts.contains("OK."))
     }
 
-    // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload.
+    // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload. User messages render in a neutral gray, input-style bubble with a thin light border and light text rather than the blue accent fill.
     func test_conversation_adds_ordered_text_annotations() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-goal-success").path
         let fixtureStateDirectory = dataDirectory.appendingPathComponent("comment-goal-fixture-state", isDirectory: true)
@@ -7159,6 +7318,13 @@ final class PlayhouseUITests: XCTestCase {
         }
         XCTAssertTrue(userView.frame.midY > transcriptScrollView.frame.minY + 20,
                       "The earlier user message should be visible before selecting its text.")
+        let userBubbleScreenshot = userView.screenshot()
+        let userBubbleAttachment = XCTAttachment(screenshot: userBubbleScreenshot)
+        userBubbleAttachment.name = "User message bubble element"
+        userBubbleAttachment.lifetime = .keepAlways
+        add(userBubbleAttachment)
+        assertGrayBorderedUserBubble(userBubbleScreenshot.image)
+        attachScreenshot(named: "User message gray bordered bubble")
         func selectPrefix(_ view: XCUIElement) {
             view.click()
             view.typeKey("a", modifierFlags: .command)
@@ -9744,7 +9910,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, including a list that starts on the line right after a paragraph without a blank line, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in, the question that started it stays pinned near the top of the transcript instead of being auto-scrolled past as the answer grows, consistent with the user message preceding its final answer in CLI/XPC history.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing is hidden until a first message is sent and while the agent waits on answers to its questions, then stays enabled with an empty composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, including a list that starts on the line right after a paragraph without a blank line, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in, the question that started it stays pinned near the top of the transcript instead of being auto-scrolled past as the answer grows, consistent with the user message preceding its final answer in CLI/XPC history.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".playhouse-bridge-fixture")
@@ -9777,52 +9943,20 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((emptyConversation?["messages"] as? [[String: Any]])?.count ?? 0, 0, "The handoff availability check should start with an empty conversation.")
         XCTAssertEqual(element("message-composer").value as? String ?? "", "")
         let startImplementingInEmptyConversation = element("start-implementing-button")
-        XCTAssertTrue(startImplementingInEmptyConversation.waitForExistence(timeout: 5), "Plan mode should offer Start Implementing before any chat messages exist.")
-        XCTAssertTrue(startImplementingInEmptyConversation.isEnabled, "Start Implementing should be clickable with an empty conversation.")
+        XCTAssertFalse(startImplementingInEmptyConversation.waitForExistence(timeout: 2), "Plan mode should not offer Start Implementing before a first message exists.")
 
         modeMenu.click()
         let goalComposerMode = app.menuItems["conversation-mode-goal"]
         XCTAssertTrue(goalComposerMode.waitForExistence(timeout: 5))
         goalComposerMode.click()
         XCTAssertTrue(modeMenu.label.contains("Goal"), "The composer should enter Goal mode.")
-        XCTAssertTrue(startImplementingInEmptyConversation.exists, "Entering Goal mode should preserve the selected Plan mode and its handoff.")
-        XCTAssertTrue(startImplementingInEmptyConversation.isEnabled)
-        startImplementingInEmptyConversation.click()
-        XCTAssertTrue(waitUntil({ modeMenu.label.contains("Code mode") }, timeout: 5), "The empty-chat handoff should leave Goal composer mode and switch to Code.")
-        XCTAssertTrue(waitUntil({
-            let history = (try? runCLI(
-                ["conversation", "history", taskID],
-                extraEnvironment: ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
-            )["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
-            return history.contains { $0["role"] as? String == "user" && $0["text"] as? String == "Start implementing the plan." }
-                && history.contains { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
-        }, timeout: 30), "Start Implementing should create a Code turn from an empty conversation.")
-        let initialFixtureData = try Data(contentsOf: URL(fileURLWithPath: fixtureCopy.path + ".history"))
-        let initialFixtureHistory = try XCTUnwrap(JSONSerialization.jsonObject(with: initialFixtureData) as? [String: Any])
-        let codeTurnsBeforeFollowup = (initialFixtureHistory["turns"] as? [[String: Any]] ?? []).count
-        let composer = element("message-composer")
-        composer.click()
-        composer.typeText("Continue the implementation.")
-        element("send-message-button").click()
-        XCTAssertTrue(waitUntil({
-            let history = (try? runCLI(
-                ["conversation", "history", taskID],
-                extraEnvironment: ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
-            )["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
-            let userIndex = history.lastIndex { $0["role"] as? String == "user" && $0["text"] as? String == "Continue the implementation." }
-            let finalIndex = history.lastIndex { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
-            let fixtureData = try? Data(contentsOf: URL(fileURLWithPath: fixtureCopy.path + ".history"))
-            let fixtureHistory = fixtureData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-            let turns = fixtureHistory?["turns"] as? [[String: Any]] ?? []
-            return userIndex != nil && finalIndex != nil && finalIndex! > userIndex!
-                && turns.count > codeTurnsBeforeFollowup
-                && turns.last?["conversationMode"] as? String == "default"
-        }, timeout: 30), "A regular composer message after handoff should start a Code turn, even when Goal was selected first.")
+        XCTAssertFalse(startImplementingInEmptyConversation.exists, "Entering Goal mode should not reveal Start Implementing in an empty conversation.")
         modeMenu.click()
         let planModeAfterGoal = app.menuItems["Plan mode"]
         XCTAssertTrue(planModeAfterGoal.waitForExistence(timeout: 5))
         planModeAfterGoal.click()
-        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Plan mode should be selectable again after the Code handoff.")
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Plan mode should be selectable again after Goal.")
+        let composer = element("message-composer")
 
         composer.click()
         composer.typeText("Plan the task.")
@@ -15161,6 +15295,57 @@ final class PlayhouseUITests: XCTestCase {
             }
         }
         return changed
+    }
+
+    /// Checks the user bubble by comparing its colors with each other rather than with exact
+    /// values, because an element screenshot's color conversion shifts absolute gray levels.
+    /// The fill is the dominant neutral gray and is lighter than the transcript background (read
+    /// from the bottom-left timestamp row). The text is much lighter, the left and right edges
+    /// carry a lighter stroke, and no blue accent remains.
+    private func assertGrayBorderedUserBubble(_ image: NSImage, file: StaticString = #filePath, line: UInt = #line) {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            XCTFail("Could not read user bubble pixels.", file: file, line: line)
+            return
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        func color(_ x: Int, _ y: Int) -> NSColor? { bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) }
+        func neutralLuminance(_ color: NSColor) -> CGFloat? {
+            let components = [color.redComponent, color.greenComponent, color.blueComponent]
+            guard components.max()! - components.min()! < 0.04 else { return nil }
+            return components.reduce(0, +) / 3
+        }
+        var buckets: [Int: Int] = [:]
+        var sampled = 0
+        var bluePixels = 0
+        for x in stride(from: 0, to: cgImage.width, by: 2) {
+            for y in stride(from: 0, to: cgImage.height, by: 2) {
+                guard let pixel = color(x, y) else { continue }
+                sampled += 1
+                if pixel.blueComponent > pixel.redComponent + 0.25 && pixel.blueComponent > pixel.greenComponent + 0.1 { bluePixels += 1 }
+                if let luminance = neutralLuminance(pixel), luminance < 0.5 { buckets[Int(luminance * 50), default: 0] += 1 }
+            }
+        }
+        XCTAssertEqual(bluePixels, 0, "User messages should no longer render a blue accent bubble.", file: file, line: line)
+        guard let (fillBucket, fillCount) = buckets.max(by: { $0.value < $1.value }),
+              let background = color(2, cgImage.height - 2).flatMap(neutralLuminance) else {
+            XCTFail("The user bubble should have a neutral gray fill over a neutral background.", file: file, line: line)
+            return
+        }
+        let fill = (CGFloat(fillBucket) + 0.5) / 50
+        XCTAssertGreaterThan(Double(fillCount) / Double(max(sampled, 1)), 0.3,
+                             "The gray fill should dominate the user bubble.", file: file, line: line)
+        XCTAssertGreaterThan(fill, background + 0.05,
+                             "The bubble fill (\(fill)) should be a lighter gray than the transcript background (\(background)).",
+                             file: file, line: line)
+        let lightText = pixelCount(in: image, step: 2) { neutralLuminance($0).map { $0 > fill + 0.4 } ?? false }
+        XCTAssertGreaterThan(lightText, 20, "User message text should stay light on the gray bubble.", file: file, line: line)
+        func edgeIsStroked(_ y: Int, _ xs: [Int]) -> Bool {
+            xs.contains { x in color(x, y).flatMap(neutralLuminance).map { $0 > fill + 0.05 && $0 < fill + 0.3 } ?? false }
+        }
+        let rows = stride(from: cgImage.height * 15 / 100, to: cgImage.height * 65 / 100, by: max(1, cgImage.height / 20))
+        let edge = 0..<min(6, cgImage.width)
+        XCTAssertTrue(rows.contains { edgeIsStroked($0, Array(edge)) && edgeIsStroked($0, edge.map { cgImage.width - 1 - $0 }) },
+                      "The user bubble should have a thin light border on both sides of its gray fill.", file: file, line: line)
     }
 
     private func orangePixelCount(in screenshot: XCUIScreenshot) -> Int {

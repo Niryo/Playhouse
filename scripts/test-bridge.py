@@ -2630,7 +2630,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertGreaterEqual(len(archived_tasks), 41, "The CLI board read should retain completed tasks beyond the first visible archive page.")
         self.assertTrue(set(filler_ids).issubset(archived_ids), "All persisted archive records should remain available across pages.")
 
-    # case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns, opens only while a card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
+    # case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
     def test_task_done_preserves_dirty_worktree(self):
         task = self.create_repo_task("Dirty cleanup", [self.primary], materialize=True)
         worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
@@ -3613,10 +3613,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli("task", "move", task_id, "Unknown", expected_status=2)
         self.assert_failure(response, "invalid_argument")
-        for status in ["In Progress", "Blocked", "Waiting Response", "Review", "Backlog"]:
+        for status in ["In Progress", "Blocked", "Waiting Response", "Backlog"]:
             response, _ = self.call_cli("task", "move", task_id, status, expected_status=2)
             self.assert_failure(response, "invalid_argument")
             self.assertIn("controlled by Codex", response["error"]["message"])
+        response, _ = self.call_cli("task", "move", task_id, "Review", expected_status=2)
+        self.assert_failure(response, "invalid_argument")
+        self.assertIn("Only a task in Waiting Response", response["error"]["message"])
         response, _ = self.call_cli("task", "move", task_id, "Done", expected_status=2)
         self.assert_failure(response, "invalid_argument")
         self.assertIn("Only a task in Review", response["error"]["message"])
@@ -3664,6 +3667,94 @@ class PlayhouseBridgeTests(unittest.TestCase):
         waiting = self.assert_success(self.call_cli("task", "get", waiting_id)[0])
         self.assertEqual(waiting["status"], "Waiting Response")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
+
+    # case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response, so a retry after the fix moves it to Review.
+    def test_waiting_response_task_moves_to_review_manually(self):
+        def remove_fixture_origin(repository, expected_url):
+            current = subprocess.run(
+                ["git", "-C", str(repository), "remote", "get-url", "origin"],
+                check=False, capture_output=True, text=True,
+            )
+            if current.returncode == 0 and current.stdout.strip() == str(expected_url):
+                self.run_git(repository, "remote", "remove", "origin")
+
+        backlog_id = self.create_task("Manual review backlog")["id"]
+        rejected, _ = self.call_cli("task", "move", backlog_id, "Review", expected_status=2)
+        self.assert_failure(rejected, "invalid_argument")
+        self.assertIn("Only a task in Waiting Response", rejected["error"]["message"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", backlog_id)[0])["status"], "Backlog")
+
+        task = self.create_repo_task("Manual review", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        self.seed_done_task_pull_request(task["id"], number=321)
+        # Work the turn left uncommitted; the Review gate must commit it.
+        (worktree / "manual-review.txt").write_text("Waiting turn output.\n", encoding="utf-8")
+
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-manual-review-question-flow"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        command = ["conversation", "send", task["id"], "--message", "Please ask your questions.", "--mode", "plan"]
+        process = self.start_cli(*command, extra_environment=environment)
+        try:
+            deadline = time.monotonic() + 60
+            pending = None
+            while process.poll() is None and time.monotonic() < deadline and pending is None:
+                history, _ = self.call_cli("conversation", "history", task["id"], extra_environment=environment)
+                pending = self.assert_success(history).get("pendingUserInputRequest")
+                if pending is None:
+                    time.sleep(0.1)
+            self.assertIsNotNone(pending, "The blocking question should hold the turn open.")
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Waiting Response")
+            # The pending question's turn still owns the worktree and the final status.
+            running, _ = self.call_cli("task", "move", task["id"], "Review", expected_status=2)
+            self.assert_failure(running, "invalid_argument")
+            self.assertIn("still running", running["error"]["message"])
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Waiting Response")
+            self.assertIn("manual-review.txt", self.run_git(worktree, "status", "--porcelain", "--untracked-files=all"))
+            answered, _ = self.call_cli(
+                "conversation", "answer-user-input", task["id"], pending["id"],
+                "--answer", "color=Blue", "--answer", "token=fixture-secret", extra_environment=environment,
+            )
+            self.assert_success(answered)
+            response, _ = self.finish_cli(process, command)
+            self.assert_success(response)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=20)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Waiting Response",
+                         "The answered turn settles in Waiting Response.")
+
+        # A sync that cannot reach the PR remote fails the move and leaves the task waiting.
+        missing_remote = self.data_directory / "manual-review-missing-origin.git"
+        self.addCleanup(remove_fixture_origin, self.primary, missing_remote)
+        self.run_git(worktree, "remote", "add", "origin", str(missing_remote))
+        failed, _ = self.call_cli("task", "move", task["id"], "Review", expected_status=1)
+        self.assert_failure(failed, "operation_failed")
+        self.assertIn("origin", failed["error"]["message"], "The failure should carry the git error for the unreachable PR remote.")
+        self.assertNotIn("still running", failed["error"]["message"])
+        waiting = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(waiting["status"], "Waiting Response", "A failed review sync must not move or block the task.")
+        self.run_git(self.primary, "remote", "remove", "origin")
+
+        moved = self.assert_success(self.call_cli("task", "move", task["id"], "Review")[0])
+        self.assertEqual(moved["status"], "Review")
+        self.assertIsNone(moved.get("statusMessage"))
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain", "--untracked-files=all").strip(), "",
+                         "Moving to Review should commit the PR-linked worktree's local changes like a completed turn.")
+        self.assertIn("manual-review.txt", self.run_git(worktree, "show", "--name-only", "--format=%s", "HEAD"))
+        reread = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(reread["status"], "Review")
+        self.assertEqual(reread["repositoryWorktrees"][0]["pullRequestNumber"], 321)
+        again = self.assert_success(self.call_cli("task", "move", task["id"], "Review")[0])
+        self.assertEqual(again["status"], "Review", "A task already in Review is returned unchanged.")
+        done = self.assert_success(self.call_cli("task", "move", task["id"], "Done", "--allow-unmerged")[0])
+        self.assertEqual(done["status"], "Done")
 
     # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private nudge prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
     def test_task_progress_reports_publish_persist_and_clear(self):
@@ -5553,7 +5644,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             any("<playhouse-handoff-context>" in message["text"] for message in final_history["messages"]),
             "Handoff context never appears in the visible transcript.",
         )
-    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload.
+    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload. User messages render in a neutral gray, input-style bubble with a thin light border and light text rather than the blue accent fill.
     def test_conversation_adds_ordered_text_annotations(self):
         task = self.create_repo_task("Conversation comments", [self.primary])
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -7310,7 +7401,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "A fresh read-only subagent inspection should return the child conversation's stored content.",
         )
 
-    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, including a list that starts on the line right after a paragraph without a blank line, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in, the question that started it stays pinned near the top of the transcript instead of being auto-scrolled past as the answer grows, consistent with the user message preceding its final answer in CLI/XPC history.
+    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing is hidden until a first message is sent and while the agent waits on answers to its questions, then stays enabled with an empty composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, including a list that starts on the line right after a paragraph without a blank line, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in, the question that started it stays pinned near the top of the transcript instead of being auto-scrolled past as the answer grows, consistent with the user message preceding its final answer in CLI/XPC history.
     def test_plan_mode_renders_markdown_in_conversation(self):
         task_id = self.create_task(title="Plan mode Markdown", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"

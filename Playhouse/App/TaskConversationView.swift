@@ -992,6 +992,14 @@ struct TaskConversationView: View {
         conversationRuntime.pendingUserInputRequest(forThread: task.activeConversationID ?? "")
     }
 
+    /// The plan exists only once a first message was sent and the agent is not
+    /// waiting on the user's answer to its questions.
+    private var canShowStartImplementing: Bool {
+        conversationMode == .plan && !isResponding && !isReadOnly
+            && messages.contains(where: { $0.role == .user })
+            && userInputRequest == nil && providerPendingUserInputRequest == nil
+    }
+
     private var isConversationTurnActive: Bool {
         conversationRuntime.isTurnActive(threadID: task.activeConversationID ?? "")
     }
@@ -3565,7 +3573,7 @@ struct TaskConversationView: View {
                         highlightedRanges: annotations.filter { $0.messageID == message.id && $0.blockID == 0 }.map {
                             NSRange(location: $0.startOffset, length: $0.endOffset - $0.startOffset)
                         },
-                        textColor: .white,
+                        textColor: .labelColor,
                         onSelection: { range, selectedText, bounds in
                             currentTextSelection = selectedText.isEmpty ? nil : AnnotationSelection(
                                 messageID: message.id, anchorID: 0, blockID: 0, startOffset: range.location,
@@ -3581,7 +3589,15 @@ struct TaskConversationView: View {
                                 .offset(y: -16)
                         }
                         .padding(.horizontal, 16).padding(.vertical, 11)
-                        .background(WorkspaceTheme.accent, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                        // The border is part of the background so the selection hint above stays clickable.
+                        .background {
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(WorkspaceTheme.inputBackground)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .strokeBorder(Color.primary.opacity(0.2), lineWidth: 1)
+                                )
+                        }
                 }
                 if let createdAt = message.createdAt {
                     Text(createdAt, format: .dateTime.hour().minute())
@@ -4434,7 +4450,7 @@ struct TaskConversationView: View {
                     .accessibilityLabel(isEnteringGoal ? "Goal" : "Conversation mode: \(conversationMode.title)")
                     .accessibilityIdentifier("conversation-mode-menu")
 
-                    if conversationMode == .plan && !isResponding && !isReadOnly {
+                    if canShowStartImplementing {
                         Button(action: startImplementingPlan) {
                             Text("Start Implementing")
                                 .font(.system(size: 12, weight: .semibold))

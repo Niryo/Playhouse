@@ -13,7 +13,7 @@ The daemon accepts a versioned, length-prefixed JSON request over its socket, st
 | `task create --title <title> --prompt <text> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--root <folder>...]` | Create one worktree per Git repository, with optional extra context folders |
 | `task create --title <title> --prompt <text> --root <folder> [--root <folder>...]` | Create a folder-only task without Git worktrees |
 | `task get <task-id>` | Read a task and its thread/root state |
-| `task move <task-id> <Backlog\|Ready\|In Progress\|Done>` | Change task status |
+| `task move <task-id> <Review\|Done>` | Move a Waiting Response task to Review (after the same pull request sync and PR mode a completed turn gets; rejected while its turn is still running), or a Review task to Done. Other statuses are set by the conversation |
 | `task rename <task-id> --title <title>` | Rename a task |
 | `task repository add <task-id> --repo <path>` / `task repository add-batch <task-id> --repo <path> [--repo <path>...]` | Add repository context, prepare managed worktrees immediately, and update saved repository selection |
 | `task repository replace <task-id> --repo <path> [--repo <path>...]` | Replace the task's repository set while preserving folder-only context |
@@ -44,7 +44,7 @@ For example:
 
 ```sh
 ./scripts/playhouse.sh task create --title "Update parser" --prompt "Update the parser to ..." --repo /work/parser --root /work/fixtures
-./scripts/playhouse.sh task move 33F746B9-3E5E-4D84-890A-257BDB01B66A "In Progress"
+./scripts/playhouse.sh task move 33F746B9-3E5E-4D84-890A-257BDB01B66A Review
 ./scripts/playhouse.sh conversation send 33F746B9-3E5E-4D84-890A-257BDB01B66A --message "Inspect the parser and summarize its error handling."
 ```
 
