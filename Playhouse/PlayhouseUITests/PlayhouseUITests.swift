@@ -904,7 +904,7 @@ final class PlayhouseUITests: XCTestCase {
         element("conversation-repository-branch-edit").click()
         let branchField = element("conversation-repository-branch")
         replaceText(branchField, with: branch)
-        element("save-conversation-repository-button").click()
+        element("conversation-repository-branch-save").click()
         let error = element("codex-chat-error")
         XCTAssertTrue(error.waitForExistence(timeout: 10))
         XCTAssertTrue((error.label + (error.value as? String ?? "")).contains("already assigned"))
@@ -4147,7 +4147,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertLessThan(abs(badgeAfterSend.frame.midY - title.frame.midY), 8, "Repository badges should stay on the fixed title row after the timeline scrolls.")
     }
 
-    // case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation.
+    // case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field dismisses the edit without saving. The settings popover is wider than before with a larger title.
     func test_task_repository_settings_validate_persist_and_lock_after_start() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -4163,13 +4163,34 @@ final class PlayhouseUITests: XCTestCase {
 
         let initial = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
         let initialBranch = try XCTUnwrap(initial["branch"] as? String)
+        let initialBranchFrom = try XCTUnwrap(initial["branchFrom"] as? String)
         badge.click()
-        element("conversation-repository-branch-edit").click()
+        let initialBranchValue = element("conversation-repository-branch-value")
+        let branchEdit = element("conversation-repository-branch-edit")
+        XCTAssertTrue(initialBranchValue.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(branchEdit.exists)
+        let settingsTitle = element("conversation-repository-settings-title")
+        XCTAssertGreaterThanOrEqual(app.popovers.firstMatch.frame.width, 340, "The repository settings popover should be roomier than before.")
+        XCTAssertGreaterThanOrEqual(settingsTitle.frame.height, 17, "The repository settings title should use a larger font.")
+        XCTAssertLessThan(branchEdit.frame.minX - initialBranchValue.frame.maxX, 20, "The edit pencil should sit right beside its value.")
+        XCTAssertGreaterThanOrEqual(branchEdit.frame.width, 20, "The edit pencil should be an easy target.")
+        XCTAssertFalse(element("save-conversation-repository-button").exists, "Per-field checkmarks replace the popover-wide Save button.")
+        XCTAssertFalse(element("remove-conversation-repository-button").exists, "Removal moved from the popover to the repository chip badge.")
+        attachScreenshot(named: "Repository settings popover with pencils beside each value", fullScreen: true)
+        branchEdit.click()
         let branchField = element("conversation-repository-branch")
+        let branchSave = element("conversation-repository-branch-save")
+        XCTAssertTrue(branchField.waitForExistence(timeout: 5))
+        XCTAssertTrue(branchSave.exists, "Editing a value should show a confirmation checkmark.")
+        XCTAssertGreaterThan(branchSave.frame.minX, branchField.frame.minX, "The checkmark should sit inside the field's trailing edge.")
+        XCTAssertLessThan(abs(branchSave.frame.midY - branchField.frame.midY), 6, "The checkmark should be inside the field.")
+        XCTAssertFalse(element("conversation-repository-branch-from-save").exists, "Only the field being edited shows a checkmark.")
         replaceText(branchField, with: "invalid branch")
-        element("save-conversation-repository-button").click()
+        attachScreenshot(named: "Inline branch edit with its confirmation checkmark", fullScreen: true)
+        branchSave.click()
         XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "Invalid branch settings should be shown in the conversation.")
         XCTAssertEqual(try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branch"] as? String, initialBranch)
+        XCTAssertTrue(branchField.exists, "A rejected value should stay open for correction.")
 
         let conversationReservation = try ConversationTurnLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         var conversationReservationReleased = false
@@ -4177,7 +4198,7 @@ final class PlayhouseUITests: XCTestCase {
             if !conversationReservationReleased { try? conversationReservation.release() }
         }
         replaceText(branchField, with: "conversation-edited")
-        element("save-conversation-repository-button").click()
+        branchSave.click()
         Thread.sleep(forTimeInterval: 0.25)
         XCTAssertEqual(
             try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branch"] as? String,
@@ -4187,24 +4208,40 @@ final class PlayhouseUITests: XCTestCase {
         try conversationReservation.release()
         conversationReservationReleased = true
         XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "branch", expected: "conversation-edited"))
+        XCTAssertTrue(waitForDisappearance(branchField), "A confirmed value should leave edit mode.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("conversation-repository-branch-value")), "conversation-edited", "The editor should stay open on the saved value.")
 
-        badge.click()
         element("conversation-repository-branch-from-edit").click()
         let branchFromField = element("conversation-repository-branch-from")
-        replaceText(branchFromField, with: "branch-source")
-        element("save-conversation-repository-button").click()
-        XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "branchFrom", expected: "branch-source"))
+        XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
+        replaceText(branchFromField, with: "discarded-edit")
+        settingsTitle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(waitForDisappearance(branchFromField), "Clicking outside the field should dismiss the edit.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("conversation-repository-branch-from-value")), initialBranchFrom, "A dismissed edit must not change the shown value.")
+        Thread.sleep(forTimeInterval: 0.25)
+        XCTAssertEqual(try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, initialBranchFrom, "A dismissed edit must not be saved.")
+        attachScreenshot(named: "Clicking outside the field dismisses the edit unsaved", fullScreen: true)
 
-        badge.click()
+        element("conversation-repository-branch-from-edit").click()
+        XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
+        replaceText(branchFromField, with: "branch-source")
+        element("conversation-repository-branch-from-save").click()
+        XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "branchFrom", expected: "branch-source"))
+        XCTAssertEqual(try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branch"] as? String, "conversation-edited", "Saving one field must keep the others.")
+
+        XCTAssertTrue(waitForDisappearance(branchFromField))
         element("conversation-repository-merge-target-edit").click()
         let mergeTargetField = element("conversation-repository-merge-target")
+        let mergeTargetSave = element("conversation-repository-merge-target-save")
+        XCTAssertTrue(mergeTargetField.waitForExistence(timeout: 5))
         replaceText(mergeTargetField, with: "branch-source")
-        element("save-conversation-repository-button").click()
+        mergeTargetSave.click()
         XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "mergeTarget", expected: "branch-source"))
-        badge.click()
+        XCTAssertTrue(waitForDisappearance(mergeTargetField))
         element("conversation-repository-merge-target-edit").click()
+        XCTAssertTrue(mergeTargetField.waitForExistence(timeout: 5))
         replaceText(mergeTargetField, with: "missing-local-branch")
-        element("save-conversation-repository-button").click()
+        mergeTargetSave.click()
         XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "An invalid merge target should be shown in the conversation.")
         XCTAssertEqual(
             try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["mergeTarget"] as? String,
@@ -4212,9 +4249,13 @@ final class PlayhouseUITests: XCTestCase {
             "Rejecting an invalid merge target must preserve the saved value."
         )
         replaceText(mergeTargetField, with: "branch-source")
-        element("save-conversation-repository-button").click()
+        mergeTargetSave.click()
         XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "mergeTarget", expected: "branch-source"))
-        XCTAssertTrue(waitForDisappearance(element("save-conversation-repository-button")), "A successful repository save should close its editor.")
+        XCTAssertTrue(waitForDisappearance(mergeTargetField), "A successful save should leave edit mode.")
+        attachScreenshot(named: "Saved repository settings stay visible in the open popover", fullScreen: true)
+        // Reopen the popover so the values come from the saved record.
+        element("task-view-title").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(waitForDisappearance(element("conversation-repository-branch-value")), "Clicking outside the popover should close it.")
         badge.click()
         app.activate()
         let branchValue = element("conversation-repository-branch-value")
@@ -4232,7 +4273,7 @@ final class PlayhouseUITests: XCTestCase {
         badge.click()
         XCTAssertTrue(element("conversation-repository-settings-locked").waitForExistence(timeout: 5))
         XCTAssertFalse(element("conversation-repository-branch-edit").exists)
-        XCTAssertFalse(element("save-conversation-repository-button").exists)
+        XCTAssertFalse(element("conversation-repository-branch-save").exists)
         assertCLIError(
             try runCLI([
                 "task", "repository", "edit", taskID,
@@ -4270,7 +4311,7 @@ final class PlayhouseUITests: XCTestCase {
         replaceText(element("conversation-repository-branch"), with: "stale-ui-edit")
 
         let barrier = try GitHoldBarrier(repositoryURL: fixture.primary)
-        element("save-conversation-repository-button").click()
+        element("conversation-repository-branch-save").click()
         var barrierReleased = false
         defer {
             if !barrierReleased { try? barrier.release() }
@@ -4303,8 +4344,7 @@ final class PlayhouseUITests: XCTestCase {
         let sole = try runCLI(["task", "create", "--title", soleTitle, "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path])["result"] as? [String: Any]
         let soleID = try XCTUnwrap(sole?["id"] as? String)
         openTask(named: soleTitle)
-        element("conversation-repository-badge-primary").click()
-        element("remove-conversation-repository-button").click()
+        element("remove-conversation-repository-primary").click()
         XCTAssertTrue(waitUntil({
             guard let result = try? self.taskRecord(id: soleID),
                   let records = result["repositoryWorktrees"] as? [[String: Any]] else { return false }
@@ -4332,8 +4372,7 @@ final class PlayhouseUITests: XCTestCase {
         ])["result"] as? [String: Any]
         let pendingID = try XCTUnwrap(pending?["id"] as? String)
         openTask(named: pendingTitle)
-        element("conversation-repository-badge-primary").click()
-        element("remove-conversation-repository-button").click()
+        element("remove-conversation-repository-primary").click()
         XCTAssertTrue(waitUntil({
             guard let result = try? self.taskRecord(id: pendingID),
                   let records = result["repositoryWorktrees"] as? [[String: Any]] else { return false }
@@ -4395,8 +4434,7 @@ final class PlayhouseUITests: XCTestCase {
         let dirtyFile = worktreeURL.appendingPathComponent("repository-removal-dirty.txt")
         try Data("keep this worktree intact\n".utf8).write(to: dirtyFile)
 
-        element("conversation-repository-badge-secondary").click()
-        let removeButton = element("remove-conversation-repository-button")
+        let removeButton = element("remove-conversation-repository-secondary")
         removeButton.click()
         XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "Dirty worktree removal should report an error in the conversation.")
         XCTAssertTrue(element("codex-chat-error").label.contains("uncommitted changes"))
@@ -4812,7 +4850,7 @@ final class PlayhouseUITests: XCTestCase {
         assertScreenshotIfVisible(named: "Repository suggestions exclude nested and symlinked folders")
     }
 
-    // case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations.
+    // case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations. Each saved selection also feeds a newest-first recent repository history of up to ten repositories that keeps repositories after they are removed from the selection; the task repository recent command lists up to five of them that still exist and are not attached to the task, and rejects an unknown task. In the UI, attached repositories appear as large chips carrying a remove badge, and recent repositories outside the task follow a vertical separator as smaller grayed chips with a plus badge; removing an attached repository through its badge turns it into a recent chip, and clicking that chip adds it back to the task and saved selection.
     func test_new_task_remembers_last_selected_repositories() throws {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["settings", "set-last-repositories", "--repo", fixture.secondary.path, "--repo", fixture.primary.path])
@@ -4846,6 +4884,39 @@ final class PlayhouseUITests: XCTestCase {
         overrideSearch.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(element("conversation-repository-badge-alternate").waitForExistence(timeout: 10))
         let expandedSelection = [fixture.secondary.path, fixture.primary.path, fixture.alternate.path]
+        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], expandedSelection)
+
+        let quickAddTaskID = try XCTUnwrap(tasksFromBoardList().first?["id"] as? String)
+        let alternateBadge = element("conversation-repository-badge-alternate")
+        let primaryBadge = element("conversation-repository-badge-primary")
+        let alternateRemove = element("remove-conversation-repository-alternate")
+        let recentAlternate = element("conversation-recent-repository-alternate")
+        let recentSeparator = element("conversation-recent-repositories-separator")
+        XCTAssertFalse(recentAlternate.exists, "An attached repository is not suggested again.")
+        XCTAssertFalse(recentSeparator.exists, "With every recent repository attached, no suggestions follow the chips.")
+        XCTAssertTrue(alternateRemove.exists, "Each attached repository chip should carry its own remove badge.")
+        XCTAssertGreaterThanOrEqual(alternateBadge.frame.height, 28, "Attached repository chips should be prominent.")
+        XCTAssertGreaterThan(alternateRemove.frame.midX, alternateBadge.frame.midX, "The remove badge should sit on the chip's trailing corner.")
+        XCTAssertLessThan(alternateRemove.frame.midY, alternateBadge.frame.midY, "The remove badge should sit on the chip's top corner.")
+        attachScreenshot(named: "Attached repositories as large chips with remove badges")
+        alternateRemove.click()
+        XCTAssertTrue(waitForDisappearance(alternateBadge, timeout: 10), "The remove badge should detach the repository.")
+        XCTAssertTrue(recentAlternate.waitForExistence(timeout: 10), "A removed repository should be offered as a recent repository.")
+        XCTAssertTrue(recentSeparator.exists, "Recent suggestions should be separated from the attached chips.")
+        XCTAssertGreaterThan(recentSeparator.frame.minX, primaryBadge.frame.maxX)
+        XCTAssertGreaterThan(recentAlternate.frame.minX, recentSeparator.frame.maxX)
+        XCTAssertLessThan(recentAlternate.frame.height, primaryBadge.frame.height, "Recent suggestions should be smaller than attached chips.")
+        XCTAssertTrue(element("conversation-recent-repository-add-badge-alternate").exists, "Recent suggestions should carry a plus badge.")
+        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], [fixture.secondary.path, fixture.primary.path])
+        XCTAssertEqual(
+            (try runCLI(["task", "repository", "recent", quickAddTaskID])["result"] as? [String: Any])?["repositories"] as? [String],
+            [fixture.alternate.path]
+        )
+        attachScreenshot(named: "Removed repository offered as a grayed recent chip after the separator")
+        recentAlternate.click()
+        XCTAssertTrue(alternateBadge.waitForExistence(timeout: 10), "Clicking a recent chip should add the repository back.")
+        XCTAssertTrue(waitForDisappearance(recentAlternate, timeout: 10), "A re-added repository leaves the suggestions.")
+        attachScreenshot(named: "Recent repository re-added as an attached chip")
         XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], expandedSelection)
         XCTAssertEqual(try XCTUnwrap(tasksFromBoardList().first?["workspaceRoots"] as? [String]), expandedSelection)
         element("back-to-board-button").click()
@@ -14152,7 +14223,7 @@ final class PlayhouseUITests: XCTestCase {
         let fieldElement = element("conversation-repository-\(field)")
         XCTAssertTrue(fieldElement.waitForExistence(timeout: 5))
         replaceText(fieldElement, with: value)
-        element("save-conversation-repository-button").click()
+        element("conversation-repository-\(field)-save").click()
         XCTAssertTrue(waitUntil({
             guard let task = try? self.tasksFromBoardList().first,
                   let records = task["repositoryWorktrees"] as? [[String: Any]],
@@ -14165,6 +14236,11 @@ final class PlayhouseUITests: XCTestCase {
             let key = field == "branch" ? "branch" : (field == "branch-from" ? "branchFrom" : "mergeTarget")
             return record[key] as? String == value
         }, timeout: 10), "The conversation should persist the edited \(field) value.")
+
+        // The settings popover stays open after a save, so close it before the next step.
+        XCTAssertTrue(waitForDisappearance(fieldElement), "A saved value should leave edit mode.")
+        app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(edit), "Escape should close the repository settings.")
     }
 
     private func pasteText(_ text: String, into field: XCUIElement) {

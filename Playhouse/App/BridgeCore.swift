@@ -4038,6 +4038,20 @@ final class WorkspaceSettingsManager {
         return value
     }
 
+    /// Repositories most recently selected for any task, newest first.
+    var recentRepositories: [String] {
+        defaults.stringArray(forKey: WorkspaceSettings.recentRepositoriesKey) ?? []
+    }
+
+    /// Recent repositories still on disk that are not already attached, for quick re-adding.
+    func recentRepositorySuggestions(excluding attachedPaths: [String]) -> [String] {
+        let attached = Set(attachedPaths.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL.path })
+        return Array(recentRepositories.filter { path in
+            !attached.contains(path)
+                && FileManager.default.fileExists(atPath: URL(fileURLWithPath: path).appendingPathComponent(".git").path)
+        }.prefix(WorkspaceSettings.recentRepositorySuggestionLimit))
+    }
+
     var appearance: String {
         let value = defaults.string(forKey: WorkspaceSettings.appearanceKey) ?? "dark"
         let appearance = value == "light" ? "light" : "dark"
@@ -4203,10 +4217,16 @@ final class WorkspaceSettingsManager {
             if !normalized.contains(url.path) { normalized.append(url.path) }
         }
         defaults.set(normalized, forKey: WorkspaceSettings.lastSelectedRepositoriesKey)
+        // The current selection moves to the front of the recent history; repositories
+        // removed from it stay behind so they can be suggested again.
+        let recent = Array((normalized + recentRepositories.filter { !normalized.contains($0) })
+            .prefix(WorkspaceSettings.recentRepositoryHistoryLimit))
+        defaults.set(recent, forKey: WorkspaceSettings.recentRepositoriesKey)
         PlayhouseDiagnostics.record("settings.write.succeeded", fields: [
             "setting": "lastSelectedRepositories",
             "repositoryCount": String(normalized.count),
-            "repositoryPaths": normalized.joined(separator: "\n")
+            "repositoryPaths": normalized.joined(separator: "\n"),
+            "recentRepositoryPaths": recent.joined(separator: "\n")
         ])
     }
 }
@@ -4237,6 +4257,13 @@ final class WorkspaceManager {
             "repositories": repositories.joined(separator: "\n")
         ])
         return repositories
+    }
+
+    /// Recently selected repositories the task header offers to add with one click.
+    func recentRepositorySuggestions(for taskID: UUID) throws -> [String] {
+        guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
+        let attached = try taskManager.get(taskID).repositoryWorktrees.map(\.repositoryPath)
+        return settingsManager.recentRepositorySuggestions(excluding: attached)
     }
 
     func roots(for taskID: UUID) throws -> [String] {
@@ -8145,6 +8172,10 @@ final class PlayhouseBridgeRuntime {
                     request.requiredStrings("repositoryPaths"),
                     on: request.requiredUUID("taskID")
                 ))
+            case "task.repository.recent":
+                let taskID = try request.requiredUUID("taskID")
+                try Self.rejectStandaloneChat(taskManager, taskID)
+                result = .object(["repositories": .array(try workspaces.recentRepositorySuggestions(for: taskID).map(BridgeValue.string))])
             case "task.repository.edit":
                 try Self.rejectStandaloneChat(taskManager, request.requiredUUID("taskID"))
                 result = try Self.value(await taskManager.updateRepository(
@@ -8223,6 +8254,7 @@ final class PlayhouseBridgeRuntime {
                     "defaultParentFolder": settings.defaultParentFolderPath.isEmpty ? .null : .string(settings.defaultParentFolderPath),
                     "defaultParentAvailable": .boolean(settings.defaultParentFolderURL != nil),
                     "lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string)),
+                    "recentRepositories": .array(settings.recentRepositories.map(BridgeValue.string)),
                     "appearance": .string(settings.appearance),
                     "defaultProvider": .string(settings.defaultConversationProvider.rawValue),
                     "tokenUsageColorMax": .integer(settings.tokenUsageColorMax),

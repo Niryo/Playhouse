@@ -957,6 +957,8 @@ struct TaskConversationView: View {
     @State private var editedBranchFrom = ""
     @State private var editedMergeTarget = ""
     @State private var editingRepositoryField: String?
+    @State private var recentRepositoryPaths: [String] = []
+    @FocusState private var focusedRepositoryField: String?
     @FocusState private var isComposerFocused: Bool
     @FocusState private var isRepositorySearchFocused: Bool
 
@@ -2277,63 +2279,17 @@ struct TaskConversationView: View {
 
     private var repositoryBadges: some View {
         let suggestedRepositoryPaths = suggestedRepositories.map(\.path)
-        return HStack(spacing: 5) {
+        let attachedRepositoryPaths = task.repositoryWorktrees.map(\.repositoryPath)
+        return HStack(spacing: 10) {
             ForEach(task.repositoryWorktrees, id: \.repositoryPath) { repository in
-                let name = URL(fileURLWithPath: repository.repositoryPath).lastPathComponent
-                Button {
-                    repositoryBeingEdited = repository
-                    editedBranch = repository.branch
-                    editedBranchFrom = repository.branchFrom
-                    editedMergeTarget = repository.mergeTarget ?? ""
-                    editingRepositoryField = nil
-                } label: {
-                    Text(name).font(.system(size: 10, weight: .medium)).lineLimit(1)
-                        .padding(.horizontal, 8).padding(.vertical, 5)
-                        .background(Color.accentColor.opacity(0.1), in: Capsule())
-                }
-                .buttonHoverPointer()
-                .nativeHelp("Edit repository settings for \(name)")
-                .buttonStyle(.plain)
-                .disabled(isReadOnly)
-                .popover(item: Binding(
-                    get: { repositoryBeingEdited?.repositoryPath == repository.repositoryPath ? RepositoryBadgeEditID(path: repository.repositoryPath) : nil },
-                    set: { if $0 == nil { repositoryBeingEdited = nil } }
-                )) { _ in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(name).font(.system(size: 12, weight: .semibold))
-                        repositoryDetailRow("Branch name", value: $editedBranch, field: "branch", placeholder: "auto", identifier: "conversation-repository-branch", editable: repository.isPending)
-                        repositoryDetailRow("Branch from", value: $editedBranchFrom, field: "from", placeholder: "default", identifier: "conversation-repository-branch-from", editable: repository.isPending)
-                        repositoryDetailRow("Merge to", value: $editedMergeTarget, field: "to", placeholder: "default", identifier: "conversation-repository-merge-target", editable: repository.isPending)
-                        HStack {
-                            Button("Remove Repository", role: .destructive) { removeConversationRepository(repository) }
-                            .buttonHoverPointer()
-                            .nativeHelp("Remove Repository")
-                                .accessibilityIdentifier("remove-conversation-repository-button")
-                            Spacer()
-                            if repository.isPending {
-                                Button("Save") { saveConversationRepository(repository) }
-                                    .buttonHoverPointer()
-                                    .nativeHelp("Save repository settings")
-                                    .buttonStyle(.borderedProminent)
-                                    .accessibilityIdentifier("save-conversation-repository-button")
-                            } else {
-                                Text("Settings are locked after the task starts.")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.secondary)
-                                    .accessibilityIdentifier("conversation-repository-settings-locked")
-                            }
-                        }
-                    }
-                    .font(.system(size: 11)).padding(12).frame(minWidth: 270, alignment: .leading)
-                }
-                .accessibilityIdentifier("conversation-repository-badge-\(name)")
+                repositoryChip(repository)
             }
             Button {
                 isShowingRepositoryPicker.toggle()
                 if suggestedRepositories.isEmpty { loadSuggestedRepositories() }
             } label: {
-                Image(systemName: "plus").font(.system(size: 10, weight: .semibold))
-                    .frame(width: 22, height: 22).background(Color.primary.opacity(0.07), in: Circle())
+                Image(systemName: "plus").font(.system(size: 12, weight: .semibold))
+                    .frame(width: 28, height: 28).background(Color.primary.opacity(0.07), in: Circle())
             }
             .buttonHoverPointer()
             .buttonStyle(.plain).nativeHelp("Add a repository").accessibilityLabel("Add repository")
@@ -2341,7 +2297,135 @@ struct TaskConversationView: View {
             // The popover content only refreshes with this view, so key it to the suggestions it lists.
             .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker.id(suggestedRepositoryPaths) }
             .disabled(isReadOnly)
+
+            if !isReadOnly, !recentRepositoryPaths.isEmpty {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.18))
+                    .frame(width: 1, height: 22)
+                    .accessibilityIdentifier("conversation-recent-repositories-separator")
+                HStack(spacing: 7) {
+                    ForEach(recentRepositoryPaths, id: \.self) { path in
+                        recentRepositoryChip(path)
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("conversation-recent-repositories")
+            }
         }
+        .onAppear { loadRecentRepositories() }
+        .onChange(of: attachedRepositoryPaths) { _, _ in loadRecentRepositories() }
+    }
+
+    private func repositoryChip(_ repository: RepositoryWorktreeRecord) -> some View {
+        let name = URL(fileURLWithPath: repository.repositoryPath).lastPathComponent
+        return Button {
+            repositoryBeingEdited = repository
+            resetRepositoryEdits(to: repository)
+            editingRepositoryField = nil
+        } label: {
+            Text(name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                .padding(.horizontal, 14).padding(.vertical, 7)
+                .background(Color.accentColor.opacity(0.16), in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.35), lineWidth: 1))
+        }
+        .buttonHoverPointer()
+        .nativeHelp("Edit repository settings for \(name)")
+        .buttonStyle(.plain)
+        .disabled(isReadOnly)
+        .popover(item: Binding(
+            get: { repositoryBeingEdited?.repositoryPath == repository.repositoryPath ? RepositoryBadgeEditID(path: repository.repositoryPath) : nil },
+            set: { if $0 == nil { repositoryBeingEdited = nil } }
+        )) { _ in
+            repositorySettingsPopover(repository, name: name)
+        }
+        .accessibilityIdentifier("conversation-repository-badge-\(name)")
+        .overlay(alignment: .topTrailing) {
+            if !isReadOnly {
+                Button { removeConversationRepository(repository) } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 16, height: 16)
+                        .background(Color(nsColor: .systemGray), in: Circle())
+                        .overlay(Circle().strokeBorder(WorkspaceTheme.windowBackground, lineWidth: 1.5))
+                        .contentShape(Circle())
+                }
+                .buttonHoverPointer()
+                .buttonStyle(.plain)
+                .nativeHelp("Remove \(name) from this task")
+                .accessibilityLabel("Remove \(name)")
+                .accessibilityIdentifier("remove-conversation-repository-\(name)")
+                .offset(x: 5, y: -5)
+            }
+        }
+    }
+
+    private func recentRepositoryChip(_ path: String) -> some View {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        return Button {
+            selectRepositories([URL(fileURLWithPath: path, isDirectory: true)], reopenPickerOnError: false)
+        } label: {
+            Text(Self.compactRepositoryName(name)).font(.system(size: 10, weight: .medium)).lineLimit(1)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8).padding(.vertical, 5)
+                .background(Color.primary.opacity(0.05), in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.1), style: StrokeStyle(lineWidth: 1, dash: [3, 2])))
+                .contentShape(Capsule())
+        }
+        .buttonHoverPointer()
+        .buttonStyle(.plain)
+        .nativeHelp("Add recent repository \(path)")
+        .accessibilityLabel("Add \(name)")
+        .accessibilityIdentifier("conversation-recent-repository-\(name)")
+        // Outside the button label so it stays its own element; clicks pass through to the chip.
+        .overlay(alignment: .topTrailing) {
+            Image(systemName: "plus")
+                .font(.system(size: 7, weight: .heavy))
+                .foregroundStyle(.white)
+                .frame(width: 13, height: 13)
+                .background(Color.accentColor, in: Circle())
+                .overlay(Circle().strokeBorder(WorkspaceTheme.windowBackground, lineWidth: 1.5))
+                .offset(x: 4, y: -4)
+                .allowsHitTesting(false)
+                .accessibilityLabel("Add")
+                .accessibilityIdentifier("conversation-recent-repository-add-badge-\(name)")
+        }
+    }
+
+    /// Keeps a recent chip hugging its name while long names stay short in the header.
+    private static func compactRepositoryName(_ name: String, limit: Int = 18) -> String {
+        guard name.count > limit else { return name }
+        let half = (limit - 1) / 2
+        return "\(name.prefix(half))…\(name.suffix(limit - 1 - half))"
+    }
+
+    private func repositorySettingsPopover(_ repository: RepositoryWorktreeRecord, name: String) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(name).font(.system(size: 15, weight: .semibold))
+                .allowsHitTesting(false)
+                .accessibilityIdentifier("conversation-repository-settings-title")
+            VStack(alignment: .leading, spacing: 8) {
+                repositoryDetailRow("Branch name", value: $editedBranch, field: "branch", placeholder: "auto", identifier: "conversation-repository-branch", repository: repository)
+                repositoryDetailRow("Branch from", value: $editedBranchFrom, field: "from", placeholder: "default", identifier: "conversation-repository-branch-from", repository: repository)
+                repositoryDetailRow("Merge to", value: $editedMergeTarget, field: "to", placeholder: "default", identifier: "conversation-repository-merge-target", repository: repository)
+            }
+            if !repository.isPending {
+                Text("Settings are locked after the task starts.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("conversation-repository-settings-locked")
+            }
+        }
+        .font(.system(size: 13))
+        .padding(18)
+        .frame(width: 360, alignment: .leading)
+        // A click anywhere outside the field being edited dismisses the edit unsaved.
+        .background(
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture { cancelRepositoryFieldEdit(repository) }
+        )
     }
 
     private var repositoryPicker: some View {
@@ -2502,12 +2586,20 @@ struct TaskConversationView: View {
                     FileManager.default.fileExists(atPath: URL(fileURLWithPath: path).appendingPathComponent(".git").path)
                 }
                 try WorkspaceSettingsManager().setLastSelectedRepositories(availablePaths)
+                loadRecentRepositories()
                 await refreshWorkspaceChanges()
             } catch {
                 errorMessage = "Couldn't add repository: \(error.localizedDescription)"
                 isShowingRepositoryPicker = reopenPickerOnError
             }
         }
+    }
+
+    private func loadRecentRepositories() {
+        guard !task.isStandaloneChat else { return }
+        recentRepositoryPaths = (try? WorkspaceManager(
+            taskManager: BoardTaskManager(modelContext: modelContext)
+        ).recentRepositorySuggestions(for: task.id)) ?? []
     }
 
     private func loadSuggestedRepositories() {
@@ -6143,7 +6235,7 @@ struct TaskConversationView: View {
         }
     }
 
-    private func saveConversationRepository(_ original: RepositoryWorktreeRecord) {
+    private func saveConversationRepository(_ original: RepositoryWorktreeRecord, field: String) {
         let branch = editedBranch.trimmingCharacters(in: .whitespacesAndNewlines)
         let branchFrom = editedBranchFrom.trimmingCharacters(in: .whitespacesAndNewlines)
         let mergeTarget = editedMergeTarget.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -6160,12 +6252,39 @@ struct TaskConversationView: View {
                     branchFrom: branchFrom,
                     mergeTarget: mergeTarget.isEmpty ? nil : mergeTarget
                 )
-                repositoryBeingEdited = nil
+                // The popover stays open on the saved value so another field can be edited next.
+                if editingRepositoryField == field { editingRepositoryField = nil }
                 errorMessage = nil
             } catch {
                 errorMessage = "Couldn't save repository settings: \(error.localizedDescription)"
             }
         }
+    }
+
+    /// The stored settings for a repository, read fresh so an edit starts from what is saved.
+    private func currentRepositoryRecord(_ repository: RepositoryWorktreeRecord) -> RepositoryWorktreeRecord {
+        task.repositoryWorktrees.first { $0.repositoryPath == repository.repositoryPath } ?? repository
+    }
+
+    private func resetRepositoryEdits(to repository: RepositoryWorktreeRecord) {
+        let current = currentRepositoryRecord(repository)
+        editedBranch = current.branch
+        editedBranchFrom = current.branchFrom
+        editedMergeTarget = current.mergeTarget ?? ""
+    }
+
+    private func beginRepositoryFieldEdit(_ field: String, repository: RepositoryWorktreeRecord) {
+        // Only one field is edited at a time; switching fields drops the unsaved one.
+        resetRepositoryEdits(to: repository)
+        editingRepositoryField = field
+        DispatchQueue.main.async { focusedRepositoryField = field }
+    }
+
+    private func cancelRepositoryFieldEdit(_ repository: RepositoryWorktreeRecord) {
+        guard editingRepositoryField != nil else { return }
+        resetRepositoryEdits(to: repository)
+        editingRepositoryField = nil
+        focusedRepositoryField = nil
     }
 
     @ViewBuilder
@@ -6175,30 +6294,67 @@ struct TaskConversationView: View {
         field: String,
         placeholder: String,
         identifier: String,
-        editable: Bool
+        repository: RepositoryWorktreeRecord
     ) -> some View {
-        HStack(spacing: 8) {
-            Text(title).foregroundStyle(.secondary).frame(width: 82, alignment: .leading)
+        let editable = repository.isPending
+        HStack(spacing: 12) {
+            Text(title).foregroundStyle(.secondary).frame(width: 96, alignment: .leading)
+                .allowsHitTesting(false)
             if editable, editingRepositoryField == field {
-                TextField(placeholder, text: value).textFieldStyle(.roundedBorder).accessibilityIdentifier(identifier)
+                TextField(placeholder, text: value)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .focused($focusedRepositoryField, equals: field)
+                    .onSubmit { saveConversationRepository(repository, field: field) }
+                    .accessibilityIdentifier(identifier)
+                    .padding(.leading, 9).padding(.trailing, 34).padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color.accentColor.opacity(0.8), lineWidth: 1.5))
+                    .overlay(alignment: .trailing) {
+                        Button { saveConversationRepository(repository, field: field) } label: {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 22, height: 22)
+                                .background(Color.accentColor, in: Circle())
+                                .contentShape(Circle())
+                        }
+                        .buttonHoverPointer()
+                        .buttonStyle(.plain)
+                        .nativeHelp("Save \(title)")
+                        .accessibilityLabel("Save \(title)")
+                        .accessibilityIdentifier("\(identifier)-save")
+                        .padding(.trailing, 5)
+                    }
             } else {
                 let displayValue = value.wrappedValue.isEmpty ? placeholder : value.wrappedValue
-                Text(displayValue)
-                    .lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityLabel(displayValue)
-                    .accessibilityIdentifier("\(identifier)-value")
-                if editable {
-                    Button {
-                        editingRepositoryField = field
-                    } label: {
-                        Image(systemName: "pencil").font(.system(size: 10, weight: .medium))
+                HStack(spacing: 8) {
+                    Text(displayValue)
+                        .fontWeight(.medium)
+                        .lineLimit(1).truncationMode(.middle)
+                        .allowsHitTesting(false)
+                        .accessibilityLabel(displayValue)
+                        .accessibilityIdentifier("\(identifier)-value")
+                    if editable {
+                        Button {
+                            beginRepositoryFieldEdit(field, repository: repository)
+                        } label: {
+                            Image(systemName: "pencil")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 24, height: 24)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonHoverPointer()
+                        .buttonStyle(.plain).nativeHelp("Edit \(title)").accessibilityLabel("Edit \(title)")
+                        .accessibilityIdentifier("\(identifier)-edit")
                     }
-                    .buttonHoverPointer()
-                    .buttonStyle(.plain).nativeHelp("Edit \(title)").accessibilityLabel("Edit \(title)")
-                    .accessibilityIdentifier("\(identifier)-edit")
                 }
+                .padding(.vertical, 6)
+                Spacer(minLength: 0)
             }
         }
+        .frame(minHeight: 34)
     }
 
     private func removeConversationRepository(_ repository: RepositoryWorktreeRecord) {
@@ -6207,8 +6363,9 @@ struct TaskConversationView: View {
                 _ = try await WorkspaceManager(
                     taskManager: BoardTaskManager(modelContext: modelContext)
                 ).removeRepository(repository.repositoryPath, from: task.id)
-                repositoryBeingEdited = nil
+                if repositoryBeingEdited?.repositoryPath == repository.repositoryPath { repositoryBeingEdited = nil }
                 errorMessage = nil
+                loadRecentRepositories()
                 await refreshWorkspaceChanges()
             } catch {
                 errorMessage = "Couldn't remove repository: \(error.localizedDescription)"

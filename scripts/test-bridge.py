@@ -4421,7 +4421,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], replaced["repositoryWorktrees"])
 
 
-    # case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation.
+    # case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field dismisses the edit without saving. The settings popover is wider than before with a larger title.
     def test_task_repository_settings_validate_persist_and_lock_after_start(self):
         task = self.create_repo_task("Repository settings", [self.primary])
         task_id = task["id"]
@@ -4866,7 +4866,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertNotIn(str(self.nested), repositories)
         self.assertNotIn(str(self.external), repositories)
 
-    # case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations.
+    # case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations. Each saved selection also feeds a newest-first recent repository history of up to ten repositories that keeps repositories after they are removed from the selection; the task repository recent command lists up to five of them that still exist and are not attached to the task, and rejects an unknown task. In the UI, attached repositories appear as large chips carrying a remove badge, and recent repositories outside the task follow a vertical separator as smaller grayed chips with a plus badge; removing an attached repository through its badge turns it into a recent chip, and clicking that chip adds it back to the task and saved selection.
     def test_new_task_remembers_last_selected_repositories(self):
         response, _ = self.call_cli("settings", "set-last-repositories", "--repo", self.secondary, "--repo", self.primary)
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
@@ -4919,6 +4919,66 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_failure(response, "invalid_argument")
         response, _ = self.call_cli("settings", "get")
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.alternate)])
+
+        # Every saved selection feeds a newest-first recent history that outlives the selection.
+        response, _ = self.call_cli("settings", "get")
+        self.assertEqual(
+            self.assert_success(response)["recentRepositories"],
+            [str(self.alternate), str(self.secondary), str(self.primary)],
+        )
+        recent, _ = self.call_cli("task", "repository", "recent", second_task_id)
+        self.assertEqual(
+            self.assert_success(recent)["repositories"],
+            [str(self.secondary), str(self.primary)],
+            "Recent suggestions should exclude repositories already attached to the task.",
+        )
+        removed, _ = self.call_cli("task", "repository", "remove", second_task_id, "--repo", self.alternate)
+        self.assertEqual(self.assert_success(removed)["repositoryWorktrees"], [])
+        response, _ = self.call_cli("settings", "get")
+        removed_settings = self.assert_success(response)
+        self.assertEqual(removed_settings["lastSelectedRepositories"], [])
+        self.assertEqual(
+            removed_settings["recentRepositories"],
+            [str(self.alternate), str(self.secondary), str(self.primary)],
+            "Removing a repository must keep it in the recent history.",
+        )
+        recent, _ = self.call_cli("task", "repository", "recent", second_task_id)
+        self.assertEqual(
+            self.assert_success(recent)["repositories"],
+            [str(self.alternate), str(self.secondary), str(self.primary)],
+            "A removed repository should be suggested again for quick re-adding.",
+        )
+        created, _ = self.call_cli("task", "create", "--title", "Quick add recent repository", "--prompt", "Fixture task description.")
+        quick_task_id = self.assert_success(created)["id"]
+        quick_added, _ = self.call_cli("task", "repository", "add", quick_task_id, "--repo", self.alternate)
+        self.assertEqual(
+            [item["repositoryPath"] for item in self.assert_success(quick_added)["repositoryWorktrees"]],
+            [str(self.alternate)],
+        )
+        recent, _ = self.call_cli("task", "repository", "recent", quick_task_id)
+        self.assertEqual(self.assert_success(recent)["repositories"], [str(self.secondary), str(self.primary)])
+
+        # The history keeps ten repositories, suggestions show five, and missing repositories are skipped.
+        extras = []
+        for index in range(11):
+            extra = self.data_directory / f"recent-repository-{index:02d}"
+            extra.mkdir()
+            subprocess.run(["git", "init", "-q", str(extra)], check=True)
+            extras.append(extra)
+        command = ["settings", "set-last-repositories"]
+        for extra in extras:
+            command.extend(["--repo", extra])
+        self.assert_success(self.call_cli(*command)[0])
+        response, _ = self.call_cli("settings", "get")
+        self.assertEqual(self.assert_success(response)["recentRepositories"], [str(extra) for extra in extras[:10]])
+        shutil.rmtree(extras[1])
+        recent, _ = self.call_cli("task", "repository", "recent", quick_task_id)
+        self.assertEqual(
+            self.assert_success(recent)["repositories"],
+            [str(extras[0])] + [str(extra) for extra in extras[2:6]],
+        )
+        response, _ = self.call_cli("task", "repository", "recent", str(uuid.uuid4()), expected_status=3)
+        self.assert_failure(response, "not_found")
 
     # case-contract: test_new_task_repository_restore_is_atomic_on_invalid_default | Applying an ordered repository batch with a valid repository followed by an empty Git repository fails without mutation: the CLI reports invalid_argument and fresh reads show no repository attachments or workspace roots; New Task automatically applies saved repositories; an invalid batch shows an error, attaches neither repository, keeps roots empty, preserves the saved order, and leaves the picker closed by default.
     def test_new_task_repository_restore_is_atomic_on_invalid_default(self):

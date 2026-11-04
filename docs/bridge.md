@@ -18,13 +18,14 @@ The daemon accepts a versioned, length-prefixed JSON request over its socket, st
 | `task repository add <task-id> --repo <path>` / `task repository add-batch <task-id> --repo <path> [--repo <path>...]` | Add repository context, prepare managed worktrees immediately, and update saved repository selection |
 | `task repository replace <task-id> --repo <path> [--repo <path>...]` | Replace the task's repository set while preserving folder-only context |
 | `task repository remove <task-id> --repo <path>` | Remove a repository from a task, subject to managed-worktree safety checks |
+| `task repository recent <task-id>` | List up to five recently selected repositories, newest first, that still exist and are not attached to the task (the task header's quick-add suggestions) |
 | `task roots get <task-id>` | Read ordered task roots |
 | `task roots set <task-id> --root <path> [--root <path>...]` | Replace ordered task roots |
 | `task delete <task-id>` | Delete a task |
 | `task pr sync <task-id>` | Push every local change on the task's PR-linked branches: commit local work, merge new remote pull request commits (conflicts are resolved by the task's provider), and push. The same sync runs automatically before a completed turn reaches Review and when the board detects a diverged pull request head, so a reviewed task never holds local-only changes; on failure the task moves to Blocked with the sync error, and a successful rerun returns it to Review |
 | `workspace suggest --parent <path>` | Find Git repository roots below a parent folder |
 | `workspace repos list` | Return the configured repository root and its discovered Git repositories |
-| `settings get` | Read the default parent folder and saved repository defaults |
+| `settings get` | Read the default parent folder, saved repository defaults, and the recent repository history |
 | `settings set-parent <path>` / `settings clear-parent` | Change the default parent folder |
 | `task create ... [--provider <codex\|claude>]` | Create a task with a specific conversation provider instead of the default |
 | `settings set-default-provider <codex\|claude>` | Change the provider new tasks start with |

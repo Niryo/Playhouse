@@ -89,6 +89,12 @@ extension View {
 enum WorkspaceSettings {
     static let defaultParentFolderKey = "defaultWorkspaceParentFolderPath"
     static let lastSelectedRepositoriesKey = "lastSelectedRepositories"
+    static let recentRepositoriesKey = "recentRepositories"
+    /// How many recently selected repositories are remembered, so enough remain
+    /// to suggest after excluding the ones already attached to a task.
+    static let recentRepositoryHistoryLimit = 10
+    /// How many recent repositories a task header suggests.
+    static let recentRepositorySuggestionLimit = 5
     static let appearanceKey = "appearance"
     static let defaultConversationProviderKey = "defaultConversationProvider"
     static let autoCreatePullRequestDefaultKey = "autoCreatePullRequestDefault"
