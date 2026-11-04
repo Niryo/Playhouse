@@ -1640,7 +1640,7 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, autoCreatePullRequestOnReview: Bool = false) async throws -> BoardTaskRecord {
+    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, autoCreatePullRequestOnReview: Bool = false, prompt: String? = nil) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw PlayhouseManagerError.invalidTitle }
         let folders = try Self.normalizeOptionalRoots(contextFolders)
@@ -1659,6 +1659,7 @@ final class BoardTaskManager {
         task.repositoryWorktrees = worktrees
         task.contextFolderPaths = folders
         task.autoCreatePullRequestOnReview = autoCreatePullRequestOnReview
+        if let prompt, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { task.savedPrompt = prompt }
         return try await withRepositoryAllocationLocks(worktrees.map(\.repositoryPath)) {
             try validateRepositoryAssignments(worktrees, excludingTaskID: nil)
             modelContext.insert(task)
@@ -1671,7 +1672,8 @@ final class BoardTaskManager {
                 "contextFolderCount": String(folders.count),
                 "contextFolders": folders.joined(separator: "\n"),
                 "status": task.status.rawValue,
-                "provider": provider.rawValue
+                "provider": provider.rawValue,
+                "hasSavedPrompt": String(task.savedPrompt != nil)
             ])
             return BoardTaskRecord(task: task)
         }
@@ -7058,7 +7060,7 @@ final class ConversationManager {
 
     private static let privateRecoveryPromptMarker = "Continue this conversation by applying the user's answer to the pending question"
     private static let privateOutcomeReminderMarker = PrivateOutcomeNudgeMarker.current
-    private static let privateOutcomeReminderPlaceholder = "[Playhouse private outcome reminder hidden]"
+    private static let privateOutcomeReminderPlaceholder = PrivatePromptPlaceholder.outcomeReminder
     private static let privateOutcomeReminderResponsePlaceholder = "[Playhouse private outcome response hidden]"
 
     /// Sent when a turn ended without reporting any outcome: ask where the work
@@ -7087,7 +7089,7 @@ final class ConversationManager {
     private static func privatePromptPlaceholder(for text: String) -> String {
         isPrivateOutcomeReminderPrompt(text)
             ? privateOutcomeReminderPlaceholder
-            : "[Private answer sent after restart]"
+            : PrivatePromptPlaceholder.recoveryAnswer
     }
 
     private static func isPrivateOutcomeReminderPrompt(_ text: String) -> Bool {
@@ -7365,9 +7367,11 @@ final class PlayhouseBridgeRuntime {
                 let roots = try request.requiredStrings("roots")
                 let repositories = try request.repositorySpecs("repositories")
                 let provider = try request.arguments["provider"]?.string.map(ConversationProvider.parse) ?? settings.defaultConversationProvider
+                let prompt = try request.requiredString("prompt")
                 result = try Self.value(await taskManager.create(
                     title: title, repositories: repositories, contextFolders: roots, provider: provider,
-                    autoCreatePullRequestOnReview: settings.autoCreatePullRequestDefault
+                    autoCreatePullRequestOnReview: settings.autoCreatePullRequestDefault,
+                    prompt: prompt
                 ))
             case "task.get", "task.show":
                 let taskID = try request.requiredUUID("taskID")

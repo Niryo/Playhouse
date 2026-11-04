@@ -144,7 +144,7 @@ class LiveWorkspace:
         return result.returncode, json.loads(lines[-1])
 
     def create_task(self, title, *roots, provider=None):
-        command = ["task", "create", "--title", title, "--provider", provider or self.provider]
+        command = ["task", "create", "--title", title, "--prompt", "Fixture task description.", "--provider", provider or self.provider]
         for root in roots or (self.first,):
             command += ["--root", root]
         return self.run_cli(*command)
@@ -391,8 +391,8 @@ def scenario_concurrent_auto_branch(ws):
 
     auto_title = f"Concurrent live auto branch {uuid.uuid4().hex[:8]}"
     auto_tasks = [
-        run_cli("task", "create", "--title", auto_title, "--repo", first, "--provider", provider),
-        run_cli("task", "create", "--title", auto_title, "--repo", first, "--provider", provider),
+        run_cli("task", "create", "--title", auto_title, "--prompt", "Fixture task description.", "--repo", first, "--provider", provider),
+        run_cli("task", "create", "--title", auto_title, "--prompt", "Fixture task description.", "--repo", first, "--provider", provider),
     ]
     auto_task_snapshots = [run_cli("task", "get", contender["id"]) for contender in auto_tasks]
     repository_paths = [

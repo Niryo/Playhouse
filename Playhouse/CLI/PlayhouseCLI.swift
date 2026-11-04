@@ -90,7 +90,7 @@ enum PlayhouseCLI {
             case "list":
                 return BridgeRequest(command: "task.list")
             case "create":
-                let flags = try parseFlags(tail, valueFlags: ["--title", "--root", "--repo", "--branch", "--branch-from", "--merge-target", "--provider"])
+                let flags = try parseFlags(tail, valueFlags: ["--title", "--root", "--repo", "--branch", "--branch-from", "--merge-target", "--provider", "--prompt"])
                 let title = try requiredFlag("--title", flags: flags).first!
                 let roots = flags["--root"] ?? []
                 let repositories = flags["--repo"] ?? []
@@ -110,6 +110,7 @@ enum PlayhouseCLI {
                     })
                 ]
                 if let provider = flags["--provider"]?.first { createArguments["provider"] = .string(provider) }
+                createArguments["prompt"] = .string(try requiredFlag("--prompt", flags: flags).first!)
                 return BridgeRequest(command: "task.create", arguments: createArguments)
             case "get", "show":
                 let id = try firstPositional(tail)
@@ -680,8 +681,8 @@ enum PlayhouseCLI {
       playhouse board list
       playhouse archive search <query>
       playhouse task list|get <task-id>
-      playhouse task create --title <title> --root <path> [--root <path>...] [--provider <codex|claude>]
-      playhouse task create --title <title> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--merge-target <repo-path>=<local-branch>]
+      playhouse task create --title <title> --prompt <text> --root <path> [--root <path>...] [--provider <codex|claude>]
+      playhouse task create --title <title> --prompt <text> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--merge-target <repo-path>=<local-branch>]
       playhouse task move <task-id> Done
       playhouse task move <task-id> Done --allow-unmerged
       playhouse task pr create <task-id>
