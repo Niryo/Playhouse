@@ -5736,6 +5736,9 @@ final class ConversationManager {
     }
 
     func queueMessage(taskID: UUID, text: String, imageDataURLs: [String] = [], asyncQuestionItemID: String? = nil) throws -> QueuedConversationMessage {
+        guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
+        }
         defer { Self.bumpVisibleRevision(taskID) }
         return try tasks.enqueueConversationMessage(
             taskID: taskID,
@@ -5772,7 +5775,7 @@ final class ConversationManager {
         try tasks.removeQueuedMessage(taskID: taskID, messageID: messageID)
     }
 
-    func steerQueuedMessage(taskID: UUID, messageID: UUID) async throws -> (message: String, accepted: Bool) {
+    func steerQueuedMessage(taskID: UUID, messageID: UUID) async throws -> (message: String, imageDataURLs: [String], accepted: Bool) {
         let item = try tasks.queuedConversationMessages(taskID: taskID).first { $0.id == messageID }
         guard let item, item.state == .queued else {
             throw BridgeCommandError(code: "invalid_transition", message: "That follow-up is no longer available to steer.")
@@ -5798,7 +5801,7 @@ final class ConversationManager {
                     Self.pendingQueuedTaskDispatchIDs.insert(taskID)
                 }
             }
-            return (item.text, accepted)
+            return (item.text, item.imageDataURLs ?? [], accepted)
         } catch {
             try? tasks.finishQueuedMessageSteering(taskID: taskID, messageID: messageID, accepted: false)
             throw error
@@ -8241,7 +8244,10 @@ final class PlayhouseBridgeRuntime {
                 let taskID = try request.requiredUUID("taskID")
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 switch request.command {
-                case "conversation.queue": result = try Self.value(conversations.queueMessage(taskID: taskID, text: request.requiredString("message")))
+                case "conversation.queue":
+                    result = try Self.value(conversations.queueMessage(
+                        taskID: taskID, text: request.arguments["message"]?.string ?? "", imageDataURLs: request.arguments["images"]?.strings ?? []
+                    ))
                 case "conversation.queue.list": result = .array(try conversations.queuedMessages(taskID: taskID).map { try Self.value($0) })
                 case "conversation.queue.retry":
                     let retried = try await conversations.retryQueuedMessage(taskID: taskID, messageID: request.requiredUUID("messageID"), onUpdate: { update in
@@ -8255,7 +8261,10 @@ final class PlayhouseBridgeRuntime {
                     result = .object(["removed": .boolean(true)])
                 case "conversation.queue.steer":
                     let steered = try await conversations.steerQueuedMessage(taskID: taskID, messageID: request.requiredUUID("messageID"))
-                    result = .object(["text": .string(steered.message), "accepted": .boolean(true), "queued": .boolean(!steered.accepted)])
+                    result = .object([
+                        "text": .string(steered.message), "images": .array(steered.imageDataURLs.map(BridgeValue.string)),
+                        "accepted": .boolean(true), "queued": .boolean(!steered.accepted)
+                    ])
                 default:
                     let accepted = try await conversations.steer(taskID: taskID, text: request.arguments["message"]?.string ?? "", imageDataURLs: request.arguments["images"]?.strings ?? [])
                     if request.arguments["queueIfMissed"]?.bool == false {

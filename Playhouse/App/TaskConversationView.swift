@@ -3907,6 +3907,15 @@ struct TaskConversationView: View {
                                 .lineLimit(1)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .accessibilityIdentifier("queued-message-text-\(queued.id.uuidString)")
+                            if let imageCount = queued.imageDataURLs?.count, imageCount > 0 {
+                                Label("\(imageCount)", systemImage: "photo")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                                    .nativeHelp(imageCount == 1 ? "1 attached image" : "\(imageCount) attached images")
+                                    .accessibilityElement(children: .ignore)
+                                    .accessibilityLabel(imageCount == 1 ? "1 attached image" : "\(imageCount) attached images")
+                                    .accessibilityIdentifier("queued-message-images-\(queued.id.uuidString)")
+                            }
                             if queued.state == .needsAction {
                                 Text("Needs action")
                                     .font(.system(size: 12))
@@ -5224,10 +5233,12 @@ struct TaskConversationView: View {
 
     private func queueDraftForAfterTurn() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        let imageDataURLs = pendingImages.map(\.dataURL)
+        guard !text.isEmpty || !imageDataURLs.isEmpty else { return }
         do {
-            _ = try conversationManager.queueMessage(taskID: task.id, text: text)
+            _ = try conversationManager.queueMessage(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
             draft = ""
+            clearSteeredDraftImages()
             refreshQueuedMessages()
             errorMessage = nil
         } catch { errorMessage = error.localizedDescription }
@@ -5256,7 +5267,7 @@ struct TaskConversationView: View {
                     errorMessage = nil
                     return
                 }
-                showLocalSteer(outcome.message)
+                showLocalSteer(outcome.message, imageDataURLs: outcome.imageDataURLs)
                 refreshQueuedMessages()
                 errorMessage = nil
             } catch {
@@ -5278,7 +5289,7 @@ struct TaskConversationView: View {
                 guard accepted else {
                     _ = try await conversationManager.queueMissedSteer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
                     draft = ""
-                    pendingImages.removeAll()
+                    clearSteeredDraftImages()
                     refreshQueuedMessages()
                     if let history = try? await conversationManager.history(taskID: task.id, messageLimit: Self.historyPageSize) {
                         applyHistoryMessages(history)
@@ -5289,7 +5300,7 @@ struct TaskConversationView: View {
                 }
                 showLocalSteer(text, imageDataURLs: imageDataURLs)
                 draft = ""
-                pendingImages.removeAll()
+                clearSteeredDraftImages()
                 errorMessage = nil
             } catch {
                 refreshQueuedMessages()
@@ -5358,6 +5369,14 @@ struct TaskConversationView: View {
             throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
         }
         pendingImages.append(PendingImage(dataURL: "data:\(encoded.mimeType);base64,\(encoded.data.base64EncodedString())", image: previewImage))
+        persistDraftImages()
+    }
+
+    /// Images handed to the active turn or the queue leave the saved draft too,
+    /// so reopening the task doesn't restore them to the composer.
+    private func clearSteeredDraftImages() {
+        guard !pendingImages.isEmpty else { return }
+        pendingImages.removeAll()
         persistDraftImages()
     }
 
