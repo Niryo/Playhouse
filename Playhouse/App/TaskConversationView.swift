@@ -37,6 +37,63 @@ private final class TextHeightMeasurer {
     }
 }
 
+/// Inline `code` in conversation text: a tinted run on a rounded pill, as code editors show it.
+private enum InlineCodeStyle {
+    /// Marks inline code runs; its value is the pill's fill color.
+    static let attribute = NSAttributedString.Key("PlayhouseInlineCode")
+    /// Room kept clear on each side of a run for its pill.
+    static let horizontalPadding: CGFloat = 4
+
+    static let textColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.91, green: 0.79, blue: 0.56, alpha: 1)
+            : NSColor(srgbRed: 0.66, green: 0.22, blue: 0.11, alpha: 1)
+    }
+    static let backgroundColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor.white.withAlphaComponent(0.09)
+            : NSColor.black.withAlphaComponent(0.06)
+    }
+
+    /// Styles `range` of `text` as inline code. Kerning, not added characters, makes room for the
+    /// pill, so comment offsets into the text are unchanged.
+    static func apply(to text: NSMutableAttributedString, range: NSRange) {
+        guard range.length > 0 else { return }
+        text.addAttributes([.foregroundColor: textColor, attribute: backgroundColor], range: range)
+        text.addAttribute(.kern, value: horizontalPadding, range: NSRange(location: NSMaxRange(range) - 1, length: 1))
+        if range.location > 0 {
+            text.addAttribute(.kern, value: horizontalPadding, range: NSRange(location: range.location - 1, length: 1))
+        }
+    }
+}
+
+/// Draws each inline code run's pill behind its glyphs, one per line the run spans.
+private final class InlineCodeLayoutManager: NSLayoutManager {
+    override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: NSPoint) {
+        super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
+        guard let storage = textStorage, let container = textContainers.first else { return }
+        let characters = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
+        storage.enumerateAttribute(InlineCodeStyle.attribute, in: characters) { value, range, _ in
+            guard let color = value as? NSColor else { return }
+            let font = storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont
+                ?? NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+            let codeGlyphs = glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            enumerateLineFragments(forGlyphRange: codeGlyphs) { lineRect, _, _, lineGlyphs, _ in
+                let piece = NSIntersectionRange(lineGlyphs, codeGlyphs)
+                guard piece.length > 0 else { return }
+                var rect = self.boundingRect(forGlyphRange: piece, in: container)
+                let baseline = lineRect.minY + self.location(forGlyphAt: piece.location).y
+                rect.origin.y = baseline - font.ascender - 2
+                rect.size.height = font.ascender - font.descender + 4
+                rect.origin.x -= InlineCodeStyle.horizontalPadding - 1
+                rect.size.width += InlineCodeStyle.horizontalPadding - 1
+                color.setFill()
+                NSBezierPath(roundedRect: rect.offsetBy(dx: origin.x, dy: origin.y), xRadius: 4, yRadius: 4).fill()
+            }
+        }
+    }
+}
+
 @Observable
 private final class ComposerDraftModel {
     var text = ""
@@ -140,30 +197,51 @@ private struct AssistantProseLayout {
         return false
     }
 
+    /// The text's own size and color: the reply's bullets read as part of the text, like an
+    /// editor's rendered Markdown, rather than as faint annotations beside it.
+    static let markerFont = NSFont.systemFont(ofSize: 16)
+    static let bulletFont = NSFont.systemFont(ofSize: 16, weight: .black)
+    /// Indent shared by every item, so bullets and numbers line up down a list.
+    private static let listIndent: CGFloat = 26
+
+    private static func isListItem(_ kind: AssistantMarkdownBlock.Kind) -> Bool {
+        switch kind {
+        case .listItem, .orderedListItem: true
+        case .heading, .paragraph, .codeBlock, .table: false
+        }
+    }
+
     init(blocks: [AssistantMarkdownBlock], responseAnnotations: [ResponseAnnotationReference]) {
-        let markerFont = NSFont.systemFont(ofSize: 16)
         let text = NSMutableAttributedString()
         var placed: [PlacedBlock] = []
         for (index, block) in blocks.enumerated() {
             let lineStart = text.length
             let style = NSMutableParagraphStyle()
             style.lineSpacing = 4
-            // Matches the gap separate block views had: their insets plus the stack's spacing,
-            // and the extra padding below a paragraph.
-            if case .paragraph = block.kind { style.paragraphSpacing = 20 } else { style.paragraphSpacing = 15 }
-            let marker: String? = switch block.kind {
-            case .listItem: "•"
-            case .orderedListItem(let number): "\(number)."
+            // A list's items sit close together; paragraphs and whole lists keep more room.
+            let next = index + 1 < blocks.count ? blocks[index + 1].kind : nil
+            switch block.kind {
+            case .heading: style.paragraphSpacing = 8
+            case .listItem, .orderedListItem:
+                style.paragraphSpacing = next.map(Self.isListItem) == true ? 6 : 14
+            case .paragraph, .codeBlock, .table:
+                style.paragraphSpacing = next.map(Self.isListItem) == true ? 10 : 14
+            }
+            let marker: (text: String, font: NSFont)? = switch block.kind {
+            case .listItem: ("•", Self.bulletFont)
+            case .orderedListItem(let number): ("\(number).", Self.markerFont)
             case .heading, .paragraph, .codeBlock, .table: nil
             }
             if let marker {
                 // Wrapped lines align under the text, past the widest marker ("10.", "100.").
-                let indent = ceil((marker as NSString).size(withAttributes: [.font: markerFont]).width) + 11
+                let markerWidth = ceil((marker.text as NSString).size(withAttributes: [.font: marker.font]).width)
+                let indent = max(Self.listIndent, markerWidth + 10)
+                style.firstLineHeadIndent = 6
                 style.headIndent = indent
                 style.tabStops = [NSTextTab(textAlignment: .left, location: indent)]
-                text.append(NSAttributedString(string: marker + "\t", attributes: [
-                    .font: markerFont,
-                    .foregroundColor: NSColor.secondaryLabelColor,
+                text.append(NSAttributedString(string: marker.text + "\t", attributes: [
+                    .font: marker.font,
+                    .foregroundColor: NSColor.labelColor,
                     .paragraphStyle: style,
                 ]))
             }
@@ -323,6 +401,132 @@ private struct CodeBlockTextView: NSViewRepresentable {
         let width = max(40, proposal.width ?? 500)
         let contentHeight = context.coordinator.height(forWidth: width)
         return CGSize(width: width, height: ceil(contentHeight) + 2)
+    }
+}
+
+/// One tool call in the conversation timeline: the tool's name and what the call was for, then
+/// what it was given (IN) and what it returned (OUT), clipped to a few lines until expanded.
+private struct ToolCallTimelineRow: View {
+    let activity: ConversationActivity
+
+    @State private var isExpanded = false
+
+    private static let collapsedLineLimit = 3
+
+    private var name: String {
+        if activity.toolKind == "mcp" { return activity.title }
+        return activity.tool ?? activity.title
+    }
+
+    private var summary: String? {
+        if let summary = activity.summary, !summary.isEmpty { return summary }
+        guard activity.input == nil else { return nil }
+        return activity.detail.split(separator: "\n").first.map(String.init)
+    }
+
+    private var output: String? {
+        guard let output = activity.output?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty else { return nil }
+        return output
+    }
+
+    private var statusColor: Color {
+        switch activity.status.lowercased() {
+        case "completed": .green
+        case "failed": .red
+        case "interrupted", "stopped": .orange
+        default: .accentColor
+        }
+    }
+
+    /// Whether either block holds more than its collapsed lines show.
+    private var canExpand: Bool {
+        [activity.input, output].compactMap { $0 }.contains { text in
+            text.count > 240 || text.split(separator: "\n", omittingEmptySubsequences: false).count > Self.collapsedLineLimit
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Circle()
+                .fill(statusColor)
+                .frame(width: 7, height: 7)
+                .padding(.top, 6)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(name)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(WorkspaceTheme.conversationText)
+                        .accessibilityIdentifier("conversation-tool-call-name-\(activity.id)")
+                    if let summary {
+                        Text(summary)
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .accessibilityIdentifier("conversation-tool-call-summary-\(activity.id)")
+                    }
+                    Spacer(minLength: 0)
+                    if canExpand {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
+                        } label: {
+                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 20, height: 20)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .buttonHoverPointer()
+                        .nativeHelp(isExpanded ? "Show less" : "Show full input and output")
+                        .accessibilityLabel(isExpanded ? "Show less" : "Show full input and output")
+                        .accessibilityIdentifier("conversation-tool-call-toggle-\(activity.id)")
+                    }
+                }
+                if activity.input != nil || output != nil {
+                    VStack(alignment: .leading, spacing: 0) {
+                        if let input = activity.input {
+                            ioRow(label: "IN", text: input, identifier: "conversation-tool-call-input-\(activity.id)")
+                        }
+                        if activity.input != nil, output != nil {
+                            Divider().opacity(0.35)
+                        }
+                        if let output {
+                            ioRow(label: "OUT", text: output, identifier: "conversation-tool-call-output-\(activity.id)")
+                        }
+                    }
+                    .background(WorkspaceTheme.inputBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(name) \(activity.statusLabel)")
+        .accessibilityIdentifier("conversation-tool-call-\(activity.id)")
+    }
+
+    private func ioRow(label: String, text: String, identifier: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 30, alignment: .leading)
+                .accessibilityHidden(true)
+            Text(text)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(WorkspaceTheme.conversationText)
+                .lineLimit(isExpanded ? nil : Self.collapsedLineLimit)
+                .truncationMode(.tail)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityLabel("\(label) \(text)")
+                .accessibilityIdentifier(identifier)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 }
 
@@ -685,6 +889,9 @@ struct TaskConversationView: View {
     @State private var currentTextSelection: AnnotationSelection?
     @State private var annotationComment = ""
     @State private var activities: [ConversationActivity] = []
+    /// Tool calls from every loaded turn, each shown in the timeline after the
+    /// message it followed.
+    @State private var timelineActivities: [ConversationActivity] = []
     /// A live turn shows its work: the disclosure opens as the turn starts and
     /// folds back into Worked for once the turn settles. A collapse the reader
     /// performs mid-turn stays collapsed until the next turn starts.
@@ -955,6 +1162,7 @@ struct TaskConversationView: View {
             let earlier = page.messages.filter { !loadedIDs.contains($0.id) }
             messages = earlier + messages
             earlierStoredMessageCount = page.earlierMessageCount ?? 0
+            mergeTimelineActivities(page.timelineActivities)
             collapsedProgressTurnIDs.formUnion(earlier.lazy
                 .filter { $0.role == .assistant && $0.phase == "final_answer" }
                 .compactMap(\.turnID))
@@ -978,6 +1186,7 @@ struct TaskConversationView: View {
     /// trimmed back to the messages already loaded, so a reload never pulls
     /// the whole conversation into memory.
     private func applyHistoryMessages(_ history: ConversationHistory, _ incoming: [ConversationMessage]? = nil) {
+        defer { mergeTimelineActivities(history.timelineActivities) }
         let incoming = incoming ?? history.messages
         if let earlierCount = history.earlierMessageCount {
             if let first = incoming.first, let overlap = messages.firstIndex(where: { $0.id == first.id }) {
@@ -997,6 +1206,16 @@ struct TaskConversationView: View {
         } else {
             messages = incoming
             earlierStoredMessageCount = 0
+        }
+    }
+
+    /// Adds a history read's placed tool calls, replacing earlier copies of the
+    /// same calls, and drops calls whose message is no longer loaded.
+    private func mergeTimelineActivities(_ incoming: [ConversationActivity]) {
+        let incomingIDs = Set(incoming.map(\.id))
+        let loadedMessageIDs = Set(messages.map(\.id))
+        timelineActivities = (timelineActivities.filter { !incomingIDs.contains($0.id) } + incoming).filter {
+            $0.afterMessageID.map(loadedMessageIDs.contains) == true
         }
     }
 
@@ -2400,6 +2619,7 @@ struct TaskConversationView: View {
                         // A plain stack: a LazyVStack of these AppKit-backed rows could keep
                         // re-estimating its rows after a send and never finish layout. At most
                         // a recent window of messages renders, and older batches load on demand.
+                        let inlineTools = inlineToolCalls.byMessageID
                         VStack(alignment: .leading, spacing: 16) {
                             ForEach(goalAchievementTimelineEntries.filter {
                                 goalAchievementAnchorMessageID(for: $0) == nil
@@ -2418,7 +2638,7 @@ struct TaskConversationView: View {
                                 if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
                                     activityList
                                 }
-                                messageBubble(message)
+                                transcriptEntry(message)
                                     .id(message.id)
                                     .background {
                                         if message.id == latestConversationTurnStartID {
@@ -2440,6 +2660,9 @@ struct TaskConversationView: View {
                                 }) { entry in
                                     goalAchievementTimelineRow(entry)
                                         .id(entry.id)
+                                }
+                                ForEach(inlineTools[message.id] ?? []) { activity in
+                                    ToolCallTimelineRow(activity: activity)
                                 }
                                 let nextOrder = conversationMessages.first(where: {
                                     guard let current = message.timelineOrder, let candidate = $0.timelineOrder else { return false }
@@ -2662,6 +2885,23 @@ struct TaskConversationView: View {
         activities.filter { $0.isSubagent && $0.isActive }
     }
 
+    /// Earlier turns' tool calls, keyed by the message each followed. The latest turn shows its
+    /// calls in Working for instead, and folds them into Worked for once it finishes.
+    private var inlineToolCalls: (byMessageID: [String: [ConversationActivity]], ids: Set<String>) {
+        guard !timelineActivities.isEmpty else { return ([:], []) }
+        var turnByMessageID: [String: String] = [:]
+        for message in messages { if let turnID = message.turnID { turnByMessageID[message.id] = turnID } }
+        let latestTurnID = latestConversationTurnID
+        var byMessageID: [String: [ConversationActivity]] = [:]
+        var ids = Set<String>()
+        for activity in timelineActivities where activity.isTimelineToolCall {
+            guard let anchor = activity.afterMessageID, let turnID = turnByMessageID[anchor],
+                  turnID != latestTurnID, ids.insert(activity.id).inserted else { continue }
+            byMessageID[anchor, default: []].append(activity)
+        }
+        return (byMessageID, ids)
+    }
+
     /// Keep the latest live non-agent operation in the conversation timeline.
     /// Earlier live operations remain available in the expanded activity list.
     private var activeProcess: ConversationActivity? {
@@ -2717,6 +2957,7 @@ struct TaskConversationView: View {
                         }
                     }
                     let activeIDsOutside = Set(activeSubagents.map(\.id) + [activeProcess?.id].compactMap { $0 })
+                        .union(inlineToolCalls.ids)
                     ForEach(activities.filter {
                         !$0.isSubagent && !$0.isContextCompaction && !activeIDsOutside.contains($0.id)
                     }) { activity in
@@ -2758,7 +2999,32 @@ struct TaskConversationView: View {
         .accessibilityIdentifier("goal-achievement-timeline-row")
     }
 
-    private func subagentTimelineRow(_ activity: ConversationActivity) -> some View {
+    /// A message as the transcript shows it. A background agent's report is the agent's work, not
+    /// the parent's reply, so it gets the agent's row, which opens the report, instead of a bubble.
+    @ViewBuilder
+    private func transcriptEntry(_ message: ConversationMessage) -> some View {
+        let reportPrefix = ConversationTranscriptStore.backgroundAgentReportMessagePrefix
+        if message.role == .assistant, message.phase == "subagent_report", message.id.hasPrefix(reportPrefix) {
+            let agentID = String(message.id.dropFirst(reportPrefix.count))
+            subagentTimelineRow(
+                agentReportActivity(agentID: agentID, report: message.text),
+                identifier: "agent-report-row-\(agentID)"
+            )
+        } else {
+            messageBubble(message)
+        }
+    }
+
+    /// The agent a report belongs to, carrying the report the agent window shows. A report whose
+    /// activity isn't loaded still opens, under a generic name.
+    private func agentReportActivity(agentID: String, report: String) -> ConversationActivity {
+        var activity = activities.first { $0.childThreadID == agentID || $0.id == agentID }
+            ?? ConversationActivity(id: agentID, title: "Background agent", detail: report, status: "completed", childThreadID: agentID)
+        activity.detail = report
+        return activity
+    }
+
+    private func subagentTimelineRow(_ activity: ConversationActivity, identifier: String? = nil) -> some View {
         // The icon sits beside the button, not in its label, because a macOS
         // button folds its label into one accessible element and the icon must
         // stay a distinct image.
@@ -2806,12 +3072,21 @@ struct TaskConversationView: View {
             .buttonHoverPointer()
             .nativeHelp("Open the read-only conversation for this agent")
             .buttonStyle(.plain)
+            // Beside the button, like the icon, so it stays its own element.
+            Image(systemName: "chevron.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 16, height: 30)
+                .contentShape(Rectangle())
+                .onTapGesture { openSubagent(activity) }
+                .accessibilityLabel("Open \(activity.title)")
+                .accessibilityIdentifier("subagent-row-chevron")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(activity.title) \(activity.timelineStatus)")
         .accessibilityValue([activity.detail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
-        .accessibilityIdentifier("codex-subagent-row-\(activity.childThreadID ?? activity.id)")
+        .accessibilityIdentifier(identifier ?? "codex-subagent-row-\(activity.childThreadID ?? activity.id)")
     }
 
     @ViewBuilder
@@ -3063,8 +3338,9 @@ struct TaskConversationView: View {
                 .font(.system(size: 9, weight: .semibold))
                 .accessibilityIdentifier("codex-activity-chevron")
         }
-        .contentShape(Rectangle())
         .frame(maxWidth: .infinity, alignment: .leading)
+        // After the frame, so the whole row the button spans takes the click.
+        .contentShape(Rectangle())
     }
 
     @ViewBuilder
@@ -3365,7 +3641,9 @@ struct TaskConversationView: View {
             guard let intent = run.inlinePresentationIntent else { continue }
             let font: NSFont
             if intent.contains(.code) {
-                font = NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
+                // Slightly smaller than the prose, which a monospaced face reads larger than.
+                font = NSFont.monospacedSystemFont(ofSize: baseFont.pointSize - 1, weight: .regular)
+                InlineCodeStyle.apply(to: result, range: NSRange(run.range, in: attributed))
             } else {
                 var traits: NSFontTraitMask = []
                 if intent.contains(.stronglyEmphasized) { traits.insert(.boldFontMask) }
@@ -3598,7 +3876,11 @@ struct TaskConversationView: View {
     }
 
     private func markdownBlockText(_ block: AssistantMarkdownBlock) -> some View {
-        let formatted = Self.markdownNSAttributedString(block.text, baseFont: block.font)
+        let formatted = NSMutableAttributedString(attributedString: Self.markdownNSAttributedString(block.text, baseFont: block.font))
+        // SwiftUI text has no pill drawing of its own; the inline code tint is drawn as a plain background.
+        formatted.enumerateAttribute(InlineCodeStyle.attribute, in: NSRange(location: 0, length: formatted.length)) { value, range, _ in
+            if let color = value as? NSColor { formatted.addAttribute(.backgroundColor, value: color, range: range) }
+        }
         return Text((try? AttributedString(formatted, including: \.appKit)) ?? Self.markdownAttributedText(block.text))
     }
 
@@ -3608,7 +3890,7 @@ struct TaskConversationView: View {
     /// rows line up exactly, rather than approximating the gap between two different text-layout
     /// engines (SwiftUI `Text` vs. AppKit `NSTextView`) with a guessed padding constant.
     private func markerText(_ marker: String) -> some View {
-        let markerFont = NSFont.systemFont(ofSize: 16)
+        let markerFont = marker == "•" ? AssistantProseLayout.bulletFont : AssistantProseLayout.markerFont
         // Measure the marker itself instead of a fixed column width, so two-digit (or longer)
         // ordered-list numbers ("10.", "100.") get enough width and never wrap/clip.
         let markerWidth = NSAttributedString(string: marker, attributes: [.font: markerFont]).size().width
@@ -3618,7 +3900,7 @@ struct TaskConversationView: View {
             onSelection: { _, _, _ in },
             formattedText: NSAttributedString(string: marker, attributes: [
                 .font: markerFont,
-                .foregroundColor: NSColor.secondaryLabelColor,
+                .foregroundColor: NSColor.labelColor,
             ]),
             font: markerFont
         )
@@ -3805,7 +4087,9 @@ struct TaskConversationView: View {
                 lastOrderedNumber = nil
                 blocks.append(AssistantMarkdownBlock(id: index, kind: .listItem, text: String(line.dropFirst(2))))
             } else if let ordered = orderedListPrefix(line[...]),
-                      paragraphLines.isEmpty,
+                      // As in CommonMark, only a list starting at 1 may interrupt a paragraph,
+                      // so a wrapped line that happens to begin "3. " stays part of its paragraph.
+                      paragraphLines.isEmpty || ordered.number == 1,
                       ordered.number == (lastOrderedNumber.map { $0 + 1 } ?? 1) {
                 flushParagraph()
                 lastOrderedNumber = ordered.number
@@ -3907,6 +4191,15 @@ struct TaskConversationView: View {
                                 .lineLimit(1)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .accessibilityIdentifier("queued-message-text-\(queued.id.uuidString)")
+                            if let imageCount = queued.imageDataURLs?.count, imageCount > 0 {
+                                Label("\(imageCount)", systemImage: "photo")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                                    .nativeHelp(imageCount == 1 ? "1 attached image" : "\(imageCount) attached images")
+                                    .accessibilityElement(children: .ignore)
+                                    .accessibilityLabel(imageCount == 1 ? "1 attached image" : "\(imageCount) attached images")
+                                    .accessibilityIdentifier("queued-message-images-\(queued.id.uuidString)")
+                            }
                             if queued.state == .needsAction {
                                 Text("Needs action")
                                     .font(.system(size: 12))
@@ -4511,6 +4804,8 @@ struct TaskConversationView: View {
             restoreAnnotations(from: history.messages)
             answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
             activities = history.activities
+            timelineActivities = []
+            mergeTimelineActivities(history.timelineActivities)
             providerBoundaries = history.providerBoundaries
             activeGoal = try? await conversationManager.goal(taskID: task.id)
             let defaults = WorkspaceSettings.preferencesStore
@@ -5224,10 +5519,12 @@ struct TaskConversationView: View {
 
     private func queueDraftForAfterTurn() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        let imageDataURLs = pendingImages.map(\.dataURL)
+        guard !text.isEmpty || !imageDataURLs.isEmpty else { return }
         do {
-            _ = try conversationManager.queueMessage(taskID: task.id, text: text)
+            _ = try conversationManager.queueMessage(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
             draft = ""
+            clearSteeredDraftImages()
             refreshQueuedMessages()
             errorMessage = nil
         } catch { errorMessage = error.localizedDescription }
@@ -5256,7 +5553,7 @@ struct TaskConversationView: View {
                     errorMessage = nil
                     return
                 }
-                showLocalSteer(outcome.message)
+                showLocalSteer(outcome.message, imageDataURLs: outcome.imageDataURLs)
                 refreshQueuedMessages()
                 errorMessage = nil
             } catch {
@@ -5278,7 +5575,7 @@ struct TaskConversationView: View {
                 guard accepted else {
                     _ = try await conversationManager.queueMissedSteer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
                     draft = ""
-                    pendingImages.removeAll()
+                    clearSteeredDraftImages()
                     refreshQueuedMessages()
                     if let history = try? await conversationManager.history(taskID: task.id, messageLimit: Self.historyPageSize) {
                         applyHistoryMessages(history)
@@ -5289,7 +5586,7 @@ struct TaskConversationView: View {
                 }
                 showLocalSteer(text, imageDataURLs: imageDataURLs)
                 draft = ""
-                pendingImages.removeAll()
+                clearSteeredDraftImages()
                 errorMessage = nil
             } catch {
                 refreshQueuedMessages()
@@ -5358,6 +5655,14 @@ struct TaskConversationView: View {
             throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
         }
         pendingImages.append(PendingImage(dataURL: "data:\(encoded.mimeType);base64,\(encoded.data.base64EncodedString())", image: previewImage))
+        persistDraftImages()
+    }
+
+    /// Images handed to the active turn or the queue leave the saved draft too,
+    /// so reopening the task doesn't restore them to the composer.
+    private func clearSteeredDraftImages() {
+        guard !pendingImages.isEmpty else { return }
+        pendingImages.removeAll()
         persistDraftImages()
     }
 
@@ -6216,6 +6521,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
         // which it misjudges inside a SwiftUI scroll view, leaving a reply taller than the
         // viewport blank. Its layout manager is also needed for selection and hover hit-testing.
         let view = CommentTrackingTextView(usingTextLayoutManager: false)
+        view.textContainer?.replaceLayoutManager(InlineCodeLayoutManager())
         view.isEditable = false
         view.isSelectable = true
         if isAssistantText {
