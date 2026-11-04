@@ -1793,6 +1793,8 @@ private struct TaskCardView: View {
         case .green: .green
         case .red: .red
         case .pending: .orange
+        // GitHub's merged purple.
+        case .merged: Color(red: 0.64, green: 0.44, blue: 0.97)
         }
     }
 
@@ -1801,6 +1803,7 @@ private struct TaskCardView: View {
         case .green: "checks passing"
         case .red: "checks failing or conflicted"
         case .pending: "checks running"
+        case .merged: "merged"
         }
     }
 

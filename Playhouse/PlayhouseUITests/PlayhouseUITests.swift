@@ -1502,7 +1502,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
     }
 
-    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls.
+    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
     func test_task_done_preserves_worktree_and_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture().merging(Self.prCheckCooldownEnvironment) { $1 }
@@ -1608,6 +1608,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(completionButton.exists, "The task should remain incomplete while any linked PR is unmerged.")
         XCTAssertTrue(prLink.exists)
         XCTAssertTrue(secondPRLink.exists)
+        XCTAssertTrue(waitUntil({ (prLink.value as? String) == "merged" }, timeout: 10), "The merged PR number should turn purple while its sibling is open.")
+        XCTAssertEqual(secondPRLink.value as? String, "green", "The open PR keeps its check colour.")
+        attachScreenshot(named: "One of two PRs merged: its number is purple, no checkmark yet", fullScreen: true)
         let rapidFocusCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
         for _ in 0..<4 {
             activateOtherAppThenReturn()
@@ -1630,6 +1633,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(completionButton.exists, "Either unmerged PR should suppress task completion.")
         XCTAssertTrue(prLink.exists)
         XCTAssertTrue(secondPRLink.exists)
+        XCTAssertTrue(waitUntil({ (secondPRLink.value as? String) == "merged" }, timeout: 10), "Either merged PR number turns purple, whichever order they merge in.")
         Thread.sleep(forTimeInterval: Self.prCheckCooldown + 0.1)
         try "123=merged\n456=merged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
         let fourthCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count

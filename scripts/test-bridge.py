@@ -2517,7 +2517,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(rejected.get("codexThreadID"))
         self.assertEqual(self.run_git(self.primary, "worktree", "list", "--porcelain").count("worktree "), claimed_count)
 
-    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls.
+    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
     def test_task_done_preserves_worktree_and_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary, self.secondary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
@@ -2558,6 +2558,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         linked = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(linked["repositoryWorktrees"][0]["pullRequestURL"], pr_url)
         self.assertEqual(linked["repositoryWorktrees"][1]["pullRequestURL"], second_pr_url)
+        partial = self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual({item["number"]: item["health"] for item in partial}, {123: "merged", 456: "green"}, "Only the merged PR reads as merged while its sibling is open.")
         (self.primary / "target-only.txt").write_text("Master advanced after this task branch was created.\n", encoding="utf-8")
         self.run_git(self.primary, "add", "target-only.txt")
         self.run_git(self.primary, "commit", "-m", "Advance merge target while task is under review")
@@ -2578,7 +2580,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         gh_state.write_text("123=merged\n456=merged\n", encoding="utf-8")
         response, _ = self.call_cli(*move_command, extra_environment=gh_environment)
         self.assertEqual(self.assert_success(response)["status"], "Done")
-        self.assertEqual(gh_calls.read_text(encoding="utf-8").splitlines(), ["123", "456", "123", "456"])
+        calls = gh_calls.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(sorted(calls), ["123", "123", "123", "456", "456", "456"], "The status probe and the Done verification each check both PRs once, plus the earlier move attempt.")
         self.assertTrue(worktree.exists(), "Moving a task to Done must preserve its worktree.")
         self.assertTrue(self.branch_exists(self.primary, "generated-fixture-title"))
         self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_head, "Moving a task to Done must not merge into the local target.")
@@ -3077,6 +3080,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(merged["action"], "merged")
         self.assertEqual(merged["mergedPullRequests"], [811])
         self.assertTrue(merged["states"][0]["merged"])
+        self.assertEqual(merged["states"][0]["health"], "merged", "A merged PR reports the merged (purple) health.")
         self.assertEqual(merges(), ["merged\t811\t--squash"], "A green PR is merged once with the first allowed method.")
         merge_call = [line for line in merge_log.read_text(encoding="utf-8").splitlines() if line.startswith("merged\t811")]
         self.assertEqual(len(merge_call), 1)
