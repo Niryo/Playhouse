@@ -1143,7 +1143,7 @@ enum PullRequestChecksState: String, Codable, Sendable {
 
 /// The colour a linked PR number shows on its task card.
 enum PullRequestHealth: String, Codable, Sendable {
-    case green, red, pending
+    case green, red, pending, merged
 }
 
 struct PullRequestReviewState: Codable, Sendable {
@@ -1178,7 +1178,7 @@ struct PullRequestReviewState: Codable, Sendable {
         self.checks = checks
         self.failingChecks = failingChecks
         self.unresolvedReviewThreads = unresolvedReviewThreads
-        if merged { health = .green }
+        if merged { health = .merged }
         else if checks == .failure || mergeable == "CONFLICTING" { health = .red }
         else if checks == .pending { health = .pending }
         else { health = .green }
