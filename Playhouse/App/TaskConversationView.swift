@@ -785,6 +785,14 @@ struct TaskConversationView: View {
         conversationRuntime.pendingUserInputRequest(forThread: task.activeConversationID ?? "")
     }
 
+    /// The plan exists only once a first message was sent and the agent is not
+    /// waiting on the user's answer to its questions.
+    private var canShowStartImplementing: Bool {
+        conversationMode == .plan && !isResponding && !isReadOnly
+            && messages.contains(where: { $0.role == .user })
+            && userInputRequest == nil && providerPendingUserInputRequest == nil
+    }
+
     private var isConversationTurnActive: Bool {
         conversationRuntime.isTurnActive(threadID: task.activeConversationID ?? "")
     }
@@ -4141,7 +4149,7 @@ struct TaskConversationView: View {
                     .accessibilityLabel(isEnteringGoal ? "Goal" : "Conversation mode: \(conversationMode.title)")
                     .accessibilityIdentifier("conversation-mode-menu")
 
-                    if conversationMode == .plan && !isResponding && !isReadOnly {
+                    if canShowStartImplementing {
                         Button(action: startImplementingPlan) {
                             Text("Start Implementing")
                                 .font(.system(size: 12, weight: .semibold))
