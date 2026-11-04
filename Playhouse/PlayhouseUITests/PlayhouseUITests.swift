@@ -8732,6 +8732,104 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
+    // case-contract: test_conversation_follows_latest_streamed_messages | While a Claude Code fixture reply streams in held stages below its question, mid-turn CLI/XPC history holds every streamed line before the newest, which Claude may still extend as its answer, once each and in order after the question, with no final line until the reply is released, and the settled turn ends with its final line after every streamed line. In the visible transcript, a reader at the bottom follows the reply: once it outgrows the viewport, the newest streamed line stays in view and the question scrolls away. Scrolling up stops following, so the next stage leaves the reader's position unchanged and its lines out of view; scrolling back to the bottom resumes following, so the next stage's newest line is in view while the turn is still running, and the settled turn leaves its final line in view. Following is shared transcript presentation, so one representative provider covers it.
+    func test_conversation_follows_latest_streamed_messages() throws {
+        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-stream-follow")
+        try FileManager.default.copyItem(at: source, to: executable)
+        claudeFixtureExecutable = executable.path
+        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"))
+        func ready(_ stage: Int) -> URL { URL(fileURLWithPath: executable.path + ".stream-follow-ready-\(stage)") }
+        func release(_ stage: Int) throws {
+            try Data("Continue.\n".utf8).write(to: URL(fileURLWithPath: executable.path + ".stream-follow-release-\(stage)"))
+        }
+        defer {
+            for stage in 1...4 where FileManager.default.fileExists(atPath: ready(stage).path) { try? release(stage) }
+        }
+        let title = "Streamed follow turn"
+        let prompt = "Please stream-follow-latest."
+        func line(_ number: Int) -> XCUIElement {
+            let text = String(format: "Streamed follow line %02d:", number)
+            return app.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", text))
+                .firstMatch
+        }
+
+        launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"])
+        let finalLine = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Streamed follow reply finished."))
+            .firstMatch
+        openTask(named: title)
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText(prompt)
+        element("send-message-button").click()
+        let scrollView = element("conversation-scroll-view")
+        func isInView(_ candidate: XCUIElement) -> Bool {
+            candidate.exists && scrollView.frame.insetBy(dx: 0, dy: -2).contains(candidate.frame)
+        }
+        func isOutOfView(_ candidate: XCUIElement) -> Bool {
+            !candidate.exists || !scrollView.frame.intersects(candidate.frame)
+        }
+
+        // At the bottom when the reply starts, the transcript follows it past its question.
+        // Claude's newest text is shown once something follows it, so each held
+        // stage shows every line but its last.
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready(1).path) }, timeout: 20), "The fixture should hold the first streamed stage.")
+        XCTAssertTrue(line(19).waitForExistence(timeout: 10), "The first stage's lines should stream into the transcript.")
+        XCTAssertTrue(waitUntil({ isInView(line(19)) }, timeout: 5), "Following the bottom should keep the newest streamed line in view; line=\(line(19).frame), viewport=\(scrollView.frame).")
+        let question = transcriptMessage(prompt)
+        XCTAssertTrue(isOutOfView(question), "A reply taller than the viewport should carry the question out of view while following; question=\(question.frame), viewport=\(scrollView.frame).")
+        attachScreenshot(named: "Following the newest streamed line")
+
+        try release(1)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready(2).path) }, timeout: 20), "The fixture should hold the second streamed stage.")
+        XCTAssertTrue(line(27).waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({ isInView(line(27)) }, timeout: 5), "Following should continue as later lines arrive; line=\(line(27).frame), viewport=\(scrollView.frame).")
+
+        // Scrolling up stops following: the next stage leaves the reader where they were.
+        for _ in 0..<10 where !isOutOfView(line(27)) {
+            scrollView.scroll(byDeltaX: 0, deltaY: 200)
+        }
+        XCTAssertTrue(isOutOfView(line(27)), "Scrolling up should move the newest line out of view.")
+        // The lowest line still in view marks the reader's position; record it once the wheel settles.
+        var readingFrame = CGRect.null
+        _ = waitUntil({
+            let frame = (1...26).reversed().map(line).first(where: isInView)?.frame ?? .null
+            defer { readingFrame = frame }
+            return frame == readingFrame
+        }, timeout: 3)
+        let readingLine = try XCTUnwrap((1...26).reversed().map(line).first(where: isInView), "Scrolling up should leave earlier lines in view to read.")
+        readingFrame = readingLine.frame
+        try release(2)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready(3).path) }, timeout: 20), "The fixture should hold the third streamed stage.")
+        XCTAssertTrue(line(35).waitForExistence(timeout: 10), "The third stage's lines should still stream in.")
+        // Give a wrongly resumed follow time to move the viewport before judging it.
+        _ = waitUntil({ !isOutOfView(line(35)) }, timeout: 2)
+        XCTAssertTrue(isOutOfView(line(35)), "After scrolling up, new lines should arrive below without pulling the reader down; line=\(line(35).frame), viewport=\(scrollView.frame).")
+        XCTAssertLessThanOrEqual(abs(readingLine.frame.minY - readingFrame.minY), 4, "The line being read should stay where it was while new lines arrive below; before=\(readingFrame), after=\(readingLine.frame).")
+        attachScreenshot(named: "Scrolled up while the reply keeps streaming")
+
+        // Scrolling back to the bottom resumes following.
+        for _ in 0..<30 where !isInView(line(35)) {
+            scrollView.scroll(byDeltaX: 0, deltaY: -300)
+        }
+        for _ in 0..<3 { scrollView.scroll(byDeltaX: 0, deltaY: -300) }
+        XCTAssertTrue(isInView(line(35)), "Scrolling down should reach the newest line.")
+        try release(3)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready(4).path) }, timeout: 20), "The fixture should hold the fourth streamed stage.")
+        XCTAssertTrue(line(43).waitForExistence(timeout: 10), "The fourth stage's lines should stream in.")
+        XCTAssertTrue(waitUntil({ isInView(line(43)) }, timeout: 5), "Back at the bottom, following should resume and keep the newest line in view while the turn runs; line=\(line(43).frame), viewport=\(scrollView.frame).")
+        attachScreenshot(named: "Following resumed at the bottom")
+        try release(4)
+        XCTAssertTrue(finalLine.waitForExistence(timeout: 30), "The final line should arrive once the reply is released.")
+        XCTAssertTrue(waitUntil({ isInView(finalLine) }, timeout: 10), "The settled turn should leave its final line in view; line=\(finalLine.frame), viewport=\(scrollView.frame).")
+    }
+
     // case-contract: test_conversation_rejects_invalid_image_attachments | Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status.
     func test_conversation_rejects_invalid_image_attachments() throws {
         launchApp(defaultParent: fixture.parent.path)
@@ -9540,7 +9638,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in, the question that started it stays pinned near the top of the transcript instead of being auto-scrolled past as the answer grows, consistent with the user message preceding its final answer in CLI/XPC history.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in and fits the viewport, the question that started it stays pinned near the top of the transcript, consistent with the user message preceding its final answer in CLI/XPC history.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".playhouse-bridge-fixture")
@@ -9640,7 +9738,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             planQuestion.frame.minY >= planTranscriptScrollView.frame.minY - 4
                 && planQuestion.frame.minY <= planTranscriptScrollView.frame.minY + 120
-        }, timeout: 5), "While the long plan is still streaming in below it, the question that started the turn should stay pinned near the top of the transcript instead of being auto-scrolled past; question=\(planQuestion.frame), viewport=\(planTranscriptScrollView.frame).")
+        }, timeout: 5), "While the partial plan still fits below it, the question that started the turn should stay pinned near the top of the transcript; question=\(planQuestion.frame), viewport=\(planTranscriptScrollView.frame).")
         try Data().write(to: deltaRelease)
         // A long reply's label is a summary; its paragraphs carry the text.
         XCTAssertTrue(waitUntil({ self.transcriptContains("Final verification") }, timeout: 30), "The completed plan should replace the partial plan.")
@@ -10867,6 +10965,11 @@ final class PlayhouseUITests: XCTestCase {
                (self.element("codex-activity-disclosure").value as? String ?? "").hasPrefix("Collapsed") {
                 self.element("codex-activity-disclosure").click()
                 failedExpandAttempts += 1
+                // The toggle animates; reading the value again before it lands
+                // would click a second time and fold the section back.
+                _ = self.waitUntil({
+                    (self.element("codex-activity-disclosure").value as? String ?? "").hasPrefix("Expanded")
+                }, timeout: 2)
                 return false
             }
             return failedAgentRow.label.contains("failed")
@@ -10921,6 +11024,8 @@ final class PlayhouseUITests: XCTestCase {
             if wakeExpandAttempts < 3, disclosure.exists, (disclosure.value as? String ?? "").hasPrefix("Collapsed") {
                 disclosure.click()
                 wakeExpandAttempts += 1
+                // Let the animated toggle land before the value is read again.
+                _ = self.waitUntil({ (disclosure.value as? String ?? "").hasPrefix("Expanded") }, timeout: 2)
             }
             return false
         }, timeout: 10), "Work the woken parent does should be visible.")

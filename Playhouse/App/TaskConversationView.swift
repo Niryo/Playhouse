@@ -853,6 +853,9 @@ struct TaskConversationView: View {
     /// `LazyVStack` row that was not realized when the scroll began is placed
     /// from an estimate, so the position has to be reapplied once it exists.
     private static let scrollSettleDelays: [UInt64] = [50_000_000]
+    /// How close to the bottom, in points, still counts as at the bottom, so
+    /// new content keeps being followed.
+    private static let conversationBottomFollowThreshold: CGFloat = 16
 
     /// First message of the newest user turn. Opening a conversation renders
     /// this message and everything after it, so the latest question sits at the
@@ -1028,6 +1031,36 @@ struct TaskConversationView: View {
         }
         guard !isWithinWindowTop else { return }
         revealOlderConversationMessages(using: proxy)
+    }
+
+    /// Keeps the newest content in view while the reader stays at the bottom.
+    /// Reaching the bottom starts following; scrolling up away from it stops,
+    /// so content arriving below never pulls a reader back down.
+    private func followConversationBottom(
+        from old: ConversationScrollGeometry,
+        to new: ConversationScrollGeometry,
+        using proxy: ScrollViewProxy
+    ) {
+        let sample = lastConversationScrollSample
+        if new.maxOffsetY - new.offsetY <= Self.conversationBottomFollowThreshold {
+            sample.isFollowingLatest = true
+            return
+        }
+        // Content arriving below leaves the offset where it was, and a shrinking
+        // transcript clamps it onto the bottom, so only the reader moves it up.
+        if new.offsetY < old.offsetY - 0.5 {
+            sample.isFollowingLatest = false
+            return
+        }
+        // A history load pins its own turn, and a reveal restores its anchor;
+        // following the bottom then would scroll away from either.
+        guard sample.isFollowingLatest, new.maxOffsetY != old.maxOffsetY,
+              !isLatestConversationTurnPinPending, !isRevealingOlderConversationMessages else { return }
+        Task { @MainActor in
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { proxy.scrollTo(Self.conversationScrollEndID, anchor: .bottom) }
+        }
     }
 
     /// Collapses the transcript to the newest user turn and pins that question
@@ -2508,7 +2541,7 @@ struct TaskConversationView: View {
                 // transcript, on every scroll frame.
                 .coordinateSpace(name: Self.conversationContentCoordinateSpace)
                 .padding(.horizontal, 28)
-                .padding(.vertical, 24)
+                .padding(.vertical, Self.conversationVerticalPadding)
                 .frame(maxWidth: 820)
                 .frame(maxWidth: .infinity)
                 .background {
@@ -2525,17 +2558,49 @@ struct TaskConversationView: View {
                 // viewport still be scrolled to the top. The window-based
                 // measure only covers a transcript still short enough to
                 // measure whole, so the newest turn's own height carries the
-                // pin once older messages are revealed above it.
+                // pin once older messages are revealed above it. Each leaves
+                // out what already sits below its measure — the end marker,
+                // and for the turn the bottom padding — so the pinned
+                // position is exactly the bottom, which following starts from.
                 let windowFiller = hasOlderConversationMessages
-                    ? max(0, viewport.size.height - conversationContentHeight)
+                    ? max(0, viewport.size.height - conversationContentHeight - Self.conversationScrollEndHeight)
                     : 0
-                let turnFiller = latestTurnHeight.map { max(0, viewport.size.height - $0) } ?? 0
+                let turnFiller = latestTurnHeight.map {
+                    max(0, viewport.size.height - $0 - Self.conversationVerticalPadding - Self.conversationScrollEndHeight)
+                } ?? 0
                 let filler = max(windowFiller, turnFiller)
                 if filler > 0 {
                     Color.clear
                         .frame(height: filler)
                         .accessibilityHidden(true)
                 }
+                // The very end of the scroll content, filler included, which is
+                // where following new content keeps the viewport. Unlike
+                // `scrollToLatest`, following can target it: a scroll that
+                // lands short of the real end changes the scroll extent again,
+                // and that change is followed once more.
+                Color.clear
+                    .frame(height: Self.conversationScrollEndHeight)
+                    .id(Self.conversationScrollEndID)
+                    .accessibilityHidden(true)
+                }
+                .background {
+                    // The scroll observer reports this geometry from macOS 15
+                    // on; before that the content's own frame in the scroll's
+                    // space carries it.
+                    if #unavailable(macOS 15) {
+                        GeometryReader { geometry in
+                            let frame = geometry.frame(in: .named(Self.conversationScrollCoordinateSpace))
+                            Color.clear.preference(
+                                key: ConversationScrollGeometryKey.self,
+                                value: ConversationScrollGeometry(
+                                    offsetY: -frame.minY,
+                                    contentHeight: frame.height,
+                                    maxOffsetY: frame.height - viewport.size.height
+                                )
+                            )
+                        }
+                    }
                 }
             }
             .coordinateSpace(name: Self.conversationScrollCoordinateSpace)
@@ -2549,11 +2614,19 @@ struct TaskConversationView: View {
                     handleConversationWindowTop(markerY, using: scrollProxy)
                 }
             }
-            .modifier(ConversationScrollOffsetObserver { offsetY in
-                lastConversationScrollSample.offsetY = offsetY
+            .onPreferenceChange(ConversationScrollGeometryKey.self) { geometry in
+                guard let geometry else { return }
+                let old = lastConversationScrollSample.geometry ?? geometry
+                lastConversationScrollSample.geometry = geometry
+                followConversationBottom(from: old, to: geometry, using: scrollProxy)
+            }
+            .modifier(ConversationScrollOffsetObserver { old, new in
                 lastConversationScrollSample.viewportHeight = viewport.size.height
+                followConversationBottom(from: old, to: new, using: scrollProxy)
+                guard lastConversationScrollSample.offsetY != new.offsetY else { return }
+                lastConversationScrollSample.offsetY = new.offsetY
                 handleConversationWindowTop(
-                    conversationWindowTopY(offsetY: offsetY, viewportHeight: viewport.size.height),
+                    conversationWindowTopY(offsetY: new.offsetY, viewportHeight: viewport.size.height),
                     using: scrollProxy
                 )
             })
@@ -2636,6 +2709,9 @@ struct TaskConversationView: View {
 
     private static let conversationScrollCoordinateSpace = "conversation-transcript-scroll"
     private static let conversationContentCoordinateSpace = "conversation-transcript-content"
+    private static let conversationScrollEndID = "conversation-scroll-end"
+    private static let conversationScrollEndHeight: CGFloat = 1
+    private static let conversationVerticalPadding: CGFloat = 24
 
     private var emptyConversationRepositoryTitle: String {
         var repositoryNames = task.repositoryWorktrees.map {
@@ -3063,8 +3139,10 @@ struct TaskConversationView: View {
                 .font(.system(size: 9, weight: .semibold))
                 .accessibilityIdentifier("codex-activity-chevron")
         }
-        .contentShape(Rectangle())
+        // The shape follows the full-width frame, so the whole row the button
+        // occupies toggles it, not just its text and chevron.
         .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     @ViewBuilder
@@ -4473,6 +4551,8 @@ struct TaskConversationView: View {
         hasPresentedLatestConversation = false
         isLatestConversationTurnPinPending = true
         isOlderConversationRevealArmed = false
+        // Following resumes once the pinned turn is observed at the bottom.
+        lastConversationScrollSample.isFollowingLatest = false
         conversationContentHeight = 0
         latestTurnTopY = nil
         transcriptBottomY = nil
@@ -5875,9 +5955,9 @@ struct TaskConversationView: View {
     }
 
     /// After the conversation is already settled, a newly sent question should land at the
-    /// top of the viewport and stay there while its answer streams in below — mirroring how
-    /// ChatGPT/Claude.ai keep your question in view instead of auto-scrolling to chase the
-    /// growing answer all the way to the bottom.
+    /// top of the viewport while its answer streams in below. The filler makes that pin the
+    /// bottom of the transcript, so once the answer outgrows the viewport, following the
+    /// bottom carries the reader along with it unless they have scrolled up.
     private func scrollToLatestUserMessage(using proxy: ScrollViewProxy, viewportHeight: CGFloat) {
         guard hasPresentedLatestConversation else {
             scrollToLatest(using: proxy, viewportHeight: viewportHeight)
@@ -5904,20 +5984,52 @@ struct TaskConversationView: View {
 private final class ConversationScrollSample {
     var offsetY: CGFloat?
     var viewportHeight: CGFloat = 0
+    /// Whether new content scrolls the transcript along to its bottom.
+    /// Reaching the bottom turns it on and scrolling up away from it turns it
+    /// off. It is read only when content changes, so it lives here, where
+    /// writing it on every scroll frame re-renders nothing.
+    var isFollowingLatest = false
+    /// The last geometry the macOS 14 preference reported, which is what its
+    /// next report is compared against.
+    var geometry: ConversationScrollGeometry?
 }
 
-/// Reports the transcript's scroll offset where the platform supports it. The
-/// preference-based marker stays as the fallback for macOS 14.
+/// The parts of the transcript's scroll geometry that following the bottom and
+/// revealing older messages depend on.
+private struct ConversationScrollGeometry: Equatable {
+    var offsetY: CGFloat
+    var contentHeight: CGFloat
+    /// The largest offset the content allows; the transcript is at its bottom
+    /// when `offsetY` reaches it.
+    var maxOffsetY: CGFloat
+}
+
+/// The scroll geometry measured from the content's own frame, for macOS 14,
+/// where the scroll view does not report it.
+private struct ConversationScrollGeometryKey: PreferenceKey {
+    static var defaultValue: ConversationScrollGeometry?
+
+    static func reduce(value: inout ConversationScrollGeometry?, nextValue: () -> ConversationScrollGeometry?) {
+        value = nextValue() ?? value
+    }
+}
+
+/// Reports the transcript's scroll geometry where the platform supports it.
+/// The preference-based markers stay as the fallback for macOS 14.
 private struct ConversationScrollOffsetObserver: ViewModifier {
-    let onOffsetChange: (CGFloat) -> Void
+    let onGeometryChange: (_ old: ConversationScrollGeometry, _ new: ConversationScrollGeometry) -> Void
 
     @ViewBuilder
     func body(content: Content) -> some View {
         if #available(macOS 15.0, *) {
-            content.onScrollGeometryChange(for: CGFloat.self) { geometry in
-                geometry.contentOffset.y
-            } action: { _, offsetY in
-                onOffsetChange(offsetY)
+            content.onScrollGeometryChange(for: ConversationScrollGeometry.self) { geometry in
+                ConversationScrollGeometry(
+                    offsetY: geometry.contentOffset.y,
+                    contentHeight: geometry.contentSize.height,
+                    maxOffsetY: geometry.contentSize.height + geometry.contentInsets.bottom - geometry.containerSize.height
+                )
+            } action: { old, new in
+                onGeometryChange(old, new)
             }
         } else {
             content
@@ -5936,8 +6048,10 @@ private struct ConversationTopMarkerPositionKey: PreferenceKey {
 private struct ConversationScrollContentHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
+    /// Only the transcript reports a height; the filler and end marker after
+    /// it contribute the default, which must not replace the measurement.
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
+        value = max(value, nextValue())
     }
 }
 

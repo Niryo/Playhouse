@@ -32,6 +32,15 @@ CHAT_ANSWER = "Confirmed: 2.1.309 registers the new model and 2.1.308 does not."
 CHAT_CLOSING = "Tell me if you want the upgrade command."
 SIMPLE_ANSWER = "OK."
 PENDING_QUESTION_SUCCESS_MARKER = "finish while a structured question remains pending"
+# Lines each held stage of the streamed follow turn adds; the first stage alone
+# outgrows the transcript viewport.
+STREAM_FOLLOW_STAGES = (20, 8, 8, 8)
+STREAM_FOLLOW_FINAL = "Streamed follow reply finished."
+
+
+def stream_follow_line(line):
+    return (f"Streamed follow line {line:02d}: the reply keeps growing below the question "
+            "so the transcript has to scroll to keep its newest text in view.")
 
 
 # Claude Code reports a turn's token cost on its `result` message. Every result
@@ -626,6 +635,24 @@ def respond(user_text, instructions, preserve_no_outcome=False):
             {"type": "tool_result", "tool_use_id": "toolu_follow_active_step", "content": "", "is_error": False},
         ]}})
         text("msg_follow_final", "Claude finished the followed turn.")
+    elif "stream-follow-latest" in user_text.lower():
+        # Streams a long reply in held stages, so a test can check the transcript
+        # between them: following the bottom, then left alone once scrolled up.
+        for stage, count in enumerate(STREAM_FOLLOW_STAGES, start=1):
+            first = sum(STREAM_FOLLOW_STAGES[:stage - 1]) + 1
+            for line in range(first, first + count):
+                text(f"msg_stream_follow_{line}", stream_follow_line(line))
+            ready = Path(str(sys.argv[0]) + f".stream-follow-ready-{stage}")
+            release = Path(str(sys.argv[0]) + f".stream-follow-release-{stage}")
+            ready.write_text(f"Streamed follow stage {stage} is visible.\n", encoding="utf-8")
+            deadline = time.monotonic() + 60
+            while not release.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            ready.unlink(missing_ok=True)
+            if not release.exists():
+                raise TimeoutError(f"The test did not release streamed follow stage {stage}.")
+            release.unlink(missing_ok=True)
+        text("msg_stream_follow_final", STREAM_FOLLOW_FINAL)
     elif user_text.startswith("Write a concise task title"):
         if "title-failure" not in sys.argv[0]:
             text("msg_title", "Generated Claude title")
