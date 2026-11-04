@@ -2077,7 +2077,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(current["status"] as? String, "Done")
     }
 
-    // case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to Off (manual); clicking it slides out Off, PR, Auto, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. The last switch choice is remembered: tasks created after turning it on start on, and tasks created after turning it off start off. Toggling Auto PR for an unknown task is rejected.
+    // case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to Manual; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. The last switch choice is remembered: tasks created after turning it on start on, and tasks created after turning it off start off. Toggling Auto PR for an unknown task is rejected.
     func test_task_auto_pr_toggle_creates_pull_request_on_review() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
@@ -2104,11 +2104,11 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(pill.waitForExistence(timeout: 5), "An in-progress task with no linked PR should show the PR mode pill.")
             XCTAssertFalse(self.element("task-create-pr-\(taskID)").exists, "The mode pill replaces the manual PR button while the task is in progress.")
             XCTAssertGreaterThanOrEqual(pill.frame.height, 30, "The closed pill should keep a comfortable hit target.")
-            XCTAssertEqual(pill.value as? String, "manual", "The closed pill shows the current mode, defaulting to Off.")
+            XCTAssertEqual(pill.value as? String, "manual", "The closed pill shows the current mode, defaulting to Manual.")
             XCTAssertFalse(self.element("task-pr-mode-merge-\(taskID)").exists, "A closed pill shows only the current mode.")
             XCTAssertFalse(try XCTUnwrap(self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool), "Auto PR must default to off.")
             XCTAssertEqual(try self.taskRecord(id: taskID)?["pullRequestMode"] as? String, "manual")
-            self.attachScreenshot(named: "Working task shows the closed mode pill on Off", fullScreen: true)
+            self.attachScreenshot(named: "Working task shows the closed mode pill on Manual", fullScreen: true)
 
             pill.click()
             for mode in ["manual", "pr", "autopilot", "merge"] {
@@ -2118,7 +2118,7 @@ final class PlayhouseUITests: XCTestCase {
             }
             XCTAssertEqual(self.element("task-pr-mode-manual-\(taskID)").value as? String, "selected")
             _ = self.settledPillOption("merge", taskID: taskID)
-            self.attachScreenshot(named: "Clicking the pill slides out Off, PR, Auto, and Merge", fullScreen: true)
+            self.attachScreenshot(named: "Clicking the pill slides out Manual, PR, Green, and Merge", fullScreen: true)
             // Choosing the current mode again just folds the pill.
             self.settledPillOption("manual", taskID: taskID).click()
             XCTAssertTrue(self.waitUntil({ pill.exists && (pill.value as? String) == "manual" && !self.element("task-pr-mode-merge-\(taskID)").exists }, timeout: 5), "Choosing the current mode should fold the pill.")
@@ -2128,9 +2128,9 @@ final class PlayhouseUITests: XCTestCase {
             self.settledPillOption("autopilot", taskID: taskID).click()
             XCTAssertTrue(self.waitUntil({
                 (try? self.taskRecord(id: taskID)?["pullRequestMode"] as? String) == "autopilot"
-            }, timeout: 5), "Choosing Auto should persist immediately.")
+            }, timeout: 5), "Choosing Green should persist immediately.")
             XCTAssertTrue(self.waitUntil({ pill.exists && (pill.value as? String) == "autopilot" && !self.element("task-pr-mode-merge-\(taskID)").exists }, timeout: 5), "Choosing a mode should fold the pill back onto it.")
-            self.attachScreenshot(named: "Choosing Auto folds the pill back onto Auto", fullScreen: true)
+            self.attachScreenshot(named: "Choosing Green folds the pill back onto Green", fullScreen: true)
             try self.selectPullRequestMode("pr", taskID: taskID)
             XCTAssertTrue(self.waitUntil({
                 (try? self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool) == true

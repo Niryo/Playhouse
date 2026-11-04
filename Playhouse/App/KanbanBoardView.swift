@@ -1633,7 +1633,7 @@ private struct TaskCardView: View {
     }
 
     /// While the task is still being worked on (before it reaches Review), the
-    /// Off/PR/Auto mode control replaces the manual create button: once the task moves
+    /// Manual/PR/Green/Merge mode pill replaces the manual create button: once the task moves
     /// to Review, the PR and Auto modes create the pull request themselves.
     private var isAutoPRWorkingState: Bool {
         switch task.status {

@@ -269,9 +269,9 @@ enum PullRequestMode: String, CaseIterable, Codable, Sendable {
 
     var label: String {
         switch self {
-        case .manual: "Off"
+        case .manual: "Manual"
         case .pullRequest: "PR"
-        case .autopilot: "Auto"
+        case .autopilot: "Green"
         case .merge: "Merge"
         }
     }
@@ -280,8 +280,8 @@ enum PullRequestMode: String, CaseIterable, Codable, Sendable {
         switch self {
         case .manual: "Manual: create the pull request yourself once this task moves to Review"
         case .pullRequest: "PR: a pull request is created automatically when this task moves to Review"
-        case .autopilot: "Autopilot: create the pull request, then keep fixing failing checks and review comments until it's green"
-        case .merge: "Merge: everything Autopilot does, then merge the pull request once it's green"
+        case .autopilot: "Green: create the pull request, then keep fixing failing checks and review comments until it's green"
+        case .merge: "Merge: everything Green does, then merge the pull request once it's green"
         }
     }
 }
