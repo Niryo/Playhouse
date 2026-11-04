@@ -37,7 +37,7 @@ DEFAULT_TURN_ID = TURN_ID
 REMINDER_TURN_IDS = set()
 
 
-MARKDOWN_PLAN = '## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n\n1. First numbered step: capture the baseline state before changes.\n\n2. Second numbered step: apply the fix and confirm there are no regressions.\n\n```javascript\nconsole.log("Hello, world!");\n```\n\n| Step | Status |\n| --- | :---: |\n| Verify fixture | Done |\n| Render table | Pending |'
+MARKDOWN_PLAN = '## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n\nTwo numbered steps follow on the very next lines:\n1. First numbered step: capture the baseline state before changes.\n\n2. Second numbered step: apply the fix and confirm there are no regressions.\n\n```javascript\nconsole.log("Hello, world!");\n```\n\n| Step | Status |\n| --- | :---: |\n| Verify fixture | Done |\n| Render table | Pending |'
 
 ECHOED_OUTCOME_PREFIX = "Echo the outcome command for "
 ECHOED_OUTCOME_ANSWER = "Fixture answer with an echoed outcome."
@@ -1156,7 +1156,8 @@ def main():
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "interrupted", "error": {"message": "Fixture interrupted the conflict-resolution turn."}},
                 }})
-            elif mode.endswith("-success"):
+            elif mode.endswith("-success") or mode.endswith("-timeline-tool-calls"):
+                # A timeline turn's items come from its thread history, not its stream.
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
@@ -2150,6 +2151,41 @@ def main():
                 index for index, saved_turn in enumerate(saved_turns)
                 if "playhouse internal outcome nudge:" not in (saved_turn.get("userMessage") or "").lower()
             ]
+            if mode.endswith("-timeline-tool-calls"):
+                # Each ordinary turn as its thread items: the tool-call turn reports
+                # commentary, shell commands with their output (one failing), and an
+                # MCP call whose arguments and result stay private, between its messages.
+                contents = []
+                for turn_index in ordinary_turn_indexes:
+                    user_message = saved_turns[turn_index].get("userMessage") or ""
+                    suffix = f"t{turn_index}"
+                    turn_items = [{"id": f"item_timeline_user_{suffix}", "type": "userMessage",
+                                   "content": [{"type": "text", "text": user_message}]}]
+                    if "show-tool-calls-inline" in user_message.lower():
+                        turn_items += [
+                            {"id": f"item_timeline_intro_{suffix}", "type": "agentMessage", "phase": "commentary",
+                             "text": "I'll check the repository status first."},
+                            {"id": "item_timeline_status", "type": "commandExecution",
+                             "command": "git status --short && echo fixture-status-done", "cwd": "/tmp/playhouse-fixture",
+                             "status": "completed", "exitCode": 0, "durationMs": 12, "aggregatedOutput": "fixture-status-done\n"},
+                            {"id": f"item_timeline_middle_{suffix}", "type": "agentMessage", "phase": "commentary",
+                             "text": "The status is clean. Next I'll list the files and run the check."},
+                            {"id": "item_timeline_list", "type": "commandExecution", "command": "ls -1",
+                             "cwd": "/tmp/playhouse-fixture", "status": "completed", "exitCode": 0, "durationMs": 9,
+                             "aggregatedOutput": "README.md\nfixture-one.txt\nfixture-two.txt\nfixture-three.txt\nfixture-four.txt\n"},
+                            {"id": "item_timeline_fail", "type": "commandExecution", "command": "exit 3",
+                             "cwd": "/tmp/playhouse-fixture", "status": "failed", "exitCode": 3, "durationMs": 4,
+                             "aggregatedOutput": "Exit code 3"},
+                            {"id": "item_timeline_mcp", "type": "mcpToolCall", "server": "fixture", "tool": "lookup",
+                             "status": "completed", "arguments": {"query": "timeline-private-argument"},
+                             "result": {"content": [{"type": "text", "text": "timeline-private-result"}]}},
+                            {"id": f"item_timeline_final_{suffix}", "type": "agentMessage", "phase": "final_answer",
+                             "text": "Here is what ran:\n1. `git status --short` was clean.\n2. The check exited with code `3`.\n\n- Bullets read at text size\n- Inline `code` is tinted"},
+                        ]
+                    else:
+                        turn_items.append({"id": f"item_timeline_later_{suffix}", "type": "agentMessage",
+                                           "phase": "final_answer", "text": "Codex answered the later turn."})
+                    contents += [{**item, "_fixture_turn_index": turn_index} for item in turn_items]
             for turn_index, saved_turn in enumerate(saved_turns, start=1):
                 if is_page_classifier_prompt(saved_turn.get("userMessage")):
                     continue

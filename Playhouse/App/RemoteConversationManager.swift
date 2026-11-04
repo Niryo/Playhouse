@@ -45,8 +45,8 @@ struct RemoteConversationManager {
     func queuedMessages(taskID: UUID) throws -> [QueuedConversationMessage] { try store.queuedMessages(taskID: taskID) }
     func savedUserInputRequest(taskID: UUID) throws -> ConversationUserInputRequest? { try store.savedUserInputRequest(taskID: taskID) }
     func answeredAsyncQuestionIDs(taskID: UUID) throws -> [String] { try store.answeredAsyncQuestionIDs(taskID: taskID) }
-    func queueMessage(taskID: UUID, text: String) throws -> QueuedConversationMessage {
-        try store.queueMessage(taskID: taskID, text: text)
+    func queueMessage(taskID: UUID, text: String, imageDataURLs: [String] = []) throws -> QueuedConversationMessage {
+        try store.queueMessage(taskID: taskID, text: text, imageDataURLs: imageDataURLs)
     }
     func removeQueuedMessage(taskID: UUID, messageID: UUID) throws {
         try store.removeQueuedMessage(taskID: taskID, messageID: messageID)
@@ -169,10 +169,10 @@ struct RemoteConversationManager {
         ]).decoded(QueuedConversationMessage.self)
     }
 
-    func steerQueuedMessage(taskID: UUID, messageID: UUID) async throws -> (message: String, accepted: Bool) {
+    func steerQueuedMessage(taskID: UUID, messageID: UUID) async throws -> (message: String, imageDataURLs: [String], accepted: Bool) {
         let result = try await daemon.call("conversation.queue.steer", ["taskID": id(taskID), "messageID": .string(messageID.uuidString)])
         let queued = result.object?["queued"]?.bool ?? false
-        return (result.object?["text"]?.string ?? "", !queued)
+        return (result.object?["text"]?.string ?? "", result.object?["images"]?.strings ?? [], !queued)
     }
 
     func retryQueuedMessage(
@@ -274,6 +274,12 @@ struct RemoteConversationManager {
                   let states = try? event.payload.decoded([PullRequestReviewState].self) else { return }
             onStatus(states)
         }.decoded(PullRequestAutopilotOutcome.self)
+    }
+
+    /// Review syncs pull request changes and may open PRs, which needs the
+    /// daemon's provider clients, so this move runs there rather than in-process.
+    func moveTaskToReview(taskID: UUID) async throws -> BoardTaskRecord {
+        try await daemon.call("task.move", ["taskID": id(taskID), "status": .string(TaskStatus.review.rawValue)]).decoded(BoardTaskRecord.self)
     }
 
     func syncPullRequestChanges(taskID: UUID) async throws -> PullRequestSyncOutcome {

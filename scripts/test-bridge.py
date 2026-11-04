@@ -2517,7 +2517,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(rejected.get("codexThreadID"))
         self.assertEqual(self.run_git(self.primary, "worktree", "list", "--porcelain").count("worktree "), claimed_count)
 
-    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls.
+    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
     def test_task_done_preserves_worktree_and_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary, self.secondary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
@@ -2558,6 +2558,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         linked = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(linked["repositoryWorktrees"][0]["pullRequestURL"], pr_url)
         self.assertEqual(linked["repositoryWorktrees"][1]["pullRequestURL"], second_pr_url)
+        partial = self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual({item["number"]: item["health"] for item in partial}, {123: "merged", 456: "green"}, "Only the merged PR reads as merged while its sibling is open.")
         (self.primary / "target-only.txt").write_text("Master advanced after this task branch was created.\n", encoding="utf-8")
         self.run_git(self.primary, "add", "target-only.txt")
         self.run_git(self.primary, "commit", "-m", "Advance merge target while task is under review")
@@ -2578,7 +2580,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         gh_state.write_text("123=merged\n456=merged\n", encoding="utf-8")
         response, _ = self.call_cli(*move_command, extra_environment=gh_environment)
         self.assertEqual(self.assert_success(response)["status"], "Done")
-        self.assertEqual(gh_calls.read_text(encoding="utf-8").splitlines(), ["123", "456", "123", "456"])
+        calls = gh_calls.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(sorted(calls), ["123", "123", "123", "456", "456", "456"], "The status probe and the Done verification each check both PRs once, plus the earlier move attempt.")
         self.assertTrue(worktree.exists(), "Moving a task to Done must preserve its worktree.")
         self.assertTrue(self.branch_exists(self.primary, "generated-fixture-title"))
         self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_head, "Moving a task to Done must not merge into the local target.")
@@ -2904,7 +2907,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             hold_marker.unlink(missing_ok=True)
         return self.assert_success(response)
 
-    # case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only for an autopilot task; the board colours each linked PR number green, red, or orange by that health and keeps the mode pill beside linked PRs. Autopilot leaves a task inactive unless its mode is autopilot and it sits in Review. With checks still running it sends no turn, and the board re-probes only those autopilot PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop.
+    # case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only for an autopilot task; the board colours each linked PR number green, red, or blue by that health and keeps the mode pill beside linked PRs. Autopilot leaves a task inactive unless its mode is autopilot and it sits in Review. With checks still running it sends no turn, and the board re-probes only those autopilot PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop.
     def test_task_pr_autopilot_fixes_red_pull_request_until_green(self):
         missing, _ = self.call_cli("task", "pr", "autopilot", str(uuid.uuid4()), expected_status=3)
         self.assert_failure(missing, "not_found")
@@ -3028,7 +3031,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(capped_task["status"], "Waiting Response")
         self.assertIn("5 fix turns", capped_task["statusMessage"])
 
-    # case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green with checks that actually ran and passed: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass with no unresolved threads it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace moves the task to Waiting Response explaining that merge mode needs checks that passed, without merging. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
+    # case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass (or the head has had no checks past the registration grace, as in a repository without CI) with no unresolved threads and GitHub reporting it mergeable, it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace is merged all the same. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
     def test_task_pr_merge_mode_merges_green_pull_request(self):
         task = self.create_repo_task("PR merge mode", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
         refused = self.create_repo_task("PR merge refused", [self.secondary], merge_targets={self.secondary: "main"}, materialize=True)
@@ -3077,6 +3080,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(merged["action"], "merged")
         self.assertEqual(merged["mergedPullRequests"], [811])
         self.assertTrue(merged["states"][0]["merged"])
+        self.assertEqual(merged["states"][0]["health"], "merged", "A merged PR reports the merged (purple) health.")
         self.assertEqual(merges(), ["merged\t811\t--squash"], "A green PR is merged once with the first allowed method.")
         merge_call = [line for line in merge_log.read_text(encoding="utf-8").splitlines() if line.startswith("merged\t811")]
         self.assertEqual(len(merge_call), 1)
@@ -3088,20 +3092,23 @@ class PlayhouseBridgeTests(unittest.TestCase):
         status = self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=gh_environment)[0])
         self.assertTrue(status[0]["merged"])
 
-        # Long past the grace with still no checks: merge mode stops and says why.
+        # Long past the grace with still no checks (a repository without CI): merge mode
+        # still attempts the merge. GitHub refuses it here (a required review), so the
+        # task stops in Waiting Response with GitHub's reason.
         commit_head(refused["repositoryWorktrees"][0]["worktreePath"], committed_at="2020-01-01T00:00:00Z")
         self.assert_success(self.call_cli("task", "pr", "mode", refused["id"], "merge")[0])
         no_ci = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], extra_environment=gh_environment)[0])
         self.assertEqual(no_ci["action"], "stalled")
         no_ci_task = self.assert_success(self.call_cli("task", "get", refused["id"])[0])
         self.assertEqual(no_ci_task["status"], "Waiting Response")
-        self.assertIn("GitHub reports no checks", no_ci_task["statusMessage"])
-        self.assertEqual(merges(), ["merged\t811\t--squash"], "No checks must never be merged.")
+        self.assertIn("couldn't merge pull request #812", no_ci_task["statusMessage"])
+        self.assertNotIn("no checks", no_ci_task["statusMessage"])
+        self.assertEqual(merges(), ["merged\t811\t--squash", "merge-failed\t812\t--squash"], "No checks past the grace is still merged, with the first allowed method.")
 
-        # The user sends it back to Review; checks pass, but GitHub refuses the merge. The
+        # The user sends it back to Review; GitHub still refuses the merge. The
         # `repo.methods` line, written after #811 merged, disallows squash from here on.
         self.complete_fixture_turn(refused["id"])
-        gh_state.write_text(gh_state.read_text(encoding="utf-8").replace("812.checks=none", "812.checks=success") + "repo.methods=merge,rebase\n", encoding="utf-8")
+        gh_state.write_text(gh_state.read_text(encoding="utf-8") + "repo.methods=merge,rebase\n", encoding="utf-8")
         stalled = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], extra_environment=gh_environment)[0])
         self.assertEqual(stalled["action"], "stalled")
         current = self.assert_success(self.call_cli("task", "get", refused["id"])[0])
@@ -3604,10 +3611,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli("task", "move", task_id, "Unknown", expected_status=2)
         self.assert_failure(response, "invalid_argument")
-        for status in ["In Progress", "Blocked", "Waiting Response", "Review", "Backlog"]:
+        for status in ["In Progress", "Blocked", "Waiting Response", "Backlog"]:
             response, _ = self.call_cli("task", "move", task_id, status, expected_status=2)
             self.assert_failure(response, "invalid_argument")
             self.assertIn("controlled by Codex", response["error"]["message"])
+        response, _ = self.call_cli("task", "move", task_id, "Review", expected_status=2)
+        self.assert_failure(response, "invalid_argument")
+        self.assertIn("Only a task in Waiting Response", response["error"]["message"])
         response, _ = self.call_cli("task", "move", task_id, "Done", expected_status=2)
         self.assert_failure(response, "invalid_argument")
         self.assertIn("Only a task in Review", response["error"]["message"])
@@ -3655,6 +3665,94 @@ class PlayhouseBridgeTests(unittest.TestCase):
         waiting = self.assert_success(self.call_cli("task", "get", waiting_id)[0])
         self.assertEqual(waiting["status"], "Waiting Response")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
+
+    # case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response, so a retry after the fix moves it to Review.
+    def test_waiting_response_task_moves_to_review_manually(self):
+        def remove_fixture_origin(repository, expected_url):
+            current = subprocess.run(
+                ["git", "-C", str(repository), "remote", "get-url", "origin"],
+                check=False, capture_output=True, text=True,
+            )
+            if current.returncode == 0 and current.stdout.strip() == str(expected_url):
+                self.run_git(repository, "remote", "remove", "origin")
+
+        backlog_id = self.create_task("Manual review backlog")["id"]
+        rejected, _ = self.call_cli("task", "move", backlog_id, "Review", expected_status=2)
+        self.assert_failure(rejected, "invalid_argument")
+        self.assertIn("Only a task in Waiting Response", rejected["error"]["message"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", backlog_id)[0])["status"], "Backlog")
+
+        task = self.create_repo_task("Manual review", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        self.seed_done_task_pull_request(task["id"], number=321)
+        # Work the turn left uncommitted; the Review gate must commit it.
+        (worktree / "manual-review.txt").write_text("Waiting turn output.\n", encoding="utf-8")
+
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-manual-review-question-flow"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        command = ["conversation", "send", task["id"], "--message", "Please ask your questions.", "--mode", "plan"]
+        process = self.start_cli(*command, extra_environment=environment)
+        try:
+            deadline = time.monotonic() + 60
+            pending = None
+            while process.poll() is None and time.monotonic() < deadline and pending is None:
+                history, _ = self.call_cli("conversation", "history", task["id"], extra_environment=environment)
+                pending = self.assert_success(history).get("pendingUserInputRequest")
+                if pending is None:
+                    time.sleep(0.1)
+            self.assertIsNotNone(pending, "The blocking question should hold the turn open.")
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Waiting Response")
+            # The pending question's turn still owns the worktree and the final status.
+            running, _ = self.call_cli("task", "move", task["id"], "Review", expected_status=2)
+            self.assert_failure(running, "invalid_argument")
+            self.assertIn("still running", running["error"]["message"])
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Waiting Response")
+            self.assertIn("manual-review.txt", self.run_git(worktree, "status", "--porcelain", "--untracked-files=all"))
+            answered, _ = self.call_cli(
+                "conversation", "answer-user-input", task["id"], pending["id"],
+                "--answer", "color=Blue", "--answer", "token=fixture-secret", extra_environment=environment,
+            )
+            self.assert_success(answered)
+            response, _ = self.finish_cli(process, command)
+            self.assert_success(response)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=20)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Waiting Response",
+                         "The answered turn settles in Waiting Response.")
+
+        # A sync that cannot reach the PR remote fails the move and leaves the task waiting.
+        missing_remote = self.data_directory / "manual-review-missing-origin.git"
+        self.addCleanup(remove_fixture_origin, self.primary, missing_remote)
+        self.run_git(worktree, "remote", "add", "origin", str(missing_remote))
+        failed, _ = self.call_cli("task", "move", task["id"], "Review", expected_status=1)
+        self.assert_failure(failed, "operation_failed")
+        self.assertIn("origin", failed["error"]["message"], "The failure should carry the git error for the unreachable PR remote.")
+        self.assertNotIn("still running", failed["error"]["message"])
+        waiting = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(waiting["status"], "Waiting Response", "A failed review sync must not move or block the task.")
+        self.run_git(self.primary, "remote", "remove", "origin")
+
+        moved = self.assert_success(self.call_cli("task", "move", task["id"], "Review")[0])
+        self.assertEqual(moved["status"], "Review")
+        self.assertIsNone(moved.get("statusMessage"))
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain", "--untracked-files=all").strip(), "",
+                         "Moving to Review should commit the PR-linked worktree's local changes like a completed turn.")
+        self.assertIn("manual-review.txt", self.run_git(worktree, "show", "--name-only", "--format=%s", "HEAD"))
+        reread = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(reread["status"], "Review")
+        self.assertEqual(reread["repositoryWorktrees"][0]["pullRequestNumber"], 321)
+        again = self.assert_success(self.call_cli("task", "move", task["id"], "Review")[0])
+        self.assertEqual(again["status"], "Review", "A task already in Review is returned unchanged.")
+        done = self.assert_success(self.call_cli("task", "move", task["id"], "Done", "--allow-unmerged")[0])
+        self.assertEqual(done["status"], "Done")
 
     # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private nudge prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
     def test_task_progress_reports_publish_persist_and_clear(self):
@@ -5544,7 +5642,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             any("<playhouse-handoff-context>" in message["text"] for message in final_history["messages"]),
             "Handoff context never appears in the visible transcript.",
         )
-    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload.
+    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload. User messages render in a neutral gray, input-style bubble with a thin light border and light text rather than the blue accent fill.
     def test_conversation_adds_ordered_text_annotations(self):
         task = self.create_repo_task("Conversation comments", [self.primary])
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -6083,7 +6181,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(steer_params["input"], [{"type": "text", "text": steer_message}])
         self.assertTrue(steer_params["expectedTurnId"], "Steering must identify the matching active turn.")
 
-    # case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
+    # case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up with its attached image, clears the preview, and marks the row with its image count; the queued image persists across reopening without returning to the composer, and malformed queued images fail validation. Its row Steer uses the active turn ID, delivers both text and image to the provider, appears in the transcript with its image, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
     def test_conversation_steers_and_queues_active_turn(self):
         task = self.create_repo_task("Active turn message controls", [self.primary])
         task_id = task["id"]
@@ -6148,10 +6246,24 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assertTrue(self.assert_success(removed)["removed"])
             persisted, _ = self.call_cli("conversation", "queue-list", task_id)
             self.assertEqual({item["id"] for item in self.assert_success(persisted)}, {queued_record["id"], missed_item["id"]})
-            steerable, _ = self.call_cli("conversation", "queue", task_id, "--message", "Steer this queued follow-up now.")
+            invalid_queue, _ = self.call_cli(
+                "conversation", "queue", task_id, "--message", "Reject this queued image.", "--image", str(invalid_image),
+                expected_status=2,
+            )
+            self.assertEqual(invalid_queue["error"]["code"], "invalid_argument", "A queued follow-up must validate its images.")
+            steerable, _ = self.call_cli(
+                "conversation", "queue", task_id, "--message", "Steer this queued follow-up now.", "--image", str(steer_image)
+            )
             steerable_record = self.assert_success(steerable)
+            self.assertTrue(steerable_record["imageDataURLs"][0].startswith("data:image/png;base64,"), "A queued follow-up should keep its image.")
+            persisted, _ = self.call_cli("conversation", "queue-list", task_id)
+            steerable_item = next(item for item in self.assert_success(persisted) if item["id"] == steerable_record["id"])
+            self.assertEqual(steerable_item["imageDataURLs"], steerable_record["imageDataURLs"], "A fresh read should return the queued image.")
             queued_steer, _ = self.call_cli("conversation", "queue-steer", task_id, steerable_record["id"])
-            self.assertTrue(self.assert_success(queued_steer)["accepted"])
+            queued_steer_result = self.assert_success(queued_steer)
+            self.assertTrue(queued_steer_result["accepted"])
+            self.assertFalse(queued_steer_result["queued"])
+            self.assertEqual(queued_steer_result["images"], steerable_record["imageDataURLs"], "A queued-row steer should report the image it delivered.")
             persisted, _ = self.call_cli("conversation", "queue-list", task_id)
             self.assertEqual({item["id"] for item in self.assert_success(persisted)}, {queued_record["id"], missed_item["id"]})
             missed_row_item, _ = self.call_cli("conversation", "queue", task_id, "--message", "Keep this after a missed row steer.")
@@ -6197,7 +6309,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(steer["input"][1]["type"], "image")
         self.assertTrue(steer["input"][1]["url"].startswith("data:image/png;base64,"))
         self.assertEqual(steer["expectedTurnId"], protocol_history["messages"][0]["turnID"])
-        self.assertEqual(protocol_history["steerRequests"][1]["input"], [{"type": "text", "text": "Steer this queued follow-up now."}])
+        self.assertEqual(
+            protocol_history["steerRequests"][1]["input"],
+            [{"type": "text", "text": "Steer this queued follow-up now."}, {"type": "image", "url": steerable_record["imageDataURLs"][0]}],
+            "Steering a queued row should deliver its image to the active turn, not only its text.",
+        )
         self.assertEqual(protocol_history["steerRequests"][1]["expectedTurnId"], protocol_history["messages"][0]["turnID"])
         queue_after_completion, _ = self.call_cli("conversation", "queue-list", task_id)
         self.assertEqual(self.assert_success(queue_after_completion), [], "Successful dispatch must be durable and nonduplicating across reload.")
@@ -6737,6 +6853,84 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn(final_text, texts, "The settled turn should end with its final line.")
         self.assertGreater(texts.index(final_text), texts.index(expected[-1]), "The final line should come after every streamed line.")
 
+    def assert_earlier_turn_tool_calls_in_history(self, provider, environment, call_ids, summaries):
+        """Runs a tool-call turn and a later turn, then checks the earlier turn's calls in history."""
+        task_id = self.create_task(f"{provider} timeline tools", provider=provider)["id"]
+        answer = ("Here is what ran:\n1. `git status --short` was clean.\n2. The check exited with code `3`.\n\n"
+                  "- Bullets read at text size\n- Inline `code` is tinted")
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Please show-tool-calls-inline.", extra_environment=environment)[0])
+        latest = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        self.assertIn(call_ids[0], {activity["id"] for activity in latest["activities"]},
+                      "While its turn is the latest, the call belongs to that turn's Worked for activities.")
+        self.assertIn(answer, [message["text"] for message in latest["messages"]],
+                      "History should keep the answer's Markdown source exactly, inline code and list markers included.")
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Please reply simply.", extra_environment=environment)[0])
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        message_ids = {message["text"]: message["id"] for message in history["messages"]}
+        intro = message_ids.get("I'll check the repository status first.")
+        middle = message_ids.get("The status is clean. Next I'll list the files and run the check.")
+        self.assertTrue(intro and middle, f"The commentary on either side of a call should stay separate messages: {list(message_ids)}")
+        timeline = [activity for activity in history.get("timelineActivities", []) if activity["id"] in call_ids]
+        self.assertEqual([activity["id"] for activity in timeline], list(call_ids),
+                         "History should return the earlier turn's calls in the order they ran.")
+        status, listing, failing, mcp = timeline
+        self.assertEqual(status["afterMessageID"], intro, "A call should follow the message written before it.")
+        for activity in (listing, failing, mcp):
+            self.assertEqual(activity["afterMessageID"], middle, "Calls after the second message should follow it.")
+        self.assertEqual(status["input"], "git status --short && echo fixture-status-done")
+        self.assertEqual(status["output"].strip(), "fixture-status-done")
+        self.assertEqual(status["summary"], summaries[0])
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(listing["input"], "ls -1")
+        self.assertEqual(listing["output"].strip().splitlines()[-1], "fixture-four.txt")
+        self.assertEqual(listing["summary"], summaries[1])
+        self.assertEqual(failing["input"], "exit 3")
+        self.assertEqual(failing["status"], "failed", "A failing command should report failed.")
+        self.assertIsNone(mcp.get("input"), "An MCP call's arguments must stay private.")
+        self.assertIsNone(mcp.get("output"), "An MCP call's raw result must stay private.")
+        raw = json.dumps(history)
+        self.assertNotIn("timeline-private-argument", raw)
+        self.assertNotIn("timeline-private-result", raw)
+        latest_turn_id = history["messages"][-1].get("turnID")
+        self.assertTrue(latest_turn_id, "The later turn's messages should carry their turn ID.")
+        for activity in timeline:
+            self.assertNotEqual(activity.get("turnID"), latest_turn_id, "Each call belongs to the earlier turn, not the latest one.")
+        latest_ids = {activity["id"] for activity in history["activities"]}
+        self.assertFalse(latest_ids & set(call_ids[:3]), "The earlier turn's shell calls are timeline activities, not the latest turn's.")
+
+        newest = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "2", extra_environment=environment)[0])
+        self.assertGreater(newest["earlierMessageCount"], 0)
+        self.assertFalse({activity["id"] for activity in newest.get("timelineActivities", [])} & set(call_ids),
+                         "The newest page holds none of the earlier turn's messages, so none of its calls.")
+        earlier = self.assert_success(self.call_cli(
+            "conversation", "history", task_id, "--limit", "80", "--before", newest["messages"][0]["id"], extra_environment=environment,
+        )[0])
+        self.assertEqual([activity["id"] for activity in earlier.get("timelineActivities", []) if activity["id"] in call_ids], list(call_ids),
+                         "The page holding the earlier turn should carry all of its calls.")
+
+    # case-contract: test_claude_earlier_turn_tool_calls_render_inline | A Claude Code fixture turn that writes commentary, runs shell commands (one failing) and an MCP call, then answers keeps each call in Playhouse's own transcript placed after the message written before it. Once a later turn starts, CLI/XPC history still returns the earlier turn's calls as timeline activities, apart from the latest turn's activities: each shell call carries its stated purpose, its exact command and the output it returned, the failing call reports failed, and the MCP call exposes neither its arguments nor its raw result. A history page returns only the calls placed on its own messages, so the newest page carries none of them and the page before it carries them all. While its turn is the latest, a call stays in Worked for and is not shown inline. Once a later turn starts, the visible conversation shows each earlier call inline between those messages, in order, as a row with the tool's name, its purpose, and IN and OUT blocks clipped until expanded; the MCP row has no IN or OUT block, the turn's answer renders a numbered list written right under a paragraph line as separate items whose inline code text is unchanged, and the rows are still there after reopening the task.
+    def test_claude_earlier_turn_tool_calls_render_inline(self):
+        environment = self.install_claude_fixture("claude-fixture-timeline-tools")
+        self.assert_earlier_turn_tool_calls_in_history(
+            "claude", environment,
+            ("toolu_timeline_status", "toolu_timeline_list", "toolu_timeline_fail", "toolu_timeline_mcp"),
+            ("Check repository status", "List fixture files"),
+        )
+
+    # case-contract: test_codex_earlier_turn_tool_calls_render_inline | A Codex app-server fixture thread whose earlier turn reports commentary, command executions (one failing) and an MCP call between its messages keeps those items in their place in history: once a later turn starts, CLI/XPC history returns each earlier call as a timeline activity placed after the message the thread listed before it, with its working directory, exact command and aggregated output, the failing command reports failed, and the MCP call exposes neither its arguments nor its raw result. Commentary on either side of a call stays a separate message instead of merging across it. A history page returns only the calls placed on its own messages, so the newest page carries none of them and the page before it carries them all. While its turn is the latest, a call stays in Worked for and is not shown inline. Once a later turn starts, the visible conversation shows each earlier call inline between those messages, in order, as a row with the tool's name, its working directory, and IN and OUT blocks clipped until expanded; the MCP row has no IN or OUT block, the turn's answer renders a numbered list written right under a paragraph line as separate items whose inline code text is unchanged, and the rows are still there after reopening the task.
+    def test_codex_earlier_turn_tool_calls_render_inline(self):
+        executable = self.data_directory / "codex-fixture-unique-turns-timeline-tool-calls"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        self.assert_earlier_turn_tool_calls_in_history(
+            "codex", {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
+            ("item_timeline_status", "item_timeline_list", "item_timeline_fail", "item_timeline_mcp"),
+            ("in /tmp/playhouse-fixture", "in /tmp/playhouse-fixture"),
+        )
+
     # case-contract: test_conversation_rejects_invalid_image_attachments | Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status.
     def test_conversation_rejects_invalid_image_attachments(self):
         task_id = self.create_task(title="Invalid image conversation")["id"]
@@ -7101,7 +7295,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         pages = read_pages(grown)
         self.assertEqual([page["earlierMessageCount"] for page in pages], [0, 17, 57])
 
-    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, Working for renders open and active agents appear as individual named rows outside it, with available path/model/reasoning metadata and started-working wording; a mid-turn collapse the reader performs is honored. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
+    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, Working for renders open and active agents appear as individual named rows, each with an arrow that opens it, outside it, with available path/model/reasoning metadata and started-working wording; a mid-turn collapse the reader performs is honored. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -7264,7 +7458,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "A fresh read-only subagent inspection should return the child conversation's stored content.",
         )
 
-    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in and fits the viewport, the question that started it stays pinned near the top of the transcript, consistent with the user message preceding its final answer in CLI/XPC history.
+    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing is hidden until a first message is sent and while the agent waits on answers to its questions, then stays enabled with an empty composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, including a list that starts on the line right after a paragraph without a blank line, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in and fits the viewport, the question that started it stays pinned near the top of the transcript, consistent with the user message preceding its final answer in CLI/XPC history.
     def test_plan_mode_renders_markdown_in_conversation(self):
         task_id = self.create_task(title="Plan mode Markdown", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -7275,7 +7469,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
-        markdown_reply = "## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n\n1. First numbered step: capture the baseline state before changes.\n\n2. Second numbered step: apply the fix and confirm there are no regressions.\n\n```javascript\nconsole.log(\"Hello, world!\");\n```\n\n| Step | Status |\n| --- | :---: |\n| Verify fixture | Done |\n| Render table | Pending |"
+        markdown_reply = "## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n\nTwo numbered steps follow on the very next lines:\n1. First numbered step: capture the baseline state before changes.\n\n2. Second numbered step: apply the fix and confirm there are no regressions.\n\n```javascript\nconsole.log(\"Hello, world!\");\n```\n\n| Step | Status |\n| --- | :---: |\n| Verify fixture | Done |\n| Render table | Pending |"
         sent, events = self.call_cli(
             "conversation", "send", task_id, "--message", "Plan the task.", "--mode", "plan",
             extra_environment=env,
@@ -8102,7 +8296,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         resumed, _ = self.call_cli("conversation", "history", task_id)
         self.assertIsNone(self.assert_success(resumed).get("pendingUserInputRequest"))
 
-    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports. A failed agent whose notification the running turn already consumed ends the send promptly instead of waiting for a wake. The system prompt Playhouse appends for Claude lets it run shell commands and agents in the foreground or background, forbids only processes detached with & or nohup, says it can end its response while background work runs instead of waiting and must report the outcome only after the background results, and no longer tells it to sleep, keep shell commands in the foreground, or keep its turn open for work it started.
+    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript as the agent's row (named, finished working, with an arrow) rather than a reply bubble, opens the report in the read-only agent window when clicked, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports. A failed agent whose notification the running turn already consumed ends the send promptly instead of waiting for a wake. The system prompt Playhouse appends for Claude lets it run shell commands and agents in the foreground or background, forbids only processes detached with & or nohup, says it can end its response while background work runs instead of waiting and must report the outcome only after the background results, and no longer tells it to sleep, keep shell commands in the foreground, or keep its turn open for work it started.
     def test_claude_background_agent_keeps_turn_open_until_resolved(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-background-agent"

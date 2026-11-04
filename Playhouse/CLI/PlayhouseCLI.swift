@@ -515,8 +515,11 @@ enum PlayhouseCLI {
                 if let text = flags["--text"]?.first { arguments["objective"] = .string(text) }
                 return BridgeRequest(command: "conversation.goal", arguments: arguments)
             case "queue":
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message"])
-                return BridgeRequest(command: "conversation.queue", arguments: ["taskID": .string(id), "message": .string(flags["--message"]?.first ?? "")])
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--image"])
+                return BridgeRequest(command: "conversation.queue", arguments: [
+                    "taskID": .string(id), "message": .string(flags["--message"]?.first ?? ""),
+                    "images": .array(try imageDataURLs(flags["--image"] ?? []))
+                ])
             case "subagent-history":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--activity"])
                 guard let activityJSON = flags["--activity"]?.first,
@@ -537,14 +540,10 @@ enum PlayhouseCLI {
                 return BridgeRequest(command: "conversation.queue.steer", arguments: ["taskID": .string(id), "messageID": .string(tail[1])])
             case "steer":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--image"])
-                let images = try (flags["--image"] ?? []).map { path -> BridgeValue in
-                    let url = URL(fileURLWithPath: path)
-                    let data = try Data(contentsOf: url)
-                    guard data.count <= 10_000_000 else { throw CLIError.usage("Each image must be smaller than 10 MB.") }
-                    let mime = ["jpg", "jpeg"].contains(url.pathExtension.lowercased()) ? "image/jpeg" : "image/png"
-                    return .string("data:\(mime);base64,\(data.base64EncodedString())")
-                }
-                return BridgeRequest(command: "conversation.steer", arguments: ["taskID": .string(id), "message": .string(flags["--message"]?.first ?? ""), "images": .array(images)])
+                return BridgeRequest(command: "conversation.steer", arguments: [
+                    "taskID": .string(id), "message": .string(flags["--message"]?.first ?? ""),
+                    "images": .array(try imageDataURLs(flags["--image"] ?? []))
+                ])
             case "repair-user-input":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--from-task"])
                 guard let sourceTaskID = flags["--from-task"]?.first else {
@@ -591,13 +590,7 @@ enum PlayhouseCLI {
                     }
                     answers[questionID, default: []].append(answer)
                 }
-                let images = try (flags["--image"] ?? []).map { path -> BridgeValue in
-                    let url = URL(fileURLWithPath: path)
-                    let data = try Data(contentsOf: url)
-                    guard data.count <= 10_000_000 else { throw CLIError.usage("Each image must be smaller than 10 MB.") }
-                    let mime = url.pathExtension.lowercased() == "jpg" || url.pathExtension.lowercased() == "jpeg" ? "image/jpeg" : "image/png"
-                    return .string("data:\(mime);base64,\(data.base64EncodedString())")
-                }
+                let images = try imageDataURLs(flags["--image"] ?? [])
                 var sendArguments: [String: BridgeValue] = [
                     "taskID": .string(id),
                     "message": .string(flags["--message"]?.first ?? ""),
@@ -616,6 +609,17 @@ enum PlayhouseCLI {
             }
         default:
             throw CLIError.usage("Unknown command group '\(group)'.")
+        }
+    }
+
+    /// Conversation image flags as data URLs; the bridge validates the image bytes.
+    private static func imageDataURLs(_ paths: [String]) throws -> [BridgeValue] {
+        try paths.map { path in
+            let url = URL(fileURLWithPath: path)
+            let data = try Data(contentsOf: url)
+            guard data.count <= 10_000_000 else { throw CLIError.usage("Each image must be smaller than 10 MB.") }
+            let mime = ["jpg", "jpeg"].contains(url.pathExtension.lowercased()) ? "image/jpeg" : "image/png"
+            return .string("data:\(mime);base64,\(data.base64EncodedString())")
         }
     }
 
@@ -687,6 +691,7 @@ enum PlayhouseCLI {
       playhouse task list|get <task-id>
       playhouse task create --title <title> --prompt <text> --root <path> [--root <path>...] [--provider <codex|claude>]
       playhouse task create --title <title> --prompt <text> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--merge-target <repo-path>=<local-branch>]
+      playhouse task move <task-id> Review
       playhouse task move <task-id> Done
       playhouse task move <task-id> Done --allow-unmerged
       playhouse task pr create <task-id>
@@ -731,7 +736,7 @@ enum PlayhouseCLI {
       playhouse task cpu-usage <task-id>
       playhouse conversation history <task-id> [--limit <messages>] [--before <message-id>]
       playhouse conversation present-image <task-id> --image <path> [--caption <text>]
-      playhouse conversation queue <task-id> --message <text>
+      playhouse conversation queue <task-id> --message <text> [--image <path>]...
       playhouse conversation queue-list <task-id>
       playhouse conversation runtime [--watch]
       playhouse conversation cpu-usage [--watch]

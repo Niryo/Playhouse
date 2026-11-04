@@ -45,6 +45,7 @@ struct KanbanBoardView: View {
     @State private var autopilotPollScheduled = false
     @State private var pullRequestError: String?
     @State private var doneMoveError: String?
+    @State private var reviewMoveError: String?
     @State private var isShowingBoardSearch = false
     @State private var boardSearchText = ""
     @FocusState private var isBoardSearchFocused: Bool
@@ -197,6 +198,16 @@ struct KanbanBoardView: View {
         } message: {
             Text(doneMoveError ?? "Please try again.")
         }
+        .alert("Couldn't move task to Review", isPresented: Binding(
+            get: { reviewMoveError != nil },
+            set: { if !$0 { reviewMoveError = nil } }
+        )) {
+            Button("OK", role: .cancel) { reviewMoveError = nil }
+            .buttonHoverPointer()
+            .nativeHelp("Dismiss Review move error")
+        } message: {
+            Text(reviewMoveError ?? "Please try again.")
+        }
         .confirmationDialog(
             "This task has an unmerged pull request",
             isPresented: Binding(
@@ -315,7 +326,7 @@ struct KanbanBoardView: View {
             .scrollContentBackground(.hidden)
             .accessibilityIdentifier("board-columns-scroll-view")
             .overlay(alignment: .trailing) {
-                if draggedTaskID != nil {
+                if draggedTaskStatus == .review {
                     HStack(spacing: 10) {
                         DoneDropTarget(isActive: $isDoneTargetActive, onDrop: { moveTask(id: $0, to: .done) })
                             .frame(width: 104, height: 480)
@@ -402,6 +413,7 @@ struct KanbanBoardView: View {
             },
             onShowTaskTokenStats: { taskShowingTokenStats = $0 },
             draggedTaskID: $draggedTaskID,
+            acceptsDraggedTask: status == .review && draggedTaskStatus == .waitingResponse,
             minHeight: minHeight
         )
         .frame(width: 264)
@@ -477,7 +489,7 @@ struct KanbanBoardView: View {
                     Text("Playhouse")
                         .font(.system(size: 21, weight: .semibold, design: .rounded))
                         .accessibilityIdentifier("board-title")
-                    Text("A clear view of every task in flight.")
+                    Text("Let the show begin.")
                         .font(.system(size: 12.5))
                         .foregroundStyle(.secondary)
                 }
@@ -486,28 +498,6 @@ struct KanbanBoardView: View {
             Spacer(minLength: 20)
 
             HStack(spacing: 14) {
-                let activeTaskCount = tasks.filter { $0.status != .done }.count
-                Text("\(activeTaskCount) \(activeTaskCount == 1 ? "task" : "tasks")")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Task count")
-                    .accessibilityValue("\(activeTaskCount)")
-                    .accessibilityIdentifier("task-count")
-
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = true }
-                    isBoardSearchFocused = true
-                } label: {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 30, height: 30)
-                }
-                .buttonHoverPointer()
-                .buttonStyle(.bordered)
-                .nativeHelp("Search tasks")
-                .accessibilityLabel("Search tasks")
-                .accessibilityIdentifier("board-search-button")
-
                 Button {
                     withAnimation(.easeInOut(duration: 0.24)) { isShowingDoneArchive.toggle() }
                 } label: {
@@ -817,8 +807,25 @@ struct KanbanBoardView: View {
         }
     }
 
+    /// Each drag reveals only the target its source column can move to: Review
+    /// cards get the Done target, Waiting Response cards the Review column.
+    private var draggedTaskStatus: TaskStatus? {
+        draggedTaskID.flatMap { id in tasks.first(where: { $0.id == id })?.status }
+    }
+
     private func moveTask(id: UUID, to status: TaskStatus, allowUnmergedPullRequests: Bool = false) {
         guard let task = tasks.first(where: { $0.id == id }), task.status != status else { return }
+        if status == .review {
+            guard task.status == .waitingResponse else { return }
+            Task { @MainActor in
+                do {
+                    _ = try await remoteConversations.moveTaskToReview(taskID: id)
+                } catch {
+                    reviewMoveError = error.localizedDescription
+                }
+            }
+            return
+        }
         guard status == .done else { return }
         let skipMergeVerification = mergedReviewTaskIDs.contains(id)
         Task { @MainActor in
@@ -1188,7 +1195,10 @@ private struct KanbanColumnView: View {
     let onDeleteTask: (BoardTask) -> Void
     let onShowTaskTokenStats: (BoardTask) -> Void
     @Binding var draggedTaskID: UUID?
+    /// True while a card this column can receive is being dragged.
+    let acceptsDraggedTask: Bool
     let minHeight: CGFloat
+    @State private var isDropTargeted = false
 
     var body: some View {
         dropTarget
@@ -1253,14 +1263,33 @@ private struct KanbanColumnView: View {
                 .fill(WorkspaceTheme.panelBackground.opacity(0.78))
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.075), lineWidth: 1)
+            if acceptsDraggedTask {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(status.accent.opacity(isDropTargeted ? 0.16 : 0.06))
+                    .strokeBorder(status.accent.opacity(isDropTargeted ? 0.9 : 0.45), style: StrokeStyle(lineWidth: isDropTargeted ? 2 : 1.5, dash: isDropTargeted ? [] : [6, 4]))
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("task-\(status.accessibilityKey)-drop-target")
+            } else {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.075), lineWidth: 1)
+            }
         }
     }
 
     @ViewBuilder
     private var dropTarget: some View {
-        if status != .done {
+        if status == .review {
+            // Waiting Response cards drop here; the board ignores any other source.
+            columnContent
+                .onDrop(of: [.plainText], isTargeted: $isDropTargeted) { providers in
+                    guard acceptsDraggedTask, let provider = providers.first else { return false }
+                    _ = provider.loadObject(ofClass: NSString.self) { value, _ in
+                        guard let value = value as? String, let id = UUID(uuidString: value) else { return }
+                        DispatchQueue.main.async { onMoveTask(id, status) }
+                    }
+                    return true
+                }
+        } else if status != .done {
             columnContent
         } else if #available(macOS 26.0, *) {
             NativeMoveDropDestination { taskID in
@@ -1293,11 +1322,10 @@ private struct KanbanColumnView: View {
             isPullRequestMerged: mergedReviewTaskIDs.contains(task.id),
             hasPullRequestConflicts: conflictedReviewTaskIDs.contains(task.id),
             pullRequestHealth: pullRequestHealth[task.id] ?? [:],
-            onMoveToDone: task.status == .review ? { onMoveTask(task.id, .done) } : nil
+            onMoveToDone: task.status == .review ? { onMoveTask(task.id, .done) } : nil,
+            onMoveToReview: task.status == .waitingResponse ? { onMoveTask(task.id, .review) } : nil
         )
-        if task.status == .waitingResponse {
-            card
-        } else if task.status == .review {
+        if task.status == .waitingResponse || task.status == .review {
             card.onDrag {
                 draggedTaskID = task.id
                 return NSItemProvider(object: task.id.uuidString as NSString)
@@ -1467,6 +1495,7 @@ private struct TaskCardView: View {
     let hasPullRequestConflicts: Bool
     let pullRequestHealth: [Int: PullRequestHealth]
     let onMoveToDone: (() -> Void)?
+    let onMoveToReview: (() -> Void)?
 
     var body: some View {
         // Card rows, top to bottom: the title, the live updates, the time with
@@ -1595,6 +1624,12 @@ private struct TaskCardView: View {
                 .buttonHoverPointer()
                 .help("Move to Done")
                     .accessibilityIdentifier("move-task-to-done-menu-item")
+            }
+            if let onMoveToReview {
+                Button("Move to Review", systemImage: "eye", action: onMoveToReview)
+                .buttonHoverPointer()
+                .help("Move to Review")
+                    .accessibilityIdentifier("move-task-to-review-menu-item")
             }
             Button("Rename…", systemImage: "pencil", action: onRename)
             .buttonHoverPointer()
@@ -1792,7 +1827,9 @@ private struct TaskCardView: View {
         switch health {
         case .green: .green
         case .red: .red
-        case .pending: .orange
+        case .pending: .blue
+        // GitHub's merged purple.
+        case .merged: Color(red: 0.64, green: 0.44, blue: 0.97)
         }
     }
 
@@ -1801,6 +1838,7 @@ private struct TaskCardView: View {
         case .green: "checks passing"
         case .red: "checks failing or conflicted"
         case .pending: "checks running"
+        case .merged: "merged"
         }
     }
 
