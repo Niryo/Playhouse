@@ -6794,6 +6794,65 @@ class PlayhouseBridgeTests(unittest.TestCase):
             send_arguments=("--model", "gpt-6-sol"),
         )
 
+    # case-contract: test_conversation_follows_latest_streamed_messages | While a Claude Code fixture reply streams in held stages below its question, mid-turn CLI/XPC history holds every streamed line before the newest, which Claude may still extend as its answer, once each and in order after the question, with no final line until the reply is released, and the settled turn ends with its final line after every streamed line. In the visible transcript, a reader at the bottom follows the reply: once it outgrows the viewport, the newest streamed line stays in view and the question scrolls away. Scrolling up stops following, so the next stage leaves the reader's position unchanged and its lines out of view; scrolling back to the bottom resumes following, so the next stage's newest line is in view while the turn is still running, and the settled turn leaves its final line in view. Following is shared transcript presentation, so one representative provider covers it.
+    def test_conversation_follows_latest_streamed_messages(self):
+        executable = self.data_directory / "claude-fixture-stream-follow"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        task_id = self.create_task("Streamed follow turn", provider="claude")["id"]
+        prompt = "Please stream-follow-latest."
+        stages = (20, 8, 8, 8)
+        final_text = "Streamed follow reply finished."
+
+        def line(number):
+            return (f"Streamed follow line {number:02d}: the reply keeps growing below the question "
+                    "so the transcript has to scroll to keep its newest text in view.")
+
+        def history_texts():
+            history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+            return [message["text"] for message in history["messages"]]
+
+        send = self.start_cli("conversation", "send", task_id, "--message", prompt, extra_environment=environment)
+        try:
+            shown = 0
+            for stage, count in enumerate(stages, start=1):
+                ready = Path(str(executable) + f".stream-follow-ready-{stage}")
+                self.wait_for_marker(ready, True, f"The fixture should hold streamed stage {stage}.", timeout=20)
+                shown += count
+                expected = [line(number) for number in range(1, shown + 1)]
+                # Claude's newest text can still turn out to be its answer, so it
+                # is recorded once something follows it; every earlier line is history.
+                texts = []
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    texts = history_texts()
+                    if expected[-2] in texts:
+                        break
+                    time.sleep(0.1)
+                streamed = [text for text in texts if text.startswith("Streamed follow line ")]
+                self.assertIn(len(streamed), (shown - 1, shown), f"Mid-turn history at stage {stage} should hold every line before the newest.")
+                self.assertEqual(
+                    streamed, expected[:len(streamed)],
+                    f"Mid-turn history at stage {stage} should hold the streamed lines once each and in order.",
+                )
+                self.assertLess(texts.index(prompt), texts.index(expected[0]), "The streamed reply should follow its question.")
+                self.assertNotIn(final_text, texts, "The final line must not exist while the reply is still held.")
+                Path(str(executable) + f".stream-follow-release-{stage}").write_text("Continue.\n", encoding="utf-8")
+        except BaseException:
+            for stage in range(1, len(stages) + 1):
+                Path(str(executable) + f".stream-follow-release-{stage}").write_text("Release after failure.\n", encoding="utf-8")
+            raise
+        self.finish_cli(send, ("conversation", "send", task_id, "--message", prompt), timeout=60)
+        texts = history_texts()
+        expected = [line(number) for number in range(1, sum(stages) + 1)]
+        self.assertEqual([text for text in texts if text.startswith("Streamed follow line ")], expected)
+        self.assertIn(final_text, texts, "The settled turn should end with its final line.")
+        self.assertGreater(texts.index(final_text), texts.index(expected[-1]), "The final line should come after every streamed line.")
+
     def assert_earlier_turn_tool_calls_in_history(self, provider, environment, call_ids, summaries):
         """Runs a tool-call turn and a later turn, then checks the earlier turn's calls in history."""
         task_id = self.create_task(f"{provider} timeline tools", provider=provider)["id"]
@@ -7399,7 +7458,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "A fresh read-only subagent inspection should return the child conversation's stored content.",
         )
 
-    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing is hidden until a first message is sent and while the agent waits on answers to its questions, then stays enabled with an empty composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, including a list that starts on the line right after a paragraph without a blank line, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in, the question that started it stays pinned near the top of the transcript instead of being auto-scrolled past as the answer grows, consistent with the user message preceding its final answer in CLI/XPC history.
+    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing is hidden until a first message is sent and while the agent waits on answers to its questions, then stays enabled with an empty composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, including a list that starts on the line right after a paragraph without a blank line, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in and fits the viewport, the question that started it stays pinned near the top of the transcript, consistent with the user message preceding its final answer in CLI/XPC history.
     def test_plan_mode_renders_markdown_in_conversation(self):
         task_id = self.create_task(title="Plan mode Markdown", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
