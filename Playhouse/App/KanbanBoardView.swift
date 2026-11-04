@@ -477,7 +477,7 @@ struct KanbanBoardView: View {
                     Text("Playhouse")
                         .font(.system(size: 21, weight: .semibold, design: .rounded))
                         .accessibilityIdentifier("board-title")
-                    Text("A clear view of every task in flight.")
+                    Text("Let the show begin.")
                         .font(.system(size: 12.5))
                         .foregroundStyle(.secondary)
                 }
