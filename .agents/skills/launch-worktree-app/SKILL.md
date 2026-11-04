@@ -17,7 +17,7 @@ The launcher builds the app, closes an existing Playhouse instance from the same
 
 ## Environment overrides
 
-`PLAYHOUSE_DATA_DIRECTORY` must either be unset or match the selected worktree's isolated profile. If `scripts/run.sh` rejects the inherited value with “uses this worktree’s isolated data directory,” do not retry unchanged and do not manually construct an app launch. Clear only that override and rerun the worktree launcher:
+Agent sessions inherit `PLAYHOUSE_DATA_DIRECTORY` from the Playhouse app that started them. When that value is another Playhouse app's profile directory (the primary app's or another worktree's), `scripts/run.sh` ignores it, says so on stderr, and launches with the selected worktree's own data directory. Any other value must match the selected worktree's profile. If `scripts/run.sh` rejects it with “uses this worktree’s isolated data directory,” do not retry unchanged and do not manually construct an app launch. Clear only that override and rerun the worktree launcher:
 
 ```bash
 env -u PLAYHOUSE_DATA_DIRECTORY ./scripts/run.sh

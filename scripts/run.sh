@@ -8,11 +8,7 @@ derived_data_dir="${PLAYHOUSE_PROFILE_DERIVED_DATA}"
 architecture="$(uname -m)"
 app_bundle="${derived_data_dir}/Build/Products/Debug/Playhouse.app"
 app_executable="${app_bundle}/Contents/MacOS/Playhouse"
-if [[ "${PLAYHOUSE_PROFILE_KIND}" == "linked" && -n "${PLAYHOUSE_DATA_DIRECTORY:-}" && "${PLAYHOUSE_DATA_DIRECTORY}" != "${PLAYHOUSE_PROFILE_DATA_DIRECTORY}" ]]; then
-  printf 'run.sh uses this worktree’s isolated data directory; PLAYHOUSE_DATA_DIRECTORY points elsewhere.\n' >&2
-  exit 2
-fi
-launch_data_directory="${PLAYHOUSE_DATA_DIRECTORY:-${PLAYHOUSE_PROFILE_DATA_DIRECTORY}}"
+launch_data_directory="$(playhouse_resolve_launch_data_directory)" || exit 2
 worktree_label="$(git -C "${repository_root}" branch --show-current)"
 if [[ -z "${worktree_label}" ]]; then
   worktree_label="$(basename "${repository_root}")"

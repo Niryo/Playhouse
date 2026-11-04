@@ -350,7 +350,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
     def create_task(self, title="Bridge task", roots=None, provider=None):
         if roots is None:
             roots = [self.primary]
-        command = ["task", "create", "--title", title]
+        command = ["task", "create", "--title", title, "--prompt", "Fixture task description."]
         for root in roots:
             command.extend(["--root", root])
         if provider:
@@ -462,8 +462,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Claude stop while thinking", "claude", "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE", "claude-code-fixture.py"
         )
 
-    def read_watcher_snapshot(self, watcher, predicate, timeout=15):
-        """Reads `conversation runtime --watch` event lines until one runtime snapshot satisfies `predicate`."""
+    def read_watcher_snapshot(self, watcher, predicate, timeout=15, event_type="runtime_state"):
+        """Reads `--watch` event lines until one `event_type` snapshot satisfies `predicate`."""
         deadline = time.monotonic() + timeout
         seen = []
         while time.monotonic() < deadline:
@@ -474,12 +474,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
             if not line.strip():
                 continue
             event = json.loads(line.decode("utf-8"))
-            if event.get("type") != "runtime_state":
+            if event.get("type") != event_type:
                 continue
             seen.append(event["payload"])
             if predicate(event["payload"]):
                 return event["payload"]
-        self.fail(f"No matching runtime snapshot arrived within {timeout}s; saw {seen}")
+        self.fail(f"No matching {event_type} snapshot arrived within {timeout}s; saw {seen}")
 
     @staticmethod
     def process_is_running(pid):
@@ -497,7 +497,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             time.sleep(0.1)
         return not self.process_is_running(pid)
 
-    # case-contract: test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle | The bridge daemon starts on the first request, serves later requests from the same process, and stays alive while any connection (such as a window's runtime watcher) is open. A watcher receives the daemon's runtime snapshots as a turn starts and stops, and the daemon exits by itself once the last connection closes and no request is running; the next request starts a fresh daemon on demand without any manual step.
+    # case-contract: test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle | The bridge daemon starts on the first request, serves later requests from the same process, and stays alive while any connection (such as a window's runtime or CPU usage watcher) is open. A watcher receives the daemon's runtime snapshots as a turn starts and stops, and the daemon exits by itself once the last connection closes and no request is running; the next request starts a fresh daemon on demand without any manual step.
     def test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle(self):
         service = f"{arguments.service_name}.lifecycle-{uuid.uuid4().hex[:8]}"
         fixture_source = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -521,9 +521,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(second["processID"], daemon_pid, "Later requests should reuse the running daemon.")
 
         watcher = self.start_cli("conversation", "runtime", "--watch", extra_environment=environment, binary_output=True)
+        # A window also streams CPU usage; that subscription must end with its connection too.
+        cpu_watcher = self.start_cli("conversation", "cpu-usage", "--watch", extra_environment=environment, binary_output=True)
         try:
             idle = self.read_watcher_snapshot(watcher, lambda snapshot: True)
             self.assertEqual(idle["activeThreadIDs"], [], "A daemon with no turns reports nothing active.")
+            cpu_idle = self.read_watcher_snapshot(cpu_watcher, lambda snapshot: True, event_type="cpu_usage_state")
+            self.assertEqual(cpu_idle["percentByThreadID"], {}, "A daemon with no turns samples no CPU usage.")
             time.sleep(4.5)
             self.assertTrue(self.process_is_running(daemon_pid), "An open watcher keeps the daemon alive past its idle grace.")
             self.assertEqual(
@@ -565,8 +569,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
             stopped = self.read_watcher_snapshot(watcher, lambda snapshot: thread_id not in snapshot["activeThreadIDs"])
             self.assertIn(thread_id, stopped["interruptedThreadIDs"])
         finally:
-            watcher.terminate()
-            watcher.wait(timeout=10)
+            for open_watcher in (watcher, cpu_watcher):
+                open_watcher.terminate()
+                open_watcher.wait(timeout=10)
 
         self.assertTrue(
             self.wait_until_process_exits(daemon_pid, timeout=20),
@@ -728,7 +733,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_rejected_stop_restores_active_status("claude", "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE", "claude-code-fixture.py")
 
     def create_repo_task(self, title, repositories, branches=None, branch_from=None, roots=None, merge_targets=None, materialize=False):
-        command = ["task", "create", "--title", title]
+        command = ["task", "create", "--title", title, "--prompt", "Fixture task description."]
         for repository in repositories:
             command.extend(["--repo", repository])
         for repository, branch in (branches or {}).items():
@@ -1056,7 +1061,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         # A board task existing (and, in the GUI, being opened to cover the chat sidebar) must
         # not disturb the chat's own model — the two are separate records, not a shared view state.
         covering_task = self.assert_success(
-            self.call_cli("task", "create", "--title", "Covers standalone chat")[0]
+            self.call_cli("task", "create", "--title", "Covers standalone chat", "--prompt", "Fixture task description.")[0]
         )
         reopened_chat = self.assert_success(self.call_cli("chat", "open")[0])
         self.assertEqual(reopened_chat["id"], chat_task_id, "An unrelated board task must not affect the chat identity.")
@@ -1173,6 +1178,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         chat_instructions = chat_fixture_history.get("threadStartDeveloperInstructions") or ""
         self.assertIn("task create", chat_instructions, "The chat must be taught the Playhouse task CLI.")
         self.assertIn("they always mean Playhouse", chat_instructions)
+        self.assertIn('task create --title "<title>" --prompt', chat_instructions, "The chat must create tasks with a full description.")
         # Page titles reach the user as transcript separators, parsed from close-turn.
         # Assert the prohibition positively too: pinning only the old wording would let the
         # instruction come back phrased differently.
@@ -1800,7 +1806,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
     # case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, test IDs that do not match the current worktree, and nonisolated test data before launching; the current app preserves a saved draft across restart.
     def test_app_override_rejects_incompatible_bundles(self):
-        task = self.assert_success(self.call_cli("task", "create", "--title", "Protected store", "--root", self.primary)[0])
+        task = self.assert_success(self.call_cli("task", "create", "--title", "Protected store", "--prompt", "Fixture task description.", "--root", self.primary)[0])
         self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", "Protected draft", "--status", "Backlog")[0])
         root = Path(__file__).resolve().parent.parent
         launch_contract = subprocess.run(
@@ -1816,7 +1822,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["savedPrompt"], "Protected draft")
 
-    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory; a saved conversation remains visible after an app restart.
+    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory. A saved conversation remains visible after an app restart.
     def test_worktree_app_profiles_isolate_identity_and_store(self):
         script = Path(__file__).resolve().parent / "app-profile.sh"
         linked = self.fixture / "existing-worktree"
@@ -1859,6 +1865,42 @@ class PlayhouseBridgeTests(unittest.TestCase):
             ["bash", "-c", verify_build, "profile-check", str(script), str(self.primary), linked_profile["bundleID"] + ".e2e.fixture"],
             capture_output=True, text=True,
         ).returncode, 0)
+        # scripts/run.sh launches with this resolver's directory. A value inherited
+        # from another Playhouse app's agent session gives way to the profile's own.
+        resolve_launch = 'source "$1"; playhouse_load_app_profile "$2"; playhouse_resolve_launch_data_directory'
+
+        def launch_directory(path, inherited):
+            environment = os.environ.copy()
+            environment.pop("PLAYHOUSE_DATA_DIRECTORY", None)
+            if inherited is not None:
+                environment["PLAYHOUSE_DATA_DIRECTORY"] = inherited
+            return subprocess.run(
+                ["bash", "-c", resolve_launch, "launch-check", str(script), str(path)],
+                env=environment, capture_output=True, text=True,
+            )
+
+        other_linked_directory = str(Path(linked_profile["dataDirectory"]).parent / "w0123456789abcdef")
+        for path, app_profile, inherited, ignored in [
+            (linked, linked_profile, None, False),
+            (linked, linked_profile, linked_profile["dataDirectory"], False),
+            (linked, linked_profile, primary_profile["dataDirectory"], True),
+            (linked, linked_profile, primary_profile["dataDirectory"] + "/", True),
+            (linked, linked_profile, other_linked_directory, True),
+            (self.primary, primary_profile, linked_profile["dataDirectory"], True),
+        ]:
+            result = launch_directory(path, inherited)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), app_profile["dataDirectory"], f"Inherited {inherited!r}")
+            self.assertEqual("inherited from another Playhouse app" in result.stderr, ignored, result.stderr)
+        for path, inherited in [
+            (linked, str(self.data_directory)),
+            (linked, str(Path(linked_profile["dataDirectory"]).parent / "not-a-profile")),
+            (self.primary, str(self.data_directory)),
+        ]:
+            result = launch_directory(path, inherited)
+            self.assertEqual(result.returncode, 2, result.stdout)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("PLAYHOUSE_DATA_DIRECTORY points elsewhere", result.stderr)
         # The bridge daemon and CLI ship flat in Contents/MacOS and resolve
         # their identity from this same Info.plist via `Bundle.main` (no
         # separate XPC bundle/Info.plist to cross-check anymore); the service
@@ -1867,7 +1909,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         app_info = plistlib.loads((self.cli.parent.parent / "Info.plist").read_bytes())
         self.assertEqual(arguments.service_name, app_info["CFBundleIdentifier"] + ".bridge")
 
-        task = self.assert_success(self.call_cli("task", "create", "--title", "Profile restart", "--root", self.primary)[0])
+        task = self.assert_success(self.call_cli("task", "create", "--title", "Profile restart", "--prompt", "Fixture task description.", "--root", self.primary)[0])
         saved = self.assert_success(self.call_cli(
             "task", "prompt", task["id"], "--text", "Keep this draft after restart.", "--status", "Backlog",
         )[0])
@@ -1880,19 +1922,19 @@ class PlayhouseBridgeTests(unittest.TestCase):
     # case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task opens with the repository picker closed and composer focused; no selected repository is valid and shows no red missing-folder warning when the required repository root is configured. A standalone conversation can be sent without repository roots, while GUI and CLI reject sends if the configured repository root is missing. The UI and CLI accept standalone sends after the root is configured. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
     def test_task_creation_rejects_invalid_title_roots_and_missing_folder(self):
         response, _ = self.call_cli(
-            "task", "create", "--title", "   ", "--root", self.primary,
+            "task", "create", "--title", "   ", "--prompt", "Fixture task description.", "--root", self.primary,
             expected_status=2,
         )
         self.assert_failure(response, "invalid_argument")
 
         response, _ = self.call_cli(
-            "task", "create", "--title", "Bad merge target", "--repo", self.primary,
+            "task", "create", "--title", "Bad merge target", "--prompt", "Fixture task description.", "--repo", self.primary,
             "--merge-target", f"{self.primary}=not-a-local-branch", expected_status=2,
         )
         self.assert_failure(response, "invalid_argument")
         self.assertIn("must name an existing local branch", response["error"]["message"])
 
-        response, _ = self.call_cli("task", "create", "--title", "No roots")
+        response, _ = self.call_cli("task", "create", "--title", "No roots", "--prompt", "Fixture task description.")
         empty_task = self.assert_success(response)
         self.assertEqual(empty_task["workspaceRoots"], [])
         self.assertEqual(empty_task["repositoryWorktrees"], [])
@@ -1917,7 +1959,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         deleted, _ = self.call_cli("task", "delete", empty_task["id"])
         self.assertTrue(self.assert_success(deleted)["deleted"])
 
-        no_root_task = self.assert_success(self.call_cli("task", "create", "--title", "Root required")[0])
+        no_root_task = self.assert_success(self.call_cli("task", "create", "--title", "Root required", "--prompt", "Fixture task description.")[0])
         self.assert_success(self.call_cli("settings", "clear-parent")[0])
         response, _ = self.call_cli(
             "conversation", "send", no_root_task["id"], "--message", "This must be blocked",
@@ -1926,14 +1968,14 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_failure(response, "settings_required")
         untouched = self.assert_success(self.call_cli("task", "get", no_root_task["id"])[0])
         self.assertEqual(untouched["status"], "Backlog", "Missing root validation must happen before task state changes.")
-        self.assertIsNone(untouched.get("savedPrompt"))
+        self.assertEqual(untouched.get("savedPrompt"), "Fixture task description.", "A rejected send must leave the saved prompt untouched.")
         self.assertEqual(untouched["repositoryWorktrees"], [])
         self.assert_success(self.call_cli("settings", "set-parent", self.fixture / "suggested-parent")[0])
         deleted, _ = self.call_cli("task", "delete", no_root_task["id"])
         self.assertTrue(self.assert_success(deleted)["deleted"])
 
         response, _ = self.call_cli(
-            "task", "create", "--title", "Missing folder", "--root", self.fixture / "missing",
+            "task", "create", "--title", "Missing folder", "--prompt", "Fixture task description.", "--root", self.fixture / "missing",
             expected_status=2,
         )
         self.assert_failure(response, "invalid_argument")
@@ -2058,7 +2100,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
     def test_task_creation_rejects_worktree_assigned_to_active_task(self):
         first = self.create_repo_task("First owner", [self.primary], branches={str(self.primary): "active-shared"}, materialize=True)
         response, _ = self.call_cli(
-            "task", "create", "--title", "Second owner", "--repo", self.primary,
+            "task", "create", "--title", "Second owner", "--prompt", "Fixture task description.", "--repo", self.primary,
             "--branch", f"{self.primary}=active-shared", expected_status=2,
         )
         self.assert_failure(response, "invalid_argument")
@@ -2075,7 +2117,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         try:
             for title in ["Reservation contender one", "Reservation contender two"]:
                 command = [
-                    "task", "create", "--title", title,
+                    "task", "create", "--title", title, "--prompt", "Fixture task description.",
                     "--repo", self.primary,
                     "--branch", f"{self.primary}={branch}",
                 ]
@@ -2311,7 +2353,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
     # case-contract: test_legacy_store_import_failure_preserves_original | An invalid legacy database fails import without changing the source or publishing a destination or partial snapshot; the normal isolated board remains usable.
     def test_legacy_store_import_failure_preserves_original(self):
-        self.assert_success(self.call_cli("task", "create", "--title", "Healthy board", "--root", self.primary)[0])
+        self.assert_success(self.call_cli("task", "create", "--title", "Healthy board", "--prompt", "Fixture task description.", "--root", self.primary)[0])
         failure = self.data_directory / "invalid-legacy"
         failure.mkdir()
         source = failure / "Playhouse.store"
@@ -2574,7 +2616,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_failure(invalid_search, "invalid_argument")
         filler_ids = []
         for index in range(1, 41):
-            filler = self.assert_success(self.call_cli("task", "create", "--title", f"Archive page filler {index}", "--root", str(self.custom))[0])
+            filler = self.assert_success(self.call_cli("task", "create", "--title", f"Archive page filler {index}", "--prompt", "Fixture task description.", "--root", str(self.custom))[0])
             filler_ids.append(filler["id"])
             self.complete_fixture_turn(filler["id"])
             moved = self.assert_success(self.call_cli("task", "move", filler["id"], "Done")[0])
@@ -2606,7 +2648,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own row above the card title and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task(
             "PR failure", [self.primary], merge_targets={self.primary: "main"}
@@ -3380,7 +3422,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
         self.run_git(self.primary, "remote", "remove", "origin")
 
-    # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows exact PR numbers on the active task and Done archive, including four-digit values without grouping separators. Hovering the outer padded edge of each PR link triggers its feedback.
+    # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows exact PR numbers on the active task and Done archive, including four-digit values without grouping separators, each with a hit target at least 30 points wide and tall. Hovering the outer padded edge of each PR link triggers its feedback.
     def test_done_archive_displays_existing_pull_request_link(self):
         task = self.create_repo_task("Archived linked PR", [self.primary, self.secondary], materialize=True)
         completed, _ = self.call_cli("task", "move", task["id"], "Done")
@@ -4516,6 +4558,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(pending["repositoryWorktrees"][0]["isPending"])
         self.assertEqual(pending_path, str(self.primary))
         response, _ = self.call_cli("task", "delete-check", pending_id)
+        self.assertTrue(self.assert_success(response)["requiresConfirmation"], "A task with a saved prompt holds user content, so deleting it must confirm.")
+        self.assert_success(self.call_cli("task", "prompt", pending_id, "--text", "")[0])
+        response, _ = self.call_cli("task", "delete-check", pending_id)
         self.assertFalse(self.assert_success(response)["requiresConfirmation"])
         kept_id = self.create_task("Kept preferences", roots=[self.custom])["id"]
         pending_preference = f"conversationMode.{pending_id.upper()}"
@@ -4728,7 +4773,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("settings", "get")
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
 
-        created, _ = self.call_cli("task", "create", "--title", "Apply remembered repositories")
+        created, _ = self.call_cli("task", "create", "--title", "Apply remembered repositories", "--prompt", "Fixture task description.")
         first_task_id = self.assert_success(created)["id"]
         restored, _ = self.call_cli(
             "task", "repository", "add-batch", first_task_id,
@@ -4754,7 +4799,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("settings", "get")
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.alternate)])
 
-        created, _ = self.call_cli("task", "create", "--title", "Apply updated remembered repository")
+        created, _ = self.call_cli("task", "create", "--title", "Apply updated remembered repository", "--prompt", "Fixture task description.")
         second_task_id = self.assert_success(created)["id"]
         restored, _ = self.call_cli(
             "task", "repository", "add-batch", second_task_id,
@@ -4777,7 +4822,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
     # case-contract: test_new_task_repository_restore_is_atomic_on_invalid_default | Applying an ordered repository batch with a valid repository followed by an empty Git repository fails without mutation: the CLI reports invalid_argument and fresh reads show no repository attachments or workspace roots; New Task automatically applies saved repositories; an invalid batch shows an error, attaches neither repository, keeps roots empty, preserves the saved order, and leaves the picker closed by default.
     def test_new_task_repository_restore_is_atomic_on_invalid_default(self):
-        created, _ = self.call_cli("task", "create", "--title", "Atomic repository restore")
+        created, _ = self.call_cli("task", "create", "--title", "Atomic repository restore", "--prompt", "Fixture task description.")
         task_id = self.assert_success(created)["id"]
         initial, _ = self.call_cli("task", "get", task_id)
         initial_task = self.assert_success(initial)
@@ -4816,7 +4861,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
     # case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, logs task.create.succeeded for its ID, verifies empty history, and deletes it cleanly. New Task logs start and completion events with the same attempt ID and created task ID, then opens one empty conversation with the repository picker closed, the composer focused, and no create sheet. With no selected repositories, the empty conversation prominently says no repository is selected; typing starts immediately and, with a configured repository root, the UI enables standalone Send. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
     def test_new_task_has_empty_conversation_history(self):
-        response, _ = self.call_cli("task", "create", "--title", "Untitled task")
+        response, _ = self.call_cli("task", "create", "--title", "Untitled task", "--prompt", "Fixture task description.")
         task_id = self.assert_success(response)["id"]
         task_create = next((event for event in self.diagnostic_events()
                             if event.get("event") == "task.create.succeeded" and event.get("taskID") == task_id), None)
@@ -4842,7 +4887,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         write_lock = self.data_directory / "store-write.lock"
         write_lock.mkdir()
         try:
-            response, _ = self.call_cli("task", "create", "--title", "Must not persist", expected_status=1)
+            response, _ = self.call_cli("task", "create", "--title", "Must not persist", "--prompt", "Fixture task description.", expected_status=1)
             self.assert_failure(response, "operation_failed")
             tasks, _ = self.call_cli("board", "list")
             self.assertEqual(self.assert_success(tasks)["tasks"], [])
@@ -5194,7 +5239,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(recovered_record["savedPrompt"], stale_prompt)
         self.assertIsNone(recovered_record.get("pendingSubmittedPrompt"))
 
-    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
+    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly and saves a --prompt description without starting the task, rejecting a blank or missing prompt; the UI shows that task in Backlog with the description unsent in its composer. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
     def test_conversation_provider_selection_persists_and_validates(self):
         settings = self.assert_success(self.call_cli("settings", "get")[0])
         self.assertEqual(settings["defaultProvider"], "codex", "Existing installs keep Codex as the default provider.")
@@ -5212,9 +5257,18 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(self.call_cli("settings", "get")[0])["defaultProvider"], "claude")
         claude_task = self.create_task("Provider claude default task")
         self.assertEqual(claude_task["conversationProvider"], "claude")
-        explicit, _ = self.call_cli("task", "create", "--title", "Explicit Codex task", "--root", self.primary, "--provider", "codex")
+        explicit, _ = self.call_cli("task", "create", "--title", "Explicit Codex task", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "codex")
         self.assertEqual(self.assert_success(explicit)["conversationProvider"], "codex")
-        unknown_create, _ = self.call_cli("task", "create", "--title", "Unknown provider task", "--root", self.primary, "--provider", "gemini", expected_status=2)
+        with_prompt, _ = self.call_cli("task", "create", "--title", "Prompted task", "--root", self.primary, "--prompt", "Full description of the work")
+        with_prompt = self.assert_success(with_prompt)
+        self.assertEqual(with_prompt["savedPrompt"], "Full description of the work", "task create --prompt saves the description.")
+        self.assertEqual(with_prompt["status"], "Backlog", "A prompt on create must not start the task.")
+        self.assertNotIn("pendingSubmittedPrompt", with_prompt, "A prompt on create must not be submitted.")
+        blank_prompt, _ = self.call_cli("task", "create", "--title", "Blank prompt task", "--root", self.primary, "--prompt", "   ", expected_status=2)
+        self.assert_failure(blank_prompt, "invalid_argument")
+        missing_prompt, _ = self.call_cli("task", "create", "--title", "Missing prompt task", "--root", self.primary, expected_status=2)
+        self.assert_failure(missing_prompt, "invalid_argument")
+        unknown_create, _ = self.call_cli("task", "create", "--title", "Unknown provider task", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "gemini", expected_status=2)
         self.assert_failure(unknown_create, "invalid_argument")
 
         unknown_switch, _ = self.call_cli("conversation", "provider", codex_task["id"], "set", "gemini", expected_status=2)
@@ -5282,7 +5336,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         fixtures = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude), "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(codex)}
-        created, _ = self.call_cli("task", "create", "--title", "Claude answer", "--root", self.primary, "--provider", "claude")
+        created, _ = self.call_cli("task", "create", "--title", "Claude answer", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude")
         task_id = self.assert_success(created)["id"]
 
         sent, events = self.call_cli("conversation", "send", task_id, "--message", "Tell me a very short dog story.", extra_environment=fixtures)
@@ -5624,7 +5678,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             )
             environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
             task = self.assert_success(self.call_cli(
-                "task", "create", "--title", "Untitled task", "--repo", self.primary, "--provider", "claude"
+                "task", "create", "--title", "Untitled task", "--prompt", "Fixture task description.", "--repo", self.primary, "--provider", "claude"
             )[0])
             self.assertEqual(task["repositoryWorktrees"][0]["branch"], "auto")
             self.assertTrue(task["repositoryWorktrees"][0]["isPending"])
@@ -5670,10 +5724,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
         first = self.assert_success(self.call_cli(
-            "task", "create", "--title", "Held Claude conversation", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Held Claude conversation", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )[0])
         second = self.assert_success(self.call_cli(
-            "task", "create", "--title", "Parallel Claude conversation", "--root", self.secondary, "--provider", "claude"
+            "task", "create", "--title", "Parallel Claude conversation", "--prompt", "Fixture task description.", "--root", self.secondary, "--provider", "claude"
         )[0])
         first_prompt = "Please hold-claude-turn-for-concurrency."
         second_prompt = "Inspect the workspace while the other conversation is busy."
@@ -5756,10 +5810,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
         first = self.assert_success(self.call_cli(
-            "task", "create", "--title", "Failing Claude conversation", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Failing Claude conversation", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )[0])
         second = self.assert_success(self.call_cli(
-            "task", "create", "--title", "Unaffected Claude conversation", "--root", self.secondary, "--provider", "claude"
+            "task", "create", "--title", "Unaffected Claude conversation", "--prompt", "Fixture task description.", "--root", self.secondary, "--provider", "claude"
         )[0])
         first_prompt = "Please fail-after-hold-claude-turn-for-concurrency."
         second_prompt = "Second Claude turn after failure."
@@ -5832,10 +5886,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
         stopped = self.assert_success(self.call_cli(
-            "task", "create", "--title", "Stopped Claude conversation", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Stopped Claude conversation", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )[0])
         running = self.assert_success(self.call_cli(
-            "task", "create", "--title", "Running Claude conversation", "--root", self.secondary, "--provider", "claude"
+            "task", "create", "--title", "Running Claude conversation", "--prompt", "Fixture task description.", "--root", self.secondary, "--provider", "claude"
         )[0])
         parallel_prompt = "Inspect the workspace while the other conversation is busy."
         hold_command = ["conversation", "send", stopped["id"], "--message", "Hold until stopped."]
@@ -6412,7 +6466,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
             "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
-        created, _ = self.call_cli("task", "create", "--title", "Claude active image", "--root", self.primary, "--provider", "claude")
+        created, _ = self.call_cli("task", "create", "--title", "Claude active image", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude")
         task_id = self.assert_success(created)["id"]
         image = self.data_directory / "active-agent-image.png"
         image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
@@ -6449,7 +6503,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
             "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        created, _ = self.call_cli("task", "create", "--title", "Codex active image", "--root", self.primary)
+        created, _ = self.call_cli("task", "create", "--title", "Codex active image", "--prompt", "Fixture task description.", "--root", self.primary)
         task_id = self.assert_success(created)["id"]
         environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         prompt = "Please publish-image-during-active-turn."
@@ -7300,7 +7354,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         claude_environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude)}
-        claude_task, _ = self.call_cli("task", "create", "--title", "Claude model cache", "--root", self.primary, "--provider", "claude")
+        claude_task, _ = self.call_cli("task", "create", "--title", "Claude model cache", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude")
         claude_task_id = self.assert_success(claude_task)["id"]
         first_claude_models, _ = self.call_cli("conversation", "models", claude_task_id, extra_environment=claude_environment)
         first_claude_models = self.assert_success(first_claude_models)["models"]
@@ -7320,7 +7374,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         root_owner_value = "Playhouse model cache test owns this workspace root.\n"
         root_owner_marker.write_text(root_owner_value, encoding="utf-8")
         unavailable_task, _ = self.call_cli(
-            "task", "create", "--title", "Unavailable Claude model root", "--root", unavailable_root, "--provider", "claude"
+            "task", "create", "--title", "Unavailable Claude model root", "--prompt", "Fixture task description.", "--root", unavailable_root, "--provider", "claude"
         )
         unavailable_task_id = self.assert_success(unavailable_task)["id"]
         initial_unavailable_models, _ = self.call_cli("conversation", "models", unavailable_task_id, extra_environment=claude_environment)
@@ -7371,7 +7425,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         claude_environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude_executable)}
-        created, _ = self.call_cli("task", "create", "--title", "Claude model versions", "--root", self.primary, "--provider", "claude")
+        created, _ = self.call_cli("task", "create", "--title", "Claude model versions", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude")
         claude_task_id = self.assert_success(created)["id"]
         claude_models = self.assert_success(
             self.call_cli("conversation", "models", claude_task_id, extra_environment=claude_environment)[0]
@@ -7500,7 +7554,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
-        created, _ = self.call_cli("task", "create", "--title", "Claude effort dispatch", "--root", self.primary, "--provider", "claude")
+        created, _ = self.call_cli("task", "create", "--title", "Claude effort dispatch", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude")
         task_id = self.assert_success(created)["id"]
         self.assert_success(self.call_cli("conversation", "model", task_id, "set", "claude-opus-5-5")[0])
         self.assert_success(self.call_cli("conversation", "effort", task_id, "set", "xhigh")[0])
@@ -7724,7 +7778,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         task, _ = self.call_cli(
-            "task", "create", "--title", "Claude question", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Claude question", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )
         task_id = self.assert_success(task)["id"]
         response, events = self.call_cli(
@@ -7753,7 +7807,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         task, _ = self.call_cli(
-            "task", "create", "--title", "Claude reminder question", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Claude reminder question", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )
         task_id = self.assert_success(task)["id"]
         initial, initial_events = self.call_cli(
@@ -7819,7 +7873,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         task, _ = self.call_cli(
-            "task", "create", "--title", "Empty Claude question", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Empty Claude question", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )
         task_id = self.assert_success(task)["id"]
         failed, _ = self.call_cli(
@@ -7831,7 +7885,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn("question", failed.get("error", {}).get("message", "").lower())
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Blocked")
 
-    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
+    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, which still shows the question that started it, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
     def test_claude_pending_question_recovers_after_provider_process_restarts(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-restart-question"
@@ -7841,7 +7895,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         task, _ = self.call_cli(
-            "task", "create", "--title", "Restart-safe Claude question", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Restart-safe Claude question", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )
         task_id = self.assert_success(task)["id"]
         failed, _ = self.call_cli(
@@ -7881,6 +7935,25 @@ class PlayhouseBridgeTests(unittest.TestCase):
                 applying.get("pendingUserInputRequest"),
                 "An answered question must not stay pending while its recovery turn runs.",
             )
+            self.assertTrue(
+                any(m["role"] == "user" and m["text"] == "Ask a restart-safe structured question." for m in applying["messages"]),
+                "History read mid-recovery must still include the conversation saved before the answer.",
+            )
+            runtime = self.assert_success(self.call_cli("conversation", "runtime")[0])
+            self.assertEqual(
+                runtime.get("pendingUserInput", {}), {},
+                "The daemon's runtime state must not keep offering an answered question while its recovery turn runs.",
+            )
+            # A window reopening the task reads one stored page, a separate path from the full history.
+            applying_page = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80")[0])
+            self.assertTrue(
+                any(m["role"] == "user" and m["text"] == "Ask a restart-safe structured question." for m in applying_page["messages"]),
+                "The newest history page read mid-recovery must still include the conversation saved before the answer.",
+            )
+            self.assertIsNone(
+                applying_page.get("pendingUserInputRequest"),
+                "A paged history read must not bring back the answered question while its recovery turn runs.",
+            )
             self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
             # Kill the bridge daemon that owns the recovery turn before it can clean up.
             send_started = [
@@ -7911,6 +7984,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
             crashed.get("pendingUserInputRequest"), pending,
             "A recovery that dies mid-turn must show its question again for retry.",
         )
+        crashed_page = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80")[0])
+        self.assertEqual(
+            crashed_page.get("pendingUserInputRequest"), pending,
+            "A paged history read must also show the question again once its recovery has died.",
+        )
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
         for marker in (recovery_pause, recovery_ready, recovery_release):
             marker.unlink(missing_ok=True)
@@ -7937,7 +8015,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         task, _ = self.call_cli(
-            "task", "create", "--title", "Restart-safe Claude plan question", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Restart-safe Claude plan question", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )
         task_id = self.assert_success(task)["id"]
         failed, _ = self.call_cli(
@@ -7975,7 +8053,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         task, _ = self.call_cli(
-            "task", "create", "--title", "Claude background agent", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Claude background agent", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )
         task_id = self.assert_success(task)["id"]
         env = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
@@ -8071,7 +8149,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assertNotIn(contradiction, system_prompt, "Claude must not be told to block on background agents it launched.")
 
         failed_task_response, _ = self.call_cli(
-            "task", "create", "--title", "Claude failed background agent", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Claude failed background agent", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )
         failed_task_id = self.assert_success(failed_task_response)["id"]
         failed_started = time.monotonic()
@@ -8094,7 +8172,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
 
         wake_task_response, _ = self.call_cli(
-            "task", "create", "--title", "Claude woken parent", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Claude woken parent", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )
         wake_task_id = self.assert_success(wake_task_response)["id"]
         wake_command = ("conversation", "send", wake_task_id, "--message", "Launch background agents wake the parent.")
@@ -8153,7 +8231,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         env = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
         created, _ = self.call_cli(
-            "task", "create", "--title", "Claude background shell", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Claude background shell", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )
         task_id = self.assert_success(created)["id"]
         stage = {name: Path(f"{executable}.background-shell-{name}") for name in [
@@ -8212,7 +8290,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
 
         early_created, _ = self.call_cli(
-            "task", "create", "--title", "Claude early background shell", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Claude early background shell", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )
         early_id = self.assert_success(early_created)["id"]
         for name in ("running-pause", "wake-pause"):
@@ -8255,7 +8333,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         env = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
         created, _ = self.call_cli(
-            "task", "create", "--title", "Claude parked steer", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Claude parked steer", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )
         task_id = self.assert_success(created)["id"]
         ready = Path(f"{executable}.parked-shell-ready")
@@ -8330,7 +8408,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "PLAYHOUSE_E2E_CLAUDE_SLOW_WOKEN_SILENCE_SECONDS": "8",
         }
         created, _ = self.call_cli(
-            "task", "create", "--title", "Claude consumed wake", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Claude consumed wake", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )
         task_id = self.assert_success(created)["id"]
         pause = Path(f"{executable}.consumed-wake-pause")
@@ -8412,7 +8490,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         # A woken turn that is alive and merely slow to speak must not be cut
         # off by that same backstop: it gets its own, far longer grace.
         slow_created, _ = self.call_cli(
-            "task", "create", "--title", "Claude slow woken turn", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Claude slow woken turn", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )
         slow_id = self.assert_success(slow_created)["id"]
         announced = Path(f"{executable}.slow-woken-announced")
@@ -8446,7 +8524,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         env = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
         task = self.assert_success(self.call_cli(
-            "task", "create", "--title", "Claude private recovery failure", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Claude private recovery failure", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )[0])
         task_id = task["id"]
         failed, _ = self.call_cli(
@@ -9180,7 +9258,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         return {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
 
-    # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent whose tooltip names the sent total, call count and final transcript size, and the Token Stats context-menu item opens a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
+    # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and the Token Stats context-menu item opens a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
     def test_task_token_usage_records_claude_turn_breakdown(self):
         # Matches TURN_USAGE in scripts/fixtures/claude-code-fixture.py.
         expected_turn_usage = {
@@ -9198,7 +9276,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         session_files = self.data_directory / "claude-config"
         file_environment = {**environment, "CLAUDE_CONFIG_DIR": str(session_files)}
         task_id = self.assert_success(self.call_cli(
-            "task", "create", "--title", "Claude token usage", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Claude token usage", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )[0])["id"]
 
         empty = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
@@ -9260,7 +9338,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         # With no readable session files the counts come from the stream alone,
         # which is also what the card's counter follows while a turn is running.
         live_id = self.assert_success(self.call_cli(
-            "task", "create", "--title", "Claude live token usage", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Claude live token usage", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )[0])["id"]
         self.assert_success(self.call_cli(
             "conversation", "send", live_id, "--message", "Tell me a story.", extra_environment=environment,
@@ -9378,7 +9456,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Only the request that skipped the cache re-sent its context; adding the log is new content, not a miss.",
         )
 
-    # case-contract: test_task_token_waste_ranks_codex_items_by_size | A Codex fixture turn whose thread and subagent have rollout files gives the same map from Codex's own format: a request was sent the instructions plus every item before its own output, the final transcript's tokens equal the last request's input exactly after a compaction replaced the history, Codex's unsaved tool definitions appear as one hidden-overhead item sent with every request, encrypted reasoning is shown by its size, the MCP tool's log is the largest item and was removed by the compaction, the repeated README read and the cache miss are reported, and the subagent's thread is its own agent. The raw input's final transcript lists the hidden overhead, the instructions and the replacement history once each without the removed log, and an item's full text, from a tool output or from the replacement history, reads back exactly as Codex saved it, in chunks, with its call named. The Token Stats modal shows the Codex wasters, the hidden overhead and the subagent, and showing the log opens its full text.
+    # case-contract: test_task_token_waste_ranks_codex_items_by_size | A Codex fixture turn whose thread and subagent have rollout files gives the same map from Codex's own format: a request was sent the instructions plus every item before its own output, the final transcript's tokens equal the last request's input exactly after a compaction replaced the history, Codex's unsaved tool definitions appear as one hidden-overhead item sent with every request, encrypted reasoning is shown by its size, the MCP tool's log is the largest item and was removed by the compaction, the repeated README read and the cache miss are reported, and the subagent's thread is its own agent. The raw input's final transcript lists the hidden overhead, the instructions and the replacement history once each without the removed log, and an item's full text, from a tool output or from the replacement history, reads back exactly as Codex saved it, in chunks, with its call named. The single-request scope rebuilds each Codex request from the rollout and labels it reconstructed: the latest request is the final transcript in order, request 4 flags both README reads and both of their outputs as exact duplicates, each request's items add up to the input Codex reported with its cached share as cache read and no cache write, and the JSON export holds the base instructions and the input items exactly as saved. The Token Stats modal shows the Codex wasters, the hidden overhead and the subagent, showing the log opens its full text, and the raw input's single request reads as reconstructed, with request 4's duplicates flagged.
     def test_task_token_waste_ranks_codex_items_by_size(self):
         task_id = self.create_task(title="Codex token waste", roots=[self.primary])["id"]
         self.complete_fixture_turn(task_id, executable_name="codex-fixture-token-waste", message="Show token waste.")
@@ -9453,6 +9531,46 @@ class PlayhouseBridgeTests(unittest.TestCase):
         replaced_prompt = final["rows"][2]["id"]
         self.assertEqual(full_text(replaced_prompt)[0], "Show token waste.", "An item of the replacement history reads back exactly.")
         self.assertEqual(full_text(final["rows"][1]["id"])[0], "You are the Codex fixture. " * 80)
+
+        # One request at a time, rebuilt from the rollout: Codex resends the
+        # whole history, so a request is everything saved before its output.
+        def single(*options, expected_status=0):
+            response, _ = self.call_cli("task", "raw-input", task_id, "--scope", "request", "--limit", "1000", *options,
+                                        expected_status=expected_status)
+            return response
+
+        latest = self.assert_success(single())
+        request = latest["request"]
+        self.assertEqual(
+            {key: request.get(key) for key in ("number", "count", "latest", "exact", "contextTokens", "itemTokens",
+                                                "inputTokens", "cacheReadTokens", "cacheWriteTokens")},
+            {"number": 5, "count": 5, "latest": 5, "exact": False, "contextTokens": 4400, "itemTokens": 4400,
+             "inputTokens": 500, "cacheReadTokens": 3900, "cacheWriteTokens": None},
+            "Codex reports no cache writes; its cached input is the cache-read share.",
+        )
+        self.assertTrue(request["note"].startswith("Reconstructed: Codex resends the whole history"))
+        self.assertEqual([row["id"] for row in latest["rows"]], [row["id"] for row in final["rows"]],
+                         "The latest request is the final transcript, in order.")
+        repeated = self.assert_success(single("--request", "4"))
+        self.assertEqual((repeated["request"]["items"], repeated["request"]["itemTokens"], repeated["request"]["contextTokens"]), (12, 19600, 19600))
+        self.assertEqual(
+            [(row["position"], row["label"], row["repeated"]["copy"]) for row in repeated["rows"] if row.get("repeated")],
+            [(8, "exec", 1), (9, "exec", 1), (10, "exec", 2), (11, "exec", 2)],
+            "Both README reads and both of their outputs were sent in request 4.",
+        )
+        first_request = self.assert_success(single("--request", "1"))["request"]
+        self.assertEqual((first_request["items"], first_request["itemTokens"], first_request["contextTokens"], first_request["repeatedItems"]),
+                         (5, 4000, 4000, 0))
+        body = json.loads(self.assert_success(self.call_cli(
+            "task", "raw-input-export", task_id, "--request", "1", "--format", "json",
+        )[0])["text"])
+        self.assertEqual(body["instructions"], "You are the Codex fixture. " * 80)
+        self.assertEqual(body["input"], [
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "<permissions instructions>\nThe fixture may run any command.\n</permissions instructions>"}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "# AGENTS.md instructions for the fixture\nKeep answers short."}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Show token waste."}]},
+        ], "The input items exactly as Codex saved them; the unsaved tool definitions are left out.")
+        self.assert_failure(single("--request", "6", expected_status=3), "not_found")
 
     # case-contract: test_task_raw_input_pages_final_transcript_without_duplicates | A task with no conversation has no raw input: its page is empty and reading an item's text is not_found. After a Claude Code fixture turn, the raw input lists the final transcript with each item once across pages and without the log a compaction removed; the everything-sent scope adds what was removed, ordering by size lists the largest first, a search finds the log by a word only its full text contains, and a focus item reports its position. An item's full text reads back in chunks that end on a line break and join to the exact text, with the call that produced it named. An unknown agent or item is not_found, and an unknown order or a limit of zero is invalid_argument. In the app, View raw input opens the final transcript, scrolling loads the next page of rows, showing the largest waster opens it in the everything-sent scope with its full text, and scrolling that text reaches its last line.
     def test_task_raw_input_pages_final_transcript_without_duplicates(self):
@@ -9537,6 +9655,119 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         self.assert_failure(response, "not_found")
 
+    # case-contract: test_task_raw_input_single_request_lists_resumed_instruction_copies_in_order | After a Claude Code fixture session that resumes once its AGENTS.md changed, the raw input's single-request scope lists every item one request sent, in order and with nothing merged, and shows the latest request by default. A request after the resume carries both instruction copies in order, which differ and so are not flagged, while the date reminder sent twice word for word is flagged as a duplicate; a request before the resume carries one copy and no duplicates, and a search keeps each row's position. Each request reports Claude's input with its cache-read and cache-write split, and its items' sizes add up to that input. The request is labelled exact; its text export gives every item's full text under a header naming any duplicate, and its JSON export is the request body with the logged parameters, cache markers, system prompt, tools and messages verbatim, an earlier request's messages being a prefix of a later one's. A request number past the last is not_found, and zero or an unknown export format is invalid_argument. In the app, choosing Single request shows the latest request with its usage, both instruction copies unflagged and the repeated date reminder flagged, stepping back to a request before the resume shows one copy and no flags, Latest returns to the last request, and Copy all copies the whole request as JSON.
+    def test_task_raw_input_single_request_lists_resumed_instruction_copies_in_order(self):
+        environment = self.install_claude_fixture("claude-fixture-instruction-resume")
+        environment["CLAUDE_CONFIG_DIR"] = str(self.data_directory / "claude-config")
+        task_id = self.create_task(title="Claude instruction resume", provider="claude")["id"]
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Show instruction resume.", extra_environment=environment,
+        )[0])
+
+        def single(*options, expected_status=0):
+            response, _ = self.call_cli(
+                "task", "raw-input", task_id, "--scope", "request", "--limit", "1000", *options,
+                extra_environment=environment, expected_status=expected_status,
+            )
+            return response
+
+        def export(*options, expected_status=0):
+            response, _ = self.call_cli(
+                "task", "raw-input-export", task_id, *options, extra_environment=environment, expected_status=expected_status,
+            )
+            return response
+
+        latest = self.assert_success(single())
+        request = latest["request"]
+        self.assertEqual(
+            {key: request[key] for key in ("number", "count", "latest", "items", "repeatedItems", "exact")},
+            {"number": 5, "count": 5, "latest": 5, "items": 16, "repeatedItems": 2, "exact": True},
+            "The latest request is shown by default, with every item it sent.",
+        )
+        self.assertEqual(
+            {key: request.get(key) for key in ("contextTokens", "inputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens")},
+            {"contextTokens": 9100, "inputTokens": 2, "cacheReadTokens": 9000, "cacheWriteTokens": 98, "outputTokens": 5},
+            "Claude's own usage for that request, with its cache split.",
+        )
+        self.assertEqual(request["itemTokens"], 9100, "The items' sizes add up to the input Claude reported.")
+        self.assertTrue(request["note"].startswith("Exact: rebuilt from Claude Code's request log"))
+        self.assertIn("add up to the input the provider reported", request["tokenNote"])
+        rows = latest["rows"]
+        self.assertEqual([row["position"] for row in rows], list(range(16)), "Every item in the order it was sent, none merged.")
+        self.assertEqual(
+            [row["kind"] for row in rows],
+            ["systemPrompt", "toolDefinition", "toolDefinition",
+             "systemReminder", "systemReminder", "userText", "toolCall", "toolResult", "toolCall", "toolResult", "assistantText",
+             "systemReminder", "systemReminder", "userText", "toolCall", "toolResult"],
+        )
+        first_copy, second_copy = rows[3], rows[11]
+        self.assertTrue(first_copy["preview"].startswith("<system-reminder> Codebase and user instructions are shown below."))
+        self.assertTrue(second_copy["preview"].startswith("<system-reminder> Instruction files were re-read"))
+        self.assertNotEqual(first_copy["id"], second_copy["id"], "Two copies of AGENTS.md, not one item listed twice.")
+        for row in (first_copy, second_copy):
+            self.assertNotIn("repeated", row, "Two different texts are not flagged, however alike.")
+        for copy, row in enumerate((rows[4], rows[12]), start=1):
+            self.assertEqual(row["repeated"], {"first": 4, "copy": copy, "copies": 2})
+        self.assertEqual([row["position"] for row in rows if row.get("repeated")], [4, 12])
+        self.assertEqual(sum(row["tokens"] for row in rows), 9100)
+
+        before = self.assert_success(single("--request", "3"))
+        self.assertEqual((before["request"]["number"], before["request"]["items"], before["request"]["repeatedItems"]), (3, 10, 0))
+        self.assertEqual(before["request"]["itemTokens"], before["request"]["contextTokens"])
+        copies = [row for row in before["rows"] if "Contents of /fixture/repo/AGENTS.md" in row["preview"]]
+        self.assertEqual([(row["position"], row["id"]) for row in copies], [(3, first_copy["id"])], "Before the resume only the first copy was sent.")
+        self.assertEqual(
+            [row["position"] for row in rows if "Contents of /fixture/repo/AGENTS.md" in row["preview"]], [3, 11],
+            "After the resume both copies were sent, in order.",
+        )
+        self.assertFalse(any(row.get("repeated") for row in before["rows"]))
+        for number, context in ((1, 4000), (2, 4300), (4, 9000)):
+            summary = self.assert_success(single("--request", str(number), "--limit", "1"))["request"]
+            self.assertEqual((summary["contextTokens"], summary["itemTokens"]), (context, context), f"Request {number} adds up.")
+        found = self.assert_success(single("--query", "Also run the checks"))
+        self.assertEqual([row["position"] for row in found["rows"]], [11], "A search keeps each row's position.")
+
+        def full_text(item):
+            return self.assert_success(self.call_cli(
+                "task", "raw-input-text", task_id, "--item", str(item), "--length", "1000000", extra_environment=environment,
+            )[0])["text"]
+
+        body_export = self.assert_success(export("--format", "json"))
+        self.assertEqual((body_export["request"], body_export["format"], body_export["exact"], body_export["items"]), (5, "json", True, 16))
+        body = json.loads(body_export["text"])
+        self.assertEqual((body["model"], body["max_tokens"]), ("claude-fixture", 1000), "The logged request parameters.")
+        self.assertEqual(body["system"], [{"type": "text", "text": "You are the Claude Code fixture. " * 20, "cache_control": {"type": "ephemeral"}}])
+        self.assertEqual([tool["name"] for tool in body["tools"]], ["Bash", "Read"])
+        messages = body["messages"]
+        self.assertEqual([message["role"] for message in messages], ["user", "assistant", "user", "assistant", "user", "assistant", "user", "assistant", "user"])
+        self.assertEqual(messages[0]["content"][0]["text"], full_text(first_copy["id"]))
+        self.assertEqual(messages[0]["content"][2], {"type": "text", "text": "Start the fixture work."})
+        self.assertEqual(messages[5]["content"], [{"type": "text", "text": "First turn done."}])
+        self.assertEqual(messages[6]["content"][0]["text"], full_text(second_copy["id"]))
+        self.assertEqual(messages[6]["content"][1], messages[0]["content"][1], "The date reminder was sent twice word for word.")
+        self.assertEqual(messages[7]["content"][0]["input"], {"command": "echo resumed"})
+        self.assertEqual(messages[8]["content"][0]["tool_use_id"], "toolu_resume_bash2")
+        earlier = json.loads(self.assert_success(export("--format", "json", "--request", "3"))["text"])
+        self.assertEqual(len(earlier["messages"]), 5)
+        self.assertEqual(earlier["messages"], messages[:5], "An earlier request is a prefix of the later one.")
+
+        readable = self.assert_success(export("--request", "5"))
+        self.assertEqual(readable["format"], "text")
+        text = readable["text"]
+        self.assertTrue(text.startswith("Request 5 of 5 · Claude main agent"))
+        self.assertIn("Reported input: 9100 tokens (uncached 2 · cache read 9000 · cache write 98)", text)
+        self.assertEqual(text.count("\n===== #"), 16, "One header per item sent.")
+        for position, repeat in ((4, "duplicate 1 of 2"), (12, "duplicate 2 of 2")):
+            row = rows[position]
+            self.assertIn(f"\n===== #{position + 1} · {row['kind']} · {row['label']} · {row['tokens']} tokens · {repeat} =====\n", text)
+        self.assertIn(full_text(second_copy["id"]), text, "Each item's full text, verbatim.")
+        self.assertLess(text.index(full_text(first_copy["id"])), text.index(full_text(second_copy["id"])), "The copies stay in the order sent.")
+
+        self.assert_failure(single("--request", "6", expected_status=3), "not_found")
+        self.assert_failure(single("--request", "0", expected_status=2), "invalid_argument")
+        self.assert_failure(export("--request", "9", expected_status=3), "not_found")
+        self.assert_failure(export("--format", "yaml", expected_status=2), "invalid_argument")
+
     # case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
     def test_settings_token_usage_color_max_round_trip(self):
         settings = self.assert_success(self.call_cli("settings", "get")[0])
@@ -9562,7 +9793,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU"] = "1"
         environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU_SECONDS"] = "6"
         task_id = self.assert_success(self.call_cli(
-            "task", "create", "--title", "Claude CPU usage", "--root", self.primary, "--provider", "claude"
+            "task", "create", "--title", "Claude CPU usage", "--prompt", "Fixture task description.", "--root", self.primary, "--provider", "claude"
         )[0])["id"]
 
         idle = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])

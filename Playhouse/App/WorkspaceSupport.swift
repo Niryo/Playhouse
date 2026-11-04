@@ -50,6 +50,36 @@ private struct ActionButtonHoverEmphasis: ViewModifier {
     }
 }
 
+/// A native AppKit tooltip for `text`, carried by a click-through view behind the content.
+/// SwiftUI's `.help` alone never presented a tooltip for most of the main window's controls (the
+/// board header and the Done panel among them); an `NSView` with its own `toolTip` does.
+private struct NativeToolTip: NSViewRepresentable {
+    let text: String
+
+    func makeNSView(context: Context) -> NSView {
+        let view = ClickThroughView()
+        view.toolTip = text
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if nsView.toolTip != text { nsView.toolTip = text }
+    }
+
+    private final class ClickThroughView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func isAccessibilityElement() -> Bool { false }
+    }
+}
+
+extension View {
+    /// `.help` that reliably shows a native tooltip on macOS; keeps `.help` for accessibility.
+    func nativeHelp(_ text: String) -> some View {
+        // Hidden from accessibility so the extra view cannot become, or resize, the control's element.
+        help(text).background(NativeToolTip(text: text).accessibilityHidden(true))
+    }
+}
+
 extension View {
     func actionButtonHoverEmphasis(padding: CGFloat = 4) -> some View {
         modifier(ActionButtonHoverEmphasis(padding: padding))
@@ -1335,7 +1365,7 @@ struct WorkspaceRootSelector: View {
                         .font(.system(size: 12, weight: .medium))
                 }
                 .buttonHoverPointer()
-                .help("Browse folders")
+                .nativeHelp("Browse folders")
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("browse-workspace-roots-button")
             }
@@ -1362,7 +1392,7 @@ struct WorkspaceRootSelector: View {
                             }
                             .buttonHoverPointer()
                             .buttonStyle(.plain)
-                            .help("Remove \(displayNames[root.standardizedFileURL.path] ?? root.path)")
+                            .nativeHelp("Remove \(displayNames[root.standardizedFileURL.path] ?? root.path)")
                             .accessibilityLabel("Remove \(displayNames[root.standardizedFileURL.path] ?? root.lastPathComponent)")
                         }
                         .padding(.horizontal, 8)
@@ -1406,7 +1436,7 @@ struct WorkspaceRootSelector: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonHoverPointer()
-                            .help("Add repository \(repository.lastPathComponent)")
+                            .nativeHelp("Add repository \(repository.lastPathComponent)")
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("repository-suggestion-\(repository.lastPathComponent)")
                         }
@@ -1587,7 +1617,7 @@ struct WorkspaceSettingsView: View {
                     Spacer()
                     Button(parentFolderURL == nil ? "Choose…" : "Change…", action: chooseParentFolder)
                     .buttonHoverPointer()
-                        .help("Choose repository root folder")
+                        .nativeHelp("Choose repository root folder")
                         .accessibilityIdentifier("choose-default-parent-folder-button")
                     if parentFolderURL != nil {
                         Button("Clear") {
@@ -1599,7 +1629,7 @@ struct WorkspaceSettingsView: View {
                             }
                         }
                         .buttonHoverPointer()
-                        .help("Clear repository root folder")
+                        .nativeHelp("Clear repository root folder")
                         .accessibilityIdentifier("clear-default-parent-folder-button")
                     }
                 }
@@ -1638,7 +1668,7 @@ struct WorkspaceSettingsView: View {
         )) {
             Button("OK", role: .cancel) { pickerError = nil }
             .buttonHoverPointer()
-            .help("Dismiss folder error")
+            .nativeHelp("Dismiss folder error")
         } message: {
             Text(pickerError ?? "Please try again.")
         }
@@ -1648,7 +1678,7 @@ struct WorkspaceSettingsView: View {
         )) {
             Button("OK", role: .cancel) { tokenUsageError = nil }
             .buttonHoverPointer()
-            .help("Dismiss token usage setting error")
+            .nativeHelp("Dismiss token usage setting error")
         } message: {
             Text(tokenUsageError ?? "Please try again.")
         }
@@ -1658,7 +1688,7 @@ struct WorkspaceSettingsView: View {
         )) {
             Button("OK", role: .cancel) { cpuUsageError = nil }
             .buttonHoverPointer()
-            .help("Dismiss CPU usage setting error")
+            .nativeHelp("Dismiss CPU usage setting error")
         } message: {
             Text(cpuUsageError ?? "Please try again.")
         }
