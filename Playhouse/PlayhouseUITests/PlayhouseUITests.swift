@@ -2271,7 +2271,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(manualPRLink.waitForExistence(timeout: 10), "The manual PR flow must still work unchanged when Auto PR stays off.")
     }
 
-    // case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only for an autopilot task; the board colours each linked PR number green, red, or orange by that health and keeps the mode pill beside linked PRs. Autopilot leaves a task inactive unless its mode is autopilot and it sits in Review. With checks still running it sends no turn, and the board re-probes only those autopilot PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop.
+    // case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only for an autopilot task; the board colours each linked PR number green, red, or blue by that health and keeps the mode pill beside linked PRs. Autopilot leaves a task inactive unless its mode is autopilot and it sits in Review. With checks still running it sends no turn, and the board re-probes only those autopilot PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop.
     func test_task_pr_autopilot_fixes_red_pull_request_until_green() throws {
         let executable = try makeCodexFixture(emptyQuestions: false)
         codexFixtureExecutable = executable.path
@@ -2322,17 +2322,17 @@ final class PlayhouseUITests: XCTestCase {
         let inactive = try XCTUnwrap(try runCLI(["task", "pr", "autopilot", taskID])["result"] as? [String: Any])
         XCTAssertEqual(inactive["action"] as? String, "inactive", "Autopilot must not act on a task whose mode is not autopilot.")
 
-        // Pending checks: the PR number turns orange, and no fix turn is sent.
+        // Pending checks: the PR number turns blue, and no fix turn is sent.
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         let prLink = app.links["task-pr-link-\(taskID)-801"]
         XCTAssertTrue(prLink.waitForExistence(timeout: 10))
-        XCTAssertTrue(waitUntil({ (prLink.value as? String) == "pending" }, timeout: 15), "Running checks should colour the PR number orange.")
+        XCTAssertTrue(waitUntil({ (prLink.value as? String) == "pending" }, timeout: 15), "Running checks should colour the PR number blue.")
         XCTAssertFalse((try? String(contentsOf: callLogURL, encoding: .utf8))?.contains("threads 801") ?? false, "Only autopilot tasks read review threads.")
         let modePill = element("task-pr-mode-\(taskID)")
         XCTAssertTrue(modePill.waitForExistence(timeout: 5), "A linked PR keeps the mode pill beside it.")
         XCTAssertEqual(modePill.value as? String, "manual")
         XCTAssertGreaterThanOrEqual(modePill.frame.height, 30)
-        attachScreenshot(named: "Pending checks colour the PR number orange", fullScreen: true)
+        attachScreenshot(named: "Pending checks colour the PR number blue", fullScreen: true)
 
         // Autopilot on while checks run: no fix turn, only the slow poll.
         try selectPullRequestMode("autopilot", taskID: taskID)
@@ -2358,7 +2358,7 @@ final class PlayhouseUITests: XCTestCase {
             try setPullRequest("pending")
         }
         assertTaskVisible("PR autopilot UI", inColumn: "Review")
-        XCTAssertTrue(waitUntil({ (prLink.value as? String) == "pending" }, timeout: 20), "Rerunning checks after the fix should show orange.")
+        XCTAssertTrue(waitUntil({ (prLink.value as? String) == "pending" }, timeout: 20), "Rerunning checks after the fix should show blue.")
         // CI passes; the poll, not a focus change, notices. Two review-thread reads follow:
         // the poll's probe that finds green, then the daemon pass that resets the loop guard.
         let threadReads = { (try? String(contentsOf: callLogURL, encoding: .utf8))?.components(separatedBy: "\n").filter { $0 == "threads 801" }.count ?? 0 }

@@ -1792,7 +1792,7 @@ private struct TaskCardView: View {
         switch health {
         case .green: .green
         case .red: .red
-        case .pending: .orange
+        case .pending: .blue
         }
     }
 
