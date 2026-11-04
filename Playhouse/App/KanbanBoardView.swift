@@ -1792,7 +1792,7 @@ private struct TaskCardView: View {
         switch health {
         case .green: .green
         case .red: .red
-        case .pending: .orange
+        case .pending: .blue
         // GitHub's merged purple.
         case .merged: Color(red: 0.64, green: 0.44, blue: 0.97)
         }
