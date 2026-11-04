@@ -691,6 +691,7 @@ enum PlayhouseCLI {
       playhouse task list|get <task-id>
       playhouse task create --title <title> --prompt <text> --root <path> [--root <path>...] [--provider <codex|claude>]
       playhouse task create --title <title> --prompt <text> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--merge-target <repo-path>=<local-branch>]
+      playhouse task move <task-id> Review
       playhouse task move <task-id> Done
       playhouse task move <task-id> Done --allow-unmerged
       playhouse task pr create <task-id>
