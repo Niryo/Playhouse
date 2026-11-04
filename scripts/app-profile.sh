@@ -51,6 +51,34 @@ playhouse_verify_build_identity() {
   return 1
 }
 
+# Print the data directory a launcher should give this profile's app. Agent
+# sessions inherit PLAYHOUSE_DATA_DIRECTORY from the Playhouse app that started
+# them, so another app's own profile directory is replaced with this one.
+# Any other foreign override is rejected, because the app refuses to open it.
+playhouse_resolve_launch_data_directory() {
+  local requested="${PLAYHOUSE_DATA_DIRECTORY:-}"
+  local playhouse_support="${HOME}/Library/Application Support/Playhouse"
+  local worktree_key
+  while [[ "${requested}" == */ && "${requested}" != / ]]; do
+    requested="${requested%/}"
+  done
+  if [[ -z "${requested}" || "${requested}" == "${PLAYHOUSE_PROFILE_DATA_DIRECTORY}" ]]; then
+    printf '%s\n' "${PLAYHOUSE_PROFILE_DATA_DIRECTORY}"
+    return 0
+  fi
+  worktree_key="${requested#"${playhouse_support}/Worktrees/"}"
+  if [[ "${requested}" == "${playhouse_support}" ||
+        ( "${worktree_key}" != "${requested}" && "${worktree_key}" =~ ^w[0-9a-f]{16}$ ) ]]; then
+    printf 'Ignoring PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app (%s); using this worktree’s data directory.\n' \
+      "${requested}" >&2
+    printf '%s\n' "${PLAYHOUSE_PROFILE_DATA_DIRECTORY}"
+    return 0
+  fi
+  printf 'run.sh uses this worktree’s isolated data directory; PLAYHOUSE_DATA_DIRECTORY points elsewhere (%s).\n' \
+    "${requested}" >&2
+  return 2
+}
+
 # Return only GUI and bridge daemon processes launched from the selected worktree's app.
 playhouse_profile_processes() {
   local app_bundle="${PLAYHOUSE_PROFILE_DERIVED_DATA}/Build/Products/Debug/Playhouse.app"

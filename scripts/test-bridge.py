@@ -1821,7 +1821,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["savedPrompt"], "Protected draft")
 
-    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory; a saved conversation remains visible after an app restart.
+    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory. A saved conversation remains visible after an app restart.
     def test_worktree_app_profiles_isolate_identity_and_store(self):
         script = Path(__file__).resolve().parent / "app-profile.sh"
         linked = self.fixture / "existing-worktree"
@@ -1864,6 +1864,42 @@ class PlayhouseBridgeTests(unittest.TestCase):
             ["bash", "-c", verify_build, "profile-check", str(script), str(self.primary), linked_profile["bundleID"] + ".e2e.fixture"],
             capture_output=True, text=True,
         ).returncode, 0)
+        # scripts/run.sh launches with this resolver's directory. A value inherited
+        # from another Playhouse app's agent session gives way to the profile's own.
+        resolve_launch = 'source "$1"; playhouse_load_app_profile "$2"; playhouse_resolve_launch_data_directory'
+
+        def launch_directory(path, inherited):
+            environment = os.environ.copy()
+            environment.pop("PLAYHOUSE_DATA_DIRECTORY", None)
+            if inherited is not None:
+                environment["PLAYHOUSE_DATA_DIRECTORY"] = inherited
+            return subprocess.run(
+                ["bash", "-c", resolve_launch, "launch-check", str(script), str(path)],
+                env=environment, capture_output=True, text=True,
+            )
+
+        other_linked_directory = str(Path(linked_profile["dataDirectory"]).parent / "w0123456789abcdef")
+        for path, app_profile, inherited, ignored in [
+            (linked, linked_profile, None, False),
+            (linked, linked_profile, linked_profile["dataDirectory"], False),
+            (linked, linked_profile, primary_profile["dataDirectory"], True),
+            (linked, linked_profile, primary_profile["dataDirectory"] + "/", True),
+            (linked, linked_profile, other_linked_directory, True),
+            (self.primary, primary_profile, linked_profile["dataDirectory"], True),
+        ]:
+            result = launch_directory(path, inherited)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), app_profile["dataDirectory"], f"Inherited {inherited!r}")
+            self.assertEqual("inherited from another Playhouse app" in result.stderr, ignored, result.stderr)
+        for path, inherited in [
+            (linked, str(self.data_directory)),
+            (linked, str(Path(linked_profile["dataDirectory"]).parent / "not-a-profile")),
+            (self.primary, str(self.data_directory)),
+        ]:
+            result = launch_directory(path, inherited)
+            self.assertEqual(result.returncode, 2, result.stdout)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("PLAYHOUSE_DATA_DIRECTORY points elsewhere", result.stderr)
         # The bridge daemon and CLI ship flat in Contents/MacOS and resolve
         # their identity from this same Info.plist via `Bundle.main` (no
         # separate XPC bundle/Info.plist to cross-check anymore); the service
