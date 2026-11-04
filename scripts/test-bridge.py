@@ -2630,7 +2630,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertGreaterEqual(len(archived_tasks), 41, "The CLI board read should retain completed tasks beyond the first visible archive page.")
         self.assertTrue(set(filler_ids).issubset(archived_ids), "All persisted archive records should remain available across pages.")
 
-    # case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging.
+    # case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
     def test_task_done_preserves_dirty_worktree(self):
         task = self.create_repo_task("Dirty cleanup", [self.primary], materialize=True)
         worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
@@ -2642,6 +2642,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         target_before = self.run_git(self.primary, "rev-parse", "main")
         branch = task["repositoryWorktrees"][0]["branch"]
         branch_head = self.run_git(worktree, "rev-parse", "HEAD")
+        persisted_review = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(persisted_review["status"], "Review", "A reviewed task should stay in Review until it is moved.")
         response, _ = self.call_cli("task", "move", task["id"], "Done")
         self.assertEqual(self.assert_success(response)["status"], "Done")
         self.assertTrue(worktree.exists())
