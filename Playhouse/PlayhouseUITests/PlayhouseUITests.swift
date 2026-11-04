@@ -9724,7 +9724,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, including a list that starts on the line right after a paragraph without a blank line, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in, the question that started it stays pinned near the top of the transcript instead of being auto-scrolled past as the answer grows, consistent with the user message preceding its final answer in CLI/XPC history.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing is hidden until a first message is sent and while the agent waits on answers to its questions, then stays enabled with an empty composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, including a list that starts on the line right after a paragraph without a blank line, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in, the question that started it stays pinned near the top of the transcript instead of being auto-scrolled past as the answer grows, consistent with the user message preceding its final answer in CLI/XPC history.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".playhouse-bridge-fixture")
@@ -9757,52 +9757,20 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((emptyConversation?["messages"] as? [[String: Any]])?.count ?? 0, 0, "The handoff availability check should start with an empty conversation.")
         XCTAssertEqual(element("message-composer").value as? String ?? "", "")
         let startImplementingInEmptyConversation = element("start-implementing-button")
-        XCTAssertTrue(startImplementingInEmptyConversation.waitForExistence(timeout: 5), "Plan mode should offer Start Implementing before any chat messages exist.")
-        XCTAssertTrue(startImplementingInEmptyConversation.isEnabled, "Start Implementing should be clickable with an empty conversation.")
+        XCTAssertFalse(startImplementingInEmptyConversation.waitForExistence(timeout: 2), "Plan mode should not offer Start Implementing before a first message exists.")
 
         modeMenu.click()
         let goalComposerMode = app.menuItems["conversation-mode-goal"]
         XCTAssertTrue(goalComposerMode.waitForExistence(timeout: 5))
         goalComposerMode.click()
         XCTAssertTrue(modeMenu.label.contains("Goal"), "The composer should enter Goal mode.")
-        XCTAssertTrue(startImplementingInEmptyConversation.exists, "Entering Goal mode should preserve the selected Plan mode and its handoff.")
-        XCTAssertTrue(startImplementingInEmptyConversation.isEnabled)
-        startImplementingInEmptyConversation.click()
-        XCTAssertTrue(waitUntil({ modeMenu.label.contains("Code mode") }, timeout: 5), "The empty-chat handoff should leave Goal composer mode and switch to Code.")
-        XCTAssertTrue(waitUntil({
-            let history = (try? runCLI(
-                ["conversation", "history", taskID],
-                extraEnvironment: ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
-            )["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
-            return history.contains { $0["role"] as? String == "user" && $0["text"] as? String == "Start implementing the plan." }
-                && history.contains { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
-        }, timeout: 30), "Start Implementing should create a Code turn from an empty conversation.")
-        let initialFixtureData = try Data(contentsOf: URL(fileURLWithPath: fixtureCopy.path + ".history"))
-        let initialFixtureHistory = try XCTUnwrap(JSONSerialization.jsonObject(with: initialFixtureData) as? [String: Any])
-        let codeTurnsBeforeFollowup = (initialFixtureHistory["turns"] as? [[String: Any]] ?? []).count
-        let composer = element("message-composer")
-        composer.click()
-        composer.typeText("Continue the implementation.")
-        element("send-message-button").click()
-        XCTAssertTrue(waitUntil({
-            let history = (try? runCLI(
-                ["conversation", "history", taskID],
-                extraEnvironment: ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
-            )["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
-            let userIndex = history.lastIndex { $0["role"] as? String == "user" && $0["text"] as? String == "Continue the implementation." }
-            let finalIndex = history.lastIndex { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
-            let fixtureData = try? Data(contentsOf: URL(fileURLWithPath: fixtureCopy.path + ".history"))
-            let fixtureHistory = fixtureData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-            let turns = fixtureHistory?["turns"] as? [[String: Any]] ?? []
-            return userIndex != nil && finalIndex != nil && finalIndex! > userIndex!
-                && turns.count > codeTurnsBeforeFollowup
-                && turns.last?["conversationMode"] as? String == "default"
-        }, timeout: 30), "A regular composer message after handoff should start a Code turn, even when Goal was selected first.")
+        XCTAssertFalse(startImplementingInEmptyConversation.exists, "Entering Goal mode should not reveal Start Implementing in an empty conversation.")
         modeMenu.click()
         let planModeAfterGoal = app.menuItems["Plan mode"]
         XCTAssertTrue(planModeAfterGoal.waitForExistence(timeout: 5))
         planModeAfterGoal.click()
-        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Plan mode should be selectable again after the Code handoff.")
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Plan mode should be selectable again after Goal.")
+        let composer = element("message-composer")
 
         composer.click()
         composer.typeText("Plan the task.")
