@@ -30,6 +30,8 @@ struct DebugConversationImportMenu: View {
         Button("Import Conversation…") {
             Task { @MainActor in await DebugConversationImporter.pickAndImport(container: modelContainer) }
         }
+        .buttonHoverPointer()
+        .help("Import a Claude Code or Codex conversation into a new task")
     }
 }
 

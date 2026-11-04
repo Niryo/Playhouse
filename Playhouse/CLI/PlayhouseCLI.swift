@@ -438,6 +438,10 @@ enum PlayhouseCLI {
                 guard tail.isEmpty || tail == ["--watch"] else { throw CLIError.usage("Use: playhouse conversation runtime [--watch]") }
                 return BridgeRequest(command: tail.isEmpty ? "conversation.runtime" : "conversation.runtime.subscribe")
             }
+            if operation == "cpu-usage" {
+                guard tail.isEmpty || tail == ["--watch"] else { throw CLIError.usage("Use: playhouse conversation cpu-usage [--watch]") }
+                return BridgeRequest(command: tail.isEmpty ? "conversation.cpuUsage" : "conversation.cpuUsage.subscribe")
+            }
             guard let id = tail.first else { throw CLIError.usage("A task ID is required.") }
             switch operation {
             case "history":
@@ -720,6 +724,7 @@ enum PlayhouseCLI {
       playhouse conversation queue <task-id> --message <text>
       playhouse conversation queue-list <task-id>
       playhouse conversation runtime [--watch]
+      playhouse conversation cpu-usage [--watch]
       playhouse conversation answered-async <task-id>
       playhouse conversation subagent-history <task-id> --activity <activity-json>
       playhouse task reconcile <task-id>

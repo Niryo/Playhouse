@@ -159,9 +159,6 @@ def finish(args: argparse.Namespace) -> int:
         if len(expected_cases) != len(set(expected_cases)):
             print("Batch UI test case IDs must be unique.", file=sys.stderr)
             return 2
-        if len(expected_cases) > 8:
-            print("A UI test batch cannot contain more than 8 cases.", file=sys.stderr)
-            return 2
         known_cases = {case["id"] for case in cases}
         unknown_cases = sorted(set(expected_cases) - known_cases)
         if unknown_cases:

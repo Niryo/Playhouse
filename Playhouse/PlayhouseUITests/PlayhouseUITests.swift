@@ -1834,7 +1834,7 @@ final class PlayhouseUITests: XCTestCase {
         try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
         _ = try runGitOutput(remote, "init", "--bare")
         try runGit(fixture.primary, "remote", "add", "origin", remote.path)
-        defer { try? runGit(fixture.primary, "remote", "remove", "origin") }
+        addTeardownBlock { [self] in try? runGit(fixture.primary, "remote", "remove", "origin") }
         try runGit(worktree, "push", "--set-upstream", "origin", branch)
 
         // A reviewer commit on the remote PR branch the local branch has not seen.
@@ -1910,7 +1910,7 @@ final class PlayhouseUITests: XCTestCase {
         try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
         _ = try runGitOutput(remote, "init", "--bare")
         try runGit(fixture.primary, "remote", "add", "origin", remote.path)
-        defer { try? runGit(fixture.primary, "remote", "remove", "origin") }
+        addTeardownBlock { [self] in try? runGit(fixture.primary, "remote", "remove", "origin") }
         try runGit(worktree, "push", "--set-upstream", "origin", branch)
         try runGit(worktree, "push", "origin", "HEAD:refs/heads/pr-123")
         ghEnvironment["PLAYHOUSE_E2E_GH_REMOTE_REPOSITORY"] = remote.path
@@ -2090,8 +2090,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("task-card-\(taskID)").waitForExistence(timeout: 5))
         XCTAssertFalse(element("task-auto-pr-toggle-\(taskID)").exists, "A Backlog task has no working-state PR controls yet.")
         // A worktree shares its source repository's git config, so the origin remotes this
-        // case adds through its worktrees must not leak into later cases.
-        defer {
+        // case adds through its worktrees must not leak into later cases. A teardown block,
+        // not `defer`: with continueAfterFailure off, a failed assertion stops the case
+        // without running its defers.
+        addTeardownBlock { [self] in
             for repository in [fixture.primary, fixture.secondary] {
                 try? runGit(repository, "remote", "remove", "origin")
             }
@@ -2195,7 +2197,7 @@ final class PlayhouseUITests: XCTestCase {
 
         let conflictPath = "playhouse-pr-conflict-fixture.txt"
         let originalTargetHead = try runGitOutput(fixture.primary, "rev-parse", "main")
-        defer {
+        addTeardownBlock { [self] in
             try? runGit(fixture.primary, "remote", "remove", "origin")
             try? runGit(fixture.primary, "reset", "--hard", originalTargetHead)
         }
@@ -2240,7 +2242,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(
             try runGitOutput(fixture.primary, "ls-remote", "--heads", "origin", try XCTUnwrap(completedRecord["branch"] as? String))
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-            "refs/heads/\(try XCTUnwrap(completedRecord["branch"] as? String))\t\(branchHead)",
+            "\(branchHead)\trefs/heads/\(try XCTUnwrap(completedRecord["branch"] as? String))",
             "A conflicted task branch should still be published for PR creation."
         )
         XCTAssertTrue(waitUntil({ prButton.isEnabled }, timeout: 10))
@@ -2249,7 +2251,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertNil(finalRecord["pullRequestNumber"])
     }
 
-    // case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows exact PR numbers on the active task and Done archive, including four-digit values without grouping separators. Hovering the outer padded edge of each PR link triggers its feedback.
+    // case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows exact PR numbers on the active task and Done archive, including four-digit values without grouping separators, each with a hit target at least 30 points wide and tall. Hovering the outer padded edge of each PR link triggers its feedback.
     func test_done_archive_displays_existing_pull_request_link() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         // The fixture `gh` handles list/create and merged-state calls without GitHub sign-in.
@@ -2293,7 +2295,7 @@ final class PlayhouseUITests: XCTestCase {
         for repository in [fixture.primary, fixture.secondary] {
             XCTAssertFalse(try runGitOutput(repository, "remote").split(whereSeparator: \.isNewline).contains("origin"), "The isolated source fixture must not already have an origin remote.")
         }
-        defer {
+        addTeardownBlock { [self] in
             for repository in [fixture.primary, fixture.secondary] {
                 try? runGit(repository, "remote", "remove", "origin")
             }
@@ -2372,6 +2374,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(secondPRLink.waitForExistence(timeout: 10), "The Done archive should show every repository's saved PR number.")
         XCTAssertEqual(prLink.label, "#1234")
         XCTAssertEqual(secondPRLink.label, "#1235")
+        for link in [prLink, secondPRLink] {
+            XCTAssertGreaterThanOrEqual(link.frame.width, 30, "A Done archive PR link should have a comfortable horizontal hit target.")
+            XCTAssertGreaterThanOrEqual(link.frame.height, 30, "A Done archive PR link should have a comfortable vertical hit target.")
+        }
         assertHoverEmphasis(for: prLink)
         attachScreenshot(named: "Done archive shows the linked pull request")
     }
@@ -2402,7 +2408,7 @@ final class PlayhouseUITests: XCTestCase {
         for repository in [fixture.primary, fixture.secondary] {
             XCTAssertFalse(try runGitOutput(repository, "remote").split(whereSeparator: \.isNewline).contains("origin"), "The isolated source fixture must not already have an origin remote.")
         }
-        defer {
+        addTeardownBlock { [self] in
             for repository in [fixture.primary, fixture.secondary] {
                 try? runGit(repository, "remote", "remove", "origin")
             }
@@ -5986,7 +5992,7 @@ final class PlayhouseUITests: XCTestCase {
         try exerciseStopDuringThinking(provider: "claude", title: "Claude stop while thinking")
     }
 
-    // case-contract: test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle | The bridge daemon starts on the first request, serves later requests from the same process, and stays alive while any connection (such as a window's runtime watcher) is open. A watcher receives the daemon's runtime snapshots as a turn starts and stops, and the daemon exits by itself once the last connection closes and no request is running; the next request starts a fresh daemon on demand without any manual step.
+    // case-contract: test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle | The bridge daemon starts on the first request, serves later requests from the same process, and stays alive while any connection (such as a window's runtime or CPU usage watcher) is open. A watcher receives the daemon's runtime snapshots as a turn starts and stops, and the daemon exits by itself once the last connection closes and no request is running; the next request starts a fresh daemon on demand without any manual step.
     func test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle() throws {
         // Its own daemon, separate from the one the UI runner keeps alive for every
         // case. The app starts it: the sandboxed test runner can only connect.
@@ -6852,7 +6858,7 @@ final class PlayhouseUITests: XCTestCase {
             if comment.count > 100 { pasteText(comment, into: field) } else { field.typeText(comment) }
             if comment == "Explain this phrase" {
                 field.typeKey(.return, modifierFlags: [])
-                XCTAssertFalse(field.waitForExistence(timeout: 1), "Enter should add the comment and close the modal.")
+                XCTAssertTrue(field.waitForNonExistence(timeout: 2), "Enter should add the comment and close the modal.")
             } else {
                 element("add-comment-button").click()
             }
@@ -10297,7 +10303,8 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         openTask(named: "Restart-safe Claude question")
-        XCTAssertTrue(waitUntil({ self.transcriptContains("Ask a restart-safe structured question.") }, timeout: 10),
+        // Reopening pins the newest turn, which is the answer the recovery turn is applying.
+        XCTAssertTrue(waitUntil({ self.transcriptContains("[Private answer sent after restart]") }, timeout: 10),
                       "The reopened conversation should load its saved history.")
         XCTAssertFalse(waitUntil({ self.element("conversation-user-input-request").exists }, timeout: 2),
                        "Reopening the task mid-recovery must not bring back the answered question.")
@@ -11933,7 +11940,7 @@ final class PlayhouseUITests: XCTestCase {
         )
         attachScreenshot(named: "The first diff opens in the side-by-side editor")
         app.typeKey(.escape, modifierFlags: [])
-        XCTAssertFalse(element("workspace-diff-overlay").waitForExistence(timeout: 2))
+        XCTAssertTrue(element("workspace-diff-overlay").waitForNonExistence(timeout: 2))
 
         element("mark-viewed-shared.txt").click()
         // Marking saves a snapshot and stages the file asynchronously.
@@ -12035,9 +12042,15 @@ final class PlayhouseUITests: XCTestCase {
             "Deleting a reviewed new file lists the deletion as a change still to review."
         )
         element("mark-viewed-ephemeral.txt").click()
+        // The viewed snapshot is saved asynchronously; a refresh started before it lands still lists the old entry.
+        XCTAssertTrue(waitUntil({
+            let inventory = try? self.runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+            let listed = ((inventory?["viewed"] as? [[String: Any]]) ?? []) + ((inventory?["unviewed"] as? [[String: Any]]) ?? [])
+            return inventory != nil && !listed.contains { $0["path"] as? String == "ephemeral.txt" }
+        }, timeout: 10), "Reviewing the deletion of a never-committed file should leave it out of the persisted inventory.")
         element("refresh-workspace-changes-button").click()
-        XCTAssertFalse(
-            element("workspace-change-viewed-ephemeral.txt").waitForExistence(timeout: 5),
+        XCTAssertTrue(
+            element("workspace-change-viewed-ephemeral.txt").waitForNonExistence(timeout: 10),
             "A reviewed file with no base content and no current file is zero net change, not a ghost entry."
         )
         XCTAssertFalse(element("workspace-change-unviewed-ephemeral.txt").exists)

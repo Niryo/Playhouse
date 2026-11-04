@@ -653,6 +653,9 @@ struct TaskConversationView: View {
     // conversation starts the window at the latest user turn.
     @State private var oldestRenderedMessageID: String?
     @State private var isRevealingOlderConversationMessages = false
+    /// The latest scroll sample. It changes every scroll frame, so it lives in a
+    /// reference outside SwiftUI state, where writing it re-renders nothing.
+    @State private var lastConversationScrollSample = ConversationScrollSample()
     /// Messages older than `messages` that the daemon still holds. History is
     /// read a page at a time, and the next page loads once the reader scrolls
     /// past the oldest message already here.
@@ -992,6 +995,12 @@ struct TaskConversationView: View {
         }
     }
 
+    /// The runway occupies everything above the rendered window, so the distance
+    /// from the viewport top to the window top is what is left of it.
+    private func conversationWindowTopY(offsetY: CGFloat, viewportHeight: CGFloat) -> CGFloat {
+        hasOlderConversationMessages ? viewportHeight - offsetY : -offsetY
+    }
+
     /// Handles a new position for the top of the rendered window, measured from
     /// the top of the viewport. Dragging it below the threshold means the user
     /// scrolled past the oldest rendered message, which reveals the next batch.
@@ -1054,6 +1063,15 @@ struct TaskConversationView: View {
             }
             hasPresentedLatestConversation = true
             isLatestConversationTurnPinPending = false
+            // A pin that lands where the transcript already was reports no new
+            // scroll sample, which would leave the reveal disarmed for good;
+            // judge it from where the viewport now is.
+            if let offsetY = lastConversationScrollSample.offsetY {
+                handleConversationWindowTop(
+                    conversationWindowTopY(offsetY: offsetY, viewportHeight: lastConversationScrollSample.viewportHeight),
+                    using: proxy
+                )
+            }
         }
     }
 
@@ -2527,11 +2545,10 @@ struct TaskConversationView: View {
                 }
             }
             .modifier(ConversationScrollOffsetObserver { offsetY in
-                // The runway occupies everything above the rendered window, so
-                // the distance from the viewport top to the window top is what
-                // is left of it.
+                lastConversationScrollSample.offsetY = offsetY
+                lastConversationScrollSample.viewportHeight = viewport.size.height
                 handleConversationWindowTop(
-                    hasOlderConversationMessages ? viewport.size.height - offsetY : -offsetY,
+                    conversationWindowTopY(offsetY: offsetY, viewportHeight: viewport.size.height),
                     using: scrollProxy
                 )
             })
@@ -4392,8 +4409,10 @@ struct TaskConversationView: View {
         isResponding = true
         errorMessage = nil
         // After a restart the answer runs as a whole recovery turn before this
-        // call returns, so hide the answered card meanwhile.
+        // call returns, so hide the answered card meanwhile. Marking it answered
+        // now keeps a history refresh during the call from bringing it back.
         userInputRequest = nil
+        answeredUserInputRequestIDs.insert(request.id)
         // A recovery turn streams its redacted reply before history hides it.
         var streamedRecoveryFinals: [String] = []
         do {
@@ -4411,6 +4430,7 @@ struct TaskConversationView: View {
                 }
             )
             guard accepted else {
+                answeredUserInputRequestIDs.remove(request.id)
                 isResponding = false
                 if userInputRequest == nil { userInputRequest = request }
                 errorMessage = "\(provider.displayName) couldn't accept those answers. Please check the responses and try again."
@@ -4432,6 +4452,7 @@ struct TaskConversationView: View {
         } catch {
             // A failed answer keeps its saved question for retry; a new question the
             // turn raised meanwhile is already showing.
+            answeredUserInputRequestIDs.remove(request.id)
             if userInputRequest == nil,
                let saved = try? await conversationManager.history(taskID: task.id).pendingUserInputRequest,
                saved.threadID == task.activeConversationID {
@@ -5087,6 +5108,13 @@ struct TaskConversationView: View {
                 messageLimit: max(Self.historyPageSize, messages.count),
                 onActionRequest: { actionNotice = approvalNotice }
             )
+            // This is how a window learns that a recovery it did not send has died:
+            // history hides the saved question only while that recovery runs.
+            if userInputRequest == nil, let saved = history.pendingUserInputRequest,
+               saved.threadID == task.activeConversationID,
+               !answeredUserInputRequestIDs.contains(saved.id) {
+                userInputRequest = saved
+            }
             // A provider may not list a running turn's items yet, so mid-turn history can
             // hold less than this window already shows; applying it would blank the turn.
             let historyCount = history.messages.count + (history.earlierMessageCount ?? 0)
@@ -5866,6 +5894,11 @@ struct TaskConversationView: View {
             }
         }
     }
+}
+
+private final class ConversationScrollSample {
+    var offsetY: CGFloat?
+    var viewportHeight: CGFloat = 0
 }
 
 /// Reports the transcript's scroll offset where the platform supports it. The

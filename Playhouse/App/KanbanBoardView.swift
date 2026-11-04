@@ -683,7 +683,9 @@ struct KanbanBoardView: View {
                             .actionButtonHoverEmphasis(padding: 5)
                             .buttonHoverPointer()
                             .help(Text(verbatim: "Open pull request #\(number) in your browser"))
-                            .contentShape(Capsule())
+                            // The chip stays compact; the click target keeps the 30 pt minimum of its sibling actions.
+                            .frame(minWidth: 30, minHeight: 30)
+                            .contentShape(Rectangle())
                             .accessibilityIdentifier("done-archive-pr-link-\(task.id.uuidString)-\(number)")
                     }
                 }
@@ -1657,7 +1659,9 @@ private struct TaskCardView: View {
                                 .actionButtonHoverEmphasis(padding: 5)
                                 .buttonHoverPointer()
                                 .help(Text(verbatim: "Open pull request #\(number) in your browser"))
-                                .contentShape(Capsule())
+                                // The chip stays compact; the click target keeps the 30 pt minimum of its sibling actions.
+                                .frame(minWidth: 30, minHeight: 30)
+                                .contentShape(Rectangle())
                                 .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
                         }
                     }

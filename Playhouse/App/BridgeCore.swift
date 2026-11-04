@@ -4277,7 +4277,7 @@ final class ConversationManager {
             activities: try store.subagentActivities(taskID, turnIDs: earlierTurnIDs) + (latestTurn?.activities ?? []),
             diff: nil,
             answeredAsyncQuestionIDs: try tasks.answeredAsyncQuestionIDs(taskID: taskID),
-            pendingUserInputRequest: state.pendingUserInputRequest,
+            pendingUserInputRequest: visiblePendingUserInputRequest(taskID: taskID, transcript: state),
             providerBoundaries: [],
             earlierMessageCount: start
         )
