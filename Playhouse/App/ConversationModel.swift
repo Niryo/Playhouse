@@ -57,6 +57,18 @@ enum ConversationRole: String, Codable, Equatable {
     case assistant
 }
 
+/// Stand-ins the daemon puts in history for prompts Playhouse sends on its own (a recovery
+/// turn applying a saved answer, an outcome reminder). They are not something the user
+/// said, so the transcript must not treat them as the start of a conversation turn.
+enum PrivatePromptPlaceholder {
+    static let recoveryAnswer = "[Private answer sent after restart]"
+    static let outcomeReminder = "[Playhouse private outcome reminder hidden]"
+
+    static func matches(_ text: String) -> Bool {
+        text == recoveryAnswer || text.contains(outcomeReminder)
+    }
+}
+
 struct ConversationMessage: Codable, Identifiable, Equatable {
     let id: String
     let role: ConversationRole

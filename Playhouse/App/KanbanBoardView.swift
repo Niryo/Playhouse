@@ -159,13 +159,13 @@ struct KanbanBoardView: View {
                 }
             }
             .buttonHoverPointer()
-            .help("Delete Task")
+            .nativeHelp("Delete Task")
             .accessibilityIdentifier("confirm-delete-task-button")
             Button("Cancel", role: .cancel) {
                 taskBeingDeleted = nil
             }
             .buttonHoverPointer()
-            .help("Cancel task deletion")
+            .nativeHelp("Cancel task deletion")
             .accessibilityIdentifier("cancel-delete-task-button")
         } message: {
             Text("The task conversation and saved working folders will also be deleted.")
@@ -176,7 +176,7 @@ struct KanbanBoardView: View {
         )) {
             Button("OK", role: .cancel) { pullRequestError = nil }
             .buttonHoverPointer()
-            .help("Dismiss pull request error")
+            .nativeHelp("Dismiss pull request error")
         } message: {
             Text(pullRequestError ?? "Please try again.")
         }
@@ -186,7 +186,7 @@ struct KanbanBoardView: View {
         )) {
             Button("OK", role: .cancel) { doneMoveError = nil }
             .buttonHoverPointer()
-            .help("Dismiss pull request status error")
+            .nativeHelp("Dismiss pull request status error")
         } message: {
             Text(doneMoveError ?? "Please try again.")
         }
@@ -204,10 +204,10 @@ struct KanbanBoardView: View {
                 moveTask(id: id, to: .done, allowUnmergedPullRequests: true)
             }
             .buttonHoverPointer()
-            .help("Mark Done Anyway")
+            .nativeHelp("Mark Done Anyway")
             Button("Cancel", role: .cancel) { taskAwaitingUnmergedConfirmation = nil }
             .buttonHoverPointer()
-            .help("Cancel marking this task Done")
+            .nativeHelp("Cancel marking this task Done")
         } message: {
             Text("The pull request hasn't been merged. Marking this task Done will keep its worktree and branch as they are.")
         }
@@ -217,7 +217,7 @@ struct KanbanBoardView: View {
         )) {
             Button("OK", role: .cancel) { lifecycleResetNotice = nil }
                 .buttonHoverPointer()
-                .help("Dismiss worktree notice")
+                .nativeHelp("Dismiss worktree notice")
         } message: {
             Text(lifecycleResetNotice ?? "")
         }
@@ -226,7 +226,7 @@ struct KanbanBoardView: View {
                 saveError = nil
             }
             .buttonHoverPointer()
-            .help("Dismiss save error")
+            .nativeHelp("Dismiss save error")
         } message: {
             Text(saveError ?? "Please try again.")
         }
@@ -256,7 +256,7 @@ struct KanbanBoardView: View {
                     Spacer(minLength: 8)
                     Button("OK") { self.lifecycleResetNotice = nil }
                         .buttonHoverPointer()
-                        .help("Dismiss worktree notice")
+                        .nativeHelp("Dismiss worktree notice")
                         .accessibilityIdentifier("dismiss-task-lifecycle-reset-notice")
                 }
                 .padding(.horizontal, 18)
@@ -428,7 +428,7 @@ struct KanbanBoardView: View {
                 }
                     .buttonStyle(.plain)
                     .buttonHoverPointer()
-                    .help("Clear search")
+                    .nativeHelp("Clear search")
                     .accessibilityIdentifier("clear-board-search-button")
             }
             Button {
@@ -443,7 +443,7 @@ struct KanbanBoardView: View {
             }
             .buttonStyle(.plain)
             .buttonHoverPointer()
-            .help("Close search")
+            .nativeHelp("Close search")
             .accessibilityLabel("Close search")
             .accessibilityIdentifier("close-board-search-button")
         }
@@ -496,7 +496,7 @@ struct KanbanBoardView: View {
                 }
                 .buttonHoverPointer()
                 .buttonStyle(.bordered)
-                .help("Search tasks")
+                .nativeHelp("Search tasks")
                 .accessibilityLabel("Search tasks")
                 .accessibilityIdentifier("board-search-button")
 
@@ -509,7 +509,7 @@ struct KanbanBoardView: View {
                 }
                 .buttonHoverPointer()
                 .buttonStyle(.bordered)
-                .help("Browse completed tasks")
+                .nativeHelp("Browse completed tasks")
                 .accessibilityLabel("Done tasks")
                 .accessibilityIdentifier("done-archive-button")
 
@@ -522,7 +522,7 @@ struct KanbanBoardView: View {
                         .padding(.vertical, 3)
                 }
                 .buttonHoverPointer()
-                .help("Open the standalone chat")
+                .nativeHelp("Open the standalone chat")
                 .buttonStyle(.bordered)
                 .disabled(isOpeningChatSidebar)
                 .accessibilityIdentifier("chat-sidebar-button")
@@ -536,7 +536,7 @@ struct KanbanBoardView: View {
                         .padding(.vertical, 3)
                 }
                 .buttonHoverPointer()
-                .help("Create a new task")
+                .nativeHelp("Create a new task")
                 .buttonStyle(.borderedProminent)
                 .tint(WorkspaceTheme.accent)
                 .disabled(isCreatingNewTask)
@@ -558,7 +558,7 @@ struct KanbanBoardView: View {
                 Spacer()
                 Button { closeDoneArchive() } label: { Image(systemName: "xmark") }
                 .buttonHoverPointer()
-                .help("Close done tasks")
+                .nativeHelp("Close done tasks")
                     .buttonStyle(.plain).accessibilityLabel("Close done tasks")
                     .accessibilityIdentifier("close-done-archive-button")
             }
@@ -571,7 +571,7 @@ struct KanbanBoardView: View {
                 if !archiveSearchText.isEmpty {
                     Button { archiveSearchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
                     .buttonHoverPointer()
-                    .help("Clear archive search")
+                    .nativeHelp("Clear archive search")
                         .buttonStyle(.plain).accessibilityLabel("Clear archive search")
                         .accessibilityIdentifier("clear-archive-search-button")
                 }
@@ -602,7 +602,7 @@ struct KanbanBoardView: View {
                                     .padding(10).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                                 }
                                 .buttonHoverPointer()
-                                .help("Open task: \(task.title)")
+                                .nativeHelp("Open task: \(task.title)")
                                 .buttonStyle(.plain)
                                 .accessibilityIdentifier("done-archive-task-\(task.id.uuidString)")
                                 if !task.repositoryWorktrees.isEmpty {
@@ -646,7 +646,7 @@ struct KanbanBoardView: View {
             }
             .actionButtonHoverEmphasis()
             .buttonHoverPointer()
-            .help("Create a pull request for each repository linked to this completed task")
+            .nativeHelp("Create a pull request for each repository linked to this completed task")
             .disabled(taskCreatingPullRequests.contains(task.id))
             .frame(width: 30, height: 30)
             .contentShape(Rectangle())
@@ -667,7 +667,7 @@ struct KanbanBoardView: View {
                     }
                     .actionButtonHoverEmphasis()
                     .buttonHoverPointer()
-                    .help("Create pull requests for repositories without a linked pull request")
+                    .nativeHelp("Create pull requests for repositories without a linked pull request")
                     .disabled(taskCreatingPullRequests.contains(task.id))
                     .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
@@ -682,7 +682,7 @@ struct KanbanBoardView: View {
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
                             .actionButtonHoverEmphasis(padding: 5)
                             .buttonHoverPointer()
-                            .help(Text(verbatim: URL(fileURLWithPath: record.repositoryPath).lastPathComponent))
+                            .nativeHelp(URL(fileURLWithPath: record.repositoryPath).lastPathComponent)
                             // The chip stays compact; the click target keeps the 30 pt minimum of its sibling actions.
                             .frame(minWidth: 30, minHeight: 30)
                             .contentShape(Rectangle())
@@ -1112,7 +1112,7 @@ private struct KanbanColumnView: View {
                     .controlSize(.small)
                     .accessibilityLabel("Add task to Backlog")
                     .accessibilityIdentifier("add-backlog-task-button")
-                    .help("Add task to Backlog")
+                    .nativeHelp("Add task to Backlog")
                 }
             }
             .padding(.horizontal, 3)
@@ -1355,18 +1355,10 @@ private struct TaskCardView: View {
     let onMoveToDone: (() -> Void)?
 
     var body: some View {
-        // Card rows, top to bottom: the pull-request controls on the right
-        // (absent until the task has started and has a repository), the title,
-        // the live updates, then the time with the live token counter.
+        // Card rows, top to bottom: the title, the live updates, the time with
+        // the live token counter, then the pull-request controls on the right
+        // (absent until the task has started and has a repository).
         VStack(alignment: .leading, spacing: 10) {
-            if showPullRequestControls {
-                HStack(spacing: 8) {
-                    Spacer(minLength: 8)
-                    pullRequestControls
-                }
-                .frame(minHeight: 30)
-            }
-
             HStack(spacing: 6) {
                 if task.title == "Generating title…" { ProgressView().controlSize(.small) }
                 Text(task.title)
@@ -1420,6 +1412,14 @@ private struct TaskCardView: View {
             }
 
             timeRow
+
+            if showPullRequestControls {
+                HStack(spacing: 8) {
+                    Spacer(minLength: 8)
+                    pullRequestControls
+                }
+                .frame(minHeight: 30)
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1444,7 +1444,7 @@ private struct TaskCardView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .buttonHoverPointer()
             .buttonStyle(.plain)
-            .help("Open task: \(task.title)")
+            .nativeHelp("Open task: \(task.title)")
             .accessibilityLabel(task.title)
             .accessibilityHint("Open task")
             .accessibilityIdentifier("task-card-\(task.id.uuidString)")
@@ -1564,7 +1564,7 @@ private struct TaskCardView: View {
             .foregroundStyle(TokenUsageHeatmap.color(totalTokens: tokens, max: tokenUsageColorMax))
             .contentTransition(.numericText())
             .animation(.default, value: tokens)
-            .help(counterDescription)
+            .nativeHelp(counterDescription)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(counterDescription)
             .accessibilityIdentifier("task-token-usage-counter-\(task.id.uuidString)")
@@ -1593,7 +1593,7 @@ private struct TaskCardView: View {
                 }
                 .actionButtonHoverEmphasis(padding: 10)
                 .buttonHoverPointer()
-                .help("Create a pull request for each repository linked to this task")
+                .nativeHelp("Create a pull request for each repository linked to this task")
                 .disabled(isCreatingPullRequests)
                 .frame(width: 30, height: 30)
                 .contentShape(Rectangle())
@@ -1611,7 +1611,7 @@ private struct TaskCardView: View {
                     }
                     .actionButtonHoverEmphasis(padding: 10)
                     .buttonHoverPointer()
-                    .help("Create pull requests for repositories without a linked pull request")
+                    .nativeHelp("Create pull requests for repositories without a linked pull request")
                     .disabled(isCreatingPullRequests)
                     .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
@@ -1626,7 +1626,7 @@ private struct TaskCardView: View {
                     }
                     .actionButtonHoverEmphasis(padding: 10)
                     .buttonHoverPointer()
-                    .help("Complete task: all linked pull requests have merged")
+                    .nativeHelp("Complete task: all linked pull requests have merged")
                     .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
                     .accessibilityLabel("Green checkmark. Complete task, all linked pull requests merged")
@@ -1644,7 +1644,7 @@ private struct TaskCardView: View {
                         }
                         .actionButtonHoverEmphasis(padding: 10)
                         .buttonHoverPointer()
-                        .help("Resolve pull request conflicts with \(task.conversationProvider.displayName)")
+                        .nativeHelp("Resolve pull request conflicts with \(task.conversationProvider.displayName)")
                         .accessibilityLabel("Resolve pull request conflicts")
                         .accessibilityIdentifier("task-resolve-pr-conflicts-\(task.id.uuidString)")
                         .frame(minWidth: 30, minHeight: 30)
@@ -1658,7 +1658,7 @@ private struct TaskCardView: View {
                                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                                 .actionButtonHoverEmphasis(padding: 5)
                                 .buttonHoverPointer()
-                                .help(Text(verbatim: URL(fileURLWithPath: record.repositoryPath).lastPathComponent))
+                                .nativeHelp(URL(fileURLWithPath: record.repositoryPath).lastPathComponent)
                                 // The chip stays compact; the click target keeps the 30 pt minimum of its sibling actions.
                                 .frame(minWidth: 30, minHeight: 30)
                                 .contentShape(Rectangle())
@@ -1699,7 +1699,7 @@ private struct TaskCardView: View {
         }
         .buttonStyle(.plain)
         .buttonHoverPointer()
-        .help(isOn ? "Auto PR is on: a pull request is created automatically when this task moves to Review" : "Auto PR is off: create the pull request yourself once this task moves to Review")
+        .nativeHelp(isOn ? "Auto PR is on: a pull request is created automatically when this task moves to Review" : "Auto PR is off: create the pull request yourself once this task moves to Review")
         .accessibilityLabel("Auto PR")
         .accessibilityValue(isOn ? "on" : "off")
         .accessibilityAddTraits(.isToggle)
@@ -1796,7 +1796,7 @@ private struct ChoiceBar<Choice: Hashable>: View {
                 }
                 .buttonStyle(.plain)
                 .buttonHoverPointer()
-                .help(choice.title)
+                .nativeHelp(choice.title)
                 .accessibilityIdentifier(choice.id)
                 .accessibilityAddTraits(selection == choice.value ? .isSelected : [])
             }
@@ -1846,7 +1846,7 @@ private struct TokenStatsSheet: View {
                     rawInputFocus = RawInputFocus(agent: nil, item: nil, inFinalTranscript: true)
                 }
                 .buttonHoverPointer()
-                .help("Open the full input the model was sent, item by item")
+                .nativeHelp("Open the full input the model was sent, item by item")
                 .disabled(waste?.available != true)
                 .accessibilityIdentifier("token-stats-raw-input-button")
             }
@@ -1864,7 +1864,7 @@ private struct TokenStatsSheet: View {
                 Spacer()
                 Button("Done") { dismiss() }
                     .buttonHoverPointer()
-                    .help("Done")
+                    .nativeHelp("Done")
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("close-token-stats-button")
@@ -1993,7 +1993,7 @@ private struct TokenStatsSheet: View {
                         rawInputFocus = RawInputFocus(agent: item.agent, item: item.item, inFinalTranscript: item.inFinalTranscript)
                     }
                     .buttonHoverPointer()
-                    .help("Show the full text the model received")
+                    .nativeHelp("Show the full text the model received")
                     .controlSize(.small)
                     .accessibilityIdentifier("token-stats-waster-\(index)-show")
                 }
@@ -2259,9 +2259,16 @@ private struct TokenStatsSheet: View {
     }
 }
 
-/// The input a task's model requests were sent, one row per item and each item
-/// once: the final transcript, or everything ever sent including what a
-/// compaction removed. Rows load a page at a time as the list scrolls.
+private extension TaskRawInputPage.Row {
+    /// A single request can list one item twice, so its rows are keyed by position.
+    var listKey: Int { position ?? id }
+    var accessibilityID: String { position.map { "raw-input-request-row-\($0)" } ?? "raw-input-row-\(id)" }
+}
+
+/// The input a task's model requests were sent, one row per item: the final
+/// transcript or everything ever sent (including what a compaction removed)
+/// list each item once, and a single request lists everything it sent in
+/// order, repeats included and flagged. Rows load a page at a time as the list scrolls.
 private struct RawInputSheet: View {
     @Environment(\.dismiss) private var dismiss
     let taskID: UUID
@@ -2277,7 +2284,14 @@ private struct RawInputSheet: View {
     @State private var rows: [TaskRawInputPage.Row] = []
     @State private var isLoading = false
     @State private var selected: Int?
+    /// In a single request, which copy of the selected item is highlighted.
+    @State private var selectedPosition: Int?
     @State private var scrollTarget: Int?
+    /// `nil` is the request the final transcript was read from.
+    @State private var requestNumber: Int?
+    @State private var requestField = ""
+    @State private var exportFormat = TaskRawInputExportFormat.text
+    @State private var exportStatus: String?
 
     private static let pageSize = 100
     private static let number = IntegerFormatStyle<Int>().grouping(.automatic)
@@ -2299,7 +2313,9 @@ private struct RawInputSheet: View {
     }
 
     private var hasMore: Bool { rows.count < (page?.total ?? 0) }
-    private var reloadKey: String { "\(agent ?? "")|\(scope.rawValue)|\(order.rawValue)|\(submittedQuery)" }
+    private var reloadKey: String {
+        "\(agent ?? "")|\(scope.rawValue)|\(order.rawValue)|\(submittedQuery)|\(scope == .request ? requestNumber ?? 0 : 0)"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -2327,6 +2343,9 @@ private struct RawInputSheet: View {
                 }
             }
             controls
+            if scope == .request, let request = page?.request {
+                requestBar(request)
+            }
             HStack(alignment: .top, spacing: 0) {
                 list
                     .frame(width: min(460, Self.size.width * 0.42))
@@ -2350,7 +2369,7 @@ private struct RawInputSheet: View {
                 Spacer()
                 Button("Done") { dismiss() }
                     .buttonHoverPointer()
-                    .help("Done")
+                    .nativeHelp("Done")
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("close-raw-input-button")
@@ -2360,7 +2379,16 @@ private struct RawInputSheet: View {
         .frame(width: Self.size.width, height: Self.size.height)
         .task(id: reloadKey) { await reload() }
         // Item IDs belong to one agent's log; another agent's item with the same ID is unrelated.
-        .onChange(of: agent) { selected = nil }
+        .onChange(of: agent) {
+            selected = nil
+            selectedPosition = nil
+            requestNumber = nil
+        }
+        .onChange(of: requestNumber) {
+            selected = nil
+            selectedPosition = nil
+            exportStatus = nil
+        }
     }
 
     private var controls: some View {
@@ -2376,6 +2404,7 @@ private struct RawInputSheet: View {
                 choices: [
                     (TaskRawInputScope.finalTranscript, "Final transcript", "raw-input-scope-final"),
                     (TaskRawInputScope.everything, "Everything sent", "raw-input-scope-all"),
+                    (TaskRawInputScope.request, "Single request", "raw-input-scope-request"),
                 ],
                 selection: $scope
             )
@@ -2397,14 +2426,20 @@ private struct RawInputSheet: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(rows) { row in
-                        RawInputRowView(row: row, maxTokens: page?.maxTokens ?? 0, isSelected: row.id == selected)
-                            .id(row.id)
-                            .contentShape(Rectangle())
-                            .onTapGesture { selected = row.id }
-                            .onAppear {
-                                if row.id == rows.last?.id { Task { await loadMore() } }
-                            }
+                    ForEach(rows, id: \.listKey) { row in
+                        RawInputRowView(
+                            row: row, maxTokens: page?.maxTokens ?? 0,
+                            isSelected: row.position.map { $0 == selectedPosition } ?? (row.id == selected)
+                        )
+                        .id(row.listKey)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selected = row.id
+                            selectedPosition = row.position
+                        }
+                        .onAppear {
+                            if row.listKey == rows.last?.listKey { Task { await loadMore() } }
+                        }
                     }
                     if hasMore {
                         ProgressView()
@@ -2434,8 +2469,153 @@ private struct RawInputSheet: View {
     private func fetch(offset: Int, focusing item: Int?) async -> TaskRawInputPage? {
         try? await BoardTaskManager(modelContext: modelContext).rawInputPage(
             taskID, homes: .forThisApp, agent: agent, scope: scope, order: order, query: submittedQuery,
-            offset: offset, limit: Self.pageSize, focus: item
+            offset: offset, limit: Self.pageSize, focus: item, request: scope == .request ? requestNumber : nil
         )
+    }
+
+    /// Which request is shown, how the provider measured it, how exact the
+    /// rebuild is, and the whole request's export.
+    private func requestBar(_ request: TaskRawInputPage.Request) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Button("Previous request", systemImage: "chevron.left") { requestNumber = request.number - 1 }
+                    .labelStyle(.iconOnly)
+                    .buttonHoverPointer()
+                    .nativeHelp("Show the request before this one")
+                    .disabled(request.number <= 1)
+                    .accessibilityIdentifier("raw-input-request-previous")
+                Text("Request \(request.number) of \(request.count)")
+                    .font(.system(size: 12, weight: .semibold))
+                    .monospacedDigit()
+                    .accessibilityIdentifier("raw-input-request-number")
+                Button("Next request", systemImage: "chevron.right") { requestNumber = request.number + 1 }
+                    .labelStyle(.iconOnly)
+                    .buttonHoverPointer()
+                    .nativeHelp("Show the request after this one")
+                    .disabled(request.number >= request.count)
+                    .accessibilityIdentifier("raw-input-request-next")
+                TextField("Go to #", text: $requestField)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 70)
+                    .onSubmit {
+                        if let number = Int(requestField.trimmingCharacters(in: .whitespaces)) {
+                            requestNumber = min(max(1, number), request.count)
+                        }
+                        requestField = ""
+                    }
+                    .accessibilityIdentifier("raw-input-request-field")
+                Button("Latest") { requestNumber = nil }
+                    .buttonHoverPointer()
+                    .nativeHelp("Show the request the final transcript was read from")
+                    .controlSize(.small)
+                    .disabled(request.number == request.latest)
+                    .accessibilityIdentifier("raw-input-request-latest")
+                Text(request.exact ? "Exact" : "Reconstructed")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(request.exact ? Color.green : Color.orange)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill((request.exact ? Color.green : Color.orange).opacity(0.15)))
+                    .nativeHelp(request.note)
+                    .accessibilityIdentifier("raw-input-request-exactness")
+                if let timestamp = request.timestamp {
+                    Text(Self.displayTime(timestamp))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityIdentifier("raw-input-request-time")
+                }
+                Spacer(minLength: 8)
+                ChoiceBar(
+                    choices: [
+                        (TaskRawInputExportFormat.text, "Text", "raw-input-export-format-text"),
+                        (TaskRawInputExportFormat.json, "JSON", "raw-input-export-format-json"),
+                    ],
+                    selection: $exportFormat
+                )
+                Button("Copy all", systemImage: "doc.on.doc") { Task { await exportRequest(request, open: false) } }
+                    .buttonHoverPointer()
+                    .nativeHelp("Copy this whole request, every item in order")
+                    .controlSize(.small)
+                    .accessibilityIdentifier("raw-input-request-copy-button")
+                Button("Open in editor", systemImage: "square.and.pencil") { Task { await exportRequest(request, open: true) } }
+                    .buttonHoverPointer()
+                    .nativeHelp("Write this whole request to a file and open it")
+                    .controlSize(.small)
+                    .accessibilityIdentifier("raw-input-request-open-editor-button")
+            }
+            // The bar keeps one height whatever it shows: a bar that grows
+            // resizes the lazy list below it while it lays out its rows.
+            HStack(spacing: 8) {
+                Text(Self.usageLine(request))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                    .accessibilityIdentifier("raw-input-request-usage")
+                Spacer(minLength: 8)
+                Text(exportStatus ?? "")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("raw-input-request-export-status")
+            }
+            Text("\(request.note) \(request.tokenNote)")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .lineLimit(2, reservesSpace: true)
+                .nativeHelp("\(request.note) \(request.tokenNote)")
+                .accessibilityIdentifier("raw-input-request-note")
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.04)))
+    }
+
+    private static func usageLine(_ request: TaskRawInputPage.Request) -> String {
+        var parts: [String] = []
+        if let context = request.contextTokens {
+            var reported = "Reported input \(context.formatted(number))"
+            var split = ["uncached \((request.inputTokens ?? 0).formatted(number))", "cache read \((request.cacheReadTokens ?? 0).formatted(number))"]
+            if let write = request.cacheWriteTokens { split.append("cache write \(write.formatted(number))") }
+            reported += " (\(split.joined(separator: " · ")))"
+            parts.append(reported)
+        } else {
+            parts.append("No usage reported")
+        }
+        parts.append("items add up to \(request.itemTokens.formatted(number))")
+        parts.append("\(request.repeatedItems) repeated")
+        if let source = request.querySource, !source.isEmpty { parts.append("source \(source)") }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func displayTime(_ timestamp: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = formatter.date(from: timestamp) ?? ISO8601DateFormatter().date(from: timestamp)
+        return date?.formatted(date: .abbreviated, time: .standard) ?? timestamp
+    }
+
+    private func exportRequest(_ request: TaskRawInputPage.Request, open: Bool) async {
+        let format = exportFormat
+        do {
+            let export = try await BoardTaskManager(modelContext: modelContext).rawInputExport(
+                taskID, homes: .forThisApp, agent: page?.agent ?? agent, request: request.number, format: format
+            )
+            let name = format == .json ? "JSON" : "text"
+            if open {
+                let file = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("playhouse-request-\(taskID.uuidString.prefix(8))-\(export.agent.replacingOccurrences(of: "/", with: "-"))-\(export.request).\(format == .json ? "json" : "txt")")
+                try export.text.write(to: file, atomically: true, encoding: .utf8)
+                NSWorkspace.shared.open(file)
+                exportStatus = "Opened request \(export.request) as \(name): \(export.items) items"
+            } else {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(export.text, forType: .string)
+                exportStatus = "Copied request \(export.request) as \(name): \(export.items) items"
+            }
+        } catch {
+            exportStatus = error.localizedDescription
+        }
     }
 
     /// Loads the first page, then on up to the selected item so the list can scroll to it.
@@ -2449,7 +2629,9 @@ private struct RawInputSheet: View {
             while rows.count <= position, let next = await fetch(offset: rows.count, focusing: nil), !next.rows.isEmpty {
                 rows += next.rows
             }
-            scrollTarget = selected
+            guard rows.indices.contains(position) else { return }
+            if selectedPosition == nil || scope != .request { selectedPosition = rows[position].position }
+            scrollTarget = rows[position].listKey
         }
     }
 
@@ -2479,10 +2661,16 @@ private struct RawInputRowView: View {
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
                     .background(Capsule().fill(Color.primary.opacity(0.07)))
+                if let position = row.position {
+                    Text("#\(position + 1)")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                }
                 Text(row.label)
                     .font(.system(size: 11, weight: .medium))
                     .lineLimit(1)
-                    .accessibilityIdentifier("raw-input-row-\(row.id)-label")
+                    .accessibilityIdentifier("\(row.accessibilityID)-label")
                 if !row.inFinalTranscript {
                     Text("removed")
                         .font(.system(size: 9))
@@ -2495,7 +2683,7 @@ private struct RawInputRowView: View {
                 Text(row.tokens.formatted(Self.number))
                     .font(.system(size: 11, weight: .medium))
                     .monospacedDigit()
-                    .accessibilityIdentifier("raw-input-row-\(row.id)-tokens")
+                    .accessibilityIdentifier("\(row.accessibilityID)-tokens")
             }
             HStack(spacing: 6) {
                 TokenShareBar(tokens: row.tokens, maxTokens: maxTokens)
@@ -2504,12 +2692,32 @@ private struct RawInputRowView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
+            // Every row of a single request keeps this line, flagged or not: rows
+            // of one height keep the lazy list's placement from oscillating.
+            if row.position != nil {
+                if let repeated = row.repeated {
+                    Text("Duplicate \(repeated.copy) of \(repeated.copies)\(repeated.copy > 1 ? " · first at #\(repeated.first + 1)" : "")")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.red)
+                        .lineLimit(1)
+                        .accessibilityIdentifier("\(row.accessibilityID)-repeat")
+                } else {
+                    Text(" ")
+                        .font(.system(size: 9, weight: .semibold))
+                        .accessibilityHidden(true)
+                }
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? Color.accentColor.opacity(0.18) : Color.clear))
+        .background(RoundedRectangle(cornerRadius: 6).fill(background))
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("raw-input-row-\(row.id)")
+        .accessibilityIdentifier(row.accessibilityID)
+    }
+
+    private var background: Color {
+        if isSelected { return Color.accentColor.opacity(0.18) }
+        return row.repeated == nil ? .clear : Color.red.opacity(0.08)
     }
 }
 
@@ -2554,12 +2762,12 @@ private struct RawInputTextPane: View {
                     Spacer()
                     Button("Copy all", systemImage: "doc.on.doc") { Task { await copyAll() } }
                         .buttonHoverPointer()
-                        .help("Copy this item's full text")
+                        .nativeHelp("Copy this item's full text")
                         .controlSize(.small)
                         .accessibilityIdentifier("raw-input-copy-button")
                     Button("Open in editor", systemImage: "square.and.pencil") { Task { await openInEditor() } }
                         .buttonHoverPointer()
-                        .help("Write this item's full text to a file and open it")
+                        .nativeHelp("Write this item's full text to a file and open it")
                         .controlSize(.small)
                         .accessibilityIdentifier("raw-input-open-editor-button")
                 }
@@ -2698,14 +2906,14 @@ private struct RenameTaskSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 .buttonHoverPointer()
-                .help("Cancel")
+                .nativeHelp("Cancel")
                     .keyboardShortcut(.cancelAction)
                 Button("Save") {
                     onSave(normalizedTitle)
                     dismiss()
                 }
                 .buttonHoverPointer()
-                .help("Save")
+                .nativeHelp("Save")
                 .buttonStyle(.borderedProminent)
                 .disabled(normalizedTitle.isEmpty)
                 .accessibilityIdentifier("save-task-rename-button")

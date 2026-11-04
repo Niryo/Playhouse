@@ -90,7 +90,7 @@ enum PlayhouseCLI {
             case "list":
                 return BridgeRequest(command: "task.list")
             case "create":
-                let flags = try parseFlags(tail, valueFlags: ["--title", "--root", "--repo", "--branch", "--branch-from", "--merge-target", "--provider"])
+                let flags = try parseFlags(tail, valueFlags: ["--title", "--root", "--repo", "--branch", "--branch-from", "--merge-target", "--provider", "--prompt"])
                 let title = try requiredFlag("--title", flags: flags).first!
                 let roots = flags["--root"] ?? []
                 let repositories = flags["--repo"] ?? []
@@ -110,6 +110,7 @@ enum PlayhouseCLI {
                     })
                 ]
                 if let provider = flags["--provider"]?.first { createArguments["provider"] = .string(provider) }
+                createArguments["prompt"] = .string(try requiredFlag("--prompt", flags: flags).first!)
                 return BridgeRequest(command: "task.create", arguments: createArguments)
             case "get", "show":
                 let id = try firstPositional(tail)
@@ -120,11 +121,13 @@ enum PlayhouseCLI {
             case "token-waste":
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.token-waste", arguments: ["taskID": .string(id)])
-            case "raw-input", "raw-input-text":
+            case "raw-input", "raw-input-text", "raw-input-export":
                 let id = try firstPositional(Array(tail.prefix(1)))
-                let names: Set<String> = operation == "raw-input"
-                    ? ["--agent", "--scope", "--order", "--query", "--offset", "--limit", "--focus"]
-                    : ["--agent", "--item", "--offset", "--length"]
+                let names: Set<String> = switch operation {
+                case "raw-input": ["--agent", "--scope", "--order", "--query", "--offset", "--limit", "--focus", "--request"]
+                case "raw-input-export": ["--agent", "--request", "--format"]
+                default: ["--agent", "--item", "--offset", "--length"]
+                }
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: names)
                 var arguments: [String: BridgeValue] = ["taskID": .string(id)]
                 for name in names {
@@ -133,7 +136,7 @@ enum PlayhouseCLI {
                 if operation == "raw-input-text", arguments["item"] == nil {
                     throw CLIError.usage("Use: playhouse task raw-input-text <task-id> --item <n> [--agent <id>] [--offset <n>] [--length <n>]")
                 }
-                return BridgeRequest(command: operation == "raw-input" ? "task.raw-input" : "task.raw-input-text", arguments: arguments)
+                return BridgeRequest(command: "task.\(operation)", arguments: arguments)
             case "cpu-usage":
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.cpu-usage", arguments: ["taskID": .string(id)])
@@ -678,8 +681,8 @@ enum PlayhouseCLI {
       playhouse board list
       playhouse archive search <query>
       playhouse task list|get <task-id>
-      playhouse task create --title <title> --root <path> [--root <path>...] [--provider <codex|claude>]
-      playhouse task create --title <title> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--merge-target <repo-path>=<local-branch>]
+      playhouse task create --title <title> --prompt <text> --root <path> [--root <path>...] [--provider <codex|claude>]
+      playhouse task create --title <title> --prompt <text> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--merge-target <repo-path>=<local-branch>]
       playhouse task move <task-id> Done
       playhouse task move <task-id> Done --allow-unmerged
       playhouse task pr create <task-id>
@@ -716,7 +719,8 @@ enum PlayhouseCLI {
       playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>
       playhouse task token-usage <task-id>
       playhouse task token-waste <task-id>
-      playhouse task raw-input <task-id> [--agent <id>] [--scope final|all] [--order transcript|size|rent] [--query <text>] [--offset <n>] [--limit <n>] [--focus <item>]
+      playhouse task raw-input <task-id> [--agent <id>] [--scope final|all|request] [--request <n>] [--order transcript|size|rent] [--query <text>] [--offset <n>] [--limit <n>] [--focus <item>]
+      playhouse task raw-input-export <task-id> [--agent <id>] [--request <n>] [--format text|json]
       playhouse task raw-input-text <task-id> --item <n> [--agent <id>] [--offset <n>] [--length <n>]
       playhouse task cpu-usage <task-id>
       playhouse conversation history <task-id> [--limit <messages>] [--before <message-id>]
