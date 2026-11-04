@@ -1657,7 +1657,6 @@ final class PlayhouseUITests: XCTestCase {
         try moveLock.release()
         moveLockReleased = true
         XCTAssertTrue(waitUntil({ !element("task-card-\(taskID)").exists }, timeout: 15), "The completed task should disappear from the active board.")
-        XCTAssertEqual(element("task-count").value as? String, "0", "The active task count should decrease when a task is archived.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done", "Completion should trust the already-confirmed merge state and complete without rechecking GitHub, even though merge status changed to unmerged while the click waited for the task lock.")
         // The sent prompt is history, not a draft, and completion keeps the conversation.
         let completedHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
@@ -2811,7 +2810,6 @@ final class PlayhouseUITests: XCTestCase {
         try FileManager.default.removeItem(at: dataDirectory.appendingPathComponent("task-lifecycle-v2-reset"))
 
         launchApp(defaultParent: fixture.parent.path)
-        XCTAssertEqual(element("task-count").value as? String, "0")
         let resetNotice = element("task-lifecycle-reset-notice")
         let resetDetails = element("task-lifecycle-reset-details")
         XCTAssertTrue(resetNotice.waitForExistence(timeout: 10), app.debugDescription)
@@ -2861,6 +2859,8 @@ final class PlayhouseUITests: XCTestCase {
             "Wrapped task titles should have visible spacing between lines."
         )
         XCTAssertFalse(element("board-search-field").exists, "Board search should stay hidden until requested.")
+        XCTAssertFalse(element("task-count").exists, "The top bar should not show a task counter.")
+        XCTAssertFalse(element("board-search-button").exists, "The top bar should not show a search button; search is keyboard-only.")
         app.typeKey("f", modifierFlags: .command)
         let boardSearch = element("board-search-field")
         XCTAssertTrue(boardSearch.waitForExistence(timeout: 5), "Command+F should reveal the prominent board search.")

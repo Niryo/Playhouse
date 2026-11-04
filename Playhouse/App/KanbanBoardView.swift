@@ -486,28 +486,6 @@ struct KanbanBoardView: View {
             Spacer(minLength: 20)
 
             HStack(spacing: 14) {
-                let activeTaskCount = tasks.filter { $0.status != .done }.count
-                Text("\(activeTaskCount) \(activeTaskCount == 1 ? "task" : "tasks")")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Task count")
-                    .accessibilityValue("\(activeTaskCount)")
-                    .accessibilityIdentifier("task-count")
-
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = true }
-                    isBoardSearchFocused = true
-                } label: {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 30, height: 30)
-                }
-                .buttonHoverPointer()
-                .buttonStyle(.bordered)
-                .nativeHelp("Search tasks")
-                .accessibilityLabel("Search tasks")
-                .accessibilityIdentifier("board-search-button")
-
                 Button {
                     withAnimation(.easeInOut(duration: 0.24)) { isShowingDoneArchive.toggle() }
                 } label: {
