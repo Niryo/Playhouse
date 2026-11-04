@@ -682,7 +682,7 @@ struct KanbanBoardView: View {
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
                             .actionButtonHoverEmphasis(padding: 5)
                             .buttonHoverPointer()
-                            .help(Text(verbatim: "Open pull request #\(number) in your browser"))
+                            .help(Text(verbatim: URL(fileURLWithPath: record.repositoryPath).lastPathComponent))
                             // The chip stays compact; the click target keeps the 30 pt minimum of its sibling actions.
                             .frame(minWidth: 30, minHeight: 30)
                             .contentShape(Rectangle())
@@ -1658,7 +1658,7 @@ private struct TaskCardView: View {
                                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                                 .actionButtonHoverEmphasis(padding: 5)
                                 .buttonHoverPointer()
-                                .help(Text(verbatim: "Open pull request #\(number) in your browser"))
+                                .help(Text(verbatim: URL(fileURLWithPath: record.repositoryPath).lastPathComponent))
                                 // The chip stays compact; the click target keeps the 30 pt minimum of its sibling actions.
                                 .frame(minWidth: 30, minHeight: 30)
                                 .contentShape(Rectangle())
