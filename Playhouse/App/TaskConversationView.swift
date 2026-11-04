@@ -3573,7 +3573,7 @@ struct TaskConversationView: View {
                         highlightedRanges: annotations.filter { $0.messageID == message.id && $0.blockID == 0 }.map {
                             NSRange(location: $0.startOffset, length: $0.endOffset - $0.startOffset)
                         },
-                        textColor: .white,
+                        textColor: .labelColor,
                         onSelection: { range, selectedText, bounds in
                             currentTextSelection = selectedText.isEmpty ? nil : AnnotationSelection(
                                 messageID: message.id, anchorID: 0, blockID: 0, startOffset: range.location,
@@ -3589,7 +3589,15 @@ struct TaskConversationView: View {
                                 .offset(y: -16)
                         }
                         .padding(.horizontal, 16).padding(.vertical, 11)
-                        .background(WorkspaceTheme.accent, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                        // The border is part of the background so the selection hint above stays clickable.
+                        .background {
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(WorkspaceTheme.inputBackground)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .strokeBorder(Color.primary.opacity(0.2), lineWidth: 1)
+                                )
+                        }
                 }
                 if let createdAt = message.createdAt {
                     Text(createdAt, format: .dateTime.hour().minute())
