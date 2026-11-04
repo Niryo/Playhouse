@@ -1075,6 +1075,35 @@ enum GitHubPullRequestManager {
         return mergeTarget
     }
 
+    private struct RepositoryMergeMethods: Decodable {
+        let squashMergeAllowed: Bool?
+        let mergeCommitAllowed: Bool?
+        let rebaseMergeAllowed: Bool?
+    }
+
+    /// Merges the PR with the first method the repository allows (squash, then a
+    /// merge commit, then rebase). The task branch and worktree are kept.
+    /// `headOid` pins the merge to the commit autopilot saw green: GitHub refuses it
+    /// if anything was pushed since.
+    static func merge(_ record: RepositoryWorktreeRecord, headOid: String, executable: String) throws -> String {
+        guard let number = record.pullRequestNumber else {
+            throw BridgeCommandError(code: "invalid_transition", message: "This repository has no linked pull request.")
+        }
+        let allowed = try JSONDecoder().decode(
+            RepositoryMergeMethods.self,
+            from: Data(run(executable, ["repo", "view", "--json", "squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed"], directory: record.worktreePath).utf8)
+        )
+        let method: String
+        if allowed.squashMergeAllowed != false { method = "squash" }
+        else if allowed.mergeCommitAllowed != false { method = "merge" }
+        else if allowed.rebaseMergeAllowed != false { method = "rebase" }
+        else {
+            throw BridgeCommandError(code: "operation_failed", message: "The repository of pull request #\(number) allows no merge method.")
+        }
+        _ = try run(executable, ["pr", "merge", String(number), "--\(method)", "--match-head-commit", headOid], directory: record.worktreePath)
+        return method
+    }
+
     static func isMerged(_ record: RepositoryWorktreeRecord, executable: String) throws -> Bool {
         guard let number = record.pullRequestNumber else { return true }
         let result = try run(executable, ["pr", "view", String(number), "--json", "mergedAt"], directory: record.worktreePath)
@@ -1167,19 +1196,22 @@ enum PullRequestResolutionCheck: String, Codable, Sendable {
 extension PullRequestMode {
     static func parse(_ value: String) throws -> PullRequestMode {
         guard let mode = PullRequestMode(rawValue: value.lowercased()) else {
-            throw BridgeCommandError(code: "invalid_argument", message: "Unknown pull request mode '\(value)'. Valid modes: manual, pr, autopilot.")
+            throw BridgeCommandError(code: "invalid_argument", message: "Unknown pull request mode '\(value)'. Valid modes: manual, pr, autopilot, merge.")
         }
         return mode
     }
 }
 
-/// The `task.pr.autopilot` command's result. `action` is inactive, merged,
-/// green, pending, stalled (moved to Waiting Response), or fixed (a fix turn ran).
+/// The `task.pr.autopilot` command's result. `action` is inactive, merged (every
+/// PR is merged, by merge mode or before), green, pending, stalled (moved to
+/// Waiting Response), or fixed (a fix turn ran).
 struct PullRequestAutopilotOutcome: Codable, Sendable {
     let action: String
     let states: [PullRequestReviewState]
     let taskStatus: String
     let reason: String?
+    /// The PRs this pass merged (merge mode); nil when it merged none.
+    var mergedPullRequests: [Int]? = nil
 }
 
 /// What the review sync did to one PR-linked repository: no-remote,
@@ -1216,6 +1248,12 @@ struct PlayhousePullRequestService {
     ) async throws -> GitHubPullRequestManager.PullRequest {
         try await PlayhouseBackgroundOperation.run {
             try GitHubPullRequestManager.create(record, title: title, body: body, executable: executable)
+        }
+    }
+
+    func merge(_ record: RepositoryWorktreeRecord, headOid: String, executable: String) async throws -> String {
+        try await PlayhouseBackgroundOperation.run {
+            try GitHubPullRequestManager.merge(record, headOid: headOid, executable: executable)
         }
     }
 
@@ -1785,7 +1823,8 @@ final class BoardTaskManager {
         task.repositoryWorktrees = worktrees
         task.contextFolderPaths = folders
         task.autoCreatePullRequestOnReview = pullRequestMode != .manual
-        task.pullRequestAutopilot = pullRequestMode == .autopilot
+        task.pullRequestAutopilot = pullRequestMode == .autopilot || pullRequestMode == .merge
+        task.pullRequestAutoMerge = pullRequestMode == .merge
         return try await withRepositoryAllocationLocks(worktrees.map(\.repositoryPath)) {
             try validateRepositoryAssignments(worktrees, excludingTaskID: nil)
             modelContext.insert(task)
@@ -2304,7 +2343,8 @@ final class BoardTaskManager {
         try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             task.autoCreatePullRequestOnReview = mode != .manual
-            task.pullRequestAutopilot = mode == .autopilot
+            task.pullRequestAutopilot = mode == .autopilot || mode == .merge
+            task.pullRequestAutoMerge = mode == .merge
             task.pullRequestAutopilotFixAttempts = 0
             task.pullRequestAutopilotLastFixSignature = nil
             try await saveTaskContext(taskID: id)
@@ -2397,6 +2437,59 @@ final class BoardTaskManager {
             let task = try requireTask(id)
             task.pullRequestAutopilotLastFixSignature = nil
             try await saveTaskContext(taskID: id)
+        }
+    }
+
+    enum PullRequestMergeResult {
+        case merged([Int])
+        /// The task left Review, a turn took it, or merge mode was turned off
+        /// while the PRs were being probed.
+        case skipped
+        case refused(String)
+    }
+
+    /// Merge mode's last step: merges every open linked PR at the head it was
+    /// probed green at. It re-checks the task under the task operation lock, so a
+    /// turn or a mode change during the probe stops the merge. A merge GitHub
+    /// refuses (required reviews, branch protection) is not the model's to fix,
+    /// so the task moves to Waiting Response with GitHub's reason.
+    func mergeGreenPullRequests(_ id: UUID, states: [PullRequestReviewState]) async throws -> PullRequestMergeResult {
+        let outcome: Result<[Int], BridgeCommandError>? = try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.status == .review, task.pullRequestAutoMerge, try !hasConversationTurnReservation(id) else { return nil }
+            let heads = Dictionary(states.filter { !$0.merged }.map { ($0.repositoryPath, $0.headRefOid) }, uniquingKeysWith: { first, _ in first })
+            let records = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && heads.keys.contains($0.repositoryPath) }
+            let executable = try pullRequestService.resolveExecutable()
+            var merged: [Int] = []
+            for record in records {
+                let number = record.pullRequestNumber ?? 0
+                do {
+                    guard let head = heads[record.repositoryPath] ?? nil else {
+                        throw BridgeCommandError(code: "operation_failed", message: "GitHub didn't report its head commit.")
+                    }
+                    let method = try await pullRequestService.merge(record, headOid: head, executable: executable)
+                    merged.append(number)
+                    PlayhouseDiagnostics.record("task.pr.autopilot.merged", fields: [
+                        "taskID": id.uuidString, "number": String(number), "method": method
+                    ])
+                } catch {
+                    let done = merged.isEmpty ? "" : " Already merged: \(merged.map { "#\($0)" }.joined(separator: ", "))."
+                    return .failure(BridgeCommandError(
+                        code: "operation_failed",
+                        message: "Autopilot couldn't merge pull request #\(number): \(error.localizedDescription)\(done)"
+                    ))
+                }
+            }
+            return .success(merged)
+        }
+        switch outcome {
+        case nil:
+            return .skipped
+        case .success(let merged)?:
+            return .merged(merged)
+        case .failure(let error)?:
+            _ = try await setLifecycleStatus(id, to: .waitingResponse, message: error.message)
+            return .refused(error.message)
         }
     }
 
@@ -7329,7 +7422,30 @@ final class ConversationManager {
             return try outcome("merged", states)
         case .green:
             try await tasks.resetPullRequestAutopilotAttempts(taskID)
-            return try outcome("green", states)
+            guard task.pullRequestAutoMerge else { return try outcome("green", states) }
+            // A head with no checks may be one GitHub hasn't started CI for yet;
+            // merging is irreversible, so it waits for checks that actually passed.
+            guard states.filter({ !$0.merged }).allSatisfy({ $0.checks == .success }) else {
+                // Past the registration grace, no checks means this repository has
+                // no CI; say so instead of silently never merging.
+                let reason = "Merge mode merges only once checks have run and passed, and GitHub reports no checks for this pull request. Merge it yourself, or switch the task to Auto."
+                _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse, message: reason)
+                return try outcome("stalled", states, reason: reason)
+            }
+            // GitHub may still be computing mergeability; merge once it says MERGEABLE.
+            guard states.filter({ !$0.merged }).allSatisfy({ $0.mergeable == "MERGEABLE" }) else {
+                return try outcome("pending", states)
+            }
+            switch try await tasks.mergeGreenPullRequests(taskID, states: states) {
+            case .skipped:
+                return try outcome("inactive", states, reason: "The task left Review, a turn started, or merge mode was turned off.")
+            case .refused(let reason):
+                return try outcome("stalled", states, reason: reason)
+            case .merged(let numbers):
+                var result = try outcome("merged", try await tasks.reviewPullRequests(try tasks.taskModel(taskID)))
+                result.mergedPullRequests = numbers
+                return result
+            }
         case .pending:
             return try outcome("pending", states)
         case .needsFix:

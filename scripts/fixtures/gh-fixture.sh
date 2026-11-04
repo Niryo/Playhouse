@@ -7,6 +7,12 @@
 # `<number>.checks=<success|failure|pending|none>` line (default success), and
 # `gh api graphql` review-thread reads answer from `<number>.threads=<count>`
 # unresolved threads (default 0), logging `threads <number>` to the call log.
+# `gh repo view --json ...MergeAllowed` allows every merge method, or only those
+# in a `repo.methods=<squash,merge,rebase>` line, and `gh pr merge <number>
+# --<method> ...` logs `merged<TAB><number><TAB>--<method>` to the create log and
+# marks the PR merged, unless a `<number>.merge=<message>` line makes it fail with
+# that message (logged as `merge-failed`). A merge not pinned with
+# `--match-head-commit <current HEAD>` is refused the same way.
 # Create calls return sequential fixture PR numbers. Environment:
 #   PLAYHOUSE_E2E_GH_STATE_PATH          state file (required)
 #   PLAYHOUSE_E2E_GH_CALL_LOG            append-only log of probed PR numbers (required)
@@ -51,6 +57,29 @@ if [ "$1" = pr ] && [ "$2" = create ]; then
   create_number=$((first_number + count))
   printf 'created\t%s\t%s\n' "$PWD" "$create_number" >> "$PLAYHOUSE_E2E_GH_CREATE_LOG"
   printf 'https://github.com/playhouse-test/fixture/pull/%s\n' "$create_number"
+  exit 0
+fi
+if [ "$1" = repo ] && [ "$2" = view ]; then
+  methods=$(awk -F= '$1 == "repo.methods" { print $2 }' "$PLAYHOUSE_E2E_GH_STATE_PATH")
+  methods=${methods:-squash,merge,rebase}
+  allowed() { case ",$methods," in *",$1,"*) echo true ;; *) echo false ;; esac; }
+  printf '{"squashMergeAllowed":%s,"mergeCommitAllowed":%s,"rebaseMergeAllowed":%s}\n' "$(allowed squash)" "$(allowed merge)" "$(allowed rebase)"
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = merge ]; then
+  refusal=$(awk -F= -v key="$3.merge" '$1 == key { print $2 }' "$PLAYHOUSE_E2E_GH_STATE_PATH")
+  # Like GitHub, refuse a merge that is not pinned to the PR's current head.
+  if [ "$5" != --match-head-commit ] || [ "$6" != "$(git rev-parse HEAD)" ]; then
+    refusal="Head branch was modified. Review and try the merge again."
+  fi
+  if [ -n "$refusal" ]; then
+    printf 'merge-failed\t%s\t%s\n' "$3" "$4" >> "$PLAYHOUSE_E2E_GH_CREATE_LOG"
+    echo "$refusal" >&2
+    exit 1
+  fi
+  printf 'merged\t%s\t%s\n' "$3" "$4" >> "$PLAYHOUSE_E2E_GH_CREATE_LOG"
+  awk -F= -v number="$3" 'BEGIN { OFS = "=" } $1 == number { $2 = "merged" } { print }' "$PLAYHOUSE_E2E_GH_STATE_PATH" > "$PLAYHOUSE_E2E_GH_STATE_PATH.tmp"
+  mv "$PLAYHOUSE_E2E_GH_STATE_PATH.tmp" "$PLAYHOUSE_E2E_GH_STATE_PATH"
   exit 0
 fi
 if [ "$1" = api ] && [ "$2" = graphql ]; then

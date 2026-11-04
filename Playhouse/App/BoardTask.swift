@@ -197,6 +197,9 @@ final class BoardTask {
     /// task's pull requests in Review and sends fix turns until checks pass and every
     /// review thread is resolved.
     var pullRequestAutopilot: Bool = false
+    /// When true (with `pullRequestAutopilot`), autopilot also merges the pull
+    /// requests once they're green.
+    var pullRequestAutoMerge: Bool = false
     /// Autopilot fix turns sent since the pull requests were last green; bounds the loop.
     var pullRequestAutopilotFixAttempts: Int = 0
     /// The PR state the last autopilot fix turn was sent for, so an unchanged red state
@@ -262,12 +265,14 @@ enum PullRequestMode: String, CaseIterable, Codable, Sendable {
     case manual
     case pullRequest = "pr"
     case autopilot
+    case merge
 
     var label: String {
         switch self {
         case .manual: "Off"
         case .pullRequest: "PR"
         case .autopilot: "Auto"
+        case .merge: "Merge"
         }
     }
 
@@ -276,13 +281,15 @@ enum PullRequestMode: String, CaseIterable, Codable, Sendable {
         case .manual: "Manual: create the pull request yourself once this task moves to Review"
         case .pullRequest: "PR: a pull request is created automatically when this task moves to Review"
         case .autopilot: "Autopilot: create the pull request, then keep fixing failing checks and review comments until it's green"
+        case .merge: "Merge: everything Autopilot does, then merge the pull request once it's green"
         }
     }
 }
 
 extension BoardTask {
     var pullRequestMode: PullRequestMode {
-        pullRequestAutopilot ? .autopilot : (autoCreatePullRequestOnReview ? .pullRequest : .manual)
+        if pullRequestAutopilot { return pullRequestAutoMerge ? .merge : .autopilot }
+        return autoCreatePullRequestOnReview ? .pullRequest : .manual
     }
 }
 

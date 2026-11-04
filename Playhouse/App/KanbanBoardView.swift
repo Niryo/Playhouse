@@ -942,9 +942,10 @@ struct KanbanBoardView: View {
             autopilotPendingTaskIDs.remove(id)
         case .green:
             autopilotPendingTaskIDs.remove(id)
-            // The daemon owns the loop guard: let it confirm green and reset the
-            // fix streak, so a later red state gets a full set of attempts.
-            if task.pullRequestAutopilotFixAttempts > 0 || task.pullRequestAutopilotLastFixSignature != nil {
+            // The daemon owns the loop guard and the merge: let it confirm green,
+            // reset the fix streak so a later red state gets a full set of
+            // attempts, and in merge mode merge the PRs.
+            if task.pullRequestAutoMerge || task.pullRequestAutopilotFixAttempts > 0 || task.pullRequestAutopilotLastFixSignature != nil {
                 runPullRequestAutopilot(for: id)
             }
         case .needsFix:
@@ -968,12 +969,12 @@ struct KanbanBoardView: View {
                     recordPullRequestHealth(id, states: states)
                 }
                 switch outcome.action {
-                case "fixed":
-                    // Its states predate the fix; probe the task's PRs afresh now
-                    // that the turn has settled.
+                case "fixed", "merged":
+                    // Its states predate the fix or merge; probe the task's PRs
+                    // afresh so the card shows where they stand now.
                     lastMergedPullRequestCheckAt = nil
                     checkReviewPullRequests()
-                case "green", "merged", "stalled":
+                case "green", "stalled":
                     recordPullRequestHealth(id, states: outcome.states)
                 default:
                     recordPullRequestHealth(id, states: outcome.states)
@@ -1687,7 +1688,7 @@ private struct TaskCardView: View {
         HStack(spacing: 5) {
             let linked = linkedPullRequests
             if linked.isEmpty && isAutoPRWorkingState {
-                pullRequestModeControl
+                pullRequestModePill
             } else if linked.isEmpty {
                 let hasMultipleRepositories = task.repositoryWorktrees.filter { !$0.isPending }.count > 1
                 Button(action: onCreatePullRequests) {
@@ -1757,7 +1758,7 @@ private struct TaskCardView: View {
                         .frame(minWidth: 30, minHeight: 30)
                         .contentShape(Rectangle())
                     }
-                    autopilotToggle
+                    pullRequestModePill
                     ForEach(linked, id: \.repositoryPath) { record in
                         if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
                             let health = pullRequestHealth[number]
@@ -1798,79 +1799,10 @@ private struct TaskCardView: View {
         }
     }
 
-    /// Compact three-way control shown in place of the manual "PR" button while the
-    /// task is still being worked on: Off leaves the PR to the user, PR creates it on
-    /// Review, and Auto also keeps fixing it until it's green. macOS has no native
-    /// three-state switch (a mixed-state checkbox means "partially on"), so this is a
-    /// small segmented picker drawn to fit the card.
-    private var pullRequestModeControl: some View {
-        let current = task.pullRequestMode
-        return HStack(spacing: 0) {
-            ForEach(PullRequestMode.allCases, id: \.self) { mode in
-                let isSelected = mode == current
-                Button {
-                    if !isSelected { onSetPullRequestMode(mode) }
-                } label: {
-                    Text(mode.label)
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(isSelected ? Color.white : Color.secondary)
-                        .padding(.horizontal, 5)
-                        .frame(minHeight: 15)
-                        .background(Capsule().fill(isSelected ? Color.accentColor : Color.clear))
-                        .frame(minHeight: 30)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .buttonHoverPointer()
-                .help(mode.helpText)
-                .accessibilityLabel(mode.label)
-                .accessibilityValue(isSelected ? "selected" : "")
-                .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
-                .accessibilityIdentifier("task-pr-mode-\(mode.rawValue)-\(task.id.uuidString)")
-            }
-        }
-        .padding(.horizontal, 1)
-        .background(Capsule().fill(Color.primary.opacity(0.08)).frame(height: 17))
-        .animation(.easeInOut(duration: 0.15), value: current)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Pull request mode")
-        .accessibilityIdentifier("task-pr-mode-\(task.id.uuidString)")
-    }
-
-    /// Once a PR is linked, the mode control is gone; this small "Auto" switch keeps
-    /// autopilot switchable (on, or back to plain PR) so the user can stop or start the loop.
-    private var autopilotToggle: some View {
-        let isOn = task.pullRequestAutopilot
-        return Button {
-            onSetPullRequestMode(isOn ? .pullRequest : .autopilot)
-        } label: {
-            HStack(spacing: 5) {
-                Text("Auto")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Capsule()
-                    .fill(isOn ? Color.accentColor : Color.primary.opacity(0.18))
-                    .frame(width: 22, height: 13)
-                    .overlay(alignment: isOn ? .trailing : .leading) {
-                        Circle()
-                            .fill(.white)
-                            .frame(width: 11, height: 11)
-                            .shadow(color: .black.opacity(0.25), radius: 0.5, y: 0.5)
-                            .padding(1)
-                    }
-                    .animation(.easeInOut(duration: 0.15), value: isOn)
-            }
-            .fixedSize()
-            .frame(minWidth: 30, minHeight: 30)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .buttonHoverPointer()
-        .help(isOn ? "Autopilot is on: Playhouse keeps fixing failing checks and review comments until the pull request is green. Click to turn it off." : "Autopilot is off. Click to keep fixing failing checks and review comments automatically.")
-        .accessibilityLabel("Autopilot")
-        .accessibilityValue(isOn ? "on" : "off")
-        .accessibilityAddTraits(.isToggle)
-        .accessibilityIdentifier("task-pr-autopilot-toggle-\(task.id.uuidString)")
+    /// Shown in place of the manual "PR" button while the task is being worked on,
+    /// and beside linked PRs afterwards so autopilot and merge stay switchable.
+    private var pullRequestModePill: some View {
+        PullRequestModePill(taskID: task.id, mode: task.pullRequestMode, onSelect: onSetPullRequestMode)
     }
 
     private func workingDuration(at date: Date) -> String {
@@ -2880,5 +2812,108 @@ private struct RenameTaskSheet: View {
         }
         .padding(24)
         .frame(width: 420)
+    }
+}
+
+/// A compact pill showing the task's PR mode. Clicking it slides the other modes
+/// out beside it; choosing one (or the current one again) selects it and folds the
+/// pill back. macOS has no native control for this, so it's drawn to fit the card.
+private struct PullRequestModePill: View {
+    let taskID: UUID
+    let mode: PullRequestMode
+    let onSelect: (PullRequestMode) -> Void
+    @State private var isExpanded = false
+    /// The mode just chosen, shown until the stored mode catches up with it.
+    @State private var chosenMode: PullRequestMode?
+    @Namespace private var selection
+
+    private var shownMode: PullRequestMode { chosenMode ?? mode }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            if isExpanded {
+                ForEach(Array(PullRequestMode.allCases.enumerated()), id: \.element) { index, option in
+                    if index > 0 {
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.18))
+                            .frame(width: 1, height: 9)
+                            .opacity(option == shownMode || PullRequestMode.allCases[index - 1] == shownMode ? 0 : 1)
+                    }
+                    optionButton(option)
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .leading).combined(with: .opacity),
+                            removal: .opacity
+                        ))
+                }
+            } else {
+                Button {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { isExpanded = true }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(shownMode.label)
+                            .font(.system(size: 9, weight: .semibold))
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 7, weight: .bold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 7)
+                    .frame(height: 17)
+                    .background(Capsule().fill(Color.primary.opacity(0.14)).matchedGeometryEffect(id: "selected", in: selection))
+                    .frame(minHeight: 30)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .buttonHoverPointer()
+                .help("\(shownMode.helpText). Click to change.")
+                .accessibilityLabel("Pull request mode")
+                .accessibilityValue(shownMode.rawValue)
+                .accessibilityIdentifier("task-pr-mode-\(taskID.uuidString)")
+            }
+        }
+        .padding(.horizontal, 1)
+        .background(Capsule().fill(Color.primary.opacity(0.07)).frame(height: 19))
+        .clipShape(Capsule().inset(by: -6))
+        .fixedSize()
+        .accessibilityElement(children: .contain)
+        .onChange(of: mode) { _, stored in
+            if stored == chosenMode { chosenMode = nil }
+        }
+        // A choice the daemon rejected must not stick on the pill.
+        .task(id: chosenMode) {
+            guard chosenMode != nil else { return }
+            try? await Task.sleep(for: .seconds(5))
+            chosenMode = nil
+        }
+    }
+
+    private func optionButton(_ option: PullRequestMode) -> some View {
+        let isSelected = option == shownMode
+        return Button {
+            if !isSelected {
+                chosenMode = option
+                onSelect(option)
+            }
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { isExpanded = false }
+        } label: {
+            Text(option.label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                .padding(.horizontal, 7)
+                .frame(height: 17)
+                .background {
+                    if isSelected {
+                        Capsule().fill(Color.primary.opacity(0.14)).matchedGeometryEffect(id: "selected", in: selection)
+                    }
+                }
+                .frame(minHeight: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .buttonHoverPointer()
+        .help(option.helpText)
+        .accessibilityLabel(option.label)
+        .accessibilityValue(isSelected ? "selected" : "")
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityIdentifier("task-pr-mode-\(option.rawValue)-\(taskID.uuidString)")
     }
 }

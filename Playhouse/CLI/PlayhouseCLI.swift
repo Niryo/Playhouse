@@ -169,7 +169,7 @@ enum PlayhouseCLI {
                 case "sync" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.sync", arguments: ["taskID": .string(tail[1])])
                 default:
-                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync|autopilot <task-id> [resolve-and-push|resolve-only|keep], playhouse task pr auto <task-id> on|off, or playhouse task pr mode <task-id> manual|pr|autopilot")
+                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync|autopilot <task-id> [resolve-and-push|resolve-only|keep], playhouse task pr auto <task-id> on|off, or playhouse task pr mode <task-id> manual|pr|autopilot|merge")
                 }
             case "progress":
                 guard let action = tail.first else { throw CLIError.usage("Use: playhouse task progress publish|custom|clear <task-id> ...") }
@@ -686,7 +686,7 @@ enum PlayhouseCLI {
       playhouse task pr status <task-id>
       playhouse task pr verify <task-id>
       playhouse task pr sync <task-id>
-      playhouse task pr mode <task-id> <manual|pr|autopilot>
+      playhouse task pr mode <task-id> <manual|pr|autopilot|merge>
       playhouse task pr autopilot <task-id>
       playhouse task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]
       playhouse task progress custom <task-id> --label <label> [--detail <text>]
