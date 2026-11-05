@@ -6796,7 +6796,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             send_arguments=("--model", "gpt-6-sol"),
         )
 
-    # case-contract: test_conversation_follows_latest_streamed_messages | While a Claude Code fixture reply streams in held stages below its question, mid-turn CLI/XPC history holds every streamed line before the newest, which Claude may still extend as its answer, once each and in order after the question, with no final line until the reply is released, and the settled turn ends with its final line after every streamed line. In the visible transcript, a reader at the bottom follows the reply: once it outgrows the viewport, the newest streamed line stays in view and the question scrolls away. Scrolling up stops following, so the next stage leaves the reader's position unchanged and its lines out of view; scrolling back to the bottom resumes following, so the next stage's newest line is in view while the turn is still running, and the settled turn leaves its final line in view. Following is shared transcript presentation, so one representative provider covers it.
+    # case-contract: test_conversation_follows_latest_streamed_messages | While a Claude Code fixture reply streams in held stages below its question, mid-turn CLI/XPC history holds every streamed line before the newest, which Claude may still extend as its answer, once each and in order after the question, with no final line until the reply is released, and the settled turn ends with its final line after every streamed line. In the visible transcript, a reader at the bottom follows the reply: once it outgrows the viewport, the newest streamed line stays in view and the question scrolls away. Scrolling up stops following, so the next stage leaves the reader's position unchanged and its lines out of view; scrolling back to the bottom resumes following, so the next stage's newest line is in view while the turn is still running, and the settled turn leaves its final line in view. A short follow-up with a tool call then becomes the newest turn, and the newest history page ends with its question, tool call, and answer after the streamed turn. Scrolled as far down as it goes, the transcript has no blank overscroll: while the held reply outgrows the viewport it ends at its newest line, and the settled reply, whose streamed lines fold into Worked for, and the short follow-up, both once it settles and after the settled conversation is reopened, keep the newest question pinned near the top. Following is shared transcript presentation, so one representative provider covers it.
     def test_conversation_follows_latest_streamed_messages(self):
         executable = self.data_directory / "claude-fixture-stream-follow"
         shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
@@ -6854,6 +6854,22 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual([text for text in texts if text.startswith("Streamed follow line ")], expected)
         self.assertIn(final_text, texts, "The settled turn should end with its final line.")
         self.assertGreater(texts.index(final_text), texts.index(expected[-1]), "The final line should come after every streamed line.")
+
+        # A short follow-up with a tool call becomes the newest turn, and the newest page a
+        # reopened conversation reads ends with that whole turn: question, tool, then answer.
+        follow_up = "Summarize the release notes."
+        closing = "Tell me if you want the upgrade command."
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", follow_up, extra_environment=environment)[0])
+        page = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80", extra_environment=environment)[0])
+        page_messages = page["messages"]
+        last_user = max(index for index, message in enumerate(page_messages) if message["role"] == "user")
+        self.assertEqual(page_messages[last_user]["text"], follow_up, "The follow-up should be the newest question.")
+        self.assertEqual(page_messages[-1]["text"], closing, "The newest page should end with the follow-up's answer.")
+        self.assertIn("toolu_chat_read", {activity["id"] for activity in page["activities"]},
+                      "The follow-up's tool call should belong to the newest turn.")
+        page_texts = [message["text"] for message in page_messages]
+        self.assertLess(page_texts.index(final_text), last_user,
+                        "The streamed turn should sit before the follow-up, where a reopened window holds it back.")
 
     def assert_earlier_turn_tool_calls_in_history(self, provider, environment, call_ids, summaries):
         """Runs a tool-call turn and a later turn, then checks the earlier turn's calls in history."""
@@ -7191,7 +7207,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual([read["source"] for read in paged_reads], ["composed", "composed"],
                          "A Codex thread is composed from the app-server before it is paged.")
 
-    # case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, then reads the older page from the store as the reader scrolls up until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again.
+    # case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, scrolling straight down from that pin keeps the latest question near the top and the latest answer below it with no blank overscroll, and scrolling up then reads the older page from the store as the reader scrolls up until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again.
     def test_conversation_history_pages_claude_transcript_from_store(self):
         claude = self.data_directory / "claude-fixture-long-history"
         shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", claude)

@@ -8952,7 +8952,7 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
-    // case-contract: test_conversation_follows_latest_streamed_messages | While a Claude Code fixture reply streams in held stages below its question, mid-turn CLI/XPC history holds every streamed line before the newest, which Claude may still extend as its answer, once each and in order after the question, with no final line until the reply is released, and the settled turn ends with its final line after every streamed line. In the visible transcript, a reader at the bottom follows the reply: once it outgrows the viewport, the newest streamed line stays in view and the question scrolls away. Scrolling up stops following, so the next stage leaves the reader's position unchanged and its lines out of view; scrolling back to the bottom resumes following, so the next stage's newest line is in view while the turn is still running, and the settled turn leaves its final line in view. Following is shared transcript presentation, so one representative provider covers it.
+    // case-contract: test_conversation_follows_latest_streamed_messages | While a Claude Code fixture reply streams in held stages below its question, mid-turn CLI/XPC history holds every streamed line before the newest, which Claude may still extend as its answer, once each and in order after the question, with no final line until the reply is released, and the settled turn ends with its final line after every streamed line. In the visible transcript, a reader at the bottom follows the reply: once it outgrows the viewport, the newest streamed line stays in view and the question scrolls away. Scrolling up stops following, so the next stage leaves the reader's position unchanged and its lines out of view; scrolling back to the bottom resumes following, so the next stage's newest line is in view while the turn is still running, and the settled turn leaves its final line in view. A short follow-up with a tool call then becomes the newest turn, and the newest history page ends with its question, tool call, and answer after the streamed turn. Scrolled as far down as it goes, the transcript has no blank overscroll: while the held reply outgrows the viewport it ends at its newest line, and the settled reply, whose streamed lines fold into Worked for, and the short follow-up, both once it settles and after the settled conversation is reopened, keep the newest question pinned near the top. Following is shared transcript presentation, so one representative provider covers it.
     func test_conversation_follows_latest_streamed_messages() throws {
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
@@ -9045,9 +9045,70 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(line(43).waitForExistence(timeout: 10), "The fourth stage's lines should stream in.")
         XCTAssertTrue(waitUntil({ isInView(line(43)) }, timeout: 5), "Back at the bottom, following should resume and keep the newest line in view while the turn runs; line=\(line(43).frame), viewport=\(scrollView.frame).")
         attachScreenshot(named: "Following resumed at the bottom")
+        // The held reply is far taller than the viewport, so its bottom is its newest line.
+        assertTranscriptEndsWithoutOverscroll(question: question, lastRow: line(43), in: scrollView, turnFitsViewport: false)
         try release(4)
         XCTAssertTrue(finalLine.waitForExistence(timeout: 30), "The final line should arrive once the reply is released.")
         XCTAssertTrue(waitUntil({ isInView(finalLine) }, timeout: 10), "The settled turn should leave its final line in view; line=\(finalLine.frame), viewport=\(scrollView.frame).")
+        // Settling folds the streamed lines into Worked for, so the settled turn fits the
+        // viewport again and its question returns to the top.
+        assertTranscriptEndsWithoutOverscroll(question: question, lastRow: finalLine, in: scrollView, turnFitsViewport: true)
+        attachScreenshot(named: "Scrolled to the bottom of the settled reply")
+
+        // A follow-up whose turn fits the viewport is pinned to the top, and the space below it
+        // is sized from the turn as it settles, tool row and answer included, not from the
+        // question alone at the moment it was sent.
+        let followUp = "Summarize the release notes."
+        let closing = app.groups.matching(NSPredicate(format: "label CONTAINS %@", "Tell me if you want the upgrade command.")).firstMatch
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText(followUp)
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ self.fixtureTurnCount(executable, containing: followUp) > 0 && self.noTurnIsRunning() }, timeout: 30),
+                      "The follow-up turn should finish.")
+        XCTAssertTrue(closing.waitForExistence(timeout: 10), "The follow-up's answer should render.")
+        assertTranscriptEndsWithoutOverscroll(question: transcriptMessage(followUp), lastRow: closing, in: scrollView, turnFitsViewport: true)
+        attachScreenshot(named: "Scrolled to the bottom after a short follow-up")
+
+        // Reopening the settled conversation is a fresh view that opens on the newest turn, with
+        // the earlier one held back above it; scrolling straight down must reach the same end.
+        element("back-to-board-button").click()
+        openTask(named: title)
+        XCTAssertTrue(closing.waitForExistence(timeout: 10), "The reopened conversation should show the newest answer.")
+        assertTranscriptEndsWithoutOverscroll(question: transcriptMessage(followUp), lastRow: closing, in: scrollView, turnFitsViewport: true)
+        attachScreenshot(named: "Reopened conversation scrolled to the bottom")
+    }
+
+    /// Scrolls the transcript as far down as the wheel goes and checks that its bottom is real
+    /// content. A newest turn that fits the viewport keeps its question pinned near the top, which
+    /// fails if the room below the turn is too small; a taller one ends at its last row, which
+    /// fails on blank overscroll below a turn whose question has scrolled away.
+    private func assertTranscriptEndsWithoutOverscroll(
+        question: XCUIElement, lastRow: XCUIElement, in scrollView: XCUIElement, turnFitsViewport: Bool,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        for _ in 0..<5 { scrollView.scroll(byDeltaX: 0, deltaY: -600) }
+        var settledBottom = CGFloat.nan
+        _ = waitUntil({
+            let bottom = lastRow.frame.maxY
+            defer { settledBottom = bottom }
+            return bottom == settledBottom
+        }, timeout: 3)
+        let viewport = scrollView.frame
+        XCTAssertTrue(lastRow.exists && viewport.insetBy(dx: 0, dy: -2).contains(lastRow.frame),
+                      "The bottom of the transcript should show its last row; row=\(lastRow.frame), viewport=\(viewport).",
+                      file: file, line: line)
+        if turnFitsViewport {
+            XCTAssertTrue(question.exists && question.frame.minY >= viewport.minY - 2 && question.frame.minY <= viewport.minY + 120,
+                          "Scrolled to the bottom, a newest turn that fits should keep its question pinned near the top, with no blank space opening above or below it; question=\(question.frame), row=\(lastRow.frame), viewport=\(viewport).",
+                          file: file, line: line)
+        } else {
+            // The content padding and any trailing row sit below the last row; the overscroll
+            // this guards against opened most of a viewport.
+            XCTAssertLessThanOrEqual(viewport.maxY - lastRow.frame.maxY, 100,
+                                     "Scrolled to the bottom, a turn taller than the viewport should end at its last row instead of opening blank space below; row=\(lastRow.frame), viewport=\(viewport).",
+                                     file: file, line: line)
+        }
     }
 
     /// Runs a tool-call turn and a later turn from the composer, then checks that the earlier
@@ -9594,7 +9655,7 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 10), "Upward scrolling must still reveal earlier messages after an in-place reload.")
     }
 
-    // case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, then reads the older page from the store as the reader scrolls up until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again.
+    // case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, scrolling straight down from that pin keeps the latest question near the top and the latest answer below it with no blank overscroll, and scrolling up then reads the older page from the store as the reader scrolls up until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again.
     func test_conversation_history_pages_claude_transcript_from_store() throws {
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         let executable = dataDirectory.appendingPathComponent("claude-fixture-long-history")
@@ -9713,6 +9774,10 @@ final class PlayhouseUITests: XCTestCase {
         }, "Opening reads only the newest 80 messages from the stored turns.")
         XCTAssertFalse(openReads.contains { $0["returnedMessageCount"] as? String == "95" }, "Opening never reads the whole conversation.")
         attachScreenshot(named: "Paged Claude history opens on the latest turn")
+        // Scrolling straight down from the pinned turn must find its end, not blank space below it.
+        let latestAnswerID = try XCTUnwrap(messages.last?["id"] as? String)
+        assertTranscriptEndsWithoutOverscroll(question: latestQuestion, lastRow: element("assistant-message-\(latestAnswerID)"), in: scrollView, turnFitsViewport: true)
+        attachScreenshot(named: "Paged Claude history scrolled to the bottom")
         func isVisible(_ candidate: XCUIElement) -> Bool {
             candidate.exists && scrollView.frame.intersects(candidate.frame)
         }
