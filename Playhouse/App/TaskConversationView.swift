@@ -873,16 +873,10 @@ struct TaskConversationView: View {
     /// pinned, so load-time scroll requests cannot follow the bottom past it.
     @State private var isLatestConversationTurnPinPending = true
     @State private var hasPresentedLatestConversation = false
-    /// Natural height of the rendered transcript, before the filler that keeps
-    /// the newest turn pinnable to the top of the viewport.
-    @State private var conversationContentHeight: CGFloat = 0
-    /// Top of the newest turn and bottom of the transcript, in the scroll's own
-    /// coordinate space. Their difference is the newest turn's height, which is
-    /// what the filler has to leave room for; measuring the turn itself keeps
-    /// the pin reachable even once older messages are revealed above it, when
-    /// the transcript as a whole is far taller than the viewport.
-    @State private var latestTurnTopY: CGFloat?
-    @State private var transcriptBottomY: CGFloat?
+    /// Natural height of the newest turn, before the minimum height that keeps
+    /// it pinnable to the top of the viewport. It only decides whether a
+    /// presentation pins the turn or scrolls to its end; layout never reads it.
+    @State private var latestTurnContentHeight: CGFloat = 0
     @State private var lastScrolledUserMessageID: String?
     @State private var annotations: [ConversationAnnotation] = []
     @State private var annotationSelection: AnnotationSelection?
@@ -1088,13 +1082,6 @@ struct TaskConversationView: View {
         return allMessages.last(where: { $0.role == .user && !PrivatePromptPlaceholder.matches($0.text) })?.id
             ?? allMessages.last(where: { $0.role == .user })?.id
             ?? allMessages.last?.id
-    }
-
-    /// Height of the newest turn, from its question to the end of the
-    /// transcript, or `nil` until both ends have been measured.
-    private var latestTurnHeight: CGFloat? {
-        guard let latestTurnTopY, let transcriptBottomY, transcriptBottomY >= latestTurnTopY else { return nil }
-        return transcriptBottomY - latestTurnTopY
     }
 
     /// The window runs from `oldestRenderedMessageID` to the newest message.
@@ -2747,6 +2734,50 @@ struct TaskConversationView: View {
         }
     }
 
+    /// One message of the rendered window with the rows anchored to it: its
+    /// page separator and activity disclosure above, and the boundaries, goal
+    /// achievements, tool calls, and compactions that follow it.
+    @ViewBuilder
+    private func transcriptRows(for message: ConversationMessage, inlineTools: [String: [ConversationActivity]]) -> some View {
+        if let page = standaloneChatPageSeparator(before: message) {
+            standaloneChatPageSeparator(page)
+                .id("chat-page-separator-\(page.id)-\(message.id)")
+        }
+        if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
+            activityList
+        }
+        transcriptEntry(message)
+            .id(message.id)
+            // The question itself starts the newest turn, below any page
+            // separator, so a pin lands on the bubble.
+            .layoutValue(key: ConversationLatestTurnStartKey.self, value: message.id == latestConversationTurnStartID)
+        ForEach(providerBoundaries.filter {
+            renderedAnchorMessageID(for: boundaryAnchorID(for: $0)) == message.id
+        }) { boundary in
+            providerBoundaryRow(boundary)
+        }
+        ForEach(goalAchievementTimelineEntries.filter {
+            renderedAnchorMessageID(for: goalAchievementAnchorMessageID(for: $0)) == message.id
+        }) { entry in
+            goalAchievementTimelineRow(entry)
+                .id(entry.id)
+        }
+        ForEach(inlineTools[message.id] ?? []) { activity in
+            ToolCallTimelineRow(activity: activity)
+        }
+        let nextOrder = conversationMessages.first(where: {
+            guard let current = message.timelineOrder, let candidate = $0.timelineOrder else { return false }
+            return candidate > current
+        })?.timelineOrder
+        ForEach(activities.filter {
+            guard $0.isContextCompaction, let eventOrder = $0.timelineOrder,
+                  let messageOrder = message.timelineOrder, eventOrder > messageOrder else { return false }
+            return nextOrder.map { eventOrder < $0 } ?? true
+        }) { activity in
+            contextCompactionTimelineRow(activity)
+        }
+    }
+
     private var conversation: some View {
         GeometryReader { viewport in
             ScrollViewReader { scrollProxy in
@@ -2788,7 +2819,24 @@ struct TaskConversationView: View {
                     }
                     .frame(height: 0)
 
-                VStack(alignment: .leading, spacing: 16) {
+                // One stack for the whole rendered window, so rows keep their
+                // identity, and with it their state, as a newer question moves
+                // the start of the newest turn past them. The layout reserves
+                // the filler below the newest turn itself: from its question to
+                // the end of the transcript it is at least a viewport tall, less
+                // the bottom padding and end marker already below it, which lets
+                // a turn shorter than the viewport be pinned to the top, and
+                // makes that pin exactly the bottom, which following starts
+                // from. The runway above the window does the same for the other
+                // end. Sizing the filler from measurements instead, which
+                // SwiftUI reports a pass later, left it stale and opened blank
+                // overscroll below the transcript.
+                let leadingGoalEntries = goalAchievementTimelineEntries.filter { goalAchievementAnchorMessageID(for: $0) == nil }
+                let inlineTools = inlineToolCalls.byMessageID
+                ConversationTranscriptLayout(
+                    spacing: 16,
+                    minimumLatestTurnHeight: max(0, viewport.size.height - Self.conversationVerticalPadding - Self.conversationScrollEndHeight)
+                ) {
                     if messages.isEmpty && activeGoal?.status != "complete" && !isLoadingHistory {
                         VStack(spacing: 0) {
                             if task.isStandaloneChat {
@@ -2828,66 +2876,18 @@ struct TaskConversationView: View {
                         // A plain stack: a LazyVStack of these AppKit-backed rows could keep
                         // re-estimating its rows after a send and never finish layout. At most
                         // a recent window of messages renders, and older batches load on demand.
-                        let inlineTools = inlineToolCalls.byMessageID
-                        VStack(alignment: .leading, spacing: 16) {
-                            ForEach(goalAchievementTimelineEntries.filter {
-                                goalAchievementAnchorMessageID(for: $0) == nil
-                            }) { entry in
-                                goalAchievementTimelineRow(entry)
-                                    .id(entry.id)
-                            }
-                            ForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
-                                providerBoundaryRow(boundary)
-                            }
-                            ForEach(renderedConversationMessages) { message in
-                                if let page = standaloneChatPageSeparator(before: message) {
-                                    standaloneChatPageSeparator(page)
-                                        .id("chat-page-separator-\(page.id)-\(message.id)")
-                                }
-                                if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
-                                    activityList
-                                }
-                                transcriptEntry(message)
-                                    .id(message.id)
-                                    .background {
-                                        if message.id == latestConversationTurnStartID {
-                                            GeometryReader { geometry in
-                                                Color.clear.preference(
-                                                    key: ConversationLatestTurnTopKey.self,
-                                                    value: geometry.frame(in: .named(Self.conversationContentCoordinateSpace)).minY
-                                                )
-                                            }
-                                        }
-                                    }
-                                ForEach(providerBoundaries.filter {
-                                    renderedAnchorMessageID(for: boundaryAnchorID(for: $0)) == message.id
-                                }) { boundary in
-                                    providerBoundaryRow(boundary)
-                                }
-                                ForEach(goalAchievementTimelineEntries.filter {
-                                    renderedAnchorMessageID(for: goalAchievementAnchorMessageID(for: $0)) == message.id
-                                }) { entry in
-                                    goalAchievementTimelineRow(entry)
-                                        .id(entry.id)
-                                }
-                                ForEach(inlineTools[message.id] ?? []) { activity in
-                                    ToolCallTimelineRow(activity: activity)
-                                }
-                                let nextOrder = conversationMessages.first(where: {
-                                    guard let current = message.timelineOrder, let candidate = $0.timelineOrder else { return false }
-                                    return candidate > current
-                                })?.timelineOrder
-                                ForEach(activities.filter {
-                                    guard $0.isContextCompaction, let eventOrder = $0.timelineOrder,
-                                          let messageOrder = message.timelineOrder, eventOrder > messageOrder else { return false }
-                                    return nextOrder.map { eventOrder < $0 } ?? true
-                                }) { activity in
-                                    contextCompactionTimelineRow(activity)
-                                }
-                            }
-                            if shouldShowActivityDisclosure, activityDisclosureAnchorID == nil {
-                                activityList
-                            }
+                        ForEach(leadingGoalEntries) { entry in
+                            goalAchievementTimelineRow(entry)
+                                .id(entry.id)
+                        }
+                        ForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
+                            providerBoundaryRow(boundary)
+                        }
+                        ForEach(renderedConversationMessages) { message in
+                            transcriptRows(for: message, inlineTools: inlineTools)
+                        }
+                        if shouldShowActivityDisclosure, activityDisclosureAnchorID == nil {
+                            activityList
                         }
                     }
 
@@ -2900,9 +2900,7 @@ struct TaskConversationView: View {
                         }
                     }
                     if messages.isEmpty {
-                        ForEach(goalAchievementTimelineEntries.filter {
-                            goalAchievementAnchorMessageID(for: $0) == nil
-                        }) { entry in
+                        ForEach(leadingGoalEntries) { entry in
                             goalAchievementTimelineRow(entry)
                                 .id(entry.id)
                         }
@@ -2925,54 +2923,32 @@ struct TaskConversationView: View {
                     Color.clear
                         .frame(height: 1)
                         .id("conversation-latest-anchor")
+                    // Spans the newest turn at its natural height, which only
+                    // "does the newest turn fit the viewport?" is asked of.
+                    Color.clear
                         .background {
                             GeometryReader { geometry in
                                 Color.clear.preference(
-                                    key: ConversationTranscriptBottomKey.self,
-                                    value: geometry.frame(in: .named(Self.conversationContentCoordinateSpace)).maxY
+                                    key: ConversationLatestTurnHeightKey.self,
+                                    value: geometry.size.height
                                 )
                             }
                         }
+                        .accessibilityHidden(true)
+                        .layoutValue(key: ConversationLatestTurnExtentKey.self, value: true)
                 }
-                // The latest turn's top and the transcript's bottom are measured in this
-                // space, which scrolls with them: only their difference is used, and
-                // scroll-relative values would publish state, and re-render the whole
-                // transcript, on every scroll frame.
-                .coordinateSpace(name: Self.conversationContentCoordinateSpace)
                 .padding(.horizontal, 28)
                 .padding(.vertical, Self.conversationVerticalPadding)
+                // A window that holds older messages back needs the runway's
+                // counterpart below even when no turn of its own is rendered.
+                .frame(
+                    minHeight: hasOlderConversationMessages
+                        ? max(0, viewport.size.height - Self.conversationScrollEndHeight)
+                        : nil,
+                    alignment: .top
+                )
                 .frame(maxWidth: 820)
                 .frame(maxWidth: .infinity)
-                .background {
-                    GeometryReader { geometry in
-                        Color.clear.preference(
-                            key: ConversationScrollContentHeightKey.self,
-                            value: geometry.size.height
-                        )
-                    }
-                }
-
-                // Filler below the rendered window. Together with the runway
-                // above it, this is what lets a turn that is shorter than the
-                // viewport still be scrolled to the top. The window-based
-                // measure only covers a transcript still short enough to
-                // measure whole, so the newest turn's own height carries the
-                // pin once older messages are revealed above it. Each leaves
-                // out what already sits below its measure — the end marker,
-                // and for the turn the bottom padding — so the pinned
-                // position is exactly the bottom, which following starts from.
-                let windowFiller = hasOlderConversationMessages
-                    ? max(0, viewport.size.height - conversationContentHeight - Self.conversationScrollEndHeight)
-                    : 0
-                let turnFiller = latestTurnHeight.map {
-                    max(0, viewport.size.height - $0 - Self.conversationVerticalPadding - Self.conversationScrollEndHeight)
-                } ?? 0
-                let filler = max(windowFiller, turnFiller)
-                if filler > 0 {
-                    Color.clear
-                        .frame(height: filler)
-                        .accessibilityHidden(true)
-                }
                 // The very end of the scroll content, filler included, which is
                 // where following new content keeps the viewport. Unlike
                 // `scrollToLatest`, following can target it: a scroll that
@@ -3029,25 +3005,12 @@ struct TaskConversationView: View {
                     using: scrollProxy
                 )
             })
-            // A row the LazyVStack has not realized reports nothing; keeping the
-            // last measurement stops the filler from collapsing — and the
-            // transcript from jumping under the reader — while the newest turn
-            // is scrolled out of view.
-            .onPreferenceChange(ConversationLatestTurnTopKey.self) { top in
-                guard let top, latestTurnTopY != top else { return }
-                latestTurnTopY = top
-            }
-            .onPreferenceChange(ConversationTranscriptBottomKey.self) { bottom in
-                guard let bottom, transcriptBottomY != bottom else { return }
-                transcriptBottomY = bottom
-            }
-            .onPreferenceChange(ConversationScrollContentHeightKey.self) { height in
+            .onPreferenceChange(ConversationLatestTurnHeightKey.self) { height in
                 // Only "shorter than the viewport?" is ever asked of this value,
-                // and a LazyVStack keeps revising its measured height as rows
-                // realize while scrolling. Publishing each revision re-renders
-                // the whole transcript, so cap it once the content overflows.
+                // and publishing each revision re-renders the whole transcript,
+                // so cap it once the turn overflows.
                 let clamped = min(height, viewport.size.height + 1)
-                if clamped != conversationContentHeight { conversationContentHeight = clamped }
+                if clamped != latestTurnContentHeight { latestTurnContentHeight = clamped }
             }
             .onChange(of: isLoadingHistory) { _, isLoading in
                 // Every completed history load reopens on the newest turn,
@@ -3107,7 +3070,6 @@ struct TaskConversationView: View {
     }
 
     private static let conversationScrollCoordinateSpace = "conversation-transcript-scroll"
-    private static let conversationContentCoordinateSpace = "conversation-transcript-content"
     private static let conversationScrollEndID = "conversation-scroll-end"
     private static let conversationScrollEndHeight: CGFloat = 1
     private static let conversationVerticalPadding: CGFloat = 24
@@ -5028,9 +4990,6 @@ struct TaskConversationView: View {
         isOlderConversationRevealArmed = false
         // Following resumes once the pinned turn is observed at the bottom.
         lastConversationScrollSample.isFollowingLatest = false
-        conversationContentHeight = 0
-        latestTurnTopY = nil
-        transcriptBottomY = nil
         oldestRenderedMessageID = nil
         errorMessage = nil
         let draftAtLoadStart = draft
@@ -6397,8 +6356,8 @@ struct TaskConversationView: View {
         // that makes that pin reachable.
         if let turnStartID = latestConversationTurnStartID,
            oldestRenderedMessageID == turnStartID,
-           conversationContentHeight > 0,
-           conversationContentHeight <= viewportHeight {
+           latestTurnContentHeight > 0,
+           latestTurnContentHeight + 2 * Self.conversationVerticalPadding <= viewportHeight {
             presentLatestConversationTurn(using: proxy)
             return
         }
@@ -6532,30 +6491,91 @@ private struct ConversationTopMarkerPositionKey: PreferenceKey {
     }
 }
 
-private struct ConversationScrollContentHeightKey: PreferenceKey {
+private struct ConversationLatestTurnHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
-    /// Only the transcript reports a height; the filler and end marker after
-    /// it contribute the default, which must not replace the measurement.
+    /// Only the newest turn reports a height; every other view contributes the
+    /// default, which must not replace the measurement.
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
     }
 }
 
-/// Only the newest turn reports a top, so the first non-nil value is it.
-private struct ConversationLatestTurnTopKey: PreferenceKey {
-    static var defaultValue: CGFloat?
-
-    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
-        value = nextValue() ?? value
-    }
+/// Marks the row whose top starts the newest turn.
+private struct ConversationLatestTurnStartKey: LayoutValueKey {
+    static let defaultValue = false
 }
 
-private struct ConversationTranscriptBottomKey: PreferenceKey {
-    static var defaultValue: CGFloat?
+/// Marks the view the layout stretches over the newest turn instead of stacking.
+private struct ConversationLatestTurnExtentKey: LayoutValueKey {
+    static let defaultValue = false
+}
 
-    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
-        value = nextValue() ?? value
+/// A leading-aligned vertical stack that keeps at least
+/// `minimumLatestTurnHeight` from the top of the newest turn's first row to its
+/// end, adding the difference as blank space below the last row. The extent
+/// view is not stacked: it is laid over the newest turn at its natural height.
+private struct ConversationTranscriptLayout: Layout {
+    var spacing: CGFloat
+    var minimumLatestTurnHeight: CGFloat
+
+    private struct Measurement {
+        var sizes: [CGSize]
+        var tops: [CGFloat]
+        var contentHeight: CGFloat
+        var latestTurnTop: CGFloat?
+    }
+
+    // Measured on every call rather than cached: a row that grows on its own,
+    // like an AppKit text view, would otherwise leave a stale filler behind.
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let measurement = measure(width: proposal.width, subviews: subviews)
+        // As wide as its widest row, as a leading-aligned VStack is.
+        let width = measurement.sizes.map(\.width).max() ?? 0
+        let latestTurnHeight = measurement.latestTurnTop.map { measurement.contentHeight - $0 } ?? 0
+        let filler = measurement.latestTurnTop == nil ? 0 : max(0, minimumLatestTurnHeight - latestTurnHeight)
+        return CGSize(width: width, height: measurement.contentHeight + filler)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let measurement = measure(width: bounds.width, subviews: subviews)
+        for (index, subview) in subviews.enumerated() {
+            if subview[ConversationLatestTurnExtentKey.self] {
+                let top = measurement.latestTurnTop ?? measurement.contentHeight
+                subview.place(
+                    at: CGPoint(x: bounds.minX, y: bounds.minY + top),
+                    proposal: ProposedViewSize(width: bounds.width, height: measurement.contentHeight - top)
+                )
+            } else {
+                subview.place(
+                    at: CGPoint(x: bounds.minX, y: bounds.minY + measurement.tops[index]),
+                    proposal: ProposedViewSize(width: bounds.width, height: measurement.sizes[index].height)
+                )
+            }
+        }
+    }
+
+    private func measure(width: CGFloat?, subviews: Subviews) -> Measurement {
+        var sizes: [CGSize] = []
+        var tops: [CGFloat] = []
+        var y: CGFloat = 0
+        var hasStacked = false
+        var latestTurnTop: CGFloat?
+        for subview in subviews {
+            guard !subview[ConversationLatestTurnExtentKey.self] else {
+                sizes.append(.zero)
+                tops.append(0)
+                continue
+            }
+            if hasStacked { y += spacing }
+            hasStacked = true
+            let size = subview.sizeThatFits(ProposedViewSize(width: width, height: nil))
+            if latestTurnTop == nil, subview[ConversationLatestTurnStartKey.self] { latestTurnTop = y }
+            sizes.append(size)
+            tops.append(y)
+            y += size.height
+        }
+        return Measurement(sizes: sizes, tops: tops, contentHeight: y, latestTurnTop: latestTurnTop)
     }
 }
 
