@@ -905,6 +905,11 @@ struct TaskConversationView: View {
     @State private var subagentError: String?
     @State private var changeInventory = WorkspaceChangeInventory(unviewed: [], viewed: [])
     @State private var isViewedSectionExpanded = false
+    @AppStorage(WorkspaceSettings.taskSidebarCollapsedKey, store: WorkspaceSettings.preferencesStore) private var isTaskSidebarCollapsed = false
+    @AppStorage(WorkspaceSettings.workspaceChangesSectionCollapsedKey, store: WorkspaceSettings.preferencesStore) private var isChangesSectionCollapsed = false
+    /// The loading placeholder is for the first read only; later watcher refreshes keep the
+    /// current list (or empty state) on screen instead of flashing the spinner.
+    @State private var hasLoadedChanges = false
     @State private var isLoadingChanges = false
     @State private var changesNeedRefresh = false
     @State private var changeWatcher: WorkspaceChangeWatcher?
@@ -1641,85 +1646,91 @@ struct TaskConversationView: View {
         }
     }
 
+    @ViewBuilder
     private var taskSidebar: some View {
+        if isTaskSidebarCollapsed {
+            collapsedTaskSidebar
+        } else {
+            expandedTaskSidebar
+        }
+    }
+
+    private func setTaskSidebarCollapsed(_ collapsed: Bool) {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isTaskSidebarCollapsed = collapsed
+        }
+    }
+
+    private func toggleChangesSection() {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isChangesSectionCollapsed.toggle()
+        }
+    }
+
+    /// A narrow rail that keeps the pending count visible while the sidebar is hidden.
+    private var collapsedTaskSidebar: some View {
+        VStack(spacing: 8) {
+            Button {
+                setTaskSidebarCollapsed(false)
+            } label: {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 26, height: 24)
+            }
+            .buttonHoverPointer()
+            .buttonStyle(.plain)
+            .nativeHelp("Show sidebar")
+            .accessibilityLabel("Show sidebar")
+            .accessibilityIdentifier("show-task-sidebar-button")
+
+            if !changeInventory.unviewed.isEmpty {
+                Text("\(changeInventory.unviewed.count)")
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Changes to review: \(changeInventory.unviewed.count)")
+                    .accessibilityIdentifier("collapsed-task-sidebar-count")
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.top, 12)
+        .frame(width: 38)
+        .frame(maxHeight: .infinity)
+        .background(WorkspaceTheme.panelBackground.opacity(0.62))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("task-sidebar-collapsed")
+    }
+
+    private var expandedTaskSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Text("Changes")
-                    .font(.system(size: 13, weight: .semibold))
-                    .accessibilityIdentifier("workspace-changes-title")
-                Spacer(minLength: 0)
                 Button {
-                    Task { await refreshWorkspaceChanges() }
+                    setTaskSidebarCollapsed(true)
                 } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11, weight: .medium))
-                        .frame(width: 24, height: 24)
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 22, height: 24)
                 }
                 .buttonHoverPointer()
                 .buttonStyle(.plain)
-                .nativeHelp("Refresh workspace changes")
-                .accessibilityLabel("Refresh workspace changes")
-                .accessibilityIdentifier("refresh-workspace-changes-button")
-                .disabled(isLoadingChanges)
+                .nativeHelp("Hide sidebar")
+                .accessibilityLabel("Hide sidebar")
+                .accessibilityIdentifier("hide-task-sidebar-button")
+                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 16)
-            .padding(.bottom, 10)
+            .padding(.horizontal, 10)
+            .padding(.top, 12)
+            .padding(.bottom, 6)
 
             Rectangle()
                 .fill(Color.primary.opacity(0.07))
                 .frame(height: 1)
 
-            if let changesError {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("Couldn't read Git changes", systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.red)
-                    Text(changesError)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("Retry") {
-                        Task { await refreshWorkspaceChanges() }
-                    }
-                    .buttonHoverPointer()
-                    .nativeHelp("Retry")
-                    .font(.system(size: 11, weight: .medium))
-                    .accessibilityIdentifier("retry-workspace-changes-button")
-                }
-                .padding(12)
-                .accessibilityIdentifier("workspace-changes-error")
-            } else if isLoadingChanges && changeInventory.isEmpty {
-                ProgressView("Checking folders…")
-                    .controlSize(.small)
-                    .font(.system(size: 11))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityIdentifier("workspace-changes-loading")
-            } else if changeInventory.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.secondary)
-                    Text("No changes")
-                        .font(.system(size: 12, weight: .medium))
-                    Text("Changes in Git repositories under this task's folders will appear here.")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(15)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityIdentifier("workspace-changes-empty")
+            changesSectionHeader
+
+            if isChangesSectionCollapsed {
+                Spacer(minLength: 0)
             } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 15) {
-                        changeSection(title: "Viewed", entries: changeInventory.viewed)
-                        changeSection(title: "Changes", entries: changeInventory.unviewed)
-                    }
-                    .padding(.vertical, 12)
-                }
-                .scrollIndicators(.visible)
-                .accessibilityIdentifier("workspace-changes-list")
+                changesSectionContent
             }
         }
         .frame(width: 232)
@@ -1727,6 +1738,114 @@ struct TaskConversationView: View {
         .background(WorkspaceTheme.panelBackground.opacity(0.62))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("task-sidebar")
+    }
+
+    /// The Changes section's header; collapsing hides its lists so later sidebar sections
+    /// can share the column, and the pending count stays visible while it's collapsed.
+    private var changesSectionHeader: some View {
+        HStack(spacing: 6) {
+            Button {
+                toggleChangesSection()
+            } label: {
+                Image(systemName: isChangesSectionCollapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14, height: 24)
+            }
+            .buttonHoverPointer()
+            .buttonStyle(.plain)
+            .nativeHelp(isChangesSectionCollapsed ? "Expand changes" : "Collapse changes")
+            .accessibilityLabel(isChangesSectionCollapsed ? "Expand changes" : "Collapse changes")
+            .accessibilityValue(isChangesSectionCollapsed ? "Collapsed" : "Expanded")
+            .accessibilityIdentifier("toggle-workspace-changes-section-button")
+            Text("Changes")
+                .font(.system(size: 13, weight: .semibold))
+                .accessibilityIdentifier("workspace-changes-title")
+                .onTapGesture { toggleChangesSection() }
+            if isChangesSectionCollapsed && !changeInventory.unviewed.isEmpty {
+                Text("\(changeInventory.unviewed.count)")
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Changes to review: \(changeInventory.unviewed.count)")
+                    .accessibilityIdentifier("collapsed-workspace-changes-section-count")
+            }
+            Spacer(minLength: 0)
+                .contentShape(Rectangle())
+                .onTapGesture { toggleChangesSection() }
+            Button {
+                Task { await refreshWorkspaceChanges() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonHoverPointer()
+            .buttonStyle(.plain)
+            .nativeHelp("Refresh workspace changes")
+            .accessibilityLabel("Refresh workspace changes")
+            .accessibilityIdentifier("refresh-workspace-changes-button")
+            .disabled(!hasLoadedChanges)
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 14)
+        .padding(.vertical, 8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("workspace-changes-section-header")
+    }
+
+    @ViewBuilder
+    private var changesSectionContent: some View {
+        if let changesError {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Couldn't read Git changes", systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.red)
+                Text(changesError)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Retry") {
+                    Task { await refreshWorkspaceChanges() }
+                }
+                .buttonHoverPointer()
+                .nativeHelp("Retry")
+                .font(.system(size: 11, weight: .medium))
+                .accessibilityIdentifier("retry-workspace-changes-button")
+            }
+            .padding(12)
+            .accessibilityIdentifier("workspace-changes-error")
+        } else if !hasLoadedChanges {
+            ProgressView("Checking folders…")
+                .controlSize(.small)
+                .font(.system(size: 11))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityIdentifier("workspace-changes-loading")
+        } else if changeInventory.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "checkmark.circle")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.secondary)
+                Text("No changes")
+                    .font(.system(size: 12, weight: .medium))
+                Text("Changes in Git repositories under this task's folders will appear here.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(15)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilityIdentifier("workspace-changes-empty")
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 15) {
+                    changeSection(title: "Viewed", entries: changeInventory.viewed)
+                    changeSection(title: "Changes", entries: changeInventory.unviewed)
+                }
+                .padding(.vertical, 12)
+            }
+            .scrollIndicators(.visible)
+            .accessibilityIdentifier("workspace-changes-list")
+        }
     }
 
     /// A Viewed row always shows the reviewed work from the branch base; only a change made
@@ -1753,6 +1872,20 @@ struct TaskConversationView: View {
                     Image(systemName: isViewedSectionExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
+                } else if !entries.isEmpty {
+                    Button {
+                        Task { await markAllViewed() }
+                    } label: {
+                        Image(systemName: "checklist.checked")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 20, height: 18)
+                    }
+                    .buttonStyle(.plain)
+                    .buttonHoverPointer()
+                    .nativeHelp("Mark all as viewed")
+                    .accessibilityLabel("Mark all as viewed")
+                    .accessibilityIdentifier("mark-all-viewed-button")
                 }
             }
             .padding(.horizontal, 14)
@@ -1831,6 +1964,20 @@ struct TaskConversationView: View {
                                 .nativeHelp("Mark as viewed")
                                 .accessibilityLabel("Mark \(entry.path) as viewed")
                                 .accessibilityIdentifier("mark-viewed-\(entry.path)")
+                            } else {
+                                Button {
+                                    Task { await markUnviewed(entry) }
+                                } label: {
+                                    Image(systemName: "arrow.uturn.backward.circle")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 20, height: 22)
+                                }
+                                .buttonStyle(.plain)
+                                .buttonHoverPointer()
+                                .nativeHelp("Mark as unviewed")
+                                .accessibilityLabel("Mark \(entry.path) as unviewed")
+                                .accessibilityIdentifier("mark-unviewed-\(entry.path)")
                             }
                         }
                         .padding(.horizontal, 7)
@@ -2160,13 +2307,34 @@ struct TaskConversationView: View {
         }
     }
 
+    private func markUnviewed(_ entry: WorkspaceChangeEntry) async {
+        do {
+            try await workspaceManager.markUnviewed(for: task.id, repository: entry.repository, path: entry.path)
+            await refreshWorkspaceChanges()
+        } catch {
+            changesError = error.localizedDescription
+        }
+    }
+
+    private func markAllViewed() async {
+        do {
+            _ = try await workspaceManager.markAllViewed(for: task.id)
+            await refreshWorkspaceChanges()
+        } catch {
+            changesError = error.localizedDescription
+        }
+    }
+
     private func refreshWorkspaceChanges() async {
         guard !isLoadingChanges else {
             changesNeedRefresh = true
             return
         }
         isLoadingChanges = true
-        defer { isLoadingChanges = false }
+        defer {
+            isLoadingChanges = false
+            hasLoadedChanges = true
+        }
 
         repeat {
             changesNeedRefresh = false

@@ -970,6 +970,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
         self.run_git(self.changes, "reset", "--mixed", "HEAD")
         self.run_git(self.changes, "checkout", "--", ".")
+        # Earlier cases can leave untracked files (for example a recreated ephemeral.txt);
+        # the ownership marker lives outside this repository, so cleaning cannot remove it.
+        self.run_git(self.changes, "clean", "-fd")
         (self.changes / "staged.txt").write_text("Staged index version.\n", encoding="utf-8")
         (self.changes / "shared.txt").write_text("Shared index version.\n", encoding="utf-8")
         (self.changes / "syntax.json").write_text('{"value":"working version"}\n', encoding="utf-8")
@@ -9413,6 +9416,62 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(event.get("event") == "workspace.file.read.succeeded" and event.get("group") == "viewed" for event in diagnostics))
         self.assertTrue(any(event.get("event") == "workspace.file.read.failed" and event.get("path") == "stale.txt" for event in diagnostics))
         self.assertNotIn("Shared working version.", json.dumps(diagnostics))
+
+    # case-contract: test_task_workspace_changes_mark_all_viewed_and_unview | The Changes section header offers Mark all as viewed while it lists files: one action saves a viewed snapshot of every current Changes entry and stages each in Git, so Changes empties and every file is listed under Viewed, and the operation reports how many files it marked, zero when nothing is pending. Each Viewed entry offers Mark as unviewed, which drops that file's snapshot without touching the Git index, so its whole change from the branch base is listed under Changes again; unviewing a file that isn't a current Viewed entry, including one already unviewed and an unknown path, is rejected. These results persist across fresh CLI/XPC connections. The Changes section collapses inside the task sidebar, hiding its Viewed and Changes lists while its header and pending count stay visible and the sidebar stays open for other sections; separately, the whole sidebar hides to a narrow rail that still shows how many files are pending. Each collapsed or expanded state is its own global preference, so opening another task keeps it. Once loaded, refreshing a task with no changes keeps its No changes state on screen instead of flashing the loading placeholder.
+    def test_task_workspace_changes_mark_all_viewed_and_unview(self):
+        # The sidebar collapse preference and the loading placeholder are window presentation
+        # state outside the bridge API; the paired UI case asserts them.
+        self.prepare_workspace_changes()
+        task_id = self.create_task(title="Mark all viewed", roots=[self.changes])["id"]
+        pending_paths = {"deleted.txt", "shared.txt", "staged-deleted.txt", "staged.txt", "syntax.json", "untracked.txt", "working.txt"}
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        self.assertEqual({entry["path"] for entry in inventory["unviewed"]}, pending_paths)
+        self.assertEqual(inventory["viewed"], [])
+
+        marked, _ = self.call_cli("task", "changes", "mark-all-viewed", task_id)
+        self.assertEqual(self.assert_success(marked), {"markedCount": len(pending_paths)})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        self.assertEqual(inventory["unviewed"], [], "Marking all viewed leaves nothing pending.")
+        viewed = {entry["path"]: entry for entry in inventory["viewed"]}
+        self.assertEqual(set(viewed), pending_paths, "Every pending file is listed under Viewed.")
+        self.assertEqual(viewed["deleted.txt"]["status"], "deleted")
+        self.assertEqual(viewed["untracked.txt"]["status"], "added")
+        self.assertEqual(self.run_git(self.changes, "status", "--porcelain", "--", "untracked.txt").strip(), "A  untracked.txt", "Marking all viewed stages each file.")
+        self.assertEqual(self.run_git(self.changes, "status", "--porcelain", "--", "shared.txt").strip(), "M  shared.txt")
+        self.assertEqual(self.run_git(self.changes, "status", "--porcelain", "--", "deleted.txt").strip(), "D  deleted.txt", "A deleted file is staged as a deletion.")
+        self.assertEqual(self.run_git(self.changes, "status", "--porcelain", "--", "staged-deleted.txt").strip(), "D  staged-deleted.txt", "An already staged deletion is accepted and stays staged.")
+        again, _ = self.call_cli("task", "changes", "mark-all-viewed", task_id)
+        self.assertEqual(self.assert_success(again), {"markedCount": 0}, "With nothing pending, marking all viewed marks nothing.")
+
+        unviewed, _ = self.call_cli("task", "changes", "mark-unviewed", task_id, "--repository", str(self.changes), "--path", "shared.txt")
+        self.assertEqual(self.assert_success(unviewed), {"viewed": False})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        pending = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertEqual(set(pending), {"shared.txt"}, "Unviewing lists the file under Changes again.")
+        self.assertFalse(pending["shared.txt"]["hasViewedSnapshot"], "An unviewed file no longer has a saved snapshot baseline.")
+        self.assertNotIn("shared.txt", [entry["path"] for entry in inventory["viewed"]])
+        self.assertEqual(len(inventory["viewed"]), len(pending_paths) - 1, "Other viewed files are unaffected.")
+        self.assertEqual(self.run_git(self.changes, "status", "--porcelain", "--", "shared.txt").strip(), "M  shared.txt", "Unviewing leaves the Git index as it was.")
+        unviewed_diff = self.assert_success(self.changes_diff(task_id, "shared.txt", "unviewed"))
+        self.assertEqual(unviewed_diff["original"], "Shared baseline.\n", "An unviewed file diffs from the branch base again.")
+        self.assertEqual(unviewed_diff["modified"], "Shared working version.\n")
+
+        repeat, _ = self.call_cli("task", "changes", "mark-unviewed", task_id, "--repository", str(self.changes), "--path", "shared.txt", expected_status=3)
+        self.assert_failure(repeat, "not_found")
+        unknown, _ = self.call_cli("task", "changes", "mark-unviewed", task_id, "--repository", str(self.changes), "--path", "missing.txt", expected_status=3)
+        self.assert_failure(unknown, "not_found")
+
+        unviewed_deleted, _ = self.call_cli("task", "changes", "mark-unviewed", task_id, "--repository", str(self.changes), "--path", "deleted.txt")
+        self.assertEqual(self.assert_success(unviewed_deleted), {"viewed": False})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        pending = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertEqual(set(pending), {"deleted.txt", "shared.txt"})
+        self.assertEqual(pending["deleted.txt"]["status"], "deleted")
+        final, _ = self.call_cli("task", "changes", "mark-all-viewed", task_id)
+        self.assertEqual(self.assert_success(final), {"markedCount": 2})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        self.assertEqual(inventory["unviewed"], [])
+        self.assertEqual({entry["path"] for entry in inventory["viewed"]}, pending_paths)
 
     # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes.
     def test_external_git_edits_and_commit_refresh_workspace_changes(self):

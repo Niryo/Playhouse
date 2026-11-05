@@ -12924,6 +12924,173 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
+    // case-contract: test_task_workspace_changes_mark_all_viewed_and_unview | The Changes section header offers Mark all as viewed while it lists files: one action saves a viewed snapshot of every current Changes entry and stages each in Git, so Changes empties and every file is listed under Viewed, and the operation reports how many files it marked, zero when nothing is pending. Each Viewed entry offers Mark as unviewed, which drops that file's snapshot without touching the Git index, so its whole change from the branch base is listed under Changes again; unviewing a file that isn't a current Viewed entry, including one already unviewed and an unknown path, is rejected. These results persist across fresh CLI/XPC connections. The Changes section collapses inside the task sidebar, hiding its Viewed and Changes lists while its header and pending count stay visible and the sidebar stays open for other sections; separately, the whole sidebar hides to a narrow rail that still shows how many files are pending. Each collapsed or expanded state is its own global preference, so opening another task keeps it. Once loaded, refreshing a task with no changes keeps its No changes state on screen instead of flashing the loading placeholder.
+    func test_task_workspace_changes_mark_all_viewed_and_unview() throws {
+        let cleanRepository = runDirectory.appendingPathComponent("clean-changes", isDirectory: true)
+        try FileManager.default.createDirectory(at: cleanRepository, withIntermediateDirectories: true)
+        try "Baseline.\n".write(to: cleanRepository.appendingPathComponent("tracked.txt"), atomically: true, encoding: .utf8)
+        try runGit(cleanRepository, "init", "--initial-branch=main")
+        try runGit(cleanRepository, "config", "user.name", "Playhouse UI Test")
+        try runGit(cleanRepository, "config", "user.email", "playhouse-ui-test@example.invalid")
+        try runGit(cleanRepository, "add", "tracked.txt")
+        try runGit(cleanRepository, "commit", "-m", "Baseline")
+        // This case builds its own changed repository: the shared fixture is prepared only for
+        // the staged/unstaged case and is left modified by it within a batch.
+        let changes = runDirectory.appendingPathComponent("review-parent/changes", isDirectory: true)
+        try FileManager.default.createDirectory(at: changes, withIntermediateDirectories: true)
+        let baseline = [
+            "staged.txt": "Staged baseline.\n",
+            "shared.txt": "Shared baseline.\n",
+            "working.txt": "Working baseline.\n",
+            "deleted.txt": "Deleted baseline.\n",
+            "staged-deleted.txt": "Staged deletion baseline.\n",
+            "syntax.json": "{\"value\":\"baseline\"}\n",
+        ]
+        for (path, contents) in baseline {
+            try contents.write(to: changes.appendingPathComponent(path), atomically: true, encoding: .utf8)
+        }
+        try runGit(changes, "init", "--initial-branch=main")
+        try runGit(changes, "config", "user.name", "Playhouse UI Test")
+        try runGit(changes, "config", "user.email", "playhouse-ui-test@example.invalid")
+        try runGit(changes, "add", ".")
+        try runGit(changes, "commit", "-m", "Baseline")
+        try "Staged index version.\n".write(to: changes.appendingPathComponent("staged.txt"), atomically: true, encoding: .utf8)
+        try "Shared index version.\n".write(to: changes.appendingPathComponent("shared.txt"), atomically: true, encoding: .utf8)
+        try "{\"value\":\"working version\"}\n".write(to: changes.appendingPathComponent("syntax.json"), atomically: true, encoding: .utf8)
+        try runGit(changes, "add", "staged.txt", "shared.txt")
+        try "Shared working version.\n".write(to: changes.appendingPathComponent("shared.txt"), atomically: true, encoding: .utf8)
+        try "Working tree version.\n".write(to: changes.appendingPathComponent("working.txt"), atomically: true, encoding: .utf8)
+        try FileManager.default.removeItem(at: changes.appendingPathComponent("deleted.txt"))
+        try "Untracked file.\n".write(to: changes.appendingPathComponent("untracked.txt"), atomically: true, encoding: .utf8)
+        try runGit(changes, "rm", "--quiet", "staged-deleted.txt")
+        _ = try runCLI(["task", "create", "--title", "Mark all viewed", "--prompt", "Fixture task description.", "--root", changes.path])
+        _ = try runCLI(["task", "create", "--title", "Clean changes", "--prompt", "Fixture task description.", "--root", cleanRepository.path])
+        let taskID = try taskID(named: "Mark all viewed")
+        let pendingPaths: Set<String> = ["deleted.txt", "shared.txt", "staged-deleted.txt", "staged.txt", "syntax.json", "untracked.txt", "working.txt"]
+
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Mark all viewed")
+        XCTAssertTrue(element("workspace-change-unviewed-shared.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("mark-all-viewed-button").exists, "The Changes header offers Mark all as viewed while it lists files.")
+        XCTAssertFalse(element("mark-unviewed-shared.txt").exists, "Changes entries offer mark-viewed, not unview.")
+        attachScreenshot(named: "The Changes header offers Mark all as viewed")
+
+        element("mark-all-viewed-button").click()
+        var inventory: [String: Any]?
+        XCTAssertTrue(waitUntil({
+            inventory = try? self.runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+            return (inventory?["unviewed"] as? [[String: Any]])?.isEmpty == true
+        }, timeout: 15), "Mark all as viewed should leave nothing pending.")
+        XCTAssertEqual(Set(((inventory?["viewed"] as? [[String: Any]]) ?? []).compactMap { $0["path"] as? String }), pendingPaths)
+        XCTAssertEqual(
+            try runGitOutput(changes, "status", "--porcelain", "--", "untracked.txt").trimmingCharacters(in: .whitespacesAndNewlines),
+            "A  untracked.txt",
+            "Mark all as viewed should stage each file."
+        )
+        XCTAssertEqual(
+            try runGitOutput(changes, "status", "--porcelain", "--", "staged-deleted.txt").trimmingCharacters(in: .whitespacesAndNewlines),
+            "D  staged-deleted.txt",
+            "An already staged deletion is accepted and stays staged."
+        )
+        XCTAssertTrue(element("workspace-change-unviewed-shared.txt").waitForNonExistence(timeout: 10))
+        XCTAssertFalse(element("mark-all-viewed-button").exists, "With nothing pending, the header no longer offers Mark all as viewed.")
+        element("viewed-changes-section").click()
+        XCTAssertTrue(element("workspace-change-viewed-shared.txt").waitForExistence(timeout: 10))
+        for path in pendingPaths {
+            XCTAssertTrue(element("workspace-change-viewed-\(path)").exists, "\(path) should be listed under Viewed.")
+            XCTAssertTrue(element("mark-unviewed-\(path)").exists, "Each Viewed entry offers Mark as unviewed.")
+        }
+        XCTAssertFalse(element("mark-viewed-shared.txt").exists)
+        attachScreenshot(named: "Every file is listed under Viewed with an unview action")
+
+        element("mark-unviewed-shared.txt").click()
+        XCTAssertTrue(element("workspace-change-unviewed-shared.txt").waitForExistence(timeout: 10), "Unviewing lists the file under Changes again.")
+        XCTAssertTrue(element("workspace-change-viewed-shared.txt").waitForNonExistence(timeout: 10))
+        XCTAssertTrue(element("mark-viewed-shared.txt").exists)
+        XCTAssertTrue(element("mark-all-viewed-button").exists)
+        let afterUnview = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        let pendingAfterUnview = (afterUnview?["unviewed"] as? [[String: Any]]) ?? []
+        XCTAssertEqual(pendingAfterUnview.compactMap { $0["path"] as? String }, ["shared.txt"])
+        XCTAssertEqual(pendingAfterUnview.first?["hasViewedSnapshot"] as? Bool, false)
+        XCTAssertEqual((afterUnview?["viewed"] as? [[String: Any]])?.count, pendingPaths.count - 1)
+        XCTAssertEqual(
+            try runGitOutput(changes, "status", "--porcelain", "--", "shared.txt").trimmingCharacters(in: .whitespacesAndNewlines),
+            "M  shared.txt",
+            "Unviewing leaves the Git index as it was."
+        )
+        element("workspace-change-unviewed-shared.txt").click()
+        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        assertText("workspace-diff-source", equals: "review-parent/changes · Since branch base")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(element("workspace-diff-overlay").waitForNonExistence(timeout: 2))
+        attachScreenshot(named: "An unviewed file is listed under Changes again")
+        assertCLIError(
+            try runCLI(["task", "changes", "mark-unviewed", taskID, "--repository", changes.path, "--path", "shared.txt"], expectedStatus: 3),
+            code: "not_found"
+        )
+        assertCLIError(
+            try runCLI(["task", "changes", "mark-unviewed", taskID, "--repository", changes.path, "--path", "missing.txt"], expectedStatus: 3),
+            code: "not_found"
+        )
+
+        // The Changes section collapses inside the sidebar, which stays open for other sections.
+        assertText("toggle-workspace-changes-section-button", equals: "Expanded")
+        element("toggle-workspace-changes-section-button").click()
+        XCTAssertTrue(element("workspace-change-unviewed-shared.txt").waitForNonExistence(timeout: 5), "Collapsing the Changes section hides its lists.")
+        XCTAssertFalse(element("unviewed-changes-section").exists)
+        XCTAssertFalse(element("viewed-changes-section").exists)
+        XCTAssertTrue(element("task-sidebar").exists, "Collapsing the section keeps the sidebar open.")
+        XCTAssertFalse(element("task-sidebar-collapsed").exists)
+        assertText("workspace-changes-title", equals: "Changes")
+        assertText("toggle-workspace-changes-section-button", equals: "Collapsed")
+        assertText("collapsed-workspace-changes-section-count", equals: "Changes to review: 1")
+        XCTAssertGreaterThan(element("task-sidebar").frame.width, 200)
+        attachScreenshot(named: "The collapsed Changes section keeps its header and pending count")
+
+        openTask(named: "Clean changes")
+        XCTAssertTrue(element("workspace-changes-title").waitForExistence(timeout: 10))
+        assertText("toggle-workspace-changes-section-button", equals: "Collapsed")
+        XCTAssertFalse(element("workspace-changes-empty").exists, "The collapsed section state is global, so another task opens with it collapsed.")
+        XCTAssertFalse(element("collapsed-workspace-changes-section-count").exists, "A task with nothing pending shows no count.")
+        element("workspace-changes-title").click()
+        XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10), "Clicking the section title expands it.")
+        assertText("toggle-workspace-changes-section-button", equals: "Expanded")
+
+        // Every refresh used to swap No changes for the loading placeholder while Git ran.
+        var sawLoadingPlaceholder = false
+        for _ in 0..<3 {
+            element("refresh-workspace-changes-button").click()
+            let deadline = Date().addingTimeInterval(0.6)
+            while Date() < deadline {
+                if element("workspace-changes-loading").exists || !element("workspace-changes-empty").exists {
+                    sawLoadingPlaceholder = true
+                }
+            }
+        }
+        XCTAssertFalse(sawLoadingPlaceholder, "Refreshing a loaded task must keep No changes on screen instead of flashing the loading placeholder.")
+        attachScreenshot(named: "No changes stays on screen across refreshes")
+
+        // Separately, the whole sidebar hides to a narrow rail.
+        element("hide-task-sidebar-button").click()
+        XCTAssertTrue(element("task-sidebar-collapsed").waitForExistence(timeout: 5), "The sidebar hides to a narrow rail.")
+        XCTAssertFalse(element("workspace-changes-title").exists)
+        XCTAssertFalse(element("collapsed-task-sidebar-count").exists, "A task with nothing pending shows no count.")
+        XCTAssertLessThan(element("task-sidebar-collapsed").frame.width, 60)
+
+        openTask(named: "Mark all viewed")
+        XCTAssertTrue(element("task-sidebar-collapsed").waitForExistence(timeout: 10), "The hidden sidebar state is global, so another task opens with it hidden.")
+        assertText("collapsed-task-sidebar-count", equals: "Changes to review: 1")
+        attachScreenshot(named: "The hidden sidebar keeps the pending count")
+        element("show-task-sidebar-button").click()
+        XCTAssertTrue(element("workspace-changes-title").waitForExistence(timeout: 10))
+        XCTAssertFalse(element("task-sidebar-collapsed").exists)
+        assertText("toggle-workspace-changes-section-button", equals: "Expanded")
+        XCTAssertTrue(
+            element("workspace-change-unviewed-shared.txt").waitForExistence(timeout: 10),
+            "Expanding the section in one task expands it everywhere."
+        )
+    }
+
     // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes.
     func test_external_git_edits_and_commit_refresh_workspace_changes() throws {
         let repository = runDirectory.appendingPathComponent("external-git", isDirectory: true)
