@@ -13616,7 +13616,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Merged upstream commits are excluded when the local base branch is stale")
     }
 
-    // case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The CLI reports how that terminal starts: the account's executable login shell with -l, opened in the task's repository worktree (or, for a folder-only task, its first folder), with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Clicking the button slides a terminal panel in from the window's right edge, beside the conversation, whose shell runs in the task's worktree with the task ID in its environment; hiding the panel keeps the same shell, so reopening it reaches the same process. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task whose folders no longer exist reports terminal_unavailable from the CLI and the panel shows that error instead of a shell; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.
+    // case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The CLI reports how that terminal starts: the account's executable login shell with -l, opened in the task's repository worktree (or, for a folder-only task, its first folder), with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Clicking the button slides a terminal panel in from the window's right edge, floating over the conversation's right side without moving or resizing the conversation, whose shell runs in the task's worktree with the task ID in its environment and which uses macOS Terminal's built-in Clear Dark profile: its slightly translucent slate background and ANSI palette (such as its blue, distinct from the emulator's own default), switching to the Clear Light profile's white background and blue when the app's appearance turns light and back when it returns to dark; hiding the panel keeps the same shell, so reopening it reaches the same process. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task whose folders no longer exist reports terminal_unavailable from the CLI and the panel shows that error instead of a shell; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.
     func test_task_terminal_opens_shell_in_task_worktree() throws {
         let repository = runDirectory.appendingPathComponent("terminal-repository", isDirectory: true)
         try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
@@ -13661,12 +13661,15 @@ final class PlayhouseUITests: XCTestCase {
         let conversation = element("empty-conversation")
         XCTAssertTrue(conversation.exists)
         XCTAssertGreaterThan(conversation.frame.maxX, window.frame.maxX - 470, "Before the panel opens, the conversation reaches into the space the panel will take.")
+        let conversationFrameBefore = conversation.frame
         toggle.click()
         let panel = element("task-terminal-panel")
         XCTAssertTrue(panel.waitForExistence(timeout: 5))
         XCTAssertTrue(waitUntil({ abs(panel.frame.maxX - window.frame.maxX) <= 2 }, timeout: 5), "The panel settles against the window's right edge.")
         XCTAssertGreaterThan(panel.frame.minX, sidebar.frame.maxX, "The panel opens on the right, leaving the sidebar in place.")
-        XCTAssertTrue(waitUntil({ conversation.frame.maxX <= panel.frame.minX + 1 }, timeout: 5), "The conversation sits beside the terminal, not under it.")
+        XCTAssertLessThan(panel.frame.minX, conversation.frame.maxX, "The panel floats over the conversation's right side.")
+        XCTAssertEqual(conversation.frame.minX, conversationFrameBefore.minX, accuracy: 1, "Opening the terminal does not move the conversation.")
+        XCTAssertEqual(conversation.frame.width, conversationFrameBefore.width, accuracy: 1, "Opening the terminal does not resize the conversation.")
         XCTAssertEqual(toggle.value as? String, "Shown")
         assertText("task-terminal-title", equals: "Terminal")
 
@@ -13686,7 +13689,29 @@ final class PlayhouseUITests: XCTestCase {
             shellPID = pid
             return true
         }, timeout: 20), "The shell runs in the task worktree with the task ID: \(String(reflecting: terminal.value as? String ?? ""))")
+        // macOS Terminal's Clear Dark: ANSI blue #6D96B4 (the emulator's own is #492EE1) on a
+        // 95%-opaque #212734 background. Clear Light: blue #5685A8 on 93%-opaque white.
+        // The small translucency stays within the pixel tolerance.
+        terminal.typeText("printf '\\033[44m%24s\\033[0m\\n' ''\n")
+        XCTAssertTrue(waitUntil({
+            self.screenshotContains(srgb: (0x6D, 0x96, 0xB4), in: terminal)
+        }, timeout: 10), "ANSI blue renders in Clear Dark's blue.")
+        XCTAssertFalse(screenshotContains(srgb: (0x49, 0x2E, 0xE1), in: terminal), "The emulator's own default blue is replaced.")
+        XCTAssertTrue(screenshotContains(srgb: (0x21, 0x27, 0x34), in: terminal), "The terminal uses Clear Dark's slate background.")
         attachScreenshot(named: "Terminal slid in from the right, running in the task worktree")
+
+        _ = try runCLI(["settings", "set-appearance", "light"])
+        XCTAssertTrue(waitUntil({
+            self.screenshotContains(srgb: (0x56, 0x85, 0xA8), in: terminal)
+                && !self.screenshotContains(srgb: (0x21, 0x27, 0x34), in: terminal)
+        }, timeout: 10), "Light appearance switches the terminal to Clear Light's colors.")
+        XCTAssertTrue(screenshotContains(srgb: (0xFF, 0xFF, 0xFF), in: terminal), "Clear Light uses a white background.")
+        attachScreenshot(named: "Terminal in light appearance uses the Clear Light profile")
+        _ = try runCLI(["settings", "set-appearance", "dark"])
+        XCTAssertTrue(waitUntil({
+            self.screenshotContains(srgb: (0x21, 0x27, 0x34), in: terminal)
+        }, timeout: 10), "Returning to dark appearance restores Clear Dark's background.")
+        terminal.click()
 
         element("close-terminal-button").click()
         XCTAssertTrue(waitUntil({ !panel.exists }, timeout: 5), "Hide slides the panel away.")
@@ -16005,6 +16030,32 @@ final class PlayhouseUITests: XCTestCase {
 
     private func element(_ identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    /// Whether a screenshot of `element` has a pixel within a small tolerance of an sRGB color.
+    /// The expected color is converted into the screenshot's own color space (the Tart VM's
+    /// display profile) and compared with raw pixels; converting each pixel to sRGB instead
+    /// shifts it by more than the tolerance.
+    private func screenshotContains(srgb expected: (Int, Int, Int), in element: XCUIElement, tolerance: Int = 10) -> Bool {
+        let image = element.screenshot().image
+        guard let bitmap = image.representations.compactMap({ $0 as? NSBitmapImageRep }).first
+                ?? image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)),
+              let target = NSColor(
+                  srgbRed: CGFloat(expected.0) / 255, green: CGFloat(expected.1) / 255,
+                  blue: CGFloat(expected.2) / 255, alpha: 1
+              ).usingColorSpace(bitmap.colorSpace) else { return false }
+        let expected = (Int(round(target.redComponent * 255)), Int(round(target.greenComponent * 255)), Int(round(target.blueComponent * 255)))
+        let step = max(1, min(bitmap.pixelsWide, bitmap.pixelsHigh) / 120)
+        for y in stride(from: 0, to: bitmap.pixelsHigh, by: step) {
+            for x in stride(from: 0, to: bitmap.pixelsWide, by: step) {
+                guard let color = bitmap.colorAt(x: x, y: y) else { continue }
+                let rgb = (Int(round(color.redComponent * 255)), Int(round(color.greenComponent * 255)), Int(round(color.blueComponent * 255)))
+                if abs(rgb.0 - expected.0) <= tolerance, abs(rgb.1 - expected.1) <= tolerance, abs(rgb.2 - expected.2) <= tolerance {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /// The digits the shell printed between `marker` and a `;` in a terminal's text, latest first.

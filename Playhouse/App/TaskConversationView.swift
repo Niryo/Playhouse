@@ -1457,7 +1457,10 @@ struct TaskConversationView: View {
 
                     conversationPanel
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-
+                }
+                // The terminal floats over the conversation's right edge rather than taking
+                // its width, so opening it never reflows the transcript or the composer.
+                .overlay(alignment: .trailing) {
                     if isTerminalPresented {
                         HStack(spacing: 0) {
                             Rectangle()
@@ -1470,6 +1473,7 @@ struct TaskConversationView: View {
                             )
                         }
                         .frame(width: 460)
+                        .shadow(color: .black.opacity(0.22), radius: 12, x: -4, y: 0)
                         .transition(.move(edge: .trailing))
                     }
                 }

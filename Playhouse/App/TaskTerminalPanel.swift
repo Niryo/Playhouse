@@ -25,7 +25,7 @@ final class TaskTerminalSession: ObservableObject {
         do {
             let launch = try workspaceManager.terminalLaunch(for: taskID)
             let view = PlayhouseTerminalView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
-            view.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            view.font = TerminalTheme.font
             view.optionAsMetaKey = false
             view.setAccessibilityIdentifier("task-terminal-view")
             let observer = ProcessObserver(session: self)
@@ -106,6 +106,9 @@ final class TaskTerminalSession: ObservableObject {
 /// SwiftTerm draws its grid without exposing it to accessibility on macOS, so the view
 /// reports itself as a text area whose value is the scrollback and screen text.
 final class PlayhouseTerminalView: LocalProcessTerminalView {
+    /// The theme last applied, so appearance updates only reinstall colors when they change.
+    var theme: TerminalTheme?
+
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .textArea }
     override func accessibilityLabel() -> String? { "Terminal" }
@@ -194,7 +197,6 @@ struct TaskTerminalPanel: View {
                 .accessibilityIdentifier("task-terminal-error")
             } else if let terminalView = session.terminalView {
                 TerminalViewHost(view: terminalView)
-                    .padding(.leading, 6)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .overlay(alignment: .bottom) {
                         if let exitStatus = session.exitStatus {
@@ -216,7 +218,8 @@ struct TaskTerminalPanel: View {
                     }
             }
         }
-        .background(WorkspaceTheme.panelBackground)
+        // Clear profiles blur what lies behind their translucent background.
+        .background(.ultraThinMaterial)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("task-terminal-panel")
     }
@@ -224,6 +227,69 @@ struct TaskTerminalPanel: View {
     private static func abbreviated(_ path: String) -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return path == home || path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+    }
+}
+
+/// The look of macOS Terminal's built-in Clear Dark and Clear Light profiles: a slightly
+/// translucent background over a blur, with soft, desaturated ANSI colors. It follows the
+/// app's appearance between the two. Values are from the profiles Terminal.app ships in
+/// Contents/Resources/Initial Settings.
+struct TerminalTheme: Equatable {
+    let foreground: NSColor
+    let background: NSColor
+    /// Only the default background is translucent; text and colored cells stay opaque.
+    let backgroundOpacity: CGFloat
+    let cursor: NSColor
+    let selection: NSColor
+    let ansi: [NSColor]
+
+    /// Terminal.app's profile font: the system monospaced face (SF Mono) at 12 points.
+    static let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
+    static func terminalClear(dark: Bool) -> TerminalTheme {
+        dark
+            ? TerminalTheme(
+                foreground: hex(0xE6E6E6),
+                background: hex(0x212734), backgroundOpacity: 0.95,
+                cursor: hex(0xE6E6E6), selection: hex(0x334E5E),
+                ansi: [
+                    0x35424C, 0xB45648, 0x6CAA71, 0xC4AC62, 0x6D96B4, 0xBD7BCD, 0x7CCBCD, 0xDEE5EB,
+                    0x465C6D, 0xDF6C5A, 0x79BE7E, 0xE5C872, 0x67B5ED, 0xD389E5, 0x84DDE0, 0xE5EFF5
+                ].map(hex)
+            )
+            : TerminalTheme(
+                foreground: hex(0x3A4851),
+                background: hex(0xFFFFFF), backgroundOpacity: 0.93,
+                cursor: hex(0x919191), selection: hex(0xE5ECF1),
+                ansi: [
+                    0x2D3840, 0xB45648, 0x6CAA71, 0xC4AC62, 0x5685A8, 0xAD64BE, 0x69C6C9, 0xC1C8CC,
+                    0x506573, 0xDF6C5A, 0x79BE7E, 0xE5C872, 0x49A2E1, 0xD389E5, 0x77E1E5, 0xD8E1E7
+                ].map(hex)
+            )
+    }
+
+    func apply(to view: TerminalView) {
+        view.installColors(ansi.map { color in
+            let rgb = color.usingColorSpace(.sRGB) ?? color
+            return Color(
+                red: UInt16(rgb.redComponent * 65535),
+                green: UInt16(rgb.greenComponent * 65535),
+                blue: UInt16(rgb.blueComponent * 65535)
+            )
+        })
+        view.nativeForegroundColor = foreground
+        view.nativeBackgroundColor = background.withAlphaComponent(backgroundOpacity)
+        view.caretColor = cursor
+        view.selectedTextBackgroundColor = selection
+    }
+
+    private static func hex(_ value: Int) -> NSColor {
+        NSColor(
+            srgbRed: CGFloat((value >> 16) & 0xFF) / 255,
+            green: CGFloat((value >> 8) & 0xFF) / 255,
+            blue: CGFloat(value & 0xFF) / 255,
+            alpha: 1
+        )
     }
 }
 
@@ -235,19 +301,19 @@ private struct TerminalViewHost: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSView {
         let container = NSView()
+        container.wantsLayer = true
         attach(to: container)
         return container
     }
 
     func updateNSView(_ container: NSView, context: Context) {
         if view.superview !== container { attach(to: container) }
-        let isDark = colorScheme == .dark
-        let background = isDark
-            ? NSColor(srgbRed: 0x25 / 255, green: 0x25 / 255, blue: 0x26 / 255, alpha: 1)
-            : NSColor.textBackgroundColor
-        if view.nativeBackgroundColor != background {
-            view.nativeBackgroundColor = background
-            view.nativeForegroundColor = isDark ? NSColor(white: 0.85, alpha: 1) : .textColor
+        let theme = TerminalTheme.terminalClear(dark: colorScheme == .dark)
+        // The inset around the grid shares the terminal's translucent background.
+        container.layer?.backgroundColor = theme.background.withAlphaComponent(theme.backgroundOpacity).cgColor
+        if view.theme != theme {
+            theme.apply(to: view)
+            view.theme = theme
         }
     }
 
@@ -256,9 +322,9 @@ private struct TerminalViewHost: NSViewRepresentable {
         view.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(view)
         NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
             view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            view.topAnchor.constraint(equalTo: container.topAnchor),
+            view.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
             view.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
         // Opening the panel is a request to type in it.
