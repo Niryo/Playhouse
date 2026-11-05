@@ -407,6 +407,60 @@ enum PlayhouseCLI {
             return BridgeRequest(command: "workspace.suggest", arguments: [
                 "parent": .string(try requiredFlag("--parent", flags: flags).first!)
             ])
+        case "skills":
+            guard let operation = rest.first else { throw CLIError.usage("Missing skills operation.") }
+            let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: [
+                "--task", "--skill", "--scope", "--name", "--description", "--body", "--root", "--content", "--content-file",
+                "--message", "--include-bundled",
+            ])
+            var arguments: [String: BridgeValue] = [:]
+            if let task = flags["--task"]?.first { arguments["taskID"] = .string(task) }
+            if let root = flags["--root"]?.first { arguments["root"] = .string(root) }
+            func skillID() throws -> BridgeValue { .string(try requiredFlag("--skill", flags: flags).first!) }
+            switch operation {
+            case "list":
+                if let bundled = flags["--include-bundled"]?.first { arguments["includeBundled"] = .boolean(bundled == "true") }
+                return BridgeRequest(command: "skills.list", arguments: arguments)
+            case "get":
+                arguments["skillID"] = try skillID()
+                if let bundled = flags["--include-bundled"]?.first { arguments["includeBundled"] = .boolean(bundled == "true") }
+                return BridgeRequest(command: "skills.get", arguments: arguments)
+            case "create":
+                arguments["scope"] = .string(try requiredFlag("--scope", flags: flags).first!)
+                arguments["name"] = .string(try requiredFlag("--name", flags: flags).first!)
+                arguments["description"] = .string(flags["--description"]?.first ?? "")
+                if let body = flags["--body"]?.first { arguments["body"] = .string(body) }
+                return BridgeRequest(command: "skills.create", arguments: arguments)
+            case "update":
+                arguments["skillID"] = try skillID()
+                if let path = flags["--content-file"]?.first {
+                    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+                        throw CLIError.usage("Could not read \(path).")
+                    }
+                    arguments["content"] = .string(content)
+                } else {
+                    arguments["content"] = .string(try requiredFlag("--content", flags: flags).first!)
+                }
+                return BridgeRequest(command: "skills.update", arguments: arguments)
+            case "move":
+                arguments["skillID"] = try skillID()
+                arguments["scope"] = .string(try requiredFlag("--scope", flags: flags).first!)
+                return BridgeRequest(command: "skills.move", arguments: arguments)
+            case "enable", "disable":
+                arguments["skillID"] = try skillID()
+                arguments["enabled"] = .boolean(operation == "enable")
+                if let bundled = flags["--include-bundled"]?.first { arguments["includeBundled"] = .boolean(bundled == "true") }
+                return BridgeRequest(command: "skills.enable", arguments: arguments)
+            case "delete", "link", "unlink":
+                arguments["skillID"] = try skillID()
+                return BridgeRequest(command: "skills.\(operation)", arguments: arguments)
+            case "bridge":
+                guard arguments["taskID"] != nil else { throw CLIError.usage("Use: playhouse skills bridge --task <task-id> [--message <text>]") }
+                if let message = flags["--message"]?.first { arguments["message"] = .string(message) }
+                return BridgeRequest(command: "skills.bridge", arguments: arguments)
+            default:
+                throw CLIError.usage("Unknown skills operation \(operation).")
+            }
         case "settings":
             guard let operation = rest.first else { throw CLIError.usage("Missing settings operation.") }
             switch operation {
@@ -727,6 +781,13 @@ enum PlayhouseCLI {
       playhouse chat page close-turn <chat-id> --continues <true|false> [--new-title <title>] [--summary-hint <text>]
       playhouse workspace suggest --parent <path>
       playhouse workspace repos list
+      playhouse skills list [--task <task-id>] [--include-bundled true]
+      playhouse skills get --skill <skill-id> [--task <task-id>]
+      playhouse skills create --scope <repo|global> --name <name> --description <text> [--body <text>] [--task <task-id>] [--root <repo-path>]
+      playhouse skills update --skill <skill-id> (--content <text>|--content-file <path>) [--task <task-id>]
+      playhouse skills move --skill <skill-id> --scope <repo|global> [--root <repo-path>] [--task <task-id>]
+      playhouse skills enable|disable|delete|link|unlink --skill <skill-id> [--task <task-id>]
+      playhouse skills bridge --task <task-id> [--message <text>]
       playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>
       playhouse task token-usage <task-id>
       playhouse task token-waste <task-id>

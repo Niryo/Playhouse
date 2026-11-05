@@ -142,6 +142,9 @@ enum WorkspaceTheme {
 struct ConversationWorkspaceContext {
     let roots: [URL]
     let cwd: URL
+    /// The skill folders each provider needs passed so it sees the whole
+    /// gallery. Only a turn's own launch sets it.
+    var skillBridge: SkillBridgeLaunch?
 
     init(roots: [URL]) throws {
         let normalized = roots.map(\.standardizedFileURL)

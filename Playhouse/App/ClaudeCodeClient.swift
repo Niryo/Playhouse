@@ -432,6 +432,13 @@ final class ClaudeSessionRunner {
         if modelID != ClaudeCodeClient.defaultModelID { arguments += ["--model", modelID] }
         if !persistsSessions { arguments.append("--no-session-persistence") }
         for root in workspace.roots.dropFirst() { arguments += ["--add-dir", root.path] }
+        // Skills from the Agent Skills folders reach Claude Code through a
+        // Playhouse wrapper laid out as `.claude/skills`, and disabled skills are
+        // turned off for this run only, so the user's settings stay untouched.
+        if let bridge = workspace.skillBridge {
+            for directory in bridge.claudeAddDirectories { arguments += ["--add-dir", directory] }
+            if let settings = bridge.claudeSettingsJSON { arguments += ["--settings", settings] }
+        }
         // Background Bash and Agent/Task calls report through Claude Code's task
         // events and keep the turn open, so Claude may end its response while
         // they run instead of blocking on a wait it cannot satisfy. Only a process
@@ -1414,6 +1421,16 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             capabilities.error = error.localizedDescription
         }
         return capabilities
+    }
+
+    /// The skills and commands built into Claude Code itself, which have no
+    /// folder on disk, read without starting a model turn.
+    func bundledSkills(workspace: ConversationWorkspaceContext) async throws -> [(name: String, description: String)] {
+        let response = try await withMetadataSession(workspace: workspace) { _ in [:] }
+        return (response.initialize["commands"] as? [[String: Any]] ?? []).compactMap { command in
+            guard command["builtin"] as? Bool == true, let name = command["name"] as? String, !name.hasPrefix("_") else { return nil }
+            return (name, command["description"] as? String ?? "")
+        }
     }
 
     func sendMessage(

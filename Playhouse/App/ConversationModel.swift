@@ -807,6 +807,8 @@ struct TaskCPUUsageSnapshot: Codable, Equatable {
 struct ConversationClients {
     let codex: CodexAppServerClient
     let claude: ClaudeCodeClient
+    /// The shared skill gallery, which a turn's launch bridges to its provider.
+    var skills: SkillCatalogManager? = nil
 
     func client(for provider: ConversationProvider) -> ConversationProviderClient {
         switch provider {

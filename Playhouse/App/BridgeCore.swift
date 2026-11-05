@@ -4533,6 +4533,21 @@ final class ConversationManager {
         clients.client(for: task.conversationProvider)
     }
 
+    /// The workspace a provider launch for `task` runs in, carrying the skill
+    /// bridge so the provider sees the whole gallery. Every path that can start
+    /// or load the task's own provider session (send, history, goals) uses this:
+    /// Codex keeps a loaded thread's skill config, so the first load decides it.
+    private func launchWorkspace(for task: any ConversationSubject, roots: [URL], message: String = "") throws -> ConversationWorkspaceContext {
+        var workspace = try ConversationWorkspaceContext(roots: roots)
+        if let skills = clients.skills {
+            let skillRoots = SkillRoot.roots(for: task)
+            var bridge = skills.bridge(roots: skillRoots)
+            bridge.invocations = skills.invocations(in: message, roots: skillRoots)
+            workspace.skillBridge = bridge
+        }
+        return workspace
+    }
+
     private static func historyRoots(_ task: any ConversationSubject) -> [String] {
         task.workspaceRootPaths.isEmpty && task.status == .done
             ? task.repositoryWorktrees.map { $0.repositoryPath }
@@ -5082,7 +5097,9 @@ final class ConversationManager {
             || recoveryTranscript?.pendingSensitiveUserInputRedaction == true
             || !(recoveryTranscript?.sensitiveTurnIDs ?? []).isEmpty
             || !(recoveryTranscript?.sensitiveCodexTurnIDs ?? []).isEmpty
-        let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map {
+        // Reading history can load the thread, which a later send then reuses,
+        // so it carries the same skill bridge a send would.
+        let workspace = try launchWorkspace(for: task, roots: Self.historyRoots(task).map {
             URL(fileURLWithPath: $0, isDirectory: true)
         })
         let settings = settingsManager
@@ -5674,7 +5691,8 @@ final class ConversationManager {
         if task.codexThreadID == nil {
             guard action == "set" else { return nil }
             let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
-            let workspace = try ConversationWorkspaceContext(roots: roots)
+            // A goal starts its own thread, so it needs the skill bridge a send would add.
+            let workspace = try launchWorkspace(for: task, roots: roots)
             let id = try await client.startThread(
                 workspace: workspace,
                 developerInstructions: TaskThreadDeveloperInstructions.make(
@@ -5691,7 +5709,8 @@ final class ConversationManager {
             task = try tasks.conversationSubject(taskID)
         }
         guard let threadID = task.codexThreadID else { return nil }
-        let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
+        // Any goal call can load the thread, which then needs the skill bridge.
+        let workspace = try launchWorkspace(for: task, roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
         switch action {
         case "get": return try await client.getGoal(threadID: threadID, workspace: workspace)
         case "set":
@@ -6776,7 +6795,7 @@ final class ConversationManager {
                 _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
             }
             let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
-            workspace = try ConversationWorkspaceContext(roots: roots)
+            workspace = try launchWorkspace(for: task, roots: roots, message: normalizedText)
             _ = try await tasks.clearProgressReport(taskID)
             if shouldGenerateTitle && !resolveTitleBeforeWorktree {
                 let latest = try tasks.conversationSubject(taskID)
@@ -7887,11 +7906,54 @@ final class PlayhouseBridgeRuntime {
             let guiRuntime = request.arguments["__guiRuntime"]?.bool == true
             // The caller's Codex home, so a window and the CLI read the same threads.
             let callerCodexHome = request.arguments["__codexHome"]?.string
+            let skillsHome: String?
+            #if DEBUG
+            // A test data directory gets its own skill homes, so bridge tests
+            // never read or bridge the host's own skills.
+            skillsHome = dataDirectory == nil ? nil : storeDirectory.map { $0 + "/skills-home" }
+            #else
+            skillsHome = nil
+            #endif
+            let skills = SkillCatalogManager(
+                environment: SkillEnvironment.resolve(
+                    homeOverride: skillsHome,
+                    claudeConfigOverride: claudeConfigDirectory,
+                    codexHomeOverride: callerCodexHome,
+                    storeDirectory: storeDirectory
+                ),
+                preferences: preferences
+            )
             func conversationClients(codexHome: String? = nil, goalFeatureEnabled: Bool = false) -> ConversationClients {
                 ConversationClients(
                     codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: codexHome ?? callerCodexHome, goalFeatureEnabled: goalFeatureEnabled, goalRuntimeEnabled: guiRuntime, dataDirectory: dataDirectory),
-                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, configDirectoryOverride: claudeConfigDirectory, dataDirectory: dataDirectory)
+                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, configDirectoryOverride: claudeConfigDirectory, dataDirectory: dataDirectory),
+                    skills: skills
                 )
+            }
+            func skillRoots() throws -> [SkillRoot] {
+                guard request.arguments["taskID"]?.string?.isEmpty == false else { return [] }
+                return SkillRoot.roots(for: try taskManager.conversationSubject(request.requiredUUID("taskID")))
+            }
+            func skillRoot(in roots: [SkillRoot]) throws -> SkillRoot? {
+                guard let value = request.arguments["root"]?.string, !value.isEmpty else { return roots.count == 1 ? roots[0] : nil }
+                let path = URL(fileURLWithPath: value).standardizedFileURL.path
+                guard let root = roots.first(where: { $0.path == path || $0.repositoryPath == path }) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "\(value) is not one of the task's repositories.")
+                }
+                return root
+            }
+            func skillScope() throws -> SkillScope {
+                guard let scope = SkillScope(rawValue: try request.requiredString("scope")), scope != .builtin else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Scope must be 'repo' or 'global'.")
+                }
+                return scope
+            }
+            func bundledClaudeSkills(_ roots: [SkillRoot]) async -> [(name: String, description: String)] {
+                guard request.arguments["includeBundled"]?.bool == true || request.arguments["includeBundled"]?.string == "true" else { return [] }
+                let workspace = (try? ConversationWorkspaceContext(roots: roots.map { URL(fileURLWithPath: $0.path, isDirectory: true) }))
+                    ?? (try? ConversationWorkspaceContext(roots: []))
+                guard let workspace else { return [] }
+                return (try? await conversationClients().claude.bundledSkills(workspace: workspace)) ?? []
             }
 
             let result: BridgeValue
@@ -8317,6 +8379,64 @@ final class PlayhouseBridgeRuntime {
                     taskID: request.requiredUUID("taskID"),
                     provider: ConversationProvider.parse(request.requiredString("provider"))
                 ))
+            case "skills.list":
+                let roots = try skillRoots()
+                result = try Self.value(skills.catalog(roots: roots, bundledClaudeSkills: await bundledClaudeSkills(roots)))
+            case "skills.get":
+                let roots = try skillRoots()
+                let catalog = skills.catalog(roots: roots, bundledClaudeSkills: await bundledClaudeSkills(roots))
+                let skillID = try request.requiredString("skillID")
+                guard let record = catalog.skill(id: skillID) else {
+                    throw BridgeCommandError(code: "not_found", message: "No skill matches \(skillID).")
+                }
+                result = .object([
+                    "skill": try Self.value(record),
+                    "content": record.folderPath == nil ? .null : .string(try skills.content(id: skillID, roots: roots)),
+                ])
+            case "skills.create":
+                let roots = try skillRoots()
+                let scope = try skillScope()
+                result = try Self.value(skills.create(
+                    name: request.requiredString("name"),
+                    description: request.arguments["description"]?.string ?? "",
+                    body: request.arguments["body"]?.string ?? "",
+                    scope: scope,
+                    root: scope == .repo ? try skillRoot(in: roots) : nil,
+                    roots: roots
+                ))
+            case "skills.update":
+                result = try Self.value(skills.update(
+                    id: request.requiredString("skillID"), content: request.requiredString("content"), roots: skillRoots()
+                ))
+            case "skills.delete":
+                try skills.delete(id: request.requiredString("skillID"), roots: skillRoots())
+                result = .object(["deleted": .boolean(true)])
+            case "skills.move":
+                let roots = try skillRoots()
+                let scope = try skillScope()
+                result = try Self.value(skills.move(
+                    id: request.requiredString("skillID"), to: scope,
+                    root: scope == .repo ? try skillRoot(in: roots) : nil, roots: roots
+                ))
+            case "skills.enable":
+                let roots = try skillRoots()
+                let value = request.arguments["enabled"]
+                guard let enabled = value?.bool ?? value?.string.flatMap({ ["true": true, "false": false][$0] }) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Enabled must be true or false.")
+                }
+                result = try Self.value(skills.setEnabled(
+                    id: request.requiredString("skillID"), enabled: enabled, roots: roots,
+                    bundledClaudeSkills: await bundledClaudeSkills(roots)
+                ))
+            case "skills.link":
+                result = try Self.value(skills.link(id: request.requiredString("skillID"), roots: skillRoots()))
+            case "skills.unlink":
+                result = try Self.value(skills.unlink(id: request.requiredString("skillID"), roots: skillRoots()))
+            case "skills.bridge":
+                let roots = try skillRoots()
+                var bridge = skills.bridge(roots: roots)
+                bridge.invocations = skills.invocations(in: request.arguments["message"]?.string ?? "", roots: roots)
+                result = try Self.value(bridge)
             case "conversation.provider.capabilities":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .array(try await conversations.providerCapabilities(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })
@@ -8326,7 +8446,7 @@ final class PlayhouseBridgeRuntime {
                 var ownsClient = !guiRuntime
                 if let threadID = try? taskManager.taskModel(request.requiredUUID("taskID")).codexThreadID,
                    let owner = CodexAppServerClient.sharedClient(loading: threadID, compatibleWith: clients.codex), owner !== clients.codex {
-                    clients = ConversationClients(codex: owner, claude: clients.claude)
+                    clients = ConversationClients(codex: owner, claude: clients.claude, skills: clients.skills)
                     ownsClient = false
                 }
                 defer { if ownsClient { clients.codex.shutdown() } }
