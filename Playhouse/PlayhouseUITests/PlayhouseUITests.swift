@@ -4251,6 +4251,98 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(final["isPending"] as? Bool, false)
     }
 
+    // case-contract: test_task_repository_branch_from_fetches_remote_branch | A branch-from that exists only on a Git remote and was never fetched is fetched when repository settings are saved, and the pending record stores its remote-tracking branch; a branch-from missing locally and on every remote is rejected without changing the saved settings; a remote that can't be reached reports the fetch failure instead of a missing branch and also keeps the saved settings; starting the task creates its worktree from the fetched remote commit without making the remote branch the task branch's upstream.
+    func test_task_repository_branch_from_fetches_remote_branch() throws {
+        let remoteBranch = "remote-only/branch-from"
+        let trackingRef = "refs/remotes/origin/\(remoteBranch)"
+        let remote = runDirectory.appendingPathComponent("branch-from-origin.git", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remote.path), "Each UI case should use a fresh owned bare remote.")
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        try runGit(remote, "init", "--bare")
+        let remoteCommit = try runGitOutput(
+            fixture.primary, "commit-tree", "main^{tree}", "-p", "main", "-m", "Create remote-only branch-from fixture commit"
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        try runGit(fixture.primary, "remote", "add", "origin", remote.path)
+        addTeardownBlock { [self] in try? runGit(fixture.primary, "remote", "remove", "origin") }
+        try runGit(fixture.primary, "push", "--quiet", "origin", "main", "\(remoteCommit):refs/heads/\(remoteBranch)")
+        // Pushing records the remote-tracking ref; drop it so the branch exists only on the remote.
+        try runGit(fixture.primary, "update-ref", "-d", trackingRef)
+        let trackingRefs = try runGitOutput(fixture.primary, "for-each-ref", "--format=%(refname)", trackingRef)
+        XCTAssertEqual(trackingRefs.trimmingCharacters(in: .whitespacesAndNewlines), "", "The remote branch must start unfetched.")
+
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        launchApp(defaultParent: fixture.parent.path)
+        let title = "Remote branch-from through UI"
+        let created = try runCLI([
+            "task", "create", "--title", title, "--prompt", "Fixture task description.",
+            "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any]
+        let taskID = try XCTUnwrap(created?["id"] as? String)
+        openTask(named: title)
+        let badge = element("conversation-repository-badge-primary")
+        XCTAssertTrue(badge.waitForExistence(timeout: 5))
+
+        badge.click()
+        element("conversation-repository-branch-from-edit").click()
+        let branchFromField = element("conversation-repository-branch-from")
+        replaceText(branchFromField, with: remoteBranch)
+        attachScreenshot(named: "Branch-from names a branch that exists only on the remote")
+        element("save-conversation-repository-button").click()
+        XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "branchFrom", expected: "origin/\(remoteBranch)"))
+        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", trackingRef).trimmingCharacters(in: .whitespacesAndNewlines), remoteCommit)
+        let localBranches = try runGitOutput(fixture.primary, "for-each-ref", "--format=%(refname)", "refs/heads/\(remoteBranch)")
+        XCTAssertEqual(localBranches.trimmingCharacters(in: .whitespacesAndNewlines), "", "Fetching must not create a local branch.")
+        XCTAssertTrue(waitForDisappearance(element("save-conversation-repository-button")), "A successful repository save should close its editor.")
+
+        badge.click()
+        app.activate()
+        let branchFromValue = element("conversation-repository-branch-from-value")
+        XCTAssertTrue(branchFromValue.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(accessibleLabelOrValue(of: branchFromValue), "origin/\(remoteBranch)", app.debugDescription)
+        attachScreenshot(named: "Remote branch-from is fetched and saved as its remote-tracking branch")
+
+        element("conversation-repository-branch-from-edit").click()
+        replaceText(branchFromField, with: "missing-everywhere/branch")
+        element("save-conversation-repository-button").click()
+        let error = element("codex-chat-error")
+        XCTAssertTrue(error.waitForExistence(timeout: 10), "A branch-from missing locally and on the remote should be shown in the conversation.")
+        XCTAssertTrue(error.label.contains("missing-everywhere/branch"), error.label)
+        attachScreenshot(named: "Branch-from missing locally and on the remote is rejected")
+        XCTAssertEqual(
+            try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String,
+            "origin/\(remoteBranch)",
+            "Rejecting a missing branch-from must preserve the saved value."
+        )
+
+        try runGit(fixture.primary, "remote", "set-url", "origin", runDirectory.appendingPathComponent("unreachable-origin.git").path)
+        replaceText(branchFromField, with: "unfetched/branch")
+        element("save-conversation-repository-button").click()
+        XCTAssertTrue(
+            waitUntil({ error.exists && error.label.contains("couldn't fetch 'unfetched/branch' from origin") }, timeout: 10),
+            "A fetch failure should be reported as such, not as a missing branch: \(error.label)"
+        )
+        attachScreenshot(named: "Unreachable remote reports the fetch failure")
+        try runGit(fixture.primary, "remote", "set-url", "origin", remote.path)
+        XCTAssertEqual(
+            try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String,
+            "origin/\(remoteBranch)",
+            "A failed fetch must preserve the saved value."
+        )
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(element("save-conversation-repository-button")), "Dismissing the editor should close it before the turn starts.")
+
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: title)
+        let started = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
+        XCTAssertEqual(started["isPending"] as? Bool, false)
+        XCTAssertEqual(started["branchFrom"] as? String, "origin/\(remoteBranch)")
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(started["worktreePath"] as? String), isDirectory: true)
+        let taskBranch = try XCTUnwrap(started["branch"] as? String)
+        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines), remoteCommit)
+        let upstream = try runGitOutput(worktree, "config", "--default", "", "--get", "branch.\(taskBranch).remote")
+        XCTAssertEqual(upstream.trimmingCharacters(in: .whitespacesAndNewlines), "", "The remote branch-from must not become the task branch's upstream.")
+    }
+
     // case-contract: test_task_repository_edit_rejects_stale_validation_after_removal | If a pending repository is removed while its settings are being validated, the stale edit is rejected and the newer repository removal and context root remain saved.
     func test_task_repository_edit_rejects_stale_validation_after_removal() throws {
         // The window validates the edit with real Git; the staged wrapper parks that call

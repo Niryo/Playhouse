@@ -140,6 +140,10 @@
     "expectation": "Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation."
   },
   {
+    "id": "test_task_repository_branch_from_fetches_remote_branch",
+    "expectation": "A branch-from that exists only on a Git remote and was never fetched is fetched when repository settings are saved, and the pending record stores its remote-tracking branch; a branch-from missing locally and on every remote is rejected without changing the saved settings; a remote that can't be reached reports the fetch failure instead of a missing branch and also keeps the saved settings; starting the task creates its worktree from the fetched remote commit without making the remote branch the task branch's upstream."
+  },
+  {
     "id": "test_task_repository_edit_rejects_stale_validation_after_removal",
     "expectation": "If a pending repository is removed while its settings are being validated, the stale edit is rejected and the newer repository removal and context root remain saved."
   },

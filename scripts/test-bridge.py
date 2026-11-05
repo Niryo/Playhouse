@@ -4510,6 +4510,86 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(final_record["branchFrom"], "branch-source")
         self.assertEqual(final_record["mergeTarget"], "branch-source")
 
+    # case-contract: test_task_repository_branch_from_fetches_remote_branch | A branch-from that exists only on a Git remote and was never fetched is fetched when repository settings are saved, and the pending record stores its remote-tracking branch; a branch-from missing locally and on every remote is rejected without changing the saved settings; a remote that can't be reached reports the fetch failure instead of a missing branch and also keeps the saved settings; starting the task creates its worktree from the fetched remote commit without making the remote branch the task branch's upstream.
+    def test_task_repository_branch_from_fetches_remote_branch(self):
+        remote = self.data_directory / "branch-from-origin.git"
+        remote_branch = "remote-only/branch-from"
+        tracking_ref = f"refs/remotes/origin/{remote_branch}"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+        remote_commit = self.run_git(
+            self.primary, "commit-tree", "main^{tree}", "-p", "main", "-m", "Create remote-only branch-from fixture commit",
+        ).strip()
+        self.run_git(self.primary, "remote", "add", "origin", str(remote))
+        try:
+            self.run_git(self.primary, "push", "--quiet", "origin", "main", f"{remote_commit}:refs/heads/{remote_branch}")
+            # Pushing records the remote-tracking ref; drop it so the branch exists only on the remote.
+            self.run_git(self.primary, "update-ref", "-d", tracking_ref)
+            unfetched = subprocess.run(
+                ["git", "-C", str(self.primary), "rev-parse", "--verify", "--quiet", tracking_ref],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertNotEqual(unfetched.returncode, 0, "The remote branch must start unfetched.")
+            self.assertFalse(self.branch_exists(self.primary, remote_branch))
+
+            task = self.create_repo_task("Remote branch-from", [self.primary])
+            task_id = task["id"]
+            changed, _ = self.call_cli(
+                "task", "repository", "edit", task_id,
+                "--repo", self.primary,
+                "--branch", "remote-branch-from-task",
+                "--branch-from", remote_branch,
+                "--merge-target", "main",
+            )
+            edited = self.assert_success(changed)["repositoryWorktrees"][0]
+            self.assertEqual(edited["branchFrom"], f"origin/{remote_branch}")
+            self.assertTrue(edited["isPending"])
+            self.assertEqual(self.run_git(self.primary, "rev-parse", tracking_ref).strip(), remote_commit)
+            self.assertFalse(self.branch_exists(self.primary, remote_branch), "Fetching must not create a local branch.")
+
+            missing, _ = self.call_cli(
+                "task", "repository", "edit", task_id,
+                "--repo", self.primary,
+                "--branch", "remote-branch-from-task",
+                "--branch-from", "missing-everywhere/branch",
+                "--merge-target", "main",
+                expected_status=2,
+            )
+            self.assert_failure(missing, "invalid_argument")
+            self.assertIn("missing-everywhere/branch", missing["error"]["message"])
+            fresh, _ = self.call_cli("task", "get", task_id)
+            self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"][0]["branchFrom"], f"origin/{remote_branch}")
+
+            self.run_git(self.primary, "remote", "set-url", "origin", str(self.data_directory / "unreachable-origin.git"))
+            unreachable, _ = self.call_cli(
+                "task", "repository", "edit", task_id,
+                "--repo", self.primary,
+                "--branch", "remote-branch-from-task",
+                "--branch-from", "unfetched/branch",
+                "--merge-target", "main",
+                expected_status=1,
+            )
+            self.assert_failure(unreachable, "operation_failed")
+            self.assertIn("couldn't fetch 'unfetched/branch' from origin", unreachable["error"]["message"])
+            self.run_git(self.primary, "remote", "set-url", "origin", str(remote))
+            fresh, _ = self.call_cli("task", "get", task_id)
+            self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"][0]["branchFrom"], f"origin/{remote_branch}")
+
+            self.complete_fixture_turn(task_id)
+            started, _ = self.call_cli("task", "get", task_id)
+            started_record = self.assert_success(started)["repositoryWorktrees"][0]
+            self.assertFalse(started_record["isPending"])
+            self.assertEqual(started_record["branchFrom"], f"origin/{remote_branch}")
+            worktree = Path(started_record["worktreePath"])
+            self.assertTrue(worktree.is_dir())
+            self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), remote_commit)
+            upstream = subprocess.run(
+                ["git", "-C", str(worktree), "config", "--get", "branch.remote-branch-from-task.remote"],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(upstream.stdout.strip(), "", "The remote branch-from must not become the task branch's upstream.")
+        finally:
+            self.run_git(self.primary, "remote", "remove", "origin")
+
     # case-contract: test_task_repository_edit_rejects_stale_validation_after_removal | If a pending repository is removed while its settings are being validated, the stale edit is rejected and the newer repository removal and context root remain saved.
     def test_task_repository_edit_rejects_stale_validation_after_removal(self):
         task = self.create_repo_task("Concurrent repository edit", [self.primary], roots=[str(self.custom)])
