@@ -2721,6 +2721,7 @@ final class PlayhouseUITests: XCTestCase {
         for link in [prLink, secondPRLink] {
             XCTAssertGreaterThanOrEqual(link.frame.width, 30, "A Done archive PR link should have a comfortable horizontal hit target.")
             XCTAssertGreaterThanOrEqual(link.frame.height, 30, "A Done archive PR link should have a comfortable vertical hit target.")
+            XCTAssertTrue(link.isHittable, "A Done archive PR link must be reachable at its own position, not resolved to the board under the archive.")
         }
         assertHoverEmphasis(for: prLink)
         attachScreenshot(named: "Done archive shows the linked pull request")
@@ -7339,7 +7340,6 @@ final class PlayhouseUITests: XCTestCase {
         selectAllText(userView)
         XCTAssertTrue(addComment.waitForExistence(timeout: 5), "Selecting transcript text should expose Add comment.")
         XCTAssertGreaterThan(userView.frame.height, 40, "The selected text should wrap across multiple lines.")
-        // Keep this diagnostic run focused on the response comment hover below.
         XCTAssertLessThan(abs(addComment.frame.midX - userView.frame.midX), 70,
                           "For a multiline selection, the floating hint should center over the selected lines.")
         // The hint is part of the message element, so measure against its text: the bubble's
@@ -7467,7 +7467,14 @@ final class PlayhouseUITests: XCTestCase {
         let reloadedTranscript = element("conversation-scroll-view")
         XCTAssertTrue(renderedCommentResponse.waitForExistence(timeout: 10),
                       "The reloaded conversation should finish loading before scrolling through history.")
-        for _ in 0..<6 {
+        // Scroll up only until both restored messages sit where the checks below
+        // need them; a fixed swipe count kept scrolling past the top.
+        func restoredSourceTurnIsInView() -> Bool {
+            restoredUserView.exists && restoredAssistantView.exists
+                && restoredUserView.frame.minY >= reloadedTranscript.frame.minY + 8
+                && restoredAssistantView.frame.minY < reloadedTranscript.frame.maxY - 40
+        }
+        for _ in 0..<6 where !restoredSourceTurnIsInView() {
             reloadedTranscript.swipeDown()
         }
         XCTAssertTrue(restoredUserView.waitForExistence(timeout: 10))
@@ -9438,7 +9445,12 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse((row.label + " " + (row.value as? String ?? "")).contains("COMPACTION_OPAQUE_SENTINEL"))
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "COMPACTION_OPAQUE_SENTINEL")).count, 0)
         try "Release context compaction.\n".write(to: release, atomically: true, encoding: .utf8)
-        XCTAssertTrue(waitUntil({ row.label.contains("Completed") }, timeout: 20))
+        // Query by label: reading `row.label` while the reload below briefly removes the
+        // row is a fatal snapshot error, not a polled false.
+        let completedRow = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier == %@ AND label CONTAINS %@", "context-compaction-row-item_playhouse_compaction", "Completed"
+        )).firstMatch
+        XCTAssertTrue(waitUntil({ completedRow.exists }, timeout: 20))
         // The turn's end reloads the transcript; the row is briefly absent while
         // that happens, so wait for the reloaded state before counting rows.
         XCTAssertTrue(waitUntil({
@@ -11313,11 +11325,18 @@ final class PlayhouseUITests: XCTestCase {
         // The section is open while the turn runs and folds into Worked for once the
         // answer lands, so expand only when it is actually collapsed.
         let failedAgentRow = element("codex-subagent-row-toolu_background_agent")
+        // Query by label rather than reading `failedAgentRow.label`: the row can be
+        // missing for a moment while the section folds at turn end, and reading a
+        // missing element's label is a fatal snapshot error, not a polled false.
+        let failedAgentRowWithFailure = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier == %@ AND label CONTAINS %@", "codex-subagent-row-toolu_background_agent", "failed"
+        )).firstMatch
         var failedExpandAttempts = 0
         XCTAssertTrue(waitUntil({
-            if !failedAgentRow.exists, failedExpandAttempts < 3,
-               (self.element("codex-activity-disclosure").value as? String ?? "").hasPrefix("Collapsed") {
-                self.element("codex-activity-disclosure").click()
+            let disclosure = self.element("codex-activity-disclosure")
+            if !failedAgentRow.exists, failedExpandAttempts < 3, disclosure.exists,
+               (disclosure.value as? String ?? "").hasPrefix("Collapsed") {
+                disclosure.click()
                 failedExpandAttempts += 1
                 // The toggle animates; reading the value again before it lands
                 // would click a second time and fold the section back.
@@ -11326,8 +11345,8 @@ final class PlayhouseUITests: XCTestCase {
                 }, timeout: 2)
                 return false
             }
-            return failedAgentRow.label.contains("failed")
-        }, timeout: 15), failedAgentRow.label)
+            return failedAgentRowWithFailure.exists
+        }, timeout: 15), failedAgentRow.exists ? failedAgentRow.label : "The failed agent row never appeared.")
         XCTAssertFalse(element(reportIdentifier).exists, "A failed agent summary must not appear as a successful assistant result.")
         XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20))
         XCTAssertLessThan(

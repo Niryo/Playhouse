@@ -354,6 +354,14 @@ struct KanbanBoardView: View {
                 }
             }
         }
+        // Keep a platform view behind the board. #156 removed the last one (the old drag-end
+        // monitor). Without it, accessibility hit tests over parts of the opened Done archive
+        // resolved to the board's scroll view underneath: the rows still took mouse clicks, but
+        // XCUITest (and so assistive clients) did not find them. A platform view here restores
+        // it; that was found by bisecting and experiment, and the AppKit mechanism is not
+        // confirmed. Do not remove it without rerunning test_task_done_preserves_worktree_and_branch,
+        // whose archive hittability check guards it.
+        .background(BoardAccessibilityHitTestAnchor())
         .overlay(alignment: .topTrailing) {
             if isShowingBoardSearch {
                 boardSearchBar
@@ -1112,6 +1120,13 @@ struct KanbanBoardView: View {
         }
     }
 
+}
+
+/// An empty, zero-size AppKit view kept behind the board because, empirically, the Done
+/// archive overlay's accessibility hit testing breaks without one; see its use in `body`.
+private struct BoardAccessibilityHitTestAnchor: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 private struct DoneDropDrawer: View {
