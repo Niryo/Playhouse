@@ -3,6 +3,9 @@ import SwiftData
 import SwiftUI
 
 struct KanbanBoardView: View {
+    private let boardSidebarWidth: CGFloat = 184
+    private let chatSidebarWidth: CGFloat = 460
+
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
     @Query(filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" }, sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
@@ -59,26 +62,7 @@ struct KanbanBoardView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            if isShowingChatSidebar, selectedTask == nil, let chatTask {
-                TaskConversationView(
-                    task: chatTask, isNewTask: false, isReadOnly: false,
-                    conflictResolutionRequested: false,
-                    onConflictResolutionChecked: { _ in }
-                ) {
-                    withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
-                }
-                .frame(width: 460)
-                .transition(.move(edge: .leading).combined(with: .opacity))
-                .id(chatTask.id)
-                // Without a container, this identifier replaces the conversation controls' own.
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("chat-sidebar")
-                Divider()
-            }
-            mainContent
-        }
-        .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
+        mainContent
     }
 
     private var mainContent: some View {
@@ -258,93 +242,125 @@ struct KanbanBoardView: View {
                 .fill(Color.primary.opacity(0.07))
                 .frame(height: 1)
 
-            HStack(spacing: 0) {
-                boardSidebar
+            ZStack(alignment: .topLeading) {
+                HStack(spacing: 0) {
+                    boardSidebar
 
-                Rectangle()
-                    .fill(Color.primary.opacity(0.07))
-                    .frame(width: 1)
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.07))
+                        .frame(width: 1)
 
-                VStack(spacing: 0) {
-                    if let lifecycleResetNotice {
-                        HStack(alignment: .top, spacing: 12) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Some task worktrees were kept")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .accessibilityIdentifier("task-lifecycle-reset-title")
-                                Text(lifecycleResetNotice)
-                                    .font(.system(size: 11))
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .accessibilityIdentifier("task-lifecycle-reset-details")
-                            }
-                            Spacer(minLength: 8)
-                            Button("OK") { self.lifecycleResetNotice = nil }
-                                .buttonHoverPointer()
-                                .nativeHelp("Dismiss worktree notice")
-                                .accessibilityIdentifier("dismiss-task-lifecycle-reset-notice")
-                        }
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(WorkspaceTheme.panelBackground)
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("task-lifecycle-reset-notice")
+                    if isShowingChatSidebar, selectedTask == nil, chatTask != nil {
+                        Color.clear
+                            .frame(width: max(0, chatSidebarWidth - boardSidebarWidth - 1))
+                            .accessibilityHidden(true)
                     }
 
-                    HStack(spacing: 0) {
-                        ScrollView([.horizontal, .vertical]) {
-                            HStack(alignment: .top, spacing: 16) {
-                                ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
-                                    if status == .backlog {
-                                        let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
-                                        VStack(spacing: 12) {
-                                            if hasBlockedTasks {
-                                                kanbanColumn(.blocked, minHeight: 220)
-                                                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    VStack(spacing: 0) {
+                        if let lifecycleResetNotice {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Some task worktrees were kept")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .accessibilityIdentifier("task-lifecycle-reset-title")
+                                    Text(lifecycleResetNotice)
+                                        .font(.system(size: 11))
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .accessibilityIdentifier("task-lifecycle-reset-details")
+                                }
+                                Spacer(minLength: 8)
+                                Button("OK") { self.lifecycleResetNotice = nil }
+                                    .buttonHoverPointer()
+                                    .nativeHelp("Dismiss worktree notice")
+                                    .accessibilityIdentifier("dismiss-task-lifecycle-reset-notice")
+                            }
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(WorkspaceTheme.panelBackground)
+                            .accessibilityElement(children: .contain)
+                            .accessibilityIdentifier("task-lifecycle-reset-notice")
+                        }
+
+                        HStack(spacing: 0) {
+                            ScrollView([.horizontal, .vertical]) {
+                                HStack(alignment: .top, spacing: 16) {
+                                    ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
+                                        if status == .backlog {
+                                            let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
+                                            VStack(spacing: 12) {
+                                                if hasBlockedTasks {
+                                                    kanbanColumn(.blocked, minHeight: 220)
+                                                        .transition(.opacity.combined(with: .move(edge: .top)))
+                                                }
+                                                kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
                                             }
-                                            kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
-                                        }
-                                        .frame(width: 264)
-                                        .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
-                                    } else if status == .inProgress {
-                                        let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
-                                        VStack(spacing: 12) {
-                                            if hasWaitingResponseTasks {
-                                                kanbanColumn(.waitingResponse, minHeight: 220)
-                                                    .transition(.opacity.combined(with: .move(edge: .top)))
-                                            }
-                                            kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
-                                        }
-                                        .frame(width: 264)
-                                        .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
-                                    } else {
-                                        kanbanColumn(status)
                                             .frame(width: 264)
+                                            .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
+                                        } else if status == .inProgress {
+                                            let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
+                                            VStack(spacing: 12) {
+                                                if hasWaitingResponseTasks {
+                                                    kanbanColumn(.waitingResponse, minHeight: 220)
+                                                        .transition(.opacity.combined(with: .move(edge: .top)))
+                                                }
+                                                kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
+                                            }
+                                            .frame(width: 264)
+                                            .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
+                                        } else {
+                                            kanbanColumn(status)
+                                                .frame(width: 264)
+                                        }
                                     }
                                 }
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.horizontal, 30)
+                                .padding(.top, 22)
+                                .padding(.bottom, 28)
                             }
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.horizontal, 30)
-                            .padding(.top, 22)
-                            .padding(.bottom, 28)
-                        }
-                        .scrollIndicators(.visible)
-                        .background(WorkspaceTheme.windowBackground)
-                        .scrollContentBackground(.hidden)
-                        .accessibilityIdentifier("board-columns-scroll-view")
+                            .scrollIndicators(.visible)
+                            .background(WorkspaceTheme.windowBackground)
+                            .scrollContentBackground(.hidden)
+                            .accessibilityIdentifier("board-columns-scroll-view")
 
-                        // A fixed gutter beside the scroll view rather than an overlay, so the opened
-                        // drawer never covers a column and stays put while scrolling.
-                        DoneDropDrawer(
-                            isOpen: draggedTaskStatus == .review,
-                            isActive: $isDoneTargetActive,
-                            onDrop: { moveTask(id: $0, to: .done) }
-                        )
+                            // A fixed gutter beside the scroll view rather than an overlay, so the opened
+                            // drawer never covers a column and stays put while scrolling.
+                            DoneDropDrawer(
+                                isOpen: draggedTaskStatus == .review,
+                                isActive: $isDoneTargetActive,
+                                onDrop: { moveTask(id: $0, to: .done) }
+                            )
+                        }
                     }
                 }
+
+                if isShowingChatSidebar, selectedTask == nil, let chatTask {
+                    TaskConversationView(
+                        task: chatTask, isNewTask: false, isReadOnly: false,
+                        conflictResolutionRequested: false,
+                        onConflictResolutionChecked: { _ in }
+                    ) {
+                        withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
+                    }
+                    .frame(width: chatSidebarWidth)
+                    .frame(maxHeight: .infinity, alignment: .topLeading)
+                    .overlay(alignment: .trailing) {
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.07))
+                            .frame(width: 1)
+                    }
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+                    .id(chatTask.id)
+                    // Without a container, this identifier replaces the conversation controls' own.
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("chat-sidebar")
+                }
             }
+            .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .task(id: draggedTaskID) {
             // SwiftUI reports no end for a drag that lands outside every drop target (for
@@ -525,11 +541,12 @@ struct KanbanBoardView: View {
             Spacer(minLength: 0)
         }
         .padding(12)
-        .frame(width: 232)
+        .frame(width: boardSidebarWidth)
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(WorkspaceTheme.panelBackground.opacity(0.62))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Kanban sidebar")
+        .accessibilityHidden(isShowingChatSidebar && selectedTask == nil && chatTask != nil)
     }
 
     private var boardHeader: some View {
