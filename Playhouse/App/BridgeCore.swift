@@ -5057,6 +5057,9 @@ final class ConversationManager {
                 var attributed = message
                 attributed.turnID = transcript.turns[index].id
                 transcript.turns[index].messages.append(attributed)
+                // Presenting an image is work the user must see, even from a
+                // private status nudge turn.
+                Self.dropPrivateReminderPrompt(from: &transcript.turns[index])
             } else {
                 transcript.turns.append(.init(id: "agent-image-\(message.id)", segmentID: segment.id, messages: [message]))
             }
@@ -6480,6 +6483,29 @@ final class ConversationManager {
         }
     }
 
+    /// Shows a private status nudge turn that went on to do work. Every history
+    /// path hides a turn by its private prompt, so dropping that prompt row
+    /// leaves the rest of the turn as an ordinary one, prompt still unseen.
+    private func revealPrivateReminderTurn(taskID: UUID, turnID: String) {
+        do {
+            try transcripts.mutate(taskID, turns: .turn(turnID)) { transcript in
+                guard let index = transcript.turns.lastIndex(where: { $0.id == turnID }) else { return }
+                Self.dropPrivateReminderPrompt(from: &transcript.turns[index])
+            }
+            PlayhouseDiagnostics.record("conversation.private_reminder.revealed", fields: [
+                "taskID": taskID.uuidString, "turnID": turnID
+            ])
+        } catch {
+            var fields = PlayhouseDiagnostics.errorFields(error)
+            fields["taskID"] = taskID.uuidString
+            PlayhouseDiagnostics.record("conversation.transcript.write_failed", fields: fields)
+        }
+    }
+
+    private static func dropPrivateReminderPrompt(from turn: inout ConversationTranscript.Turn) {
+        turn.messages.removeAll { $0.role == .user && isPrivateOutcomeReminderPrompt($0.text) }
+    }
+
     private func recordClaudeActivity(taskID: UUID, turnID: String, _ activity: ConversationActivity) {
         // Loads only the turns this update can touch: its own turn, wherever an
         // activity with the same background task lives, and wherever that
@@ -6901,10 +6927,16 @@ final class ConversationManager {
                 persistedThreadID = threadID
             }
             let claudeTurnID = provider == .claude ? UUID().uuidString.lowercased() : nil
+            // A status nudge passes `hideSensitiveRecoveryPrompt` only to store its
+            // prompt as a placeholder; it carries no secret, so its output follows
+            // the reminder rule below rather than being hidden as a private answer's.
+            let hidesRecoveryOutput = hideSensitiveRecoveryPrompt && !hideInternalOutcomeReminder
             if let claudeTurnID, let segment {
                 try transcripts.mutate(taskID, turns: .none) { transcript in
                     if hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty {
-                        transcript.sensitiveTurnIDs = Array(Set(transcript.sensitiveTurnIDs ?? []).union([claudeTurnID])).sorted()
+                        if hidesRecoveryOutput || !sensitiveUserInputAnswerValues.isEmpty {
+                            transcript.sensitiveTurnIDs = Array(Set(transcript.sensitiveTurnIDs ?? []).union([claudeTurnID])).sorted()
+                        }
                         // Claude messages are persisted locally from sanitized
                         // callbacks, so the prompt is already safe to retain.
                         transcript.pendingSensitiveUserInputRedaction = false
@@ -6918,6 +6950,25 @@ final class ConversationManager {
             var finalMessageCount = 0
             var leakedOutcome: String?
             var pendingQuestionLifecycleRevision: Int?
+            // A private status nudge keeps its prompt private, and so does a reply
+            // that only reports status. The nudge also tells the agent to keep
+            // working when work remains, and Claude delivers every background
+            // result inside the turn that is running, so once this turn does work
+            // (a tool call, a subagent, a steered message) it is shown like any
+            // other turn. Until then its output is recorded but not streamed.
+            var reminderTurnRevealed = !hideInternalOutcomeReminder
+            var withheldReminderUpdates: [ConversationUpdate] = []
+            let streamTurnUpdate: (ConversationUpdate) -> Void = { update in
+                if reminderTurnRevealed { onUpdate(update) } else { withheldReminderUpdates.append(update) }
+            }
+            let revealReminderTurn: () -> Void = {
+                guard !reminderTurnRevealed else { return }
+                reminderTurnRevealed = true
+                if let claudeTurnID { self.revealPrivateReminderTurn(taskID: taskID, turnID: claudeTurnID) }
+                let withheld = withheldReminderUpdates
+                withheldReminderUpdates = []
+                withheld.forEach(onUpdate)
+            }
             if onTurnStarting != nil {
                 client.markTurnStarting(threadID: threadID)
                 onTurnStarting?()
@@ -6947,13 +6998,14 @@ final class ConversationManager {
                     missedPreviousPageSignal: task.isStandaloneChat ? ((try? tasks.standaloneChatManager().lastTurnMissedSignal()) ?? false) : false
                 ),
                 onDelta: { delta in
-                    guard !hideSensitiveRecoveryPrompt, !hideInternalOutcomeReminder else { return }
+                    // Deltas are many and superseded by the recorded message, so a
+                    // turn not shown yet drops them instead of withholding them.
+                    guard !hidesRecoveryOutput, reminderTurnRevealed else { return }
                     onUpdate(ConversationUpdate(type: "text_delta", text: delta))
                 },
                 onFinalMessage: { answer in
                     let split = LeakedTurnOutcome.split(answer)
                     if split.taskID == taskID { leakedOutcome = split.outcome }
-                    guard !hideInternalOutcomeReminder else { return }
                     let message = Self.redactingSensitiveText(split.text, values: sensitiveUserInputAnswerValues)
                     // An answer that was only the echo still replaces the streamed text.
                     if let claudeTurnID, !message.isEmpty {
@@ -6962,11 +7014,12 @@ final class ConversationManager {
                             id: "\(claudeTurnID)-final-\(finalMessageCount)", role: .assistant, text: message, phase: "final_answer"
                         ))
                     }
-                    onUpdate(ConversationUpdate(type: "assistant_final", text: message))
+                    streamTurnUpdate(ConversationUpdate(type: "assistant_final", text: message))
                 },
                 onActivity: { activity in
-                    guard !hideSensitiveRecoveryPrompt, !hideInternalOutcomeReminder else { return }
+                    guard !hidesRecoveryOutput else { return }
                     if let claudeTurnID { self.recordClaudeActivity(taskID: taskID, turnID: claudeTurnID, activity) }
+                    if activity.isAgentWork { revealReminderTurn() }
                     if let durationMs = activity.durationMs {
                         Task { @MainActor in
                             try? await self.tasks.recordConversationActivityDuration(
@@ -6976,11 +7029,11 @@ final class ConversationManager {
                             )
                         }
                     }
-                    onUpdate(ConversationUpdate(type: "activity", activity: activity))
+                    streamTurnUpdate(ConversationUpdate(type: "activity", activity: activity))
                 },
                 onDiff: { diff in
-                    guard !hideSensitiveRecoveryPrompt, !hideInternalOutcomeReminder else { return }
-                    onUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff))
+                    guard !hidesRecoveryOutput else { return }
+                    streamTurnUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff))
                 },
                 onHistory: { history in
                     if provider == .codex, let segment { self.claimCodexTurns(taskID: taskID, segmentID: segment.segmentID, history.messages) }
@@ -7084,7 +7137,7 @@ final class ConversationManager {
                             redactAllMessages: currentTranscript?.pendingSensitiveUserInputRedaction == true
                         )[0]
                     }
-                    let hideProviderDetails = hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder
+                    let hideProviderDetails = hidesRecoveryOutput || !reminderTurnRevealed
                         || currentTranscript?.pendingSensitiveUserInputRedaction == true
                     let modelIDs = currentTranscript?.segments.reduce(into: [String: String]()) { result, segment in
                         result.merge(segment.codexTurnModelIDs) { existing, _ in existing }
@@ -7167,16 +7220,16 @@ final class ConversationManager {
                     await onUserInput(request)
                 },
                 onSteerMessage: { message, images in
-                    guard !hideInternalOutcomeReminder else { return }
                     if claudeTurnID != nil {
                         self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, ConversationMessage(
                             id: UUID().uuidString.lowercased(), role: .user, text: message, imageDataURLs: images
                         ))
                     }
+                    // The user wrote this, so the turn it joined can't stay private.
+                    revealReminderTurn()
                     onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
                 },
                 onProgressMessage: { message in
-                    guard !hideInternalOutcomeReminder else { return }
                     var safeMessage = message
                     safeMessage.text = Self.redactingSensitiveText(message.text, values: sensitiveUserInputAnswerValues)
                     safeMessage.asyncQuestions = message.asyncQuestions?.map { question in
@@ -7188,7 +7241,7 @@ final class ConversationManager {
                     if let claudeTurnID {
                         self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, safeMessage)
                     }
-                    onUpdate(ConversationUpdate(
+                    streamTurnUpdate(ConversationUpdate(
                         type: "assistant_progress",
                         text: safeMessage.text,
                         itemID: safeMessage.id,
@@ -7205,7 +7258,7 @@ final class ConversationManager {
                     // A private recovery turn still costs tokens, so the task's
                     // totals include it, but its per-turn row is withheld for the
                     // same reason its activity and messages are.
-                    let isHidden = hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder
+                    let isHidden = hidesRecoveryOutput || !reminderTurnRevealed
                     let attributed = ConversationTurnUsageReport(
                         turnID: isHidden ? nil : (provider == .claude ? claudeTurnID : report.turnID),
                         usage: report.usage,

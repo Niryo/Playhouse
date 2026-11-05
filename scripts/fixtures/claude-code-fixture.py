@@ -16,6 +16,7 @@ import json
 import re
 import os
 import select
+import shlex
 import subprocess
 import sys
 import time
@@ -32,6 +33,14 @@ CHAT_ANSWER = "Confirmed: 2.1.309 registers the new model and 2.1.308 does not."
 CHAT_CLOSING = "Tell me if you want the upgrade command."
 SIMPLE_ANSWER = "OK."
 PENDING_QUESTION_SUCCESS_MARKER = "finish while a structured question remains pending"
+NUDGE_RACE_STALE_ANSWER = "The task review is approved. Only the UI review is still pending."
+NUDGE_RACE_UI_REPORT = "UI review approved."
+NUDGED_COMMENTARY = "Every review is approved. Running the final check."
+NUDGED_SUITE_COMMENTARY = "Starting the final suite in the background."
+NUDGED_SUITE_REPORT = "Final suite passed: all cases green."
+NUDGED_IMAGE_CAPTION = "Nudged turn screenshot"
+NUDGED_FINAL_ANSWER = "All checks passed and the screenshot is attached. The work is complete."
+TINY_PNG_HEX = "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"
 # Lines each held stage of the streamed follow turn adds; the first stage alone
 # outgrows the transcript viewport.
 STREAM_FOLLOW_STAGES = (20, 8, 8, 8)
@@ -408,7 +417,7 @@ def read_steered_input(description):
     raise TimeoutError(f"Playhouse did not steer {description}.")
 
 
-def respond(user_text, instructions, preserve_no_outcome=False):
+def respond(user_text, instructions, preserve_no_outcome=False, previous_prompt=""):
     global background_result_sent
     commands = []
     if user_text.startswith("Classify the latest user message for Playhouse's continuous chat page index."):
@@ -463,6 +472,86 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         write({"type": "control_request", "request_id": "question-request-1", "request": {
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
         }})
+    elif "pending ui review" in user_text.lower():
+        # Mirrors the observed incident: Claude answers while a background
+        # review still runs, the review's notification lands right after that
+        # answer, and the woken turn says nothing new (Claude Code's synthetic
+        # "No response requested." never reaches stdout). No outcome is reported.
+        tool_id = "toolu_pending_ui_review"
+        task_id = "bgtask-pending-ui-review"
+        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Agent", "input": {
+            "subagent_type": "ui-verifier", "description": "UI review", "prompt": "review the UI",
+            "run_in_background": True,
+        }}])
+        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "content": "Async agent launched successfully.", "is_error": False},
+        ]}})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_agent",
+             "subagent_type": "ui-verifier", "description": "UI review"},
+        ]})
+        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "description": "UI review", "subagent_type": "ui-verifier",
+               "is_backgrounded": True, "spawn_depth": 1, "task_type": "local_agent"})
+        text("msg_pending_ui_review", NUDGE_RACE_STALE_ANSWER)
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        background_result_sent = True
+        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "status": "completed", "output_file": "", "summary": NUDGE_RACE_UI_REPORT})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        parent_request_started("msg_pending_ui_review_woken", woken=True)
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+    elif "playhouse internal outcome nudge:" in user_text.lower() and "pending ui review" in previous_prompt:
+        # The nudge says to keep working when work remains, and this turn does:
+        # it runs a check, starts a background suite, and Claude Code wakes it
+        # for the suite's notification, where it presents a screenshot, answers,
+        # and only then reports completed.
+        assistant("msg_nudged_intro", [{"type": "text", "text": NUDGED_COMMENTARY}])
+        run_tool("toolu_nudged_check", "Bash", {"command": "echo NUDGED CHECK PASSED", "description": "Final check"},
+                 "echo NUDGED CHECK PASSED")
+        steered_uuid = None
+        if Path(str(sys.argv[0]) + ".nudged-steer-pause").exists():
+            # The test steers this running nudge turn, as a user can.
+            Path(str(sys.argv[0]) + ".nudged-steer-ready").write_text("The nudged turn is waiting for a steer.\n", encoding="utf-8")
+            steered, steered_uuid = read_steered_input("the nudged turn")
+            text("msg_nudged_steer_answer", f"STEERED NUDGE: {steered}")
+        assistant("msg_nudged_suite_intro", [{"type": "text", "text": NUDGED_SUITE_COMMENTARY}])
+        suite_tool, suite_task = "toolu_nudged_suite", "bgtask-nudged-suite"
+        assistant(f"msg_{suite_tool}", [{"type": "tool_use", "id": suite_tool, "name": "Agent", "input": {
+            "subagent_type": "general-purpose", "description": "Final suite", "prompt": "run the suite",
+            "run_in_background": True,
+        }}])
+        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": suite_tool, "content": "Async agent launched successfully.", "is_error": False},
+        ]}})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": suite_task, "run_id": "fixture-run-1", "task_type": "local_agent",
+             "subagent_type": "general-purpose", "description": "Final suite"},
+        ]})
+        write({"type": "system", "subtype": "task_started", "task_id": suite_task, "run_id": "fixture-run-1",
+               "tool_use_id": suite_tool, "description": "Final suite", "subagent_type": "general-purpose",
+               "is_backgrounded": True, "spawn_depth": 1, "task_type": "local_agent"})
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        background_result_sent = True
+        write({"type": "system", "subtype": "task_notification", "task_id": suite_task, "run_id": "fixture-run-1",
+               "tool_use_id": suite_tool, "status": "completed", "output_file": "", "summary": NUDGED_SUITE_REPORT})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        parent_request_started("msg_nudged_woken", woken=True)
+        present = report_command(instructions, " conversation present-image ")
+        if present:
+            image = Path(str(sys.argv[0]) + ".nudged-screenshot.png")
+            image.write_bytes(bytes.fromhex(TINY_PNG_HEX))
+            present = present.replace("<path>", shlex.quote(str(image))).replace(
+                '[--caption "short caption"]', f"--caption {shlex.quote(NUDGED_IMAGE_CAPTION)}")
+            commands.append({"command": present, "output": run_tool("toolu_nudged_image", "Bash", {"command": present}, present)})
+        text("msg_nudged_final", NUDGED_FINAL_ANSWER)
+        outcome = report_command(instructions, " task outcome ", "completed")
+        if outcome:
+            commands.append({"command": outcome, "output": run_tool("toolu_nudged_outcome", "Bash", {"command": outcome}, outcome)})
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        if steered_uuid:
+            complete_command(steered_uuid)
+            complete_command(current_command_uuid)
     elif "playhouse internal outcome nudge:" in user_text.lower() and "outcome-reminder-question" in Path(sys.argv[0]).name:
         question_input = {
             "questions": [{
@@ -1155,7 +1244,8 @@ def main():
             ), "")
             preserve_no_outcome = any(marker in previous_prompt for marker in ("please inspect the workspace", "start the checks"))
             maybe_burn_cpu()
-            turn["reportCommands"] = respond(user_text, instructions, preserve_no_outcome=preserve_no_outcome)
+            turn["reportCommands"] = respond(user_text, instructions, preserve_no_outcome=preserve_no_outcome,
+                                            previous_prompt=previous_prompt)
             history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
             history["turns"].append(turn)
             history_path.write_text(json.dumps(history), encoding="utf-8")

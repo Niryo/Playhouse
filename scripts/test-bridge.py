@@ -3756,7 +3756,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         done = self.assert_success(self.call_cli("task", "move", task["id"], "Done", "--allow-unmerged")[0])
         self.assertEqual(done["status"], "Done")
 
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private nudge prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A private nudge that only reports status keeps its prompt, reply, and bookkeeping activities out of Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -9501,6 +9501,169 @@ class PlayhouseBridgeTests(unittest.TestCase):
         entries = {entry["path"]: entry for entry in self.assert_success(response)["unviewed"]}
         self.assertEqual(set(entries), {"post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"})
         self.assertNotIn("local-ahead.txt", entries)
+
+    # case-contract: test_claude_nudged_turn_work_stays_in_conversation | A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt and every private placeholder stay hidden.
+    def test_claude_nudged_turn_work_stays_in_conversation(self):
+        env = self.install_claude_fixture("claude-fixture-nudged-work")
+        executable = Path(env["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
+        created, _ = self.call_cli(
+            "task", "create", "--title", "Claude nudged work", "--prompt", "Fixture task description.",
+            "--root", self.primary, "--provider", "claude",
+        )
+        task_id = self.assert_success(created)["id"]
+        steer_pause = Path(f"{executable}.nudged-steer-pause")
+        steer_ready = Path(f"{executable}.nudged-steer-ready")
+        steer_pause.write_text("Hold the nudged turn for a steer.\n", encoding="utf-8")
+        send_command = ("conversation", "send", task_id, "--message", "Wait for the pending UI review.")
+        process = self.start_cli(*send_command, extra_environment=env)
+        try:
+            deadline = time.monotonic() + 60
+            while not steer_ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(steer_ready.exists(), "The private nudge turn should start and wait for a steer.")
+            steered = self.assert_success(self.call_cli(
+                "conversation", "steer", task_id, "--message", "Also double check the docs.", extra_environment=env,
+            )[0])
+            self.assertTrue(steered["accepted"], "A user can steer the running nudge turn.")
+            response, events = self.finish_cli(process, send_command, timeout=60)
+        finally:
+            if process.poll() is None:
+                process.communicate(timeout=30)
+        self.assert_success(response)
+        self.assertIn("Also double check the docs.", [e["payload"].get("message") for e in events if e["type"] == "steered_message"],
+                      "The steered message should stream even though it joined a private nudge turn.")
+        stale_answer = "The task review is approved. Only the UI review is still pending."
+        final_report = "All checks passed and the screenshot is attached. The work is complete."
+        finals = [event["payload"]["text"] for event in events if event["type"] == "assistant_final"]
+        self.assertEqual(finals, [stale_answer, final_report],
+                         "Both the unreported turn's answer and the nudged turn's final report should stream.")
+        streamed_activities = [event["payload"]["activity"]["id"] for event in events if event["type"] == "activity"]
+        self.assertIn("toolu_nudged_check", streamed_activities, "The nudged turn's work should stream live.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Review",
+                         "The completed outcome reported inside the nudged turn moves the task to Review.")
+        turns = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+        nudges = [turn for turn in turns if "playhouse internal outcome nudge:" in turn.get("userText", "").lower()]
+        self.assertEqual(len(nudges), 1, "The turn that reported no outcome gets one private status nudge, which settles it.")
+        self.assertTrue(any(" conversation present-image " in command["command"] and '"ok":true' in command["output"]
+                            for command in nudges[0]["reportCommands"]),
+                        f"The nudged turn should present its screenshot: {nudges[0]['reportCommands']}")
+
+        race_report = ("subagent_report", "UI review approved.")
+        expected_tail = [
+            ("final_answer", stale_answer),
+            ("commentary", "Every review is approved. Running the final check."),
+            ("commentary", "STEERED NUDGE: Also double check the docs."),
+            ("commentary", "Starting the final suite in the background."),
+            ("subagent_report", "Final suite passed: all cases green."),
+            ("agent_image", "Nudged turn screenshot"),
+            ("final_answer", final_report),
+        ]
+
+        def assert_nudged_work(messages, label):
+            assistant = [(m.get("phase"), m["text"]) for m in messages if m["role"] == "assistant"]
+            self.assertIn(race_report, assistant, f"{label}: the report that arrived right after the answer should be kept.")
+            tail = [entry for entry in assistant if entry != race_report][-len(expected_tail):]
+            self.assertEqual(tail, expected_tail, f"{label}: the nudged turn's work should be in order.")
+            serialized = json.dumps(messages)
+            for hidden in ("Playhouse internal outcome nudge:", "ended without reporting a task outcome",
+                           "private outcome reminder hidden", "private outcome response hidden"):
+                self.assertNotIn(hidden, serialized, f"{label}: the private nudge prompt must stay hidden.")
+            self.assertIn("Also double check the docs.", [m["text"] for m in messages if m["role"] == "user"],
+                          f"{label}: the steered message that joined the nudge turn should stay in the conversation.")
+            image = next(m for m in messages if m.get("phase") == "agent_image")
+            final = next(m for m in reversed(messages) if m["text"] == final_report)
+            self.assertEqual(image["turnID"], final["turnID"], f"{label}: the screenshot belongs to the nudged turn.")
+
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        assert_nudged_work(history["messages"], "fresh history")
+        self.assertEqual(history["messages"][-1]["text"], final_report, "The nudged turn's final report is the latest message.")
+        timeline = [activity for activity in history.get("timelineActivities", []) if activity["id"] == "toolu_nudged_check"]
+        self.assertEqual(len(timeline), 1, "The nudged turn's shell call should be a timeline tool row.")
+        self.assertEqual(timeline[0]["input"], "echo NUDGED CHECK PASSED")
+        self.assertIn("NUDGED CHECK PASSED", timeline[0].get("output") or "")
+        suite = next(activity for activity in history["activities"] if activity["id"] == "toolu_nudged_suite")
+        self.assertEqual(suite["status"], "completed")
+        self.assertEqual(suite["backgroundTaskSummary"], "Final suite passed: all cases green.")
+
+        page = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "3", extra_environment=env)[0])
+        self.assertEqual([(m.get("phase"), m["text"]) for m in page["messages"]], expected_tail[-3:],
+                         "A paged read should end on the nudged turn's work.")
+        image_page = next(m for m in page["messages"] if m.get("phase") == "agent_image")
+        self.assertTrue(image_page["imageDataURLs"] and image_page["imageDataURLs"][0].startswith("data:image/png;base64,"))
+
+        response, _ = self.call_cli("conversation", "send", task_id, "--message", "Thanks, that's all.", extra_environment=env)
+        self.assert_success(response)
+        later = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        later_turn = [m for m in later["messages"] if m.get("turnID") == later["messages"][-1].get("turnID")]
+        self.assertEqual([m["text"] for m in later_turn], ["Thanks, that's all.", "OK."], "The later turn follows the nudged work.")
+        assert_nudged_work([m for m in later["messages"] if m not in later_turn], "after a later turn")
+
+    # case-contract: test_codex_nudged_turn_work_stays_in_conversation | A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. The nudge prompt and every private placeholder stay out of history, including after a later ordinary turn.
+    def test_codex_nudged_turn_work_stays_in_conversation(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-nudged-work-success"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        task_id = self.create_task("Codex nudged work", roots=[self.primary])["id"]
+        steer_pause = Path(f"{executable}.nudged-steer-pause")
+        steer_ready = Path(f"{executable}.nudged-steer-ready")
+        steer_pause.write_text("Hold the nudged turn for a steer.\n", encoding="utf-8")
+        send_command = ("conversation", "send", task_id, "--message", "Start the work.")
+        process = self.start_cli(*send_command, extra_environment=env)
+        try:
+            deadline = time.monotonic() + 60
+            while not steer_ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(steer_ready.exists(), "The private nudge turn should start and wait for a steer.")
+            steered = self.assert_success(self.call_cli(
+                "conversation", "steer", task_id, "--message", "Also double check the docs.", extra_environment=env,
+            )[0])
+            self.assertTrue(steered["accepted"], "A user can steer the running nudge turn.")
+            response, events = self.finish_cli(process, send_command, timeout=60)
+        finally:
+            if process.poll() is None:
+                process.communicate(timeout=30)
+        self.assert_success(response)
+        self.assertIn("Also double check the docs.", [e["payload"].get("message") for e in events if e["type"] == "steered_message"],
+                      "The steered message should stream even though it joined a private nudge turn.")
+        commentary = "Codex is finishing the remaining check after the nudge."
+        final_report = "Codex finished the remaining check after the nudge. Everything is done."
+        finals = [event["payload"]["text"] for event in events if event["type"] == "assistant_final"]
+        self.assertEqual(finals[-1:], [final_report], "The nudged turn's final answer should stream.")
+        self.assertIn("item_nudged_check_1", [event["payload"]["activity"]["id"] for event in events if event["type"] == "activity"],
+                      "The nudged turn's shell command should stream live.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Review",
+                         "The completed outcome reported inside the nudged turn moves the task to Review.")
+        saved = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        nudges = [turn for turn in saved["turns"] if "playhouse internal outcome nudge:" in (turn.get("userMessage") or "").lower()]
+        self.assertEqual(len(nudges), 1, "The completed outcome in the first nudge ends the private loop.")
+
+        def assert_nudged_work(history, label):
+            assistant = [(m.get("phase"), m["text"]) for m in history["messages"] if m["role"] == "assistant"]
+            self.assertIn("Also double check the docs.", [m["text"] for m in history["messages"] if m["role"] == "user"],
+                          f"{label}: the steered message that joined the nudge turn should stay in the conversation.")
+            self.assertGreater(len(assistant), 2, f"{label}: the earlier answer should stay ahead of the nudged work.")
+            self.assertNotIn(assistant[0], [("commentary", commentary), ("final_answer", final_report)])
+            self.assertEqual(assistant[1:3], [("commentary", commentary), ("final_answer", final_report)],
+                             f"{label}: the nudged work should follow the earlier answer in order.")
+            serialized = json.dumps(history["messages"])
+            for hidden in ("Playhouse internal outcome nudge:", "ended without reporting a task outcome",
+                           "private outcome reminder hidden", "private outcome response hidden"):
+                self.assertNotIn(hidden, serialized, f"{label}: the private nudge prompt must stay hidden.")
+            timeline = [activity for activity in history.get("timelineActivities", []) if activity["id"] == "item_nudged_check_1"]
+            self.assertEqual(len(timeline), 1, f"{label}: the nudged shell command should be a timeline tool row.")
+            self.assertEqual(timeline[0]["input"], "echo NUDGED CHECK PASSED")
+
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        assert_nudged_work(history, "fresh history")
+        self.assertEqual(history["messages"][-1]["text"], final_report, "The nudged turn's final answer is the latest message.")
+        response, _ = self.call_cli("conversation", "send", task_id, "--message", "Thanks, that's all.", extra_environment=env)
+        self.assert_success(response)
+        assert_nudged_work(self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0]), "later turn")
 
     def install_claude_fixture(self, name):
         """Installs the Claude Code protocol fixture and returns its turn environment."""

@@ -295,6 +295,11 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
             && input.map { TaskProgressReportInstructions.reportCommand(in: $0) == nil } != false
     }
 
+    /// Whether this call is the agent doing work: a tool call or a subagent,
+    /// not Playhouse's own progress and outcome bookkeeping. A private status
+    /// nudge turn that does work is shown like any other turn.
+    var isAgentWork: Bool { isSubagent || isTimelineToolCall }
+
     /// The longest command text the timeline's IN block keeps.
     static let timelineInputLimit = 4_000
 
