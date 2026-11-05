@@ -298,28 +298,42 @@ enum WorkspaceChangeScanner {
 
     @MainActor
     static func captureViewedChange(workspaceRoots: [String], repositoryPath: String, relativePath: String) async throws -> WorkspaceViewedChange {
-        let (isPresent, contents) = try await PlayhouseBackgroundOperation.run {
-            guard isSafeRelativePath(relativePath) else {
+        try await captureViewedChanges(workspaceRoots: workspaceRoots, files: [(repositoryPath, relativePath)])[0]
+    }
+
+    /// Snapshots and stages each file, reading the task's repositories once for the whole batch.
+    @MainActor
+    static func captureViewedChanges(workspaceRoots: [String], files: [(repository: String, path: String)]) async throws -> [WorkspaceViewedChange] {
+        try await PlayhouseBackgroundOperation.run {
+            guard files.allSatisfy({ isSafeRelativePath($0.path) }) else {
                 throw BridgeCommandError(code: "invalid_argument", message: "The changed file path must be relative to its repository.")
             }
             let inventory = try inventorySynchronously(workspaceRoots: workspaceRoots)
-            let repository = URL(fileURLWithPath: repositoryPath, isDirectory: true).standardizedFileURL
-            guard inventory.repositories.contains(repository) else {
-                throw BridgeCommandError(code: "invalid_argument", message: "The repository isn't inside this task's working folders.")
+            return try files.map { file in
+                let repository = URL(fileURLWithPath: file.repository, isDirectory: true).standardizedFileURL
+                guard inventory.repositories.contains(repository) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "The repository isn't inside this task's working folders.")
+                }
+                let fileURL = repository.appendingPathComponent(file.path).standardizedFileURL
+                let isPresent = FileManager.default.fileExists(atPath: fileURL.path)
+                let contents = isPresent ? try worktreeBytes(repository: repository, path: file.path) : Data()
+                try stageViewedChange(repository: repository, path: file.path)
+                return WorkspaceViewedChange(repository: URL(fileURLWithPath: file.repository).standardizedFileURL.path, path: file.path, isPresent: isPresent, contents: contents)
             }
-            let fileURL = repository.appendingPathComponent(relativePath).standardizedFileURL
-            let isPresent = FileManager.default.fileExists(atPath: fileURL.path)
-            let contents = isPresent ? try worktreeBytes(repository: repository, path: relativePath) : Data()
-            try stageViewedChange(repository: repository, path: relativePath)
-            return (isPresent, contents)
         }
-        return WorkspaceViewedChange(repository: URL(fileURLWithPath: repositoryPath).standardizedFileURL.path, path: relativePath, isPresent: isPresent, contents: contents)
     }
 
     /// Records the file in the Git index when it is marked viewed, so later edits to a formerly
     /// untracked file are reported as ordinary worktree changes against a staged baseline.
+    /// A missing file is recorded as a deletion with `rm --cached`, which also accepts a deletion
+    /// that is already staged; `add` rejects that path because it matches nothing left to add.
     private static func stageViewedChange(repository: URL, path: String) throws {
-        let result = try runGit(repository: repository, arguments: ["add", "--all", "--", path])
+        // `attributesOfItem` doesn't follow symlinks, so a dangling link still counts as present.
+        let isPresent = (try? FileManager.default.attributesOfItem(atPath: repository.appendingPathComponent(path).path)) != nil
+        let arguments = isPresent
+            ? ["add", "--all", "--", path]
+            : ["rm", "--cached", "--ignore-unmatch", "--force", "--quiet", "--", path]
+        let result = try runGit(repository: repository, arguments: arguments)
         guard result.status == 0 else {
             throw BridgeCommandError(
                 code: "operation_failed",

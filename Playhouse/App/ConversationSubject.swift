@@ -142,6 +142,9 @@ protocol ConversationSubject: AnyObject, Observable {
     var conversationModelIDsData: Data? { get set }
     var savedPrompt: String? { get set }
     var pendingSubmittedPrompt: String? { get set }
+    /// True while `savedPrompt` and the draft images are the user's unsent composer draft,
+    /// rather than the last prompt that was sent.
+    var hasUnsentDraft: Bool { get set }
     var draftImageDataURLsData: Data? { get set }
     var conversationActivityDurationsData: Data? { get set }
     var answeredAsyncQuestionIDsData: Data? { get set }
@@ -315,6 +318,7 @@ final class StandaloneChat {
     var conversationModelIDsData: Data?
     var savedPrompt: String?
     var pendingSubmittedPrompt: String?
+    var hasUnsentDraft: Bool = false
     var draftImageDataURLsData: Data?
     var conversationActivityDurationsData: Data?
     var answeredAsyncQuestionIDsData: Data?

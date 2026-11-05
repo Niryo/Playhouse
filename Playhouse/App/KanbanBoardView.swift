@@ -1719,41 +1719,55 @@ private struct TaskCardView: View {
 
     private var timeRow: some View {
         HStack(spacing: 6) {
-            Image(systemName: "clock")
-                .font(.system(size: 10))
-            if task.status == .inProgress {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text(workingDuration(at: context.date))
-                        .font(.system(size: 10))
-                        .accessibilityIdentifier("task-working-duration-\(task.id.uuidString)")
-                }
-            } else {
-                Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
+            Group {
+                Image(systemName: "clock")
                     .font(.system(size: 10))
+                if task.status == .inProgress {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(workingDuration(at: context.date))
+                            .font(.system(size: 10))
+                            .accessibilityIdentifier("task-working-duration-\(task.id.uuidString)")
+                    }
+                } else {
+                    Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
+                        .font(.system(size: 10))
+                }
             }
+            .allowsHitTesting(false)
             // A zero counter says nothing yet, so it stays hidden until the task has sent tokens.
             if task.counterTokens > 0 {
                 tokenCounter
             }
         }
         .foregroundStyle(.tertiary)
-        .allowsHitTesting(false)
     }
 
     /// Everything the task has sent to the model so far, subagents included.
     /// It climbs while a turn runs and keeps the heatmap colour, so the
     /// configured ceiling still reads as "this task is getting expensive".
+    /// Clicking it opens Token Stats. The hover capsule pads the hit area well
+    /// past the small text, and the matching negative padding keeps that
+    /// larger target from growing the time row.
     private var tokenCounter: some View {
         let tokens = task.counterTokens
-        return Text(TokenUsageHeatmap.compact(tokens))
-            .font(.system(size: 10, weight: .medium, design: .monospaced))
-            .foregroundStyle(TokenUsageHeatmap.color(totalTokens: tokens, max: tokenUsageColorMax))
-            .contentTransition(.numericText())
-            .animation(.default, value: tokens)
-            .nativeHelp(counterDescription)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(counterDescription)
-            .accessibilityIdentifier("task-token-usage-counter-\(task.id.uuidString)")
+        return Button(action: onShowTokenStats) {
+            Text(TokenUsageHeatmap.compact(tokens))
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(TokenUsageHeatmap.color(totalTokens: tokens, max: tokenUsageColorMax))
+                .contentTransition(.numericText())
+                .animation(.default, value: tokens)
+                .padding(.horizontal, 4)
+                .actionButtonHoverEmphasis(padding: 6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .buttonHoverPointer()
+        .padding(.horizontal, -10)
+        .padding(.vertical, -6)
+        .nativeHelp("\(counterDescription). Click for Token Stats")
+        .accessibilityLabel(counterDescription)
+        .accessibilityHint("Open Token Stats")
+        .accessibilityIdentifier("task-token-usage-counter-\(task.id.uuidString)")
     }
 
     private var counterDescription: String {
