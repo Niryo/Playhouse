@@ -2852,7 +2852,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
 
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         let waitingFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: waitingFixture.path))
@@ -3035,6 +3035,40 @@ final class PlayhouseUITests: XCTestCase {
             boardViewport.scroll(byDeltaX: 0, deltaY: -300)
         }
         XCTAssertTrue(waitUntil({ lowestTask.exists && lowestTask.isHittable }, timeout: 10), "Vertical board scrolling should make lower backlog tasks reachable.")
+
+        // The columns are narrower than the window, so the board centers them. A sideways
+        // scroll nudge followed by a content-height change used to leave hit testing flush
+        // left while the columns still drew centered, so clicks missed every card and button
+        // until the window was resized.
+        // The newest card lands at the top, so start there; any later vertical scroll would
+        // re-sync the stale geometry and hide the regression.
+        let newestBacklogTask = app.buttons["Backlog scroll 12"]
+        for _ in 0..<20 where !newestBacklogTask.isHittable {
+            boardViewport.scroll(byDeltaX: 0, deltaY: 300)
+        }
+        XCTAssertTrue(waitUntil({ newestBacklogTask.isHittable }, timeout: 10), "Scrolling up should return to the top of the backlog.")
+        let mainWindow = app.windows["main"]
+        XCTAssertTrue(mainWindow.exists)
+        let centeredBacklogMinX = backlogColumn.frame.minX
+        XCTAssertGreaterThan(centeredBacklogMinX - mainWindow.frame.minX, 40, "The window is wider than the columns, so they should sit centered: backlog=\(backlogColumn.frame), window=\(mainWindow.frame).")
+        boardViewport.scroll(byDeltaX: -120, deltaY: 0)
+        boardViewport.scroll(byDeltaX: 120, deltaY: 0)
+        try createTaskFixture(title: "Backlog after nudge", roots: [fixture.primary.path])
+        let nudgedTask = app.buttons["Backlog after nudge"]
+        XCTAssertTrue(waitUntil({ nudgedTask.exists && nudgedTask.isHittable }, timeout: 10), "The new backlog card should appear at the top of the column.")
+        XCTAssertTrue(waitUntil({ abs(backlogColumn.frame.minX - centeredBacklogMinX) <= 4 }, timeout: 3), "A sideways nudge and a new card should not move the board's hit-test layout away from where it draws: backlog=\(backlogColumn.frame), expected minX=\(centeredBacklogMinX).")
+        attachScreenshot(named: "Centered board after a sideways nudge and a new card: columns stay where they draw")
+        // Click near the card's drawn trailing edge, derived from the centered layout
+        // rather than its current accessibility frame, so a stale hit-test layout
+        // (shifted toward the leading edge) would miss the card.
+        let cardTrailingInset = nudgedTask.frame.maxX - backlogColumn.frame.minX
+        let drawnCardPoint = CGPoint(x: centeredBacklogMinX + cardTrailingInset - 12, y: nudgedTask.frame.midY)
+        mainWindow.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: drawnCardPoint.x - mainWindow.frame.minX, dy: drawnCardPoint.y - mainWindow.frame.minY))
+            .click()
+        XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10), "Clicking the card where it draws should open the task.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
     }
 
     // case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response, so a retry after the fix moves it to Review.
@@ -13517,7 +13551,7 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
-    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes.
+    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes. While a merge is still open in the task's worktree, its files are held back and the sidebar shows a 'Merge in progress' notice naming the repository instead of the files the merge staged; the CLI reports the repository under mergingRepositories with empty sections, and aborting the merge lists the task's changes again.
     func test_external_git_edits_and_commit_refresh_workspace_changes() throws {
         let repository = runDirectory.appendingPathComponent("external-git", isDirectory: true)
         try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
@@ -13614,6 +13648,73 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("workspace-change-unviewed-local-ahead.txt").exists)
         XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").exists)
         attachScreenshot(named: "Merged upstream commits are excluded when the local base branch is stale")
+
+        // An open merge stages everything the merged branch brings in, so the repository's files are
+        // held back until the merge is concluded rather than listed as task changes.
+        let taskRepository = try XCTUnwrap(aheadBaseEntries.first?["repository"] as? String)
+        try "Merged with the merge still open.\n".write(to: repository.appendingPathComponent("merging-in.txt"), atomically: true, encoding: .utf8)
+        try runGit(repository, "add", "merging-in.txt")
+        try runGit(repository, "commit", "-m", "Base commit merged without committing")
+        try runGit(worktree, "merge", "--no-commit", "--no-ff", "main")
+        let mergeNotice = element("workspace-changes-merge-in-progress")
+        XCTAssertTrue(mergeNotice.waitForExistence(timeout: 10))
+        let mergingRepositoryLabel = URL(fileURLWithPath: taskRepository).pathComponents.suffix(2).joined(separator: "/")
+        XCTAssertTrue(mergeNotice.label.contains(mergingRepositoryLabel), "The merge notice should name the merging repository: \(mergeNotice.label)")
+        XCTAssertFalse(element("workspace-change-unviewed-tracked.txt").exists)
+        XCTAssertFalse(element("workspace-change-unviewed-merging-in.txt").exists)
+        let merging = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((merging?["unviewed"] as? [[String: Any]])?.count, 0)
+        XCTAssertEqual((merging?["viewed"] as? [[String: Any]])?.count, 0)
+        XCTAssertEqual(merging?["mergingRepositories"] as? [String], [taskRepository])
+        attachScreenshot(named: "An open merge hides the files it staged")
+
+        try runGit(worktree, "merge", "--abort")
+        XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({ !mergeNotice.exists }, timeout: 10))
+        let aborted = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual(aborted?["mergingRepositories"] as? [String], [])
+        XCTAssertEqual(Set((aborted?["unviewed"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }), ["post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"])
+    }
+
+    // case-contract: test_task_workspace_changes_over_limit_show_notice | A task whose worktree holds more than 1000 changed files still reports every one of them through fresh CLI connections, while the open task's Changes sidebar shows a 'Too many changes to list' notice naming the count instead of rendering the file list, so the window stays responsive. Bringing the count back under the limit lists the files again.
+    func test_task_workspace_changes_over_limit_show_notice() throws {
+        let repository = runDirectory.appendingPathComponent("many-changes", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try "Baseline.\n".write(to: repository.appendingPathComponent("tracked.txt"), atomically: true, encoding: .utf8)
+        try runGit(repository, "init", "--initial-branch=main")
+        try runGit(repository, "config", "user.name", "Playhouse UI Test")
+        try runGit(repository, "config", "user.email", "playhouse-ui-test@example.invalid")
+        try runGit(repository, "add", "tracked.txt")
+        try runGit(repository, "commit", "-m", "Baseline")
+
+        let created = try runCLI(["task", "create", "--title", "Many changes", "--prompt", "Fixture task description."])
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        let added = try runCLI(["task", "repository", "add", taskID, "--repo", repository.path])
+        let record = try XCTUnwrap(((added["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+        let generated = worktree.appendingPathComponent("generated", isDirectory: true)
+        try FileManager.default.createDirectory(at: generated, withIntermediateDirectories: true)
+        for index in 0..<1001 {
+            try "Generated \(index).\n".write(to: generated.appendingPathComponent(String(format: "file-%04d.txt", index)), atomically: true, encoding: .utf8)
+        }
+
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Many changes")
+        let notice = element("workspace-changes-too-many")
+        XCTAssertTrue(notice.waitForExistence(timeout: 15))
+        XCTAssertTrue(notice.label.contains("1001 changed files"), "The notice should name the count: \(notice.label)")
+        XCTAssertFalse(element("workspace-changes-list").exists, "The file list must not render over the limit.")
+        let inventory = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((inventory?["unviewed"] as? [[String: Any]])?.count, 1001, "The limit only affects the sidebar; the CLI still reports every file.")
+        XCTAssertEqual((inventory?["viewed"] as? [[String: Any]])?.count, 0)
+        attachScreenshot(named: "Over 1000 changed files shows a notice instead of the list")
+
+        try FileManager.default.removeItem(at: generated.appendingPathComponent("file-1000.txt"))
+        XCTAssertTrue(element("workspace-changes-list").waitForExistence(timeout: 15))
+        XCTAssertTrue(waitUntil({ !notice.exists }, timeout: 10))
+        let underLimit = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((underLimit?["unviewed"] as? [[String: Any]])?.count, 1000)
+        attachScreenshot(named: "At the limit the files are listed again")
     }
 
     // case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The terminal only ever opens in the task's created repository worktree, never in its source repository or a context folder, and never creates a worktree itself: while the task's worktree is still pending, or the task has no repository, the button is disabled and the CLI reports terminal_unavailable without creating the worktree, and the button enables in the open conversation once the worktree is created. The CLI reports how the terminal starts: the account's executable login shell with -l in that worktree, with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Clicking the button slides a terminal panel in from the window's right edge, floating over the conversation's right side without moving or resizing the conversation, whose shell runs in the task's worktree with the task ID in its environment and which uses macOS Terminal's Clear Dark ANSI palette (such as its blue, distinct from the emulator's own default) on a solid black background, switching to the Clear Light profile's white background and blue when the app's appearance turns light and back when it returns to dark; hiding the panel keeps the same shell, so reopening it reaches the same process. Dragging the panel's left border resizes it against the right edge, between a 320-point minimum and leaving 260 points of conversation uncovered, without resizing the conversation, and reopening the panel keeps the dragged width. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task whose worktree no longer exists reports terminal_unavailable from the CLI, and the panel shows that error with a Try Again action that opens the shell once the worktree is back; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.

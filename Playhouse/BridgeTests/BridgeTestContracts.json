@@ -105,7 +105,7 @@
   },
   {
     "id": "test_task_status_transitions_and_rejects_unknown_status",
-    "expectation": "With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing."
+    "expectation": "With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize."
   },
   {
     "id": "test_waiting_response_task_moves_to_review_manually",
@@ -377,7 +377,11 @@
   },
   {
     "id": "test_external_git_edits_and_commit_refresh_workspace_changes",
-    "expectation": "A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes."
+    "expectation": "A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes. While a merge is still open in the task's worktree, its files are held back and the sidebar shows a 'Merge in progress' notice naming the repository instead of the files the merge staged; the CLI reports the repository under mergingRepositories with empty sections, and aborting the merge lists the task's changes again."
+  },
+  {
+    "id": "test_task_workspace_changes_over_limit_show_notice",
+    "expectation": "A task whose worktree holds more than 1000 changed files still reports every one of them through fresh CLI connections, while the open task's Changes sidebar shows a 'Too many changes to list' notice naming the count instead of rendering the file list, so the window stays responsive. Bringing the count back under the limit lists the files again."
   },
   {
     "id": "test_task_terminal_opens_shell_in_task_worktree",

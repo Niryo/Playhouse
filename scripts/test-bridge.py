@@ -3611,7 +3611,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         notice = json.loads((self.data_directory / "task-lifecycle-v2-notice.json").read_text(encoding="utf-8"))
         self.assertEqual(notice, [str(dirty_path)])
 
-    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing.
+    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize.
     def test_task_status_transitions_and_rejects_unknown_status(self):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli("task", "move", task_id, "Unknown", expected_status=2)
@@ -9747,7 +9747,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(inventory["unviewed"], [])
         self.assertEqual({entry["path"] for entry in inventory["viewed"]}, pending_paths)
 
-    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes.
+    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes. While a merge is still open in the task's worktree, its files are held back and the sidebar shows a 'Merge in progress' notice naming the repository instead of the files the merge staged; the CLI reports the repository under mergingRepositories with empty sections, and aborting the merge lists the task's changes again.
     def test_external_git_edits_and_commit_refresh_workspace_changes(self):
         repository = self.data_directory / "external-git"
         repository.mkdir()
@@ -9834,6 +9834,51 @@ class PlayhouseBridgeTests(unittest.TestCase):
         entries = {entry["path"]: entry for entry in self.assert_success(response)["unviewed"]}
         self.assertEqual(set(entries), {"post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"})
         self.assertNotIn("local-ahead.txt", entries)
+
+        # An open merge stages everything the merged branch brings in, so the repository's files are
+        # held back until the merge is concluded rather than listed as task changes.
+        task_repository = entries["tracked.txt"]["repository"]
+        (repository / "merging-in.txt").write_text("Merged with the merge still open.\n", encoding="utf-8")
+        self.run_git(repository, "add", "merging-in.txt")
+        self.run_git(repository, "commit", "-m", "Base commit merged without committing")
+        self.run_git(worktree, "merge", "--no-commit", "--no-ff", "main")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        merging = self.assert_success(response)
+        self.assertEqual(merging["unviewed"], [])
+        self.assertEqual(merging["viewed"], [])
+        self.assertEqual(merging["mergingRepositories"], [task_repository])
+        self.run_git(worktree, "merge", "--abort")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        aborted = self.assert_success(response)
+        self.assertEqual(aborted["mergingRepositories"], [])
+        self.assertEqual({entry["path"] for entry in aborted["unviewed"]}, {"post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"})
+
+    # case-contract: test_task_workspace_changes_over_limit_show_notice | A task whose worktree holds more than 1000 changed files still reports every one of them through fresh CLI connections, while the open task's Changes sidebar shows a 'Too many changes to list' notice naming the count instead of rendering the file list, so the window stays responsive. Bringing the count back under the limit lists the files again.
+    def test_task_workspace_changes_over_limit_show_notice(self):
+        repository = self.data_directory / "many-changes"
+        repository.mkdir()
+        (repository / "tracked.txt").write_text("Baseline.\n", encoding="utf-8")
+        self.run_git(repository, "init", "--initial-branch=main")
+        self.run_git(repository, "config", "user.name", "Playhouse Bridge Test")
+        self.run_git(repository, "config", "user.email", "playhouse-bridge-test@example.invalid")
+        self.run_git(repository, "add", "tracked.txt")
+        self.run_git(repository, "commit", "-m", "Baseline")
+        task_id = self.create_task(title="Many changes", roots=[])["id"]
+        added, _ = self.call_cli("task", "repository", "add", task_id, "--repo", str(repository))
+        record = next(item for item in self.assert_success(added)["repositoryWorktrees"] if item["repositoryPath"] == str(repository))
+        generated = Path(record["worktreePath"]) / "generated"
+        generated.mkdir()
+        for index in range(1001):
+            (generated / f"file-{index:04d}.txt").write_text(f"Generated {index}.\n", encoding="utf-8")
+
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        inventory = self.assert_success(response)
+        self.assertEqual(len(inventory["unviewed"]), 1001, "The limit only affects the sidebar; the CLI still reports every file.")
+        self.assertEqual(inventory["viewed"], [])
+
+        (generated / "file-1000.txt").unlink()
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        self.assertEqual(len(self.assert_success(response)["unviewed"]), 1000)
 
     def install_claude_fixture(self, name):
         """Installs the Claude Code protocol fixture and returns its turn environment."""

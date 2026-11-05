@@ -130,8 +130,11 @@ struct WorkspaceChangeEntry: Codable, Equatable, Identifiable {
 struct WorkspaceChangeInventory: Codable, Equatable {
     let unviewed: [WorkspaceChangeEntry]
     let viewed: [WorkspaceChangeEntry]
+    /// Repositories with a merge still open; their files are left out until it is committed or aborted.
+    let mergingRepositories: [String]
 
     var isEmpty: Bool { unviewed.isEmpty && viewed.isEmpty }
+    var count: Int { unviewed.count + viewed.count }
 }
 
 /// How a task's terminal panel starts its shell. `environment` holds only the variables
@@ -250,6 +253,7 @@ enum WorkspaceChangeScanner {
                 "operationID": operationID,
                 "unviewedCount": String(inventory.unviewed.count),
                 "viewedCount": String(inventory.viewed.count),
+                "mergingRepositoryCount": String(inventory.mergingRepositories.count),
                 "durationMilliseconds": String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
             ])
             return inventory
@@ -376,7 +380,13 @@ enum WorkspaceChangeScanner {
         let snapshots = Dictionary(grouping: viewedChanges, by: \.repository).mapValues { Dictionary($0.map { ($0.path, $0) }) { _, latest in latest } }
         var unviewed: [WorkspaceChangeEntry] = []
         var viewed: [WorkspaceChangeEntry] = []
+        var mergingRepositories: [String] = []
         for repository in repositories {
+            // An open merge stages everything the merged branch brought in, which isn't the task's work.
+            if try runGit(repository: repository, arguments: ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).status == 0 {
+                mergingRepositories.append(repository.path)
+                continue
+            }
             let statusResult = try runGit(repository: repository, arguments: ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
             guard statusResult.status == 0 else {
                 throw BridgeCommandError(code: "operation_failed", message: "Git couldn't read changes in \(repository.path): \(statusResult.error.trimmingCharacters(in: .whitespacesAndNewlines))")
@@ -467,7 +477,7 @@ enum WorkspaceChangeScanner {
         func sort(_ entries: [WorkspaceChangeEntry]) -> [WorkspaceChangeEntry] {
             entries.sorted { $0.repository == $1.repository ? $0.path.localizedStandardCompare($1.path) == .orderedAscending : $0.repository.localizedStandardCompare($1.repository) == .orderedAscending }
         }
-        return RepositoryInventory(repositories: repositories, changes: WorkspaceChangeInventory(unviewed: sort(unviewed), viewed: sort(viewed)))
+        return RepositoryInventory(repositories: repositories, changes: WorkspaceChangeInventory(unviewed: sort(unviewed), viewed: sort(viewed), mergingRepositories: mergingRepositories))
     }
 
     private static func diffSynchronously(
