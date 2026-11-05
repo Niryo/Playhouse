@@ -10,48 +10,65 @@ final class TaskTerminalSession: ObservableObject {
     @Published private(set) var launchError: String?
     @Published private(set) var exitStatus: String?
     @Published private(set) var currentDirectory: String?
+    /// The task's worktree is being created before its first shell can start.
+    @Published private(set) var isPreparing = false
     private(set) var terminalView: PlayhouseTerminalView?
+    /// Bumped whenever the session is torn down, so a launch that resolves afterwards is dropped.
+    private var launchGeneration = 0
     private var processObserver: ProcessObserver?
     private(set) var taskID: UUID?
 
     var isRunning: Bool { terminalView?.process?.running == true }
 
     /// Starts the shell the first time the panel opens for this task; later calls reuse it.
+    /// Resolving the launch can create the task's worktree, so the shell starts once that is done.
     func startIfNeeded(taskID: UUID, workspaceManager: WorkspaceManager) {
         if self.taskID != taskID { terminate() }
-        guard terminalView == nil else { return }
+        guard terminalView == nil, !isPreparing else { return }
         self.taskID = taskID
         exitStatus = nil
-        do {
-            let launch = try workspaceManager.terminalLaunch(for: taskID)
-            let view = PlayhouseTerminalView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
-            view.font = TerminalTheme.font
-            view.optionAsMetaKey = false
-            view.setAccessibilityIdentifier("task-terminal-view")
-            let observer = ProcessObserver(session: self)
-            view.processDelegate = observer
-            var environment = ProcessInfo.processInfo.environment
-            environment.merge(launch.environment) { _, playhouse in playhouse }
-            view.startProcess(
-                executable: launch.shell,
-                args: launch.arguments,
-                environment: environment.map { "\($0.key)=\($0.value)" },
-                currentDirectory: launch.directory
-            )
-            processObserver = observer
-            terminalView = view
-            self.launch = launch
-            currentDirectory = launch.directory
-            launchError = nil
-            PlayhouseDiagnostics.record("terminal.session.started", fields: [
-                "taskID": taskID.uuidString,
-                "directory": launch.directory,
-                "shell": launch.shell
-            ])
-        } catch {
-            launch = nil
-            launchError = error.localizedDescription
+        launchError = nil
+        isPreparing = true
+        let generation = launchGeneration
+        Task { @MainActor in
+            do {
+                let launch = try await workspaceManager.terminalLaunch(for: taskID)
+                guard generation == launchGeneration else { return }
+                isPreparing = false
+                startShell(launch, taskID: taskID)
+            } catch {
+                guard generation == launchGeneration else { return }
+                isPreparing = false
+                launch = nil
+                launchError = error.localizedDescription
+            }
         }
+    }
+
+    private func startShell(_ launch: TaskTerminalLaunch, taskID: UUID) {
+        let view = PlayhouseTerminalView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
+        view.font = TerminalTheme.font
+        view.optionAsMetaKey = false
+        view.setAccessibilityIdentifier("task-terminal-view")
+        let observer = ProcessObserver(session: self)
+        view.processDelegate = observer
+        var environment = ProcessInfo.processInfo.environment
+        environment.merge(launch.environment) { _, playhouse in playhouse }
+        view.startProcess(
+            executable: launch.shell,
+            args: launch.arguments,
+            environment: environment.map { "\($0.key)=\($0.value)" },
+            currentDirectory: launch.directory
+        )
+        processObserver = observer
+        terminalView = view
+        self.launch = launch
+        currentDirectory = launch.directory
+        PlayhouseDiagnostics.record("terminal.session.started", fields: [
+            "taskID": taskID.uuidString,
+            "directory": launch.directory,
+            "shell": launch.shell
+        ])
     }
 
     func restart(workspaceManager: WorkspaceManager) {
@@ -61,6 +78,8 @@ final class TaskTerminalSession: ObservableObject {
     }
 
     func terminate() {
+        launchGeneration += 1
+        isPreparing = false
         if isRunning { terminalView?.terminate() }
         terminalView?.processDelegate = nil
         terminalView?.removeFromSuperview()
@@ -178,7 +197,13 @@ struct TaskTerminalPanel: View {
                 .fill(Color.primary.opacity(0.07))
                 .frame(height: 1)
 
-            if let launchError = session.launchError {
+            if session.isPreparing {
+                ProgressView("Preparing worktree…")
+                    .controlSize(.small)
+                    .font(.system(size: 11))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("task-terminal-preparing")
+            } else if let launchError = session.launchError {
                 VStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 18))
@@ -190,6 +215,11 @@ struct TaskTerminalPanel: View {
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .accessibilityIdentifier("task-terminal-error-message")
+                    Button("Try Again", action: onRestart)
+                        .controlSize(.small)
+                        .buttonHoverPointer()
+                        .nativeHelp("Try opening the terminal again")
+                        .accessibilityIdentifier("retry-terminal-button")
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -230,9 +260,10 @@ struct TaskTerminalPanel: View {
     }
 }
 
-/// The look of macOS Terminal's built-in Clear Dark and Clear Light profiles: a slightly
-/// translucent background over a blur, with soft, desaturated ANSI colors. It follows the
-/// app's appearance between the two. Values are from the profiles Terminal.app ships in
+/// The look of macOS Terminal's built-in Clear Dark and Clear Light profiles: soft,
+/// desaturated ANSI colors, following the app's appearance between the two. Dark uses a solid
+/// black background in place of Clear Dark's translucent slate; light keeps Clear Light's
+/// translucent white over a blur. Values are from the profiles Terminal.app ships in
 /// Contents/Resources/Initial Settings.
 struct TerminalTheme: Equatable {
     let foreground: NSColor
@@ -250,7 +281,7 @@ struct TerminalTheme: Equatable {
         dark
             ? TerminalTheme(
                 foreground: hex(0xE6E6E6),
-                background: hex(0x212734), backgroundOpacity: 0.95,
+                background: hex(0x000000), backgroundOpacity: 1,
                 cursor: hex(0xE6E6E6), selection: hex(0x334E5E),
                 ansi: [
                     0x35424C, 0xB45648, 0x6CAA71, 0xC4AC62, 0x6D96B4, 0xBD7BCD, 0x7CCBCD, 0xDEE5EB,
