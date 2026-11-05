@@ -5,10 +5,10 @@ description: Build and launch the Playhouse macOS app from a chosen source workt
 
 # Launch a Playhouse worktree app
 
-Run the chosen worktree's `scripts/run.sh` from that worktree root. For the current worktree:
+Run the chosen worktree's `scripts/run.sh` from that worktree root, with the inherited Playhouse bridge variables cleared (see "Environment overrides" for why). For the current worktree:
 
 ```bash
-./scripts/run.sh
+env -u PLAYHOUSE_DATA_DIRECTORY -u PLAYHOUSE_BRIDGE_SERVICE_NAME -u PLAYHOUSE_BRIDGE_SOCKET_PATH ./scripts/run.sh
 ```
 
 For another worktree, run its own `scripts/run.sh` using its absolute path. Do not run this repository's launcher while pointing it at another worktree: the script derives its build and app profile from its own location.
@@ -17,13 +17,30 @@ The launcher builds the app, closes an existing Playhouse instance from the same
 
 ## Environment overrides
 
-Agent sessions inherit `PLAYHOUSE_DATA_DIRECTORY` from the Playhouse app that started them. When that value is another Playhouse app's profile directory (the primary app's or another worktree's), `scripts/run.sh` ignores it, says so on stderr, and launches with the selected worktree's own data directory. Any other value must match the selected worktree's profile. If `scripts/run.sh` rejects it with “uses this worktree’s isolated data directory,” do not retry unchanged and do not manually construct an app launch. Clear only that override and rerun the worktree launcher:
+Agent sessions inherit three variables from the Playhouse app that started them, and all three point at that app, not at the worktree being launched:
+
+- `PLAYHOUSE_DATA_DIRECTORY`: the parent app's data directory.
+- `PLAYHOUSE_BRIDGE_SERVICE_NAME` and `PLAYHOUSE_BRIDGE_SOCKET_PATH`: the parent app's bridge daemon.
+
+`open -n` passes the caller's whole environment to the launched app, not only its `--env` values. `scripts/run.sh` replaces `PLAYHOUSE_DATA_DIRECTORY` with the worktree's own directory, but it does not touch the two bridge variables. A window launched with them still set connects to the parent app's daemon while sending its own worktree data directory, so every bridge request fails. The window shows "This Playhouse worktree app cannot open another app's task store." when you send a message, and the terminal and other bridge-backed actions fail the same way. Local-only actions such as saving a draft keep working, which hides the problem until the first send.
+
+Always launch with all three cleared, as above, so `run.sh` and the app resolve this worktree's own data directory and bridge from `scripts/app-profile.sh`:
 
 ```bash
-env -u PLAYHOUSE_DATA_DIRECTORY ./scripts/run.sh
+env -u PLAYHOUSE_DATA_DIRECTORY -u PLAYHOUSE_BRIDGE_SERVICE_NAME -u PLAYHOUSE_BRIDGE_SOCKET_PATH ./scripts/run.sh
 ```
 
-This lets `run.sh` select the profile directory computed by `scripts/app-profile.sh`. Preserve other environment variables unless the launcher identifies them as the cause.
+If a window already shows that error, it was launched with the parent's bridge variables. Relaunch it with the command above; `run.sh` closes the old instance first.
+
+Clear the same three variables for `scripts/playhouse.sh` calls aimed at the launched worktree app, for example to create a task for the user to try. Otherwise the CLI refuses with "The bridge service override does not match the selected app," or reaches the parent app instead:
+
+```bash
+env -u PLAYHOUSE_DATA_DIRECTORY -u PLAYHOUSE_BRIDGE_SERVICE_NAME -u PLAYHOUSE_BRIDGE_SOCKET_PATH ./scripts/playhouse.sh task list
+```
+
+Keep the variables when you report progress or outcomes for your own task through the parent app's CLI; that path needs them.
+
+When `PLAYHOUSE_DATA_DIRECTORY` names another Playhouse app's profile directory (the primary app's or another worktree's), `scripts/run.sh` ignores it and says so on stderr. Any other value must match the selected worktree's profile; if `run.sh` rejects it with "uses this worktree's isolated data directory," do not retry unchanged or construct an app launch by hand. Clear the variables as above and rerun the worktree launcher. Preserve other environment variables unless the launcher identifies them as the cause.
 
 ## Confirm the launch
 
