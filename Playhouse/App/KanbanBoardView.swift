@@ -388,7 +388,7 @@ struct KanbanBoardView: View {
         // resolved to the board's scroll view underneath: the rows still took mouse clicks, but
         // XCUITest (and so assistive clients) did not find them. A platform view here restores
         // it; that was found by bisecting and experiment, and the AppKit mechanism is not
-        // confirmed. Do not remove it without rerunning test_task_done_preserves_worktree_and_branch,
+        // confirmed. Do not remove it without rerunning test_task_done_removes_worktree_and_preserves_branch,
         // whose archive hittability check guards it.
         .background(BoardAccessibilityHitTestAnchor())
         .overlay(alignment: .topTrailing) {
