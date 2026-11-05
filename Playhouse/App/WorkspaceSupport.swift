@@ -89,6 +89,9 @@ extension View {
 enum WorkspaceSettings {
     static let defaultParentFolderKey = "defaultWorkspaceParentFolderPath"
     static let lastSelectedRepositoriesKey = "lastSelectedRepositories"
+    static let recentRepositoriesKey = "recentRepositories"
+    /// How many recently selected repositories are remembered and offered by the repository picker.
+    static let recentRepositoryHistoryLimit = 20
     static let appearanceKey = "appearance"
     /// Whether the task view's sidebar is hidden to a narrow rail; one value shared by every task.
     static let taskSidebarCollapsedKey = "taskSidebarCollapsed"

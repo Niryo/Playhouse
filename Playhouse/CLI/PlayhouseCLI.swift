@@ -224,7 +224,7 @@ enum PlayhouseCLI {
                 let title = try requiredFlag("--title", flags: flags).first!
                 return BridgeRequest(command: "task.rename", arguments: ["taskID": .string(id), "title": .string(title)])
             case "repository":
-                guard tail.count >= 2 else { throw CLIError.usage("Use: playhouse task repository add|add-batch|replace|edit|remove <task-id> ...") }
+                guard tail.count >= 2 else { throw CLIError.usage("Use: playhouse task repository add|add-batch|replace|edit|remove|recent <task-id> ...") }
                 let id = tail[1]
                 switch tail[0] {
                 case "add-batch":
@@ -248,6 +248,9 @@ enum PlayhouseCLI {
                         command: "task.repository.\(tail[0])",
                         arguments: ["taskID": .string(id), "repositoryPath": .string(repository)]
                     )
+                case "recent":
+                    guard tail.count == 2 else { throw CLIError.usage("Use: playhouse task repository recent <task-id>") }
+                    return BridgeRequest(command: "task.repository.recent", arguments: ["taskID": .string(id)])
                 case "edit":
                     let flags = try parseFlags(
                         Array(tail.dropFirst(2)),
@@ -265,7 +268,7 @@ enum PlayhouseCLI {
                         "mergeTarget": .string(mergeTarget)
                     ])
                 default:
-                    throw CLIError.usage("Use: playhouse task repository add|add-batch|replace|edit|remove <task-id> ...")
+                    throw CLIError.usage("Use: playhouse task repository add|add-batch|replace|edit|remove|recent <task-id> ...")
                 }
             case "prompt":
                 guard let id = tail.first else { throw CLIError.usage("Use: playhouse task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]") }
@@ -721,6 +724,7 @@ enum PlayhouseCLI {
       playhouse task repository replace <task-id> --repo <path> [--repo <path>...]
       playhouse task repository edit <task-id> --repo <path> --branch <name> --branch-from <ref> [--merge-target <ref>]
       playhouse task repository remove <task-id> --repo <path>
+      playhouse task repository recent <task-id>
       playhouse task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]
       playhouse task roots get <task-id>
       playhouse task roots set <task-id> --root <path> [--root <path>...]
