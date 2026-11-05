@@ -13023,7 +13023,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Merged upstream commits are excluded when the local base branch is stale")
     }
 
-    // case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and the Token Stats context-menu item opens a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
+    // case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and both the Token Stats context-menu item and a click on the counter itself, a button that highlights on hover, open a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
     func test_task_token_usage_records_claude_turn_breakdown() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-usage")
         launchApp(defaultParent: fixture.parent.path)
@@ -13066,11 +13066,12 @@ final class PlayhouseUITests: XCTestCase {
         )
         attachScreenshot(named: "Task card shows its live token counter beside the time")
 
-
-        card.rightClick()
-        let statsAction = element("token-stats-task-menu-item")
-        XCTAssertTrue(statsAction.waitForExistence(timeout: 5), "The task context menu should offer Token Stats.")
-        statsAction.click()
+        // The counter is a button: its hit area is padded well past the 10pt text,
+        // hovering highlights it, and clicking its edge (not the text) opens Token Stats.
+        XCTAssertGreaterThanOrEqual(counter.frame.height, 20, "The counter's hit area should be taller than its small text.")
+        assertHoverEmphasis(for: counter)
+        attachScreenshot(named: "Token counter highlights on hover")
+        counter.coordinate(withNormalizedOffset: CGVector(dx: 0.06, dy: 0.5)).click()
 
         // The sheet's summary loads asynchronously (`.task`), so its text commits
         // a moment after the element appears; assertText waits on the content.
@@ -15521,7 +15522,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTFail("Could not read control screenshots to verify hover emphasis.", file: file, line: line)
             return
         }
-        XCTAssertGreaterThan(changedPixels, 5, "Hovering a PR control should visibly change its appearance.", file: file, line: line)
+        XCTAssertGreaterThan(changedPixels, 5, "Hovering the control should visibly change its appearance.", file: file, line: line)
     }
 
     private func element(containingAccessibilityText text: String) -> XCUIElement {
