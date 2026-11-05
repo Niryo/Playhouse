@@ -855,6 +855,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let conversationEffort: String
     let savedPrompt: String?
     let pendingSubmittedPrompt: String?
+    let hasUnsentDraft: Bool
     let workspaceRoots: [String]
     let repositoryWorktrees: [RepositoryWorktreeRecord]
     let contextFolders: [String]
@@ -879,6 +880,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         conversationEffort = task.conversationEffort
         savedPrompt = task.savedPrompt
         pendingSubmittedPrompt = task.pendingSubmittedPrompt
+        hasUnsentDraft = task.hasUnsentDraft
         workspaceRoots = task.workspaceRootPaths
         repositoryWorktrees = task.repositoryWorktrees
         contextFolders = task.contextFolderPaths
@@ -1881,6 +1883,7 @@ final class BoardTaskManager {
                 chat.conversationModelIDsData = task.conversationModelIDsData
                 chat.savedPrompt = task.savedPrompt
                 chat.pendingSubmittedPrompt = task.pendingSubmittedPrompt
+                chat.hasUnsentDraft = task.hasUnsentDraft
                 chat.draftImageDataURLsData = task.draftImageDataURLsData
                 chat.conversationActivityDurationsData = task.conversationActivityDurationsData
                 chat.answeredAsyncQuestionIDsData = task.answeredAsyncQuestionIDsData
@@ -3320,11 +3323,23 @@ final class BoardTaskManager {
             let providerName = task.conversationProvider.displayName
             let client = clients.client(for: task.conversationProvider)
             guard let threadID = task.activeConversationID else {
-                if task.pendingSubmittedPrompt != nil, !(try hasConversationTurnReservation(id)) {
+                if let submittedPrompt = task.pendingSubmittedPrompt, !(try hasConversationTurnReservation(id)) {
                     if task.status == .inProgress {
                         task.status = .waitingResponse
                         task.statusMessage = "Playhouse restarted before \(providerName) started this turn. Your prompt is saved; review it and continue when ready."
                     }
+                    // The prompt never reached the provider. A draft typed after sending it
+                    // was saved separately, so return both to the composer rather than one.
+                    let draft = task.hasUnsentDraft ? task.savedPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" : ""
+                    let submittedText = submittedPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if submittedText.isEmpty {
+                        // An image-only send returns through its images, still in the draft.
+                    } else if draft.isEmpty {
+                        task.savedPrompt = submittedPrompt
+                    } else if draft != submittedText {
+                        task.savedPrompt = submittedPrompt + "\n\n" + (task.savedPrompt ?? "")
+                    }
+                    task.hasUnsentDraft = task.savedPrompt != nil || !task.draftImageDataURLs.isEmpty
                     task.pendingSubmittedPrompt = nil
                     try await saveTaskContext(taskID: id)
                 }
@@ -3438,7 +3453,9 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil, submitted: Bool = false, imageDataURLs: [String]? = nil) async throws -> BoardTaskRecord {
+    /// `replacingDraft` marks a send of the composer's own draft, which replaces the unsent
+    /// draft in this same write; other submitted prompts leave a different unsent draft alone.
+    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil, submitted: Bool = false, imageDataURLs: [String]? = nil, replacingDraft: Bool = false) async throws -> BoardTaskRecord {
         PlayhouseDiagnostics.record("task.prompt.write.started", fields: [
             "taskID": id.uuidString,
             "promptByteCount": String(prompt.utf8.count),
@@ -3456,8 +3473,17 @@ final class BoardTaskManager {
         }
         return try await withTaskOperationLock(id) {
             let task = try requireSubject(id)
-            task.savedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : prompt
-            if let imageDataURLs { task.draftImageDataURLs = imageDataURLs }
+            let normalizedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            // A prompt sent from elsewhere (a queued follow-up, the CLI) must not replace an
+            // unsent composer draft holding different text.
+            let keepsUnsentDraft = submitted && !replacingDraft && task.hasUnsentDraft
+                && (task.savedPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") != normalizedPrompt
+            if !keepsUnsentDraft {
+                task.savedPrompt = normalizedPrompt.isEmpty ? nil : prompt
+                if let imageDataURLs { task.draftImageDataURLs = imageDataURLs }
+                // Only `saveDraft`, the composer's draft writer, marks an unsent draft.
+                task.hasUnsentDraft = false
+            }
             task.pendingSubmittedPrompt = submitted ? prompt : nil
             if let status {
                 task.status = status
@@ -3470,6 +3496,46 @@ final class BoardTaskManager {
                 "submitted": String(submitted)
             ])
             return BoardTaskRecord(task: task)
+        }
+    }
+
+    /// Saves the composer's unsent text and images as one draft. Unlike `savePrompt`, it leaves
+    /// the submitted prompt and status alone, so the composer can save while a turn runs
+    /// without ending that turn's pending prompt. Steering, queueing, and sending clear the
+    /// draft by saving the emptied composer; a blank draft therefore means the user cleared it.
+    func saveDraft(_ id: UUID, prompt: String, imageDataURLs: [String]) async throws -> BoardTaskRecord {
+        PlayhouseDiagnostics.record("task.draft.write.started", fields: [
+            "taskID": id.uuidString,
+            "promptByteCount": String(prompt.utf8.count),
+            "imageCount": String(imageDataURLs.count)
+        ])
+        if imageDataURLs.count > 8 || imageDataURLs.contains(where: { !ConversationManager.isValidImageDataURL($0) }) {
+            throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
+        }
+        return try await withTaskOperationLock(id) {
+            let task = try requireSubject(id)
+            task.savedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : prompt
+            task.draftImageDataURLs = imageDataURLs
+            task.hasUnsentDraft = task.savedPrompt != nil || !imageDataURLs.isEmpty
+            try await saveTaskContext(taskID: id)
+            PlayhouseDiagnostics.record("task.draft.write.succeeded", fields: [
+                "taskID": id.uuidString,
+                "status": task.status.rawValue
+            ])
+            return BoardTaskRecord(task: task)
+        }
+    }
+
+    /// Images sent with a prompt stay in the draft until its turn starts, so a restart before
+    /// then returns them with the prompt. Once the turn starts they leave the draft, unless the
+    /// user has since saved a new draft. A draft saved in that short window replaces the sent
+    /// images, so only the prompt text returns if Playhouse also stops before the turn starts.
+    func clearSentDraftImages(_ id: UUID, sentImageDataURLs: [String]) async throws {
+        try await withTaskOperationLock(id) {
+            let task = try requireSubject(id)
+            guard !task.hasUnsentDraft, !sentImageDataURLs.isEmpty, task.draftImageDataURLs == sentImageDataURLs else { return }
+            task.draftImageDataURLs = []
+            try await saveTaskContext(taskID: id)
         }
     }
 
@@ -3651,7 +3717,7 @@ final class BoardTaskManager {
         } catch {
             fields["phase"] = phase
             fields.merge(
-                PlayhouseDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
+                PlayhouseDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? "", task.pendingSubmittedPrompt ?? ""])
             ) { _, new in new }
             PlayhouseDiagnostics.record("task.delete.failed", fields: fields)
             throw error
@@ -3726,7 +3792,9 @@ final class BoardTaskManager {
         if let resolvedTitle, !resolvedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             branchTitle = resolvedTitle
         } else if ["Generating title…", "Untitled task"].contains(initialTask.title) {
-            let prompt = initialTask.savedPrompt ?? fallbackPrompt ?? initialTask.title
+            // A send names the branch after the prompt it sent; an unsent draft kept beside it
+            // describes later work.
+            let prompt = fallbackPrompt ?? initialTask.savedPrompt ?? initialTask.title
             branchTitle = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
         } else {
             branchTitle = initialTask.title
@@ -5206,7 +5274,7 @@ final class ConversationManager {
             } else {
                 fields = PlayhouseDiagnostics.errorFields(
                     error,
-                    redacting: [task.title, task.savedPrompt ?? ""] + sensitiveUserInputAnswerValues
+                    redacting: [task.title, task.savedPrompt ?? "", task.pendingSubmittedPrompt ?? ""] + sensitiveUserInputAnswerValues
                 )
             }
             fields["taskID"] = taskID.uuidString
@@ -6833,7 +6901,7 @@ final class ConversationManager {
             if !task.isStandaloneChat {
                 task = try await tasks.prepareRepositoryWorktrees(
                     taskID,
-                    fallbackPrompt: hideInternalOutcomeReminder ? (task.savedPrompt ?? persistedText) : persistedText,
+                    fallbackPrompt: hideInternalOutcomeReminder && !task.hasUnsentDraft ? (task.savedPrompt ?? persistedText) : persistedText,
                     resolvedTitle: resolvedWorktreeTitle ?? persistedText
                 )
             }
@@ -6986,6 +7054,16 @@ final class ConversationManager {
             if onTurnStarting != nil {
                 client.markTurnStarting(threadID: threadID)
                 onTurnStarting?()
+            }
+            if !hideInternalOutcomeReminder, !imageDataURLs.isEmpty {
+                // Leftover images stay safely in the draft, so a failed cleanup must not fail the turn.
+                do {
+                    try await tasks.clearSentDraftImages(taskID, sentImageDataURLs: imageDataURLs)
+                } catch {
+                    var fields = PlayhouseDiagnostics.errorFields(error)
+                    fields["taskID"] = taskID.uuidString
+                    PlayhouseDiagnostics.record("task.draft.sent_images_clear.failed", fields: fields)
+                }
             }
             phase = "\(provider.rawValue)-turn"
             try tasks.activateConversationTurnOutcome(taskID)
@@ -7390,7 +7468,7 @@ final class ConversationManager {
                 ? ["error": "Private conversation recovery turn failed."]
                 : PlayhouseDiagnostics.errorFields(
                     error,
-                    redacting: [task.title, task.savedPrompt ?? ""] + sensitiveUserInputAnswerValues
+                    redacting: [task.title, task.savedPrompt ?? "", task.pendingSubmittedPrompt ?? ""] + sensitiveUserInputAnswerValues
                 )
             fields["taskID"] = taskID.uuidString
             fields["threadID"] = persistedThreadID ?? ""
@@ -8248,6 +8326,15 @@ final class PlayhouseBridgeRuntime {
                     status: status,
                     submitted: submitted,
                     imageDataURLs: request.arguments["images"]?.strings
+                ))
+            case "task.draft.save":
+                guard let prompt = request.arguments["prompt"]?.string else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Missing required argument: prompt.")
+                }
+                result = try Self.value(try await taskManager.saveDraft(
+                    request.requiredUUID("taskID"),
+                    prompt: prompt,
+                    imageDataURLs: request.arguments["images"]?.strings ?? []
                 ))
             case "task.delete":
                 try await taskManager.delete(request.requiredUUID("taskID"), diagnostics: conversationClients().codex.diagnosticFields())

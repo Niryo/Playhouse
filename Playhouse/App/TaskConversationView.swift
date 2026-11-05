@@ -97,6 +97,9 @@ private final class InlineCodeLayoutManager: NSLayoutManager {
 @Observable
 private final class ComposerDraftModel {
     var text = ""
+    /// The composer text that needs no save: the draft last saved or restored, or the empty
+    /// composer a send, steer, or queue left behind.
+    @ObservationIgnored var settledText = ""
     @ObservationIgnored var autosaveTask: Task<Void, Never>?
 }
 
@@ -848,7 +851,7 @@ struct TaskConversationView: View {
         get { composerDraft.autosaveTask }
         nonmutating set { composerDraft.autosaveTask = newValue }
     }
-    @State private var draftNeedsAutosave = false
+    private var isDraftUnsaved: Bool { draft != composerDraft.settledText }
     @State private var pendingImages: [PendingImage] = []
     @State private var isShowingImagePicker = false
     @State private var selectedChatImage: NSImage?
@@ -1653,6 +1656,8 @@ struct TaskConversationView: View {
         .onDisappear {
             changeWatcher?.stop()
             changeWatcher = nil
+            // Switching tasks replaces this view without going back first.
+            if !isReadOnly, isDraftUnsaved { persistDraft(reportingErrors: false) }
         }
     }
 
@@ -4433,7 +4438,7 @@ struct TaskConversationView: View {
 
                                 Button {
                                     pendingImages.removeAll { $0.id == attachment.id }
-                                    persistDraftImages()
+                                    persistDraft()
                                 } label: {
                                     Image(systemName: "xmark.circle.fill").foregroundStyle(.white, .black.opacity(0.7))
                                 }
@@ -4677,9 +4682,6 @@ struct TaskConversationView: View {
                         } else if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/goal", provider.supportsGoals {
                             isEnteringGoal = true
                             draft = ""
-                        }
-                        if !isReadOnly, !isResponding, !isLoadingHistory {
-                            draftNeedsAutosave = true
                         }
                         scheduleDraftAutosave(newValue)
                     }
@@ -5138,8 +5140,8 @@ struct TaskConversationView: View {
                 }
             }
             goalStatusUpdatedAt = .now
-            // Autosave pauses during a turn, so the saved draft can be text that
-            // was since steered or queued; neither belongs back in the composer.
+            // Stores from before drafts were marked can hold an already sent prompt
+            // as the saved prompt; that one does not belong back in the composer.
             let queuedTexts = Set(((try? conversationManager.queuedMessages(taskID: task.id)) ?? []).map(\.text))
             let promptWasSent = task.savedPrompt.map { prompt in
                 history.messages.contains { $0.role == .user && $0.text == prompt }
@@ -5152,10 +5154,21 @@ struct TaskConversationView: View {
                !submittedPrompt.isEmpty {
                 messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: submittedPrompt))
             }
-            if draft == draftAtLoadStart {
-                draft = promptWasSent || hasPendingSubmittedPrompt ? "" : (task.savedPrompt ?? "")
+            // A marked draft is unsent by definition: steering, queueing, and sending clear it.
+            let savedDraft = task.hasUnsentDraft || !(promptWasSent || hasPendingSubmittedPrompt)
+                ? task.savedPrompt ?? ""
+                : ""
+            let restoresDraftImages = task.hasUnsentDraft || !(promptWasSent || hasPendingSubmittedPrompt)
+            // Unsent composer text is never replaced by a saved draft, which can only be older.
+            // A composer the user just cleared is unsaved, and stays cleared.
+            if draft == draftAtLoadStart, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isDraftUnsaved {
+                composerDraft.settledText = savedDraft
+                draft = savedDraft
+            } else if isDraftUnsaved {
+                // Autosave skips a reload, so save text that was still waiting for it.
+                persistDraft()
             }
-            if !promptWasSent && !hasPendingSubmittedPrompt && pendingImages.isEmpty {
+            if restoresDraftImages && pendingImages.isEmpty {
                 pendingImages = task.draftImageDataURLs.compactMap { dataURL in
                     guard let comma = dataURL.firstIndex(of: ","),
                           let data = Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...])),
@@ -5406,7 +5419,10 @@ struct TaskConversationView: View {
         completedResponseDuration = nil
         WorkspaceSettings.preferencesStore.set(startedAt, forKey: responseStartedAtDefaultsKey)
         WorkspaceSettings.preferencesStore.removeObject(forKey: completedResponseDurationDefaultsKey)
-        if usesComposerDraft { draft = "" }
+        if usesComposerDraft {
+            composerDraft.settledText = ""
+            draft = ""
+        }
         let imageDataURLs = usesComposerDraft ? pendingImages.map(\.dataURL) : []
         if usesComposerDraft { pendingImages = [] }
         // Question IDs can repeat across turns.
@@ -5424,7 +5440,8 @@ struct TaskConversationView: View {
                 status: .inProgress,
                 prompt: text,
                 generateTitle: false,
-                reserveTitleForSend: true
+                reserveTitleForSend: true,
+                sendsComposerDraft: usesComposerDraft
             )
             isPreparingSubmittedMessage = false
             guard saved else {
@@ -5439,6 +5456,7 @@ struct TaskConversationView: View {
                         guard let image = Self.image(fromDataURL: dataURL) else { return nil }
                         return PendingImage(dataURL: dataURL, image: image)
                     }
+                    persistDraft()
                 }
                 isResponding = false
                 responseStartedAt = nil
@@ -5628,6 +5646,7 @@ struct TaskConversationView: View {
                             guard let image = Self.image(fromDataURL: dataURL) else { return nil }
                             return PendingImage(dataURL: dataURL, image: image)
                         }
+                        persistDraft()
                     }
                     errorMessage = error.localizedDescription
                 }
@@ -5635,11 +5654,6 @@ struct TaskConversationView: View {
             }
 
             isResponding = false
-            if !usesComposerDraft, !draft.isEmpty {
-                do {
-                    _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: draft)
-                } catch { errorMessage = error.localizedDescription }
-            }
         }
     }
 
@@ -5830,8 +5844,7 @@ struct TaskConversationView: View {
         guard !text.isEmpty || !imageDataURLs.isEmpty else { return }
         do {
             _ = try conversationManager.queueMessage(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
-            draft = ""
-            clearSteeredDraftImages()
+            clearHandedOffDraft()
             refreshQueuedMessages()
             errorMessage = nil
         } catch { errorMessage = error.localizedDescription }
@@ -5881,8 +5894,7 @@ struct TaskConversationView: View {
                 let accepted = try await conversationManager.steer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
                 guard accepted else {
                     _ = try await conversationManager.queueMissedSteer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
-                    draft = ""
-                    clearSteeredDraftImages()
+                    clearHandedOffDraft()
                     refreshQueuedMessages()
                     if let history = try? await conversationManager.history(taskID: task.id, messageLimit: Self.historyPageSize) {
                         applyHistoryMessages(history)
@@ -5892,8 +5904,7 @@ struct TaskConversationView: View {
                     return
                 }
                 showLocalSteer(text, imageDataURLs: imageDataURLs)
-                draft = ""
-                clearSteeredDraftImages()
+                clearHandedOffDraft()
                 errorMessage = nil
             } catch {
                 refreshQueuedMessages()
@@ -5962,23 +5973,35 @@ struct TaskConversationView: View {
             throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
         }
         pendingImages.append(PendingImage(dataURL: "data:\(encoded.mimeType);base64,\(encoded.data.base64EncodedString())", image: previewImage))
-        persistDraftImages()
+        persistDraft()
     }
 
-    /// Images handed to the active turn or the queue leave the saved draft too,
-    /// so reopening the task doesn't restore them to the composer.
-    private func clearSteeredDraftImages() {
-        guard !pendingImages.isEmpty else { return }
+    /// Text and images handed to the active turn or the queue leave the saved draft
+    /// at once, so reopening the task doesn't restore them to the composer.
+    private func clearHandedOffDraft() {
+        composerDraft.settledText = ""
+        draft = ""
         pendingImages.removeAll()
-        persistDraftImages()
+        persistDraft()
     }
 
-    private func persistDraftImages() {
+    /// Saves the composer's text and images together as the task's draft, during a turn
+    /// as well as between turns. Values are captured now, so a save still completes after
+    /// the view goes away.
+    private func persistDraft(reportingErrors: Bool = true) {
+        draftAutosaveTask?.cancel()
+        draftAutosaveTask = nil
+        let text = draft
         let images = pendingImages.map(\.dataURL)
+        let taskID = task.id
+        let taskManager = BoardTaskManager(modelContext: modelContext)
+        composerDraft.settledText = text
         Task { @MainActor in
             do {
-                _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: draft, imageDataURLs: images)
-            } catch { errorMessage = error.localizedDescription }
+                _ = try await taskManager.saveDraft(taskID, prompt: text, imageDataURLs: images)
+            } catch {
+                if reportingErrors { errorMessage = error.localizedDescription }
+            }
         }
     }
 
@@ -6045,7 +6068,12 @@ struct TaskConversationView: View {
             return
         }
         if isReadOnly { onBack(); return }
-        if isResponding { onBack(); return }
+        if isResponding {
+            // The turn keeps running, and so does the draft typed beside it.
+            if isDraftUnsaved { persistDraft() }
+            onBack()
+            return
+        }
         let hasStartedRepository = task.repositoryWorktrees.contains { !$0.isPending }
         let hasDraft = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         // Folder-only context is not work in progress: an otherwise empty new task is discarded.
@@ -6062,11 +6090,12 @@ struct TaskConversationView: View {
             }
             return
         }
-        if draftNeedsAutosave, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if isDraftUnsaved, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let images = pendingImages.map(\.dataURL)
             Task { @MainActor in
                 do {
-                    _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: "")
-                    draftNeedsAutosave = false
+                    _ = try await BoardTaskManager(modelContext: modelContext).saveDraft(task.id, prompt: "", imageDataURLs: images)
+                    composerDraft.settledText = draft
                     await saveDraftAndGenerateTitle(status: nil, then: onBack)
                 } catch {
                     errorMessage = error.localizedDescription
@@ -6104,23 +6133,20 @@ struct TaskConversationView: View {
         messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: text, imageDataURLs: imageDataURLs))
     }
 
+    /// Autosaves typed text while the agent responds as well as between turns. Composer
+    /// changes that need no save (a restored draft, or the empty composer a send leaves)
+    /// match the settled text and are skipped.
     private func scheduleDraftAutosave(_ value: String) {
         draftAutosaveTask?.cancel()
-        let prompt = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isReadOnly, !isDisplayingActiveResponse, !isLoadingHistory else { return }
+        guard !isReadOnly, !isLoadingHistory, value != composerDraft.settledText else { return }
         draftAutosaveTask = Task { @MainActor in
             // Let AppKit finish a burst of synthesized keystrokes before the
             // main-actor SwiftData write starts. This keeps long XCTest
             // `typeText` operations responsive while retaining prompt
             // autosave once typing settles.
             try? await Task.sleep(nanoseconds: 750_000_000)
-            guard !Task.isCancelled, !isResponding, !isLoadingHistory else { return }
-            do {
-                _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: prompt)
-                if draft == value { draftNeedsAutosave = false }
-            } catch {
-                errorMessage = error.localizedDescription
-            }
+            guard !Task.isCancelled, !isLoadingHistory, draft == value else { return }
+            persistDraft()
         }
     }
 
@@ -6130,10 +6156,21 @@ struct TaskConversationView: View {
         prompt submittedPrompt: String? = nil,
         generateTitle: Bool = true,
         reserveTitleForSend: Bool = false,
+        sendsComposerDraft: Bool = false,
         then completion: (() -> Void)? = nil
     ) async -> Bool {
         let prompt = (submittedPrompt ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else {
+            // An image-only send has no prompt to submit, but its draft is no longer unsent. Its
+            // images leave the draft once the turn starts.
+            if sendsComposerDraft {
+                do {
+                    _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: "")
+                } catch {
+                    errorMessage = error.localizedDescription
+                    return false
+                }
+            }
             if task.title == "Generating title…", task.pendingSubmittedPrompt == nil {
                 _ = try? await BoardTaskManager(modelContext: modelContext).renameIfTitleMatches(
                     task.id,
@@ -6147,12 +6184,17 @@ struct TaskConversationView: View {
         let taskManager = BoardTaskManager(modelContext: modelContext)
         var shouldGenerateTitle = false
         do {
-            let savedTask = try await taskManager.savePrompt(
-                task.id,
-                prompt: prompt,
-                status: status,
-                submitted: reserveTitleForSend
-            )
+            // Without a status change this saves the composer's draft, text and images together.
+            let savedTask = status == nil && !reserveTitleForSend
+                ? try await taskManager.saveDraft(task.id, prompt: prompt, imageDataURLs: pendingImages.map(\.dataURL))
+                : try await taskManager.savePrompt(
+                    task.id,
+                    prompt: prompt,
+                    status: status,
+                    submitted: reserveTitleForSend,
+                    replacingDraft: sendsComposerDraft
+                )
+            if status == nil && !reserveTitleForSend { composerDraft.settledText = draft }
             if generateTitle, ["Generating title…", "Untitled task"].contains(savedTask.title) {
                 shouldGenerateTitle = try await taskManager.renameIfTitleMatches(
                     task.id,
