@@ -9970,7 +9970,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "terminal", chat_id, expected_status=3)
         self.assert_failure(response, "not_found")
 
-    # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and both the Token Stats context-menu item and a click on the counter itself, a button that highlights on hover, open a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
+    # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and both the Token Stats context-menu item and a click on the counter itself, a button that highlights on hover, open a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown. Excluding cache reads (uncached input + cache write + output, subagent included) is 855 per turn, doubling after a second turn, and also reaches the live stream when the session files cannot be read; an empty task reports it unavailable. A task saved before the cache split existed (call usage without the split, plus turn-level buckets) still loads, reports its call counts and total sent, omits the per-call excluding-cache figures, and falls back to the turn buckets minus cache reads (170 for 100 input, 50 output, 400 cache read and 20 cache write); its modal hides the Excluding cache reads headline. The modal also labels 'Excluding cache reads (incl. subagents)' with its main-agent and subagent split.
     def test_task_token_usage_records_claude_turn_breakdown(self):
         # Matches TURN_USAGE in scripts/fixtures/claude-code-fixture.py.
         expected_turn_usage = {
@@ -9983,6 +9983,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         call_usage_per_turn = {
             "totalCalls": 4, "totalSentTokens": 1840, "totalOutputTokens": 85, "finalTranscriptTokens": 650,
         }
+        # The same calls without their cache reads (input + cache write + output): main
+        # (100+50+20) + (120+30+40) = 360, subagent (200+20+10) + (240+10+15) = 495.
+        excluding_cache_per_turn = {"main": 360, "subagents": 495, "total": 855}
         environment = self.install_claude_fixture("claude-fixture-token-usage")
         # The session files the fixture writes live under Claude Code's config directory.
         session_files = self.data_directory / "claude-config"
@@ -9993,6 +9996,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
         empty = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
         self.assertFalse(empty["callUsage"]["available"], "A task with no turns has no call-level usage yet.")
+        self.assertIsNone(empty["callUsage"].get("totalTokensExcludingCacheReads"), "No calls means no cache-excluded call total.")
+        self.assertEqual(empty["tokensExcludingCacheReads"], 0, "An empty task falls back to the turn buckets, which are zero.")
         self.assertEqual(empty["callUsage"]["totalCalls"], 0)
         self.assertEqual(empty["totalTokens"], 0, "A task with no turns has recorded no tokens.")
         self.assertEqual(empty["turns"], [])
@@ -10013,8 +10018,18 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(calls["available"])
         for key, value in call_usage_per_turn.items():
             self.assertEqual(calls[key], value, f"callUsage.{key} should count each call once, subagent included.")
-        self.assertEqual(calls["mainAgent"], {"calls": 2, "sentTokens": 1200, "outputTokens": 60, "finalTranscriptTokens": 650})
-        self.assertEqual(calls["subagents"], {"count": 1, "calls": 2, "sentTokens": 640, "outputTokens": 25})
+        self.assertEqual(calls["mainAgent"], {
+            "calls": 2, "sentTokens": 1200, "outputTokens": 60, "finalTranscriptTokens": 650, "tokensExcludingCacheReads": excluding_cache_per_turn["main"],
+        })
+        self.assertEqual(calls["subagents"], {
+            "count": 1, "calls": 2, "sentTokens": 640, "outputTokens": 25, "tokensExcludingCacheReads": excluding_cache_per_turn["subagents"],
+        })
+        self.assertEqual(calls["mainAgent"]["tokensExcludingCacheReads"], excluding_cache_per_turn["main"])
+        self.assertEqual(
+            calls["totalTokensExcludingCacheReads"], excluding_cache_per_turn["total"],
+            "Excluding cache reads sums uncached input + cache write + output over the main agent and the subagent.",
+        )
+        self.assertEqual(first["tokensExcludingCacheReads"], excluding_cache_per_turn["total"])
         self.assertEqual(first["usage"], expected_turn_usage, "Claude's usage buckets should reach the task totals.")
         self.assertEqual(first["totalTokens"], turn_total)
         self.assertEqual(len(first["turns"]), 1, "The completed turn should be recorded once.")
@@ -10037,6 +10052,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         for key in ("totalCalls", "totalSentTokens", "totalOutputTokens"):
             self.assertEqual(second["callUsage"][key], call_usage_per_turn[key] * 2, f"A second turn adds to callUsage.{key}.")
         self.assertEqual(second["callUsage"]["finalTranscriptTokens"], 650)
+        self.assertEqual(second["callUsage"]["totalTokensExcludingCacheReads"], excluding_cache_per_turn["total"] * 2)
         self.assertEqual(second["callUsage"]["subagents"]["count"], 2, "Each turn's subagent has its own file.")
         self.assertEqual(second["totalTokens"], turn_total * 2, "A second turn adds to the running total.")
         self.assertEqual(second["usage"]["inputTokens"], expected_turn_usage["inputTokens"] * 2)
@@ -10058,8 +10074,36 @@ class PlayhouseBridgeTests(unittest.TestCase):
         live = self.assert_success(self.call_cli("task", "token-usage", live_id)[0])["callUsage"]
         for key, value in call_usage_per_turn.items():
             self.assertEqual(live[key], value, f"The live stream should reach callUsage.{key}.")
+        self.assertEqual(
+            live["totalTokensExcludingCacheReads"], excluding_cache_per_turn["total"],
+            "The live stream carries the cache split too, subagent calls included.",
+        )
+        self.assertEqual(live["subagents"]["tokensExcludingCacheReads"], excluding_cache_per_turn["subagents"])
 
-    # case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, Codex's input count includes its cached tokens, so the input bucket excludes them rather than counting them twice. Per-call usage notifications streamed before the turn ends, including those of a subagent thread that names its parent, reach the same call-level accounting once each (a repeated notification is ignored), and the Token Stats modal shows those Codex totals, call counts and final transcript size in the app.
+        # A task saved before the cache split existed: call usage without the split fields plus turn buckets.
+        legacy_title = "Claude legacy token usage"
+        legacy_id = self.create_task(title=legacy_title, provider="claude")["id"]
+        legacy_snapshots = '{"claude:legacy":{"provider":"claude","updatedAt":800000000,"main":{"calls":2,"sentTokens":1200,"outputTokens":60,"lastContextTokens":650},"subagents":{"old":{"calls":1,"sentTokens":300,"outputTokens":10,"lastContextTokens":300}}}}'.encode("utf-8")
+        with sqlite3.connect(self.data_directory / "Playhouse-v2.store") as database:
+            seeded = database.execute(
+                "UPDATE ZBOARDTASK SET ZCALLUSAGESNAPSHOTSDATA = ?, ZTOTALINPUTTOKENS = 100, ZTOTALOUTPUTTOKENS = 50, "
+                "ZTOTALCACHEREADTOKENS = 400, ZTOTALCACHECREATIONTOKENS = 20 WHERE ZTITLE = ?",
+                (legacy_snapshots, legacy_title),
+            )
+            self.assertEqual(seeded.rowcount, 1, "Seed the real SwiftData row with pre-split call usage.")
+        # The running daemon holds the task in memory; a fresh daemon (its own service name) reads the seeded row.
+        fresh_daemon = {
+            "PLAYHOUSE_BRIDGE_SERVICE_NAME": f"{arguments.service_name}.legacy-{uuid.uuid4().hex[:8]}",
+            "PLAYHOUSE_BRIDGE_IDLE_GRACE_SECONDS": "3",
+        }
+        legacy = self.assert_success(self.call_cli("task", "token-usage", legacy_id, extra_environment=fresh_daemon)[0])
+        self.assertTrue(legacy["callUsage"]["available"], "Old call usage still decodes.")
+        self.assertEqual((legacy["callUsage"]["totalCalls"], legacy["callUsage"]["totalSentTokens"]), (3, 1500))
+        self.assertIsNone(legacy["callUsage"].get("totalTokensExcludingCacheReads"), "Without the split there is no per-call figure.")
+        self.assertIsNone(legacy["callUsage"]["subagents"].get("tokensExcludingCacheReads"))
+        self.assertEqual(legacy["tokensExcludingCacheReads"], 170, "The fallback is the turn buckets minus cache reads.")
+
+    # case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, Codex's input count includes its cached tokens, so the input bucket excludes them rather than counting them twice. Per-call usage notifications streamed before the turn ends, including those of a subagent thread that names its parent, reach the same call-level accounting once each (a repeated notification is ignored), and the Token Stats modal shows those Codex totals, call counts and final transcript size in the app. Excluding cache reads, the figure counts each call's uncached input plus cache write plus output, main thread and subagent alike (780), and the modal shows it with its main-agent and subagent split.
     def test_task_token_usage_records_codex_turn_breakdown(self):
         # Matches TURN_USAGE in scripts/fixtures/codex-app-server-fixture.py.
         # The fixture reports 900 input tokens of which 250 were cached; Codex's input
@@ -10088,7 +10132,16 @@ class PlayhouseBridgeTests(unittest.TestCase):
             {key: calls[key] for key in ("totalCalls", "totalSentTokens", "totalOutputTokens", "finalTranscriptTokens")},
             {"totalCalls": 3, "totalSentTokens": 1900, "totalOutputTokens": 80, "finalTranscriptTokens": 900},
         )
-        self.assertEqual(calls["subagents"], {"count": 1, "calls": 1, "sentTokens": 300, "outputTokens": 10})
+        # Codex input includes cached tokens: main calls (700-500)+30 and (900-600)+40, subagent (300-100)+10.
+        self.assertEqual(calls["subagents"], {
+            "count": 1, "calls": 1, "sentTokens": 300, "outputTokens": 10, "tokensExcludingCacheReads": 210,
+        })
+        self.assertEqual(calls["mainAgent"]["tokensExcludingCacheReads"], 570)
+        self.assertEqual(
+            calls["totalTokensExcludingCacheReads"], 780,
+            "Excluding cache reads sums uncached input + cache write + output over the main thread and its subagent.",
+        )
+        self.assertEqual(summary["tokensExcludingCacheReads"], 780)
 
     def run_claude_token_waste_turn(self, title):
         """One Claude fixture turn whose session file logs every request; see

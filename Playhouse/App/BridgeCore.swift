@@ -3124,6 +3124,9 @@ final class BoardTaskManager {
             agent.calls += call.calls
             agent.sentTokens += call.sentTokens
             agent.outputTokens += call.outputTokens
+            agent.uncachedInputTokens += call.uncachedInputTokens
+            agent.cacheReadTokens += call.cacheReadTokens
+            agent.cacheWriteTokens += call.cacheWriteTokens
             if call.calls > 0 { agent.lastContextTokens = call.contextTokens }
             if let agentID = call.agentID { snapshot.subagents[agentID] = agent } else { snapshot.main = agent }
             snapshot.updatedAt = .now

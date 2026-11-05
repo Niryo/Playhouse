@@ -1537,7 +1537,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             turnID: nil, usage: ConversationTokenUsage(), toolLabels: [],
             liveCall: ConversationLiveCall(
                 agentID: rootID == threadID ? nil : threadID,
-                calls: 1, sentTokens: sent, outputTokens: call.outputTokens, contextTokens: sent
+                calls: 1, sentTokens: sent, outputTokens: call.outputTokens,
+                uncachedInputTokens: call.inputTokens, cacheReadTokens: call.cacheReadTokens, cacheWriteTokens: call.cacheCreationTokens,
+                contextTokens: sent
             )
         ))
     }
