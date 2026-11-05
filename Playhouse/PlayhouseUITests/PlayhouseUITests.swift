@@ -12905,7 +12905,7 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
-    // case-contract: test_task_workspace_changes_mark_all_viewed_and_unview | The Changes section header offers Mark all as viewed while it lists files: one action saves a viewed snapshot of every current Changes entry and stages each in Git, so Changes empties and every file is listed under Viewed, and the operation reports how many files it marked, zero when nothing is pending. Each Viewed entry offers Mark as unviewed, which drops that file's snapshot without touching the Git index, so its whole change from the branch base is listed under Changes again; unviewing a file that isn't a current Viewed entry, including one already unviewed and an unknown path, is rejected. These results persist across fresh CLI/XPC connections. The whole Changes sidebar collapses to a narrow rail that still shows how many files are pending, and that collapsed or expanded state is one global preference, so opening another task keeps it. Once loaded, refreshing a task with no changes keeps its No changes state on screen instead of flashing the loading placeholder.
+    // case-contract: test_task_workspace_changes_mark_all_viewed_and_unview | The Changes section header offers Mark all as viewed while it lists files: one action saves a viewed snapshot of every current Changes entry and stages each in Git, so Changes empties and every file is listed under Viewed, and the operation reports how many files it marked, zero when nothing is pending. Each Viewed entry offers Mark as unviewed, which drops that file's snapshot without touching the Git index, so its whole change from the branch base is listed under Changes again; unviewing a file that isn't a current Viewed entry, including one already unviewed and an unknown path, is rejected. These results persist across fresh CLI/XPC connections. The Changes section collapses inside the task sidebar, hiding its Viewed and Changes lists while its header and pending count stay visible and the sidebar stays open for other sections; separately, the whole sidebar hides to a narrow rail that still shows how many files are pending. Each collapsed or expanded state is its own global preference, so opening another task keeps it. Once loaded, refreshing a task with no changes keeps its No changes state on screen instead of flashing the loading placeholder.
     func test_task_workspace_changes_mark_all_viewed_and_unview() throws {
         let cleanRepository = runDirectory.appendingPathComponent("clean-changes", isDirectory: true)
         try FileManager.default.createDirectory(at: cleanRepository, withIntermediateDirectories: true)
@@ -13014,20 +13014,28 @@ final class PlayhouseUITests: XCTestCase {
             code: "not_found"
         )
 
-        element("collapse-workspace-changes-button").click()
-        XCTAssertTrue(element("task-sidebar-collapsed").waitForExistence(timeout: 5), "The Changes sidebar collapses to a narrow rail.")
-        XCTAssertFalse(element("workspace-changes-title").exists)
-        XCTAssertFalse(element("workspace-change-unviewed-shared.txt").exists)
-        assertText("collapsed-workspace-changes-count", equals: "Changes to review: 1")
-        XCTAssertLessThan(element("task-sidebar-collapsed").frame.width, 60)
-        attachScreenshot(named: "The collapsed Changes sidebar keeps the pending count")
+        // The Changes section collapses inside the sidebar, which stays open for other sections.
+        assertText("toggle-workspace-changes-section-button", equals: "Expanded")
+        element("toggle-workspace-changes-section-button").click()
+        XCTAssertTrue(element("workspace-change-unviewed-shared.txt").waitForNonExistence(timeout: 5), "Collapsing the Changes section hides its lists.")
+        XCTAssertFalse(element("unviewed-changes-section").exists)
+        XCTAssertFalse(element("viewed-changes-section").exists)
+        XCTAssertTrue(element("task-sidebar").exists, "Collapsing the section keeps the sidebar open.")
+        XCTAssertFalse(element("task-sidebar-collapsed").exists)
+        assertText("workspace-changes-title", equals: "Changes")
+        assertText("toggle-workspace-changes-section-button", equals: "Collapsed")
+        assertText("collapsed-workspace-changes-section-count", equals: "Changes to review: 1")
+        XCTAssertGreaterThan(element("task-sidebar").frame.width, 200)
+        attachScreenshot(named: "The collapsed Changes section keeps its header and pending count")
 
         openTask(named: "Clean changes")
-        XCTAssertTrue(element("task-sidebar-collapsed").waitForExistence(timeout: 10), "The collapsed state is global, so another task opens collapsed.")
-        XCTAssertFalse(element("workspace-changes-title").exists)
-        XCTAssertFalse(element("collapsed-workspace-changes-count").exists, "A task with nothing pending shows no count.")
-        element("expand-workspace-changes-button").click()
-        XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-changes-title").waitForExistence(timeout: 10))
+        assertText("toggle-workspace-changes-section-button", equals: "Collapsed")
+        XCTAssertFalse(element("workspace-changes-empty").exists, "The collapsed section state is global, so another task opens with it collapsed.")
+        XCTAssertFalse(element("collapsed-workspace-changes-section-count").exists, "A task with nothing pending shows no count.")
+        element("workspace-changes-title").click()
+        XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10), "Clicking the section title expands it.")
+        assertText("toggle-workspace-changes-section-button", equals: "Expanded")
 
         // Every refresh used to swap No changes for the loading placeholder while Git ran.
         var sawLoadingPlaceholder = false
@@ -13043,10 +13051,25 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(sawLoadingPlaceholder, "Refreshing a loaded task must keep No changes on screen instead of flashing the loading placeholder.")
         attachScreenshot(named: "No changes stays on screen across refreshes")
 
+        // Separately, the whole sidebar hides to a narrow rail.
+        element("hide-task-sidebar-button").click()
+        XCTAssertTrue(element("task-sidebar-collapsed").waitForExistence(timeout: 5), "The sidebar hides to a narrow rail.")
+        XCTAssertFalse(element("workspace-changes-title").exists)
+        XCTAssertFalse(element("collapsed-task-sidebar-count").exists, "A task with nothing pending shows no count.")
+        XCTAssertLessThan(element("task-sidebar-collapsed").frame.width, 60)
+
         openTask(named: "Mark all viewed")
-        XCTAssertTrue(element("workspace-changes-title").waitForExistence(timeout: 10), "Expanding in one task expands the sidebar everywhere.")
+        XCTAssertTrue(element("task-sidebar-collapsed").waitForExistence(timeout: 10), "The hidden sidebar state is global, so another task opens with it hidden.")
+        assertText("collapsed-task-sidebar-count", equals: "Changes to review: 1")
+        attachScreenshot(named: "The hidden sidebar keeps the pending count")
+        element("show-task-sidebar-button").click()
+        XCTAssertTrue(element("workspace-changes-title").waitForExistence(timeout: 10))
         XCTAssertFalse(element("task-sidebar-collapsed").exists)
-        XCTAssertTrue(element("workspace-change-unviewed-shared.txt").waitForExistence(timeout: 10))
+        assertText("toggle-workspace-changes-section-button", equals: "Expanded")
+        XCTAssertTrue(
+            element("workspace-change-unviewed-shared.txt").waitForExistence(timeout: 10),
+            "Expanding the section in one task expands it everywhere."
+        )
     }
 
     // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes.
