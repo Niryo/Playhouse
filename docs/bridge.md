@@ -18,7 +18,7 @@ The daemon accepts a versioned, length-prefixed JSON request over its socket, st
 | `task repository add <task-id> --repo <path>` / `task repository add-batch <task-id> --repo <path> [--repo <path>...]` | Add repository context, prepare managed worktrees immediately, and update saved repository selection |
 | `task repository replace <task-id> --repo <path> [--repo <path>...]` | Replace the task's repository set while preserving folder-only context |
 | `task repository remove <task-id> --repo <path>` | Remove a repository from a task, subject to managed-worktree safety checks |
-| `task repository recent <task-id>` | List up to three recently selected repositories, newest first, that still exist and are not attached to the task (the task header's quick-add suggestions) |
+| `task repository recent <task-id>` | List the recently selected repositories (up to twenty, newest first) that still exist and are not attached to the task; the repository picker offers these before a search is typed |
 | `task roots get <task-id>` | Read ordered task roots |
 | `task roots set <task-id> --root <path> [--root <path>...]` | Replace ordered task roots |
 | `task delete <task-id>` | Delete a task |

@@ -4866,7 +4866,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertNotIn(str(self.nested), repositories)
         self.assertNotIn(str(self.external), repositories)
 
-    # case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations. Each saved selection also feeds a newest-first recent repository history of up to ten repositories that keeps repositories after they are removed from the selection; the task repository recent command lists up to three of them that still exist and are not attached to the task, and rejects an unknown task. In the UI, attached repositories appear as large chips carrying a remove badge, and up to three recent repositories outside the task precede them as smaller grayed chips with a plus badge, divided from the attached chips by a vertical separator; removing an attached repository through its badge turns it into a recent chip, and clicking that chip adds it back to the task and saved selection.
+    # case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations. Each saved selection also feeds a newest-first recent repository history of up to twenty repositories that keeps repositories after they are removed from the selection; the task repository recent command lists those that still exist and are not attached to the task, and rejects an unknown task. In the UI, attached repositories appear as large chips carrying a remove badge and the header shows no suggestion chips; removing a repository through its badge makes the add-repository picker list it under Recent before anything is typed, clicking it adds it back to the task and saved selection, and typing a query replaces the recent list with the regular search suggestions.
     def test_new_task_remembers_last_selected_repositories(self):
         response, _ = self.call_cli("settings", "set-last-repositories", "--repo", self.secondary, "--repo", self.primary)
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
@@ -4958,9 +4958,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         recent, _ = self.call_cli("task", "repository", "recent", quick_task_id)
         self.assertEqual(self.assert_success(recent)["repositories"], [str(self.secondary), str(self.primary)])
 
-        # The history keeps ten repositories, suggestions show three, and missing repositories are skipped.
+        # The history keeps twenty repositories and skips missing ones when suggesting.
         extras = []
-        for index in range(11):
+        for index in range(21):
             extra = self.data_directory / f"recent-repository-{index:02d}"
             extra.mkdir()
             subprocess.run(["git", "init", "-q", str(extra)], check=True)
@@ -4970,12 +4970,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
             command.extend(["--repo", extra])
         self.assert_success(self.call_cli(*command)[0])
         response, _ = self.call_cli("settings", "get")
-        self.assertEqual(self.assert_success(response)["recentRepositories"], [str(extra) for extra in extras[:10]])
+        self.assertEqual(self.assert_success(response)["recentRepositories"], [str(extra) for extra in extras[:20]])
         shutil.rmtree(extras[1])
         recent, _ = self.call_cli("task", "repository", "recent", quick_task_id)
         self.assertEqual(
             self.assert_success(recent)["repositories"],
-            [str(extras[0]), str(extras[2]), str(extras[3])],
+            [str(extras[0])] + [str(extra) for extra in extras[2:20]],
         )
         response, _ = self.call_cli("task", "repository", "recent", str(uuid.uuid4()), expected_status=3)
         self.assert_failure(response, "not_found")

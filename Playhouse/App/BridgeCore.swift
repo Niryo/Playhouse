@@ -4046,10 +4046,10 @@ final class WorkspaceSettingsManager {
     /// Recent repositories still on disk that are not already attached, for quick re-adding.
     func recentRepositorySuggestions(excluding attachedPaths: [String]) -> [String] {
         let attached = Set(attachedPaths.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL.path })
-        return Array(recentRepositories.filter { path in
+        return recentRepositories.filter { path in
             !attached.contains(path)
                 && FileManager.default.fileExists(atPath: URL(fileURLWithPath: path).appendingPathComponent(".git").path)
-        }.prefix(WorkspaceSettings.recentRepositorySuggestionLimit))
+        }
     }
 
     var appearance: String {
@@ -4259,7 +4259,7 @@ final class WorkspaceManager {
         return repositories
     }
 
-    /// Recently selected repositories the task header offers to add with one click.
+    /// Recently selected repositories the repository picker offers before anything is typed.
     func recentRepositorySuggestions(for taskID: UUID) throws -> [String] {
         guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
         let attached = try taskManager.get(taskID).repositoryWorktrees.map(\.repositoryPath)

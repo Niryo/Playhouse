@@ -2281,24 +2281,12 @@ struct TaskConversationView: View {
         let suggestedRepositoryPaths = suggestedRepositories.map(\.path)
         let attachedRepositoryPaths = task.repositoryWorktrees.map(\.repositoryPath)
         return HStack(spacing: 10) {
-            if !isReadOnly, !recentRepositoryPaths.isEmpty {
-                HStack(spacing: 7) {
-                    ForEach(recentRepositoryPaths, id: \.self) { path in
-                        recentRepositoryChip(path)
-                    }
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("conversation-recent-repositories")
-                Rectangle()
-                    .fill(Color.primary.opacity(0.18))
-                    .frame(width: 1, height: 22)
-                    .accessibilityIdentifier("conversation-recent-repositories-separator")
-            }
             ForEach(task.repositoryWorktrees, id: \.repositoryPath) { repository in
                 repositoryChip(repository)
             }
             Button {
                 isShowingRepositoryPicker.toggle()
+                loadRecentRepositories()
                 if suggestedRepositories.isEmpty { loadSuggestedRepositories() }
             } label: {
                 Image(systemName: "plus").font(.system(size: 12, weight: .semibold))
@@ -2308,7 +2296,7 @@ struct TaskConversationView: View {
             .buttonStyle(.plain).nativeHelp("Add a repository").accessibilityLabel("Add repository")
             .accessibilityIdentifier("add-conversation-repository-button")
             // The popover content only refreshes with this view, so key it to the suggestions it lists.
-            .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker.id(suggestedRepositoryPaths) }
+            .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker.id(suggestedRepositoryPaths + recentRepositoryPaths) }
             .disabled(isReadOnly)
         }
         .onAppear { loadRecentRepositories() }
@@ -2363,45 +2351,6 @@ struct TaskConversationView: View {
                 .offset(x: 4, y: -4)
             }
         }
-    }
-
-    private func recentRepositoryChip(_ path: String) -> some View {
-        let name = URL(fileURLWithPath: path).lastPathComponent
-        return Button {
-            selectRepositories([URL(fileURLWithPath: path, isDirectory: true)], reopenPickerOnError: false)
-        } label: {
-            Text(Self.compactRepositoryName(name)).font(.system(size: 10, weight: .medium)).lineLimit(1)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 8).padding(.vertical, 5)
-                .background(Color.primary.opacity(0.05), in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.1), style: StrokeStyle(lineWidth: 1, dash: [3, 2])))
-                .contentShape(Capsule())
-        }
-        .buttonHoverPointer()
-        .buttonStyle(.plain)
-        .nativeHelp("Add recent repository \(path)")
-        .accessibilityLabel("Add \(name)")
-        .accessibilityIdentifier("conversation-recent-repository-\(name)")
-        // Outside the button label so it stays its own element; clicks pass through to the chip.
-        .overlay(alignment: .topTrailing) {
-            Image(systemName: "plus")
-                .font(.system(size: 7, weight: .heavy))
-                .foregroundStyle(.white)
-                .frame(width: 13, height: 13)
-                .background(WorkspaceTheme.accent, in: Circle())
-                .overlay(Circle().strokeBorder(WorkspaceTheme.windowBackground, lineWidth: 1.5))
-                .offset(x: 4, y: -4)
-                .allowsHitTesting(false)
-                .accessibilityLabel("Add")
-                .accessibilityIdentifier("conversation-recent-repository-add-badge-\(name)")
-        }
-    }
-
-    /// Keeps a recent chip hugging its name while long names stay short in the header.
-    private static func compactRepositoryName(_ name: String, limit: Int = 18) -> String {
-        guard name.count > limit else { return name }
-        let half = (limit - 1) / 2
-        return "\(name.prefix(half))…\(name.suffix(limit - 1 - half))"
     }
 
     private func repositorySettingsPopover(_ repository: RepositoryWorktreeRecord, name: String) -> some View {
@@ -2470,7 +2419,7 @@ struct TaskConversationView: View {
                     }
                 }
                 .onKeyPress { press in
-                    let available = availableRepositorySuggestions
+                    let available = pickerRepositories
                     switch press.key {
                     case .downArrow:
                         guard !available.isEmpty else { return .ignored }
@@ -2498,8 +2447,15 @@ struct TaskConversationView: View {
                     }
                 }
                 .accessibilityIdentifier("conversation-repository-search")
-            let available = availableRepositorySuggestions
-            if WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) == nil {
+            let available = pickerRepositories
+            let isListingRecent = isShowingRecentRepositories
+            if isListingRecent {
+                Text("Recent")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("conversation-repository-recent-header")
+            }
+            if !isListingRecent, WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) == nil {
                 EmptyView()
             } else if available.isEmpty {
                 Text("No matching repositories.").font(.system(size: 10)).foregroundStyle(.secondary)
@@ -2519,7 +2475,7 @@ struct TaskConversationView: View {
                             .nativeHelp("Select repository")
                             .buttonStyle(.plain)
                             .background(index == repositorySuggestionIndex ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
-                            .accessibilityIdentifier("conversation-repository-suggestion-\(repository.lastPathComponent)")
+                            .accessibilityIdentifier("conversation-repository-\(isListingRecent ? "recent" : "suggestion")-\(repository.lastPathComponent)")
                         }
                     }
                 }.frame(width: 280, height: min(CGFloat(available.count * 42), 180))
@@ -2548,6 +2504,18 @@ struct TaskConversationView: View {
             let gitMarker = repository.appendingPathComponent(".git")
             return FileManager.default.fileExists(atPath: gitMarker.path) ? repository : nil
         }
+    }
+
+    /// Before anything is typed the picker offers recently used repositories, newest first;
+    /// typing switches to searching every repository under the suggestion folder.
+    private var isShowingRecentRepositories: Bool {
+        repositorySearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !recentRepositoryPaths.isEmpty
+    }
+
+    private var pickerRepositories: [URL] {
+        isShowingRecentRepositories
+            ? recentRepositoryPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            : availableRepositorySuggestions
     }
 
     private var availableRepositorySuggestions: [URL] {

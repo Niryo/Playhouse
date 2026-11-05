@@ -4850,7 +4850,7 @@ final class PlayhouseUITests: XCTestCase {
         assertScreenshotIfVisible(named: "Repository suggestions exclude nested and symlinked folders")
     }
 
-    // case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations. Each saved selection also feeds a newest-first recent repository history of up to ten repositories that keeps repositories after they are removed from the selection; the task repository recent command lists up to three of them that still exist and are not attached to the task, and rejects an unknown task. In the UI, attached repositories appear as large chips carrying a remove badge, and up to three recent repositories outside the task precede them as smaller grayed chips with a plus badge, divided from the attached chips by a vertical separator; removing an attached repository through its badge turns it into a recent chip, and clicking that chip adds it back to the task and saved selection.
+    // case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations. Each saved selection also feeds a newest-first recent repository history of up to twenty repositories that keeps repositories after they are removed from the selection; the task repository recent command lists those that still exist and are not attached to the task, and rejects an unknown task. In the UI, attached repositories appear as large chips carrying a remove badge and the header shows no suggestion chips; removing a repository through its badge makes the add-repository picker list it under Recent before anything is typed, clicking it adds it back to the task and saved selection, and typing a query replaces the recent list with the regular search suggestions.
     func test_new_task_remembers_last_selected_repositories() throws {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["settings", "set-last-repositories", "--repo", fixture.secondary.path, "--repo", fixture.primary.path])
@@ -4890,10 +4890,7 @@ final class PlayhouseUITests: XCTestCase {
         let alternateBadge = element("conversation-repository-badge-alternate")
         let primaryBadge = element("conversation-repository-badge-primary")
         let alternateRemove = element("remove-conversation-repository-alternate")
-        let recentAlternate = element("conversation-recent-repository-alternate")
-        let recentSeparator = element("conversation-recent-repositories-separator")
-        XCTAssertFalse(recentAlternate.exists, "An attached repository is not suggested again.")
-        XCTAssertFalse(recentSeparator.exists, "With every recent repository attached, no suggestions precede the chips.")
+        XCTAssertFalse(element("conversation-recent-repositories").exists, "The header should not show recent suggestion chips.")
         XCTAssertTrue(alternateRemove.exists, "Each attached repository chip should carry its own remove badge.")
         XCTAssertGreaterThanOrEqual(alternateBadge.frame.height, 28, "Attached repository chips should be prominent.")
         XCTAssertLessThanOrEqual(alternateRemove.frame.width, 15, "The remove badge should stay small and unobtrusive.")
@@ -4902,23 +4899,49 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Attached repositories as large chips with remove badges")
         alternateRemove.click()
         XCTAssertTrue(waitForDisappearance(alternateBadge, timeout: 10), "The remove badge should detach the repository.")
-        XCTAssertTrue(recentAlternate.waitForExistence(timeout: 10), "A removed repository should be offered as a recent repository.")
-        XCTAssertTrue(recentSeparator.exists, "Recent suggestions should be separated from the attached chips.")
-        XCTAssertGreaterThan(recentSeparator.frame.minX, recentAlternate.frame.maxX, "Recent suggestions should sit left of the separator.")
-        XCTAssertGreaterThan(element("conversation-repository-badge-secondary").frame.minX, recentSeparator.frame.maxX, "Attached chips should follow the separator.")
-        XCTAssertLessThan(recentAlternate.frame.height, primaryBadge.frame.height, "Recent suggestions should be smaller than attached chips.")
-        XCTAssertTrue(element("conversation-recent-repository-add-badge-alternate").exists, "Recent suggestions should carry a plus badge.")
-        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], [fixture.secondary.path, fixture.primary.path])
+        element("remove-conversation-repository-primary").click()
+        XCTAssertTrue(waitForDisappearance(primaryBadge, timeout: 10))
+        XCTAssertFalse(element("conversation-recent-repositories").exists, "Removed repositories should not reappear as header chips.")
+        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], [fixture.secondary.path])
         XCTAssertEqual(
             (try runCLI(["task", "repository", "recent", quickAddTaskID])["result"] as? [String: Any])?["repositories"] as? [String],
-            [fixture.alternate.path]
+            [fixture.primary.path, fixture.alternate.path]
         )
-        attachScreenshot(named: "Removed repository offered as a grayed recent chip before the separator")
+
+        element("add-conversation-repository-button").click()
+        let recentSearch = element("conversation-repository-search")
+        XCTAssertTrue(recentSearch.waitForExistence(timeout: 5))
+        let recentHeader = element("conversation-repository-recent-header")
+        let recentPrimary = element("conversation-repository-recent-primary")
+        let recentAlternate = element("conversation-repository-recent-alternate")
+        XCTAssertTrue(recentHeader.waitForExistence(timeout: 5), "Before typing, the picker should list recent repositories.")
+        XCTAssertTrue(recentPrimary.exists)
+        XCTAssertTrue(recentAlternate.exists)
+        XCTAssertLessThan(recentPrimary.frame.minY, recentAlternate.frame.minY, "Recent repositories should be ordered newest first.")
+        XCTAssertFalse(element("conversation-repository-recent-secondary").exists, "An attached repository is not offered again.")
+        XCTAssertFalse(element("conversation-repository-suggestion-changes").exists, "The search suggestions wait until something is typed.")
+        attachScreenshot(named: "Add repository picker lists recent repositories before typing", fullScreen: true)
+        replaceText(recentSearch, with: "alt")
+        XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitForExistence(timeout: 5), "Typing should switch to the regular search suggestions.")
+        XCTAssertFalse(recentHeader.exists, "Typing should replace the recent list.")
+        XCTAssertFalse(recentAlternate.exists)
+        attachScreenshot(named: "Typing switches the picker to search suggestions", fullScreen: true)
+        recentSearch.typeKey("a", modifierFlags: .command)
+        recentSearch.typeKey(XCUIKeyboardKey.delete.rawValue, modifierFlags: [])
+        XCTAssertTrue(recentPrimary.waitForExistence(timeout: 5), "Clearing the search should bring the recent list back.")
+        recentPrimary.click()
+        XCTAssertTrue(primaryBadge.waitForExistence(timeout: 10), "Clicking a recent repository should add it immediately.")
+        XCTAssertTrue(waitForDisappearance(recentSearch), "Adding a recent repository should close the picker.")
+        element("add-conversation-repository-button").click()
+        XCTAssertTrue(recentAlternate.waitForExistence(timeout: 5))
+        XCTAssertFalse(recentPrimary.exists, "A re-added repository leaves the recent list.")
         recentAlternate.click()
-        XCTAssertTrue(alternateBadge.waitForExistence(timeout: 10), "Clicking a recent chip should add the repository back.")
-        XCTAssertTrue(waitForDisappearance(recentAlternate, timeout: 10), "A re-added repository leaves the suggestions.")
-        attachScreenshot(named: "Recent repository re-added as an attached chip")
-        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], expandedSelection)
+        XCTAssertTrue(alternateBadge.waitForExistence(timeout: 10), "Clicking a recent repository should add it immediately.")
+        attachScreenshot(named: "Recent repositories re-added as attached chips")
+        // The badge appears before the saved selection is written, so wait for the write.
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["settings", "get"]))?["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String] == expandedSelection
+        }, timeout: 10), "Re-adding recent repositories should restore the saved selection order.")
         XCTAssertEqual(try XCTUnwrap(tasksFromBoardList().first?["workspaceRoots"] as? [String]), expandedSelection)
         element("back-to-board-button").click()
 
