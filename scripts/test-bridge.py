@@ -9846,7 +9846,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         return {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
 
-    # case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The terminal only ever opens in the task's repository worktree, never in its source repository or a context folder. The CLI reports how it starts: the account's executable login shell with -l in that worktree, with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Opening the terminal of a task whose worktree is still pending, from the CLI or the panel, first creates that worktree and the shell runs in it. Clicking the button slides a terminal panel in from the window's right edge, floating over the conversation's right side without moving or resizing the conversation, whose shell runs in the task's worktree with the task ID in its environment and which uses macOS Terminal's Clear Dark ANSI palette (such as its blue, distinct from the emulator's own default) on a solid black background, switching to the Clear Light profile's white background and blue when the app's appearance turns light and back when it returns to dark; hiding the panel keeps the same shell, so reopening it reaches the same process. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task with no repository reports terminal_unavailable from the CLI and the panel shows that error instead of a shell, and once a repository is added to that task, the CLI and the panel's Try Again open the shell in its new worktree rather than its context folder; the CLI also reports terminal_unavailable for a task whose worktree no longer exists; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.
+    # case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The terminal only ever opens in the task's created repository worktree, never in its source repository or a context folder, and never creates a worktree itself: while the task's worktree is still pending, or the task has no repository, the button is disabled and the CLI reports terminal_unavailable without creating the worktree, and the button enables in the open conversation once the worktree is created. The CLI reports how the terminal starts: the account's executable login shell with -l in that worktree, with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Clicking the button slides a terminal panel in from the window's right edge, floating over the conversation's right side without moving or resizing the conversation, whose shell runs in the task's worktree with the task ID in its environment and which uses macOS Terminal's Clear Dark ANSI palette (such as its blue, distinct from the emulator's own default) on a solid black background, switching to the Clear Light profile's white background and blue when the app's appearance turns light and back when it returns to dark; hiding the panel keeps the same shell, so reopening it reaches the same process. Dragging the panel's left border resizes it against the right edge, between a 320-point minimum and leaving 260 points of conversation uncovered, without resizing the conversation, and reopening the panel keeps the dragged width. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task whose worktree no longer exists reports terminal_unavailable from the CLI, and the panel shows that error with a Try Again action that opens the shell once the worktree is back; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.
     def test_task_terminal_opens_shell_in_task_worktree(self):
         repository = self.data_directory / "terminal-repository"
         repository.mkdir()
@@ -9887,16 +9887,16 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(shell.returncode, 0, shell.stderr)
         self.assertEqual(shell.stdout.strip().splitlines()[-2:], [os.path.realpath(worktree), task_id])
 
-        # A worktree still pending is created by opening the terminal, which never opens in the source repository.
+        # A pending worktree is named and created when the task starts; the terminal waits for it
+        # rather than creating it early, and never opens in the source repository instead.
         pending = self.create_repo_task("Terminal pending task", [str(repository)])
         self.assertTrue(pending["repositoryWorktrees"][0]["isPending"])
-        response, _ = self.call_cli("task", "terminal", pending["id"])
-        pending_launch = self.assert_success(response)
-        prepared = self.assert_success(self.call_cli("task", "get", pending["id"])[0])["repositoryWorktrees"][0]
-        self.assertFalse(prepared["isPending"], "Opening the terminal creates the pending worktree.")
-        self.assertEqual(pending_launch["directory"], os.path.normpath(prepared["worktreePath"]))
-        self.assertNotEqual(os.path.realpath(pending_launch["directory"]), os.path.realpath(repository))
-        self.assertTrue(Path(pending_launch["directory"], "README.md").is_file(), "The new worktree is checked out.")
+        response, _ = self.call_cli("task", "terminal", pending["id"], expected_status=1)
+        self.assert_failure(response, "terminal_unavailable")
+        self.assertIn("once the task's worktree is created", response["error"]["message"])
+        still_pending = self.assert_success(self.call_cli("task", "get", pending["id"])[0])["repositoryWorktrees"][0]
+        self.assertTrue(still_pending["isPending"], "Asking for the terminal does not create the worktree.")
+        self.assertEqual(still_pending["branch"], "auto", "The branch is still named when the task starts.")
 
         # A folder-only task has no worktree, so the terminal refuses rather than open in the folder.
         folder = self.data_directory / "terminal-folder"
@@ -9904,18 +9904,19 @@ class PlayhouseBridgeTests(unittest.TestCase):
         folder_task_id = self.create_task(title="Terminal folder task", roots=[str(folder)])["id"]
         response, _ = self.call_cli("task", "terminal", folder_task_id, expected_status=1)
         self.assert_failure(response, "terminal_unavailable")
-        self.assertIn("no repository", response["error"]["message"])
-        # Once it has a repository, the terminal opens in that repository's worktree, never the folder.
+        self.assertIn("Add a repository", response["error"]["message"])
+        # Once it has a created worktree, the terminal opens there, never in the folder.
         repaired = self.assert_success(self.call_cli("task", "repository", "add", folder_task_id, "--repo", str(repository))[0])
         repaired_worktree = repaired["repositoryWorktrees"][0]["worktreePath"]
+        self.assertFalse(repaired["repositoryWorktrees"][0]["isPending"])
         response, _ = self.call_cli("task", "terminal", folder_task_id)
         repaired_launch = self.assert_success(response)
         self.assertEqual(repaired_launch["directory"], os.path.normpath(repaired_worktree))
         self.assertNotEqual(repaired_launch["directory"], os.path.normpath(str(folder)))
         self.assertNotEqual(os.path.realpath(repaired_launch["directory"]), os.path.realpath(repository))
 
-        shutil.rmtree(pending_launch["directory"])
-        response, _ = self.call_cli("task", "terminal", pending["id"], expected_status=1)
+        shutil.rmtree(repaired_launch["directory"])
+        response, _ = self.call_cli("task", "terminal", folder_task_id, expected_status=1)
         self.assert_failure(response, "terminal_unavailable")
         self.assertIn("no longer exists", response["error"]["message"])
         response, _ = self.call_cli("task", "terminal", "00000000-0000-0000-0000-000000000000", expected_status=3)

@@ -10,38 +10,25 @@ final class TaskTerminalSession: ObservableObject {
     @Published private(set) var launchError: String?
     @Published private(set) var exitStatus: String?
     @Published private(set) var currentDirectory: String?
-    /// The task's worktree is being created before its first shell can start.
-    @Published private(set) var isPreparing = false
     private(set) var terminalView: PlayhouseTerminalView?
-    /// Bumped whenever the session is torn down, so a launch that resolves afterwards is dropped.
-    private var launchGeneration = 0
     private var processObserver: ProcessObserver?
     private(set) var taskID: UUID?
 
     var isRunning: Bool { terminalView?.process?.running == true }
 
     /// Starts the shell the first time the panel opens for this task; later calls reuse it.
-    /// Resolving the launch can create the task's worktree, so the shell starts once that is done.
     func startIfNeeded(taskID: UUID, workspaceManager: WorkspaceManager) {
         if self.taskID != taskID { terminate() }
-        guard terminalView == nil, !isPreparing else { return }
+        guard terminalView == nil else { return }
         self.taskID = taskID
         exitStatus = nil
-        launchError = nil
-        isPreparing = true
-        let generation = launchGeneration
-        Task { @MainActor in
-            do {
-                let launch = try await workspaceManager.terminalLaunch(for: taskID)
-                guard generation == launchGeneration else { return }
-                isPreparing = false
-                startShell(launch, taskID: taskID)
-            } catch {
-                guard generation == launchGeneration else { return }
-                isPreparing = false
-                launch = nil
-                launchError = error.localizedDescription
-            }
+        do {
+            let launch = try workspaceManager.terminalLaunch(for: taskID)
+            launchError = nil
+            startShell(launch, taskID: taskID)
+        } catch {
+            launch = nil
+            launchError = error.localizedDescription
         }
     }
 
@@ -78,8 +65,6 @@ final class TaskTerminalSession: ObservableObject {
     }
 
     func terminate() {
-        launchGeneration += 1
-        isPreparing = false
         if isRunning { terminalView?.terminate() }
         terminalView?.processDelegate = nil
         terminalView?.removeFromSuperview()
@@ -153,6 +138,20 @@ final class PlayhouseTerminalView: LocalProcessTerminalView {
     }
 }
 
+/// The terminal panel's width, which the user sets by dragging its left border.
+enum TerminalPanelLayout {
+    static let widthKey = "terminalPanelWidth"
+    static let defaultWidth: CGFloat = 460
+    static let minimumWidth: CGFloat = 320
+    /// The conversation keeps at least this much of the space the panel floats over.
+    static let minimumUncovered: CGFloat = 260
+
+    static func clampedWidth(_ width: CGFloat, available: CGFloat) -> CGFloat {
+        let maximum = max(minimumWidth, available - minimumUncovered)
+        return min(max(width, minimumWidth), maximum)
+    }
+}
+
 /// The terminal panel that slides in from the right edge of a task's conversation.
 struct TaskTerminalPanel: View {
     @ObservedObject var session: TaskTerminalSession
@@ -197,13 +196,7 @@ struct TaskTerminalPanel: View {
                 .fill(Color.primary.opacity(0.07))
                 .frame(height: 1)
 
-            if session.isPreparing {
-                ProgressView("Preparing worktree…")
-                    .controlSize(.small)
-                    .font(.system(size: 11))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityIdentifier("task-terminal-preparing")
-            } else if let launchError = session.launchError {
+            if let launchError = session.launchError {
                 VStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 18))

@@ -4496,32 +4496,18 @@ final class WorkspaceManager {
         }
     }
 
-    /// How the task's terminal starts: the user's login shell, opened in the task's first
-    /// repository worktree. The terminal never opens in a source repository or a context
-    /// folder, so a worktree that is still pending is created first, as a send would. That fixes
-    /// the branch name early: an untitled task's branch is named from its saved prompt rather
-    /// than from the title a first send would generate.
-    func terminalLaunch(for taskID: UUID) async throws -> TaskTerminalLaunch {
+    /// How the task's terminal starts: the user's login shell, opened in the task's first created
+    /// repository worktree. It never opens in a source repository or a context folder, and never
+    /// creates a pending worktree, which the task's start names and creates.
+    func terminalLaunch(for taskID: UUID) throws -> TaskTerminalLaunch {
         guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
-        var records = try taskManager.get(taskID).repositoryWorktrees
-        guard !records.isEmpty else {
+        let records = try taskManager.get(taskID).repositoryWorktrees
+        if let reason = TaskTerminalLaunch.unavailableReason(for: records) {
             PlayhouseDiagnostics.record("workspace.terminal.launch.failed", fields: [
                 "taskID": taskID.uuidString,
-                "reason": "no_repository"
+                "reason": records.isEmpty ? "no_repository" : "worktree_pending"
             ])
-            throw BridgeCommandError(
-                code: "terminal_unavailable",
-                message: "This task has no repository, so it has no worktree to open a terminal in."
-            )
-        }
-        if records.contains(where: \.isPending) {
-            PlayhouseDiagnostics.record("workspace.terminal.worktree.prepare.started", fields: ["taskID": taskID.uuidString])
-            do {
-                records = try await taskManager.prepareRepositoryWorktrees(taskID).repositoryWorktrees
-            } catch let error as BridgeCommandError where error.code == "invalid_transition" {
-                // A send preparing the same worktrees got there first; use what it created.
-                records = try taskManager.get(taskID).repositoryWorktrees
-            }
+            throw BridgeCommandError(code: "terminal_unavailable", message: reason)
         }
         guard let directory = records.filter({ !$0.isPending }).map(\.worktreePath)
             .first(where: { WorkspaceSettings.validDirectoryURL(for: $0) != nil }) else {
@@ -8402,7 +8388,7 @@ final class PlayhouseBridgeRuntime {
                 let roots = try request.requiredStrings("roots")
                 result = try Self.value(await workspaces.setRoots(roots, for: request.requiredUUID("taskID")))
             case "task.terminal":
-                result = try Self.value(await workspaces.terminalLaunch(for: request.requiredUUID("taskID")))
+                result = try Self.value(workspaces.terminalLaunch(for: request.requiredUUID("taskID")))
             case "task.changes.list":
                 result = try Self.value(await workspaces.changes(for: request.requiredUUID("taskID")))
             case "task.changes.mark-viewed":

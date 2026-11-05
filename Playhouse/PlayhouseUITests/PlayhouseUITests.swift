@@ -13616,7 +13616,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Merged upstream commits are excluded when the local base branch is stale")
     }
 
-    // case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The terminal only ever opens in the task's repository worktree, never in its source repository or a context folder. The CLI reports how it starts: the account's executable login shell with -l in that worktree, with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Opening the terminal of a task whose worktree is still pending, from the CLI or the panel, first creates that worktree and the shell runs in it. Clicking the button slides a terminal panel in from the window's right edge, floating over the conversation's right side without moving or resizing the conversation, whose shell runs in the task's worktree with the task ID in its environment and which uses macOS Terminal's Clear Dark ANSI palette (such as its blue, distinct from the emulator's own default) on a solid black background, switching to the Clear Light profile's white background and blue when the app's appearance turns light and back when it returns to dark; hiding the panel keeps the same shell, so reopening it reaches the same process. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task with no repository reports terminal_unavailable from the CLI and the panel shows that error instead of a shell, and once a repository is added to that task, the CLI and the panel's Try Again open the shell in its new worktree rather than its context folder; the CLI also reports terminal_unavailable for a task whose worktree no longer exists; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.
+    // case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The terminal only ever opens in the task's created repository worktree, never in its source repository or a context folder, and never creates a worktree itself: while the task's worktree is still pending, or the task has no repository, the button is disabled and the CLI reports terminal_unavailable without creating the worktree, and the button enables in the open conversation once the worktree is created. The CLI reports how the terminal starts: the account's executable login shell with -l in that worktree, with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Clicking the button slides a terminal panel in from the window's right edge, floating over the conversation's right side without moving or resizing the conversation, whose shell runs in the task's worktree with the task ID in its environment and which uses macOS Terminal's Clear Dark ANSI palette (such as its blue, distinct from the emulator's own default) on a solid black background, switching to the Clear Light profile's white background and blue when the app's appearance turns light and back when it returns to dark; hiding the panel keeps the same shell, so reopening it reaches the same process. Dragging the panel's left border resizes it against the right edge, between a 320-point minimum and leaving 260 points of conversation uncovered, without resizing the conversation, and reopening the panel keeps the dragged width. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task whose worktree no longer exists reports terminal_unavailable from the CLI, and the panel shows that error with a Try Again action that opens the shell once the worktree is back; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.
     func test_task_terminal_opens_shell_in_task_worktree() throws {
         let repository = runDirectory.appendingPathComponent("terminal-repository", isDirectory: true)
         try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
@@ -13626,25 +13626,66 @@ final class PlayhouseUITests: XCTestCase {
         try runGit(repository, "config", "user.email", "playhouse-ui-test@example.invalid")
         try runGit(repository, "add", "README.md")
         try runGit(repository, "commit", "-m", "Baseline")
-        // The worktree stays pending until something starts the task; opening the panel must create it.
-        let created = try runCLI([
-            "task", "create", "--title", "Terminal Task", "--prompt", "Fixture task description.", "--repo", repository.path
-        ])
-        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
-        let pendingRecord = try XCTUnwrap(((created["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])?.first)
-        XCTAssertEqual(pendingRecord["isPending"] as? Bool, true)
+        let secondRepository = runDirectory.appendingPathComponent("terminal-second-repository", isDirectory: true)
+        try FileManager.default.createDirectory(at: secondRepository, withIntermediateDirectories: true)
+        try "Second fixture.\n".write(to: secondRepository.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try runGit(secondRepository, "init", "--initial-branch=main")
+        try runGit(secondRepository, "config", "user.name", "Playhouse UI Test")
+        try runGit(secondRepository, "config", "user.email", "playhouse-ui-test@example.invalid")
+        try runGit(secondRepository, "add", "README.md")
+        try runGit(secondRepository, "commit", "-m", "Baseline")
 
+        // A task whose worktree is created: a titled task prepares it as soon as its repository is added.
+        let created = try runCLI(["task", "create", "--title", "Terminal Task", "--prompt", "Fixture task description."])
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        let added = try runCLI(["task", "repository", "add", taskID, "--repo", repository.path])
+        let record = try XCTUnwrap(((added["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        XCTAssertEqual(record["isPending"] as? Bool, false)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+        let launch = try XCTUnwrap(try runCLI(["task", "terminal", taskID])["result"] as? [String: Any])
+        XCTAssertEqual(launch["directory"] as? String, worktree.standardizedFileURL.path)
+        XCTAssertEqual((launch["environment"] as? [String: String])?["PLAYHOUSE_TASK_ID"], taskID)
+
+        // A task whose worktree is still pending: named and created only when the task starts.
+        let pendingCreated = try runCLI([
+            "task", "create", "--title", "Pending Terminal Task", "--prompt", "Fixture task description.", "--repo", repository.path
+        ])
+        let pendingTaskID = try XCTUnwrap((pendingCreated["result"] as? [String: Any])?["id"] as? String)
         let folder = runDirectory.appendingPathComponent("terminal-folder", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let noRepository = try runCLI(["task", "create", "--title", "No Repository Terminal", "--prompt", "Fixture task description.", "--root", folder.path])
-        let noRepositoryTaskID = try XCTUnwrap((noRepository["result"] as? [String: Any])?["id"] as? String)
+        _ = try runCLI(["task", "create", "--title", "No Repository Terminal", "--prompt", "Fixture task description.", "--root", folder.path])
 
         launchApp(defaultParent: fixture.parent.path)
+        let toggle = element("toggle-terminal-button")
+        func worktreeRecord(_ id: String) throws -> [String: Any] {
+            try XCTUnwrap(((try taskRecord(id: id))?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        }
+
+        openTask(named: "Pending Terminal Task")
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertFalse(toggle.isEnabled, "The terminal button stays disabled until the task's worktree is created.")
+        toggle.click()
+        XCTAssertFalse(element("task-terminal-panel").exists, "A disabled button opens no panel.")
+        XCTAssertEqual(try worktreeRecord(pendingTaskID)["isPending"] as? Bool, true, "Clicking it does not create the worktree.")
+        attachScreenshot(named: "Terminal button disabled until the task's worktree exists")
+        // Creating the worktree, as a task's start does, enables the button in the open conversation.
+        _ = try runCLI(["task", "repository", "add", pendingTaskID, "--repo", secondRepository.path])
+        XCTAssertEqual(try worktreeRecord(pendingTaskID)["isPending"] as? Bool, false)
+        XCTAssertTrue(waitUntil({ toggle.isEnabled }, timeout: 10), "The button enables once the worktree exists.")
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        openTask(named: "No Repository Terminal")
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertFalse(toggle.isEnabled, "A task with no repository has no worktree, so no terminal.")
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
         openTask(named: "Terminal Task")
         let sidebar = element("task-sidebar")
         let commandRow = element("sidebar-command-row")
-        let toggle = element("toggle-terminal-button")
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(toggle.isEnabled)
         XCTAssertTrue(commandRow.exists)
         XCTAssertEqual(toggle.value as? String, "Hidden")
         XCTAssertFalse(element("task-terminal-panel").exists, "The terminal stays hidden until the button opens it.")
@@ -13662,8 +13703,6 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(conversation.exists)
         XCTAssertGreaterThan(conversation.frame.maxX, window.frame.maxX - 470, "Before the panel opens, the conversation reaches into the space the panel will take.")
         let conversationFrameBefore = conversation.frame
-        let stillPending = try XCTUnwrap(((try taskRecord(id: taskID))?["repositoryWorktrees"] as? [[String: Any]])?.first)
-        XCTAssertEqual(stillPending["isPending"] as? Bool, true, "Opening the task alone does not create its worktree.")
         toggle.click()
         let panel = element("task-terminal-panel")
         XCTAssertTrue(panel.waitForExistence(timeout: 5))
@@ -13676,14 +13715,8 @@ final class PlayhouseUITests: XCTestCase {
         assertText("task-terminal-title", equals: "Terminal")
 
         let terminal = element("task-terminal-view")
-        XCTAssertTrue(terminal.waitForExistence(timeout: 30), "The shell starts once the pending worktree is created.")
-        let preparedRecord = try XCTUnwrap(((try taskRecord(id: taskID))?["repositoryWorktrees"] as? [[String: Any]])?.first)
-        XCTAssertEqual(preparedRecord["isPending"] as? Bool, false, "Opening the terminal creates the task's worktree.")
-        let worktree = URL(fileURLWithPath: try XCTUnwrap(preparedRecord["worktreePath"] as? String), isDirectory: true)
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10))
         XCTAssertNotEqual(worktree.standardizedFileURL.path, repository.standardizedFileURL.path, "The terminal never opens in the source repository.")
-        let launch = try XCTUnwrap(try runCLI(["task", "terminal", taskID])["result"] as? [String: Any])
-        XCTAssertEqual(launch["directory"] as? String, worktree.standardizedFileURL.path)
-        XCTAssertEqual((launch["environment"] as? [String: String])?["PLAYHOUSE_TASK_ID"], taskID)
         terminal.click()
         // `pwd -P` keeps the /private prefix that Foundation's symlink resolution drops for /tmp.
         let resolvedWorktree = try XCTUnwrap(realpath(worktree.path, nil).map { pointer in
@@ -13733,6 +13766,33 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 20), "Reopening the panel reaches the same shell: \(String(reflecting: terminal.value as? String ?? ""))")
         attachScreenshot(named: "Reopened terminal keeps the same shell session")
 
+        // Dragging the left border resizes the panel, within limits, and the width is remembered.
+        let handle = element("terminal-resize-handle")
+        XCTAssertTrue(handle.waitForExistence(timeout: 5))
+        XCTAssertEqual(handle.frame.midX, panel.frame.minX, accuracy: 6, "The resize handle is the panel's left border.")
+        let widthBefore = panel.frame.width
+        let conversationBeforeResize = conversation.frame
+        handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.2, thenDragTo: handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: -50, dy: 0)))
+        XCTAssertTrue(waitUntil({ abs(panel.frame.width - (widthBefore + 50)) <= 6 }, timeout: 5), "Dragging left widens the panel: \(panel.frame.width)")
+        XCTAssertEqual(abs(panel.frame.maxX - window.frame.maxX), 0, accuracy: 2, "The panel stays against the right edge.")
+        XCTAssertEqual(conversation.frame.width, conversationBeforeResize.width, accuracy: 1, "Resizing does not resize the conversation.")
+        let widened = panel.frame.width
+        attachScreenshot(named: "Terminal widened by dragging its left border")
+        element("close-terminal-button").click()
+        XCTAssertTrue(waitUntil({ !panel.exists }, timeout: 5))
+        toggle.click()
+        XCTAssertTrue(waitUntil({ panel.exists && abs(panel.frame.width - widened) <= 2 }, timeout: 5), "Reopening keeps the dragged width.")
+        handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.2, thenDragTo: handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: 900, dy: 0)))
+        XCTAssertTrue(waitUntil({ abs(panel.frame.width - 320) <= 3 }, timeout: 5), "The panel stops at its minimum width: \(panel.frame.width)")
+        handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.2, thenDragTo: handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: -3000, dy: 0)))
+        XCTAssertTrue(waitUntil({ abs(panel.frame.minX - (sidebar.frame.maxX + 1 + 260)) <= 4 }, timeout: 5),
+                      "The panel stops where 260 points of conversation stay uncovered: \(panel.frame.minX)")
+        XCTAssertTrue(terminal.exists)
+        terminal.click()
+
         terminal.typeText("exit\n")
         let exitStatus = element("task-terminal-exit-status")
         XCTAssertTrue(exitStatus.waitForExistence(timeout: 10), "Exiting the shell is reported in the panel.")
@@ -13754,39 +13814,45 @@ final class PlayhouseUITests: XCTestCase {
         toggle.click()
         XCTAssertTrue(waitUntil({ !panel.exists }, timeout: 5), "The sidebar button also hides the panel.")
 
+        // A worktree that is missing shows an error with Try Again, which recovers once it is back.
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
-        openTask(named: "No Repository Terminal")
+        // The terminal falls back to a task's next existing worktree, so every one is moved aside.
+        let pendingWorktrees = try XCTUnwrap(
+            (try taskRecord(id: pendingTaskID))?["repositoryWorktrees"] as? [[String: Any]]
+        ).compactMap { $0["worktreePath"] as? String }
+        XCTAssertEqual(pendingWorktrees.count, 2)
+        let pendingWorktree = try XCTUnwrap(pendingWorktrees.first)
+        for path in pendingWorktrees {
+            try FileManager.default.moveItem(at: URL(fileURLWithPath: path, isDirectory: true), to: URL(fileURLWithPath: path + "-moved", isDirectory: true))
+        }
+        openTask(named: "Pending Terminal Task")
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(toggle.isEnabled)
         toggle.click()
         XCTAssertTrue(element("task-terminal-error").waitForExistence(timeout: 10))
         let errorMessage = element("task-terminal-error-message")
         let errorText = errorMessage.value as? String ?? errorMessage.label
-        XCTAssertTrue(errorText.contains("no repository"), errorText)
-        XCTAssertFalse(terminal.exists, "No shell starts in a folder that is not a worktree.")
-        attachScreenshot(named: "Terminal panel refuses a task that has no worktree")
-
-        // Once the task has a repository, Try Again opens the shell in its new worktree, not its folder.
-        let repaired = try runCLI(["task", "repository", "add", noRepositoryTaskID, "--repo", repository.path])
-        let repairedRecord = try XCTUnwrap(((repaired["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        XCTAssertTrue(errorText.contains("no longer exists"), errorText)
+        XCTAssertFalse(terminal.exists, "No shell starts without the worktree.")
+        attachScreenshot(named: "Terminal panel reports a missing worktree and offers Try Again")
+        for path in pendingWorktrees {
+            try FileManager.default.moveItem(at: URL(fileURLWithPath: path + "-moved", isDirectory: true), to: URL(fileURLWithPath: path, isDirectory: true))
+        }
         element("retry-terminal-button").click()
-        XCTAssertTrue(terminal.waitForExistence(timeout: 30), "Try Again starts a shell once the task has a worktree.")
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "Try Again starts a shell once the worktree is back.")
         XCTAssertFalse(element("task-terminal-error").exists)
-        let repairedWorktree = try XCTUnwrap(
-            ((try taskRecord(id: noRepositoryTaskID))?["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String
-        )
-        XCTAssertNotEqual(repairedWorktree, folder.standardizedFileURL.path)
-        XCTAssertNotEqual(repairedRecord["repositoryPath"] as? String, repairedWorktree, "The shell's folder is a worktree, not the source repository.")
-        let resolvedRepairedWorktree = try XCTUnwrap(realpath(repairedWorktree, nil).map { pointer in
+        XCTAssertNotEqual(pendingWorktree, repository.standardizedFileURL.path)
+        let resolvedPendingWorktree = try XCTUnwrap(realpath(pendingWorktree, nil).map { pointer in
             defer { free(pointer) }
             return String(cString: pointer)
         })
         terminal.click()
         terminal.typeText("printf 'dir=%s pid=%s;\\n' \"$(pwd -P)\" \"$$\"\n")
         XCTAssertTrue(waitUntil({
-            self.terminalNumber(after: "dir=\(resolvedRepairedWorktree) pid=", in: terminal) != nil
-        }, timeout: 20), "The retried shell runs in the new worktree: \(String(reflecting: terminal.value as? String ?? ""))")
-        attachScreenshot(named: "Try Again opens the shell in the worktree once the task has a repository")
+            self.terminalNumber(after: "dir=\(resolvedPendingWorktree) pid=", in: terminal) != nil
+        }, timeout: 20), "The retried shell runs in the task's worktree: \(String(reflecting: terminal.value as? String ?? ""))")
+        attachScreenshot(named: "Try Again opens the shell once the worktree is back")
 
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))

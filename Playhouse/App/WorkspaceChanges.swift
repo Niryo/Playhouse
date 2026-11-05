@@ -144,6 +144,19 @@ struct TaskTerminalLaunch: Codable, Equatable {
     let arguments: [String]
     let environment: [String: String]
 
+    /// Why a task can't open a terminal yet, or nil when it has a created worktree. The terminal
+    /// only runs in a worktree, and opening it never creates one: a pending worktree is named
+    /// and created when the task starts, so the terminal waits for that.
+    static func unavailableReason(for records: [RepositoryWorktreeRecord]) -> String? {
+        if records.isEmpty {
+            return "Add a repository to this task to open a terminal in its worktree."
+        }
+        if records.allSatisfy(\.isPending) {
+            return "The terminal opens once the task's worktree is created, when the task starts."
+        }
+        return nil
+    }
+
     /// The account's login shell, falling back to `$SHELL` and then zsh.
     static func loginShell() -> String {
         var candidates: [String] = []
