@@ -97,6 +97,9 @@ private final class InlineCodeLayoutManager: NSLayoutManager {
 @Observable
 private final class ComposerDraftModel {
     var text = ""
+    /// The composer text that needs no save: the draft last saved or restored, or the empty
+    /// composer a send, steer, or queue left behind.
+    @ObservationIgnored var settledText = ""
     @ObservationIgnored var autosaveTask: Task<Void, Never>?
 }
 
@@ -777,6 +780,27 @@ struct TaskConversationView: View {
         var id: String { path }
     }
 
+    /// An outlined pencil with a wide body, drawn on a 24-point grid. The SF Symbol pencil
+    /// stays a thin stick at small sizes, which does not read as an edit button.
+    private struct EditPencilShape: Shape {
+        func path(in rect: CGRect) -> Path {
+            let scale = min(rect.width, rect.height) / 24
+            func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+                CGPoint(x: rect.minX + x * scale, y: rect.minY + y * scale)
+            }
+            var path = Path()
+            path.move(to: point(4, 16.5))
+            path.addLine(to: point(15.5, 5))
+            path.addLine(to: point(19, 8.5))
+            path.addLine(to: point(7.5, 20))
+            path.addLine(to: point(3.5, 20.5))
+            path.closeSubpath()
+            path.move(to: point(13, 7.5))
+            path.addLine(to: point(16.5, 11))
+            return path
+        }
+    }
+
     private struct ChangeRepositoryGroup: Identifiable {
         let repository: String
         let entries: [WorkspaceChangeEntry]
@@ -827,7 +851,7 @@ struct TaskConversationView: View {
         get { composerDraft.autosaveTask }
         nonmutating set { composerDraft.autosaveTask = newValue }
     }
-    @State private var draftNeedsAutosave = false
+    private var isDraftUnsaved: Bool { draft != composerDraft.settledText }
     @State private var pendingImages: [PendingImage] = []
     @State private var isShowingImagePicker = false
     @State private var selectedChatImage: NSImage?
@@ -873,16 +897,10 @@ struct TaskConversationView: View {
     /// pinned, so load-time scroll requests cannot follow the bottom past it.
     @State private var isLatestConversationTurnPinPending = true
     @State private var hasPresentedLatestConversation = false
-    /// Natural height of the rendered transcript, before the filler that keeps
-    /// the newest turn pinnable to the top of the viewport.
-    @State private var conversationContentHeight: CGFloat = 0
-    /// Top of the newest turn and bottom of the transcript, in the scroll's own
-    /// coordinate space. Their difference is the newest turn's height, which is
-    /// what the filler has to leave room for; measuring the turn itself keeps
-    /// the pin reachable even once older messages are revealed above it, when
-    /// the transcript as a whole is far taller than the viewport.
-    @State private var latestTurnTopY: CGFloat?
-    @State private var transcriptBottomY: CGFloat?
+    /// Natural height of the newest turn, before the minimum height that keeps
+    /// it pinnable to the top of the viewport. It only decides whether a
+    /// presentation pins the turn or scrolls to its end; layout never reads it.
+    @State private var latestTurnContentHeight: CGFloat = 0
     @State private var lastScrolledUserMessageID: String?
     @State private var annotations: [ConversationAnnotation] = []
     @State private var annotationSelection: AnnotationSelection?
@@ -903,11 +921,21 @@ struct TaskConversationView: View {
     @State private var subagentHistory: ConversationHistory?
     @State private var isLoadingSubagent = false
     @State private var subagentError: String?
-    @State private var changeInventory = WorkspaceChangeInventory(unviewed: [], viewed: [])
+    @State private var changeInventory = WorkspaceChangeInventory(unviewed: [], viewed: [], mergingRepositories: [])
     @State private var isViewedSectionExpanded = false
+    @AppStorage(WorkspaceSettings.taskSidebarCollapsedKey, store: WorkspaceSettings.preferencesStore) private var isTaskSidebarCollapsed = false
+    @AppStorage(WorkspaceSettings.workspaceChangesSectionCollapsedKey, store: WorkspaceSettings.preferencesStore) private var isChangesSectionCollapsed = false
+    /// The loading placeholder is for the first read only; later watcher refreshes keep the
+    /// current list (or empty state) on screen instead of flashing the spinner.
+    @State private var hasLoadedChanges = false
     @State private var isLoadingChanges = false
     @State private var changesNeedRefresh = false
     @State private var changeWatcher: WorkspaceChangeWatcher?
+    @State private var isTerminalPresented = false
+    @AppStorage(TerminalPanelLayout.widthKey, store: WorkspaceSettings.preferencesStore)
+    private var terminalPanelWidth = Double(TerminalPanelLayout.defaultWidth)
+    @State private var terminalResizeStartWidth: CGFloat?
+    @StateObject private var terminalSession = TaskTerminalSession()
     @State private var changesError: String?
     @State private var selectedChange: WorkspaceChangeEntry?
     @State private var selectedDiff: WorkspaceFileDiff?
@@ -957,6 +985,8 @@ struct TaskConversationView: View {
     @State private var editedBranchFrom = ""
     @State private var editedMergeTarget = ""
     @State private var editingRepositoryField: String?
+    @State private var recentRepositoryPaths: [String] = []
+    @FocusState private var focusedRepositoryField: String?
     @FocusState private var isComposerFocused: Bool
     @FocusState private var isRepositorySearchFocused: Bool
 
@@ -1071,6 +1101,8 @@ struct TaskConversationView: View {
     /// How close to the bottom, in points, still counts as at the bottom, so
     /// new content keeps being followed.
     private static let conversationBottomFollowThreshold: CGFloat = 16
+    /// Above this many changed files the sidebar shows a notice instead of the list, which would stall layout.
+    private static let maxRenderedChangeCount = 1000
 
     /// First message of the newest user turn. Opening a conversation renders
     /// this message and everything after it, so the latest question sits at the
@@ -1083,13 +1115,6 @@ struct TaskConversationView: View {
         return allMessages.last(where: { $0.role == .user && !PrivatePromptPlaceholder.matches($0.text) })?.id
             ?? allMessages.last(where: { $0.role == .user })?.id
             ?? allMessages.last?.id
-    }
-
-    /// Height of the newest turn, from its question to the end of the
-    /// transcript, or `nil` until both ends have been measured.
-    private var latestTurnHeight: CGFloat? {
-        guard let latestTurnTopY, let transcriptBottomY, transcriptBottomY >= latestTurnTopY else { return nil }
-        return transcriptBottomY - latestTurnTopY
     }
 
     /// The window runs from `oldestRenderedMessageID` to the newest message.
@@ -1438,6 +1463,29 @@ struct TaskConversationView: View {
                     conversationPanel
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+                // The terminal floats over the conversation's right edge rather than taking
+                // its width, so opening it never reflows the transcript or the composer.
+                .overlay(alignment: .trailing) {
+                    if isTerminalPresented {
+                        GeometryReader { geometry in
+                            let available = conversationWidth(in: geometry.size.width)
+                            let width = TerminalPanelLayout.clampedWidth(CGFloat(terminalPanelWidth), available: available)
+                            HStack(spacing: 0) {
+                                terminalResizeHandle(width: width, available: available)
+                                TaskTerminalPanel(
+                                    session: terminalSession,
+                                    onRestart: { terminalSession.restart(workspaceManager: workspaceManager) },
+                                    onClose: { setTerminalPresented(false) }
+                                )
+                            }
+                            .frame(width: width)
+                            .shadow(color: .black.opacity(0.22), radius: 12, x: -4, y: 0)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                        }
+                        .transition(.move(edge: .trailing))
+                    }
+                }
+                .clipped()
             }
         }
         .background(WorkspaceTheme.windowBackground)
@@ -1638,101 +1686,374 @@ struct TaskConversationView: View {
         .onDisappear {
             changeWatcher?.stop()
             changeWatcher = nil
+            terminalSession.terminate()
+            // Switching tasks replaces this view without going back first.
+            if !isReadOnly, isDraftUnsaved { persistDraft(reportingErrors: false) }
         }
     }
 
+    private func setTerminalPresented(_ presented: Bool) {
+        if presented { terminalSession.startIfNeeded(taskID: task.id, workspaceManager: workspaceManager) }
+        withAnimation(.easeOut(duration: 0.22)) { isTerminalPresented = presented }
+    }
+
+    /// The panel's left border; dragging it left widens the terminal and right narrows it.
+    private func terminalResizeHandle(width: CGFloat, available: CGFloat) -> some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.08))
+            .frame(width: 1)
+            .frame(maxHeight: .infinity)
+            .overlay {
+                Color.clear
+                    .frame(width: 9)
+                    .contentShape(Rectangle())
+                    .hoverCursor(.resizeLeftRight)
+                    .gesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                            .onChanged { value in
+                                if terminalResizeStartWidth == nil {
+                                    // Held for the whole drag, so the pointer can leave the thin border.
+                                    NSCursor.resizeLeftRight.push()
+                                }
+                                let start = terminalResizeStartWidth ?? width
+                                terminalResizeStartWidth = start
+                                terminalPanelWidth = Double(TerminalPanelLayout.clampedWidth(
+                                    start - value.translation.width, available: available
+                                ))
+                            }
+                            .onEnded { _ in
+                                if terminalResizeStartWidth != nil { NSCursor.pop() }
+                                terminalResizeStartWidth = nil
+                            }
+                    )
+                    .onDisappear {
+                        // A panel closed mid-drag may never end the gesture.
+                        if terminalResizeStartWidth != nil {
+                            NSCursor.pop()
+                            terminalResizeStartWidth = nil
+                        }
+                    }
+                    .accessibilityElement()
+                    .accessibilityLabel("Resize terminal")
+                    .accessibilityValue("\(Int(width.rounded())) points")
+                    .accessibilityIdentifier("terminal-resize-handle")
+            }
+    }
+
+    private static let expandedSidebarWidth: CGFloat = 232
+    private static let collapsedSidebarWidth: CGFloat = 38
+
+    /// The width the terminal panel can float over: the conversation, beside the sidebar and its divider.
+    private func conversationWidth(in containerWidth: CGFloat) -> CGFloat {
+        containerWidth - (isTaskSidebarCollapsed ? Self.collapsedSidebarWidth : Self.expandedSidebarWidth) - 1
+    }
+
+    /// Why this task can't open a terminal yet, shared with the CLI's `task terminal`.
+    private var terminalUnavailableReason: String? {
+        TaskTerminalLaunch.unavailableReason(for: task.repositoryWorktrees)
+    }
+
+    /// Quick actions for the task, right-aligned along the bottom of the sidebar.
+    private var sidebarCommandRow: some View {
+        HStack(spacing: 4) {
+            Spacer(minLength: 0)
+            Button {
+                setTerminalPresented(!isTerminalPresented)
+            } label: {
+                Image(systemName: "terminal")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 26, height: 24)
+                    .foregroundStyle(isTerminalPresented ? WorkspaceTheme.accent : Color.secondary)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(isTerminalPresented ? WorkspaceTheme.accent.opacity(0.14) : Color.clear)
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .buttonHoverPointer()
+            .disabled(terminalUnavailableReason != nil && !isTerminalPresented)
+            .nativeHelp(terminalUnavailableReason ?? (isTerminalPresented ? "Hide the terminal" : "Open a terminal in this task's worktree"))
+            .accessibilityLabel(isTerminalPresented ? "Hide terminal" : "Open terminal")
+            .accessibilityValue(isTerminalPresented ? "Shown" : "Hidden")
+            .accessibilityIdentifier("toggle-terminal-button")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("sidebar-command-row")
+    }
+
+    @ViewBuilder
     private var taskSidebar: some View {
+        if isTaskSidebarCollapsed {
+            collapsedTaskSidebar
+        } else {
+            expandedTaskSidebar
+        }
+    }
+
+    private func setTaskSidebarCollapsed(_ collapsed: Bool) {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isTaskSidebarCollapsed = collapsed
+        }
+    }
+
+    private func toggleChangesSection() {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isChangesSectionCollapsed.toggle()
+        }
+    }
+
+    /// A narrow rail that keeps the pending count visible while the sidebar is hidden.
+    private var collapsedTaskSidebar: some View {
+        VStack(spacing: 8) {
+            Button {
+                setTaskSidebarCollapsed(false)
+            } label: {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 26, height: 24)
+            }
+            .buttonHoverPointer()
+            .buttonStyle(.plain)
+            .nativeHelp("Show sidebar")
+            .accessibilityLabel("Show sidebar")
+            .accessibilityIdentifier("show-task-sidebar-button")
+
+            if !changeInventory.unviewed.isEmpty {
+                Text("\(changeInventory.unviewed.count)")
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Changes to review: \(changeInventory.unviewed.count)")
+                    .accessibilityIdentifier("collapsed-task-sidebar-count")
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.top, 12)
+        .frame(width: Self.collapsedSidebarWidth)
+        .frame(maxHeight: .infinity)
+        .background(WorkspaceTheme.panelBackground.opacity(0.62))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("task-sidebar-collapsed")
+    }
+
+    private var expandedTaskSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Text("Changes")
-                    .font(.system(size: 13, weight: .semibold))
-                    .accessibilityIdentifier("workspace-changes-title")
-                Spacer(minLength: 0)
                 Button {
-                    Task { await refreshWorkspaceChanges() }
+                    setTaskSidebarCollapsed(true)
                 } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11, weight: .medium))
-                        .frame(width: 24, height: 24)
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 22, height: 24)
                 }
                 .buttonHoverPointer()
                 .buttonStyle(.plain)
-                .nativeHelp("Refresh workspace changes")
-                .accessibilityLabel("Refresh workspace changes")
-                .accessibilityIdentifier("refresh-workspace-changes-button")
-                .disabled(isLoadingChanges)
+                .nativeHelp("Hide sidebar")
+                .accessibilityLabel("Hide sidebar")
+                .accessibilityIdentifier("hide-task-sidebar-button")
+                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 16)
-            .padding(.bottom, 10)
+            .padding(.horizontal, 10)
+            .padding(.top, 12)
+            .padding(.bottom, 6)
 
             Rectangle()
                 .fill(Color.primary.opacity(0.07))
                 .frame(height: 1)
 
-            if let changesError {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("Couldn't read Git changes", systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.red)
-                    Text(changesError)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("Retry") {
-                        Task { await refreshWorkspaceChanges() }
-                    }
-                    .buttonHoverPointer()
-                    .nativeHelp("Retry")
-                    .font(.system(size: 11, weight: .medium))
-                    .accessibilityIdentifier("retry-workspace-changes-button")
-                }
-                .padding(12)
-                .accessibilityIdentifier("workspace-changes-error")
-            } else if isLoadingChanges && changeInventory.isEmpty {
-                ProgressView("Checking folders…")
-                    .controlSize(.small)
-                    .font(.system(size: 11))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityIdentifier("workspace-changes-loading")
-            } else if changeInventory.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.secondary)
-                    Text("No changes")
-                        .font(.system(size: 12, weight: .medium))
-                    Text("Changes in Git repositories under this task's folders will appear here.")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(15)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityIdentifier("workspace-changes-empty")
+            changesSectionHeader
+
+            if isChangesSectionCollapsed {
+                Spacer(minLength: 0)
             } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 15) {
-                        changeSection(title: "Viewed", entries: changeInventory.viewed)
-                        changeSection(title: "Changes", entries: changeInventory.unviewed)
-                    }
-                    .padding(.vertical, 12)
-                }
-                .scrollIndicators(.visible)
-                .accessibilityIdentifier("workspace-changes-list")
+                changesSectionContent
             }
+
+            Spacer(minLength: 0)
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.07))
+                .frame(height: 1)
+
+            sidebarCommandRow
         }
-        .frame(width: 232)
+        .frame(width: Self.expandedSidebarWidth)
         .frame(maxHeight: .infinity)
         .background(WorkspaceTheme.panelBackground.opacity(0.62))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("task-sidebar")
     }
 
+    /// The Changes section's header; collapsing hides its lists so later sidebar sections
+    /// can share the column, and the pending count stays visible while it's collapsed.
+    private var changesSectionHeader: some View {
+        HStack(spacing: 6) {
+            Button {
+                toggleChangesSection()
+            } label: {
+                Image(systemName: isChangesSectionCollapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14, height: 24)
+            }
+            .buttonHoverPointer()
+            .buttonStyle(.plain)
+            .nativeHelp(isChangesSectionCollapsed ? "Expand changes" : "Collapse changes")
+            .accessibilityLabel(isChangesSectionCollapsed ? "Expand changes" : "Collapse changes")
+            .accessibilityValue(isChangesSectionCollapsed ? "Collapsed" : "Expanded")
+            .accessibilityIdentifier("toggle-workspace-changes-section-button")
+            Text("Changes")
+                .font(.system(size: 13, weight: .semibold))
+                .accessibilityIdentifier("workspace-changes-title")
+                .onTapGesture { toggleChangesSection() }
+            if isChangesSectionCollapsed && !changeInventory.unviewed.isEmpty {
+                Text("\(changeInventory.unviewed.count)")
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Changes to review: \(changeInventory.unviewed.count)")
+                    .accessibilityIdentifier("collapsed-workspace-changes-section-count")
+            }
+            Spacer(minLength: 0)
+                .contentShape(Rectangle())
+                .onTapGesture { toggleChangesSection() }
+            Button {
+                Task { await refreshWorkspaceChanges() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonHoverPointer()
+            .buttonStyle(.plain)
+            .nativeHelp("Refresh workspace changes")
+            .accessibilityLabel("Refresh workspace changes")
+            .accessibilityIdentifier("refresh-workspace-changes-button")
+            .disabled(!hasLoadedChanges)
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 14)
+        .padding(.vertical, 8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("workspace-changes-section-header")
+    }
+
+    @ViewBuilder
+    private var changesSectionContent: some View {
+        if let changesError {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Couldn't read Git changes", systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.red)
+                Text(changesError)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Retry") {
+                    Task { await refreshWorkspaceChanges() }
+                }
+                .buttonHoverPointer()
+                .nativeHelp("Retry")
+                .font(.system(size: 11, weight: .medium))
+                .accessibilityIdentifier("retry-workspace-changes-button")
+            }
+            .padding(12)
+            .accessibilityIdentifier("workspace-changes-error")
+        } else if !hasLoadedChanges {
+            ProgressView("Checking folders…")
+                .controlSize(.small)
+                .font(.system(size: 11))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityIdentifier("workspace-changes-loading")
+        } else if changeInventory.isEmpty && !changeInventory.mergingRepositories.isEmpty {
+            mergeInProgressNotice
+                .padding(15)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if changeInventory.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "checkmark.circle")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.secondary)
+                Text("No changes")
+                    .font(.system(size: 12, weight: .medium))
+                Text("Changes in Git repositories under this task's folders will appear here.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(15)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilityIdentifier("workspace-changes-empty")
+        } else if changeInventory.count > Self.maxRenderedChangeCount {
+            VStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.secondary)
+                Text("Too many changes to list")
+                    .font(.system(size: 12, weight: .medium))
+                Text(tooManyChangesMessage)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(15)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // An explicit label: a combined element of these texts reads back with an empty label.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Too many changes to list. \(tooManyChangesMessage)")
+            .accessibilityIdentifier("workspace-changes-too-many")
+        } else {
+            ScrollView {
+                // Lazy so off-screen rows stay out of the view tree; every row carries AppKit tooltip views.
+                LazyVStack(alignment: .leading, spacing: 15) {
+                    if !changeInventory.mergingRepositories.isEmpty {
+                        mergeInProgressNotice
+                            .padding(.horizontal, 14)
+                    }
+                    changeSection(title: "Viewed", entries: changeInventory.viewed)
+                    changeSection(title: "Changes", entries: changeInventory.unviewed)
+                }
+                .padding(.vertical, 12)
+            }
+            .scrollIndicators(.visible)
+            .accessibilityIdentifier("workspace-changes-list")
+        }
+    }
+
     /// A Viewed row always shows the reviewed work from the branch base; only a change made
     /// after that review is measured from the saved snapshot.
     private func diffBaselineLabel(_ entry: WorkspaceChangeEntry) -> String {
         entry.group == .unviewed && entry.hasViewedSnapshot ? "Since last viewed" : "Since branch base"
+    }
+
+    private var mergeInProgressMessage: String {
+        "Changes in \(changeInventory.mergingRepositories.map(repositoryLabel).joined(separator: ", ")) are hidden until the merge is committed or aborted."
+    }
+
+    private var tooManyChangesMessage: String {
+        "\(changeInventory.count) changed files is more than the \(Self.maxRenderedChangeCount) this list shows. Check for files that should be ignored, such as build output."
+    }
+
+    /// Shown in place of a repository's files while it has a merge open, since the merge stages
+    /// everything the merged branch brought in.
+    private var mergeInProgressNotice: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "arrow.triangle.merge")
+                .font(.system(size: 20))
+                .foregroundStyle(.secondary)
+            Text("Merge in progress")
+                .font(.system(size: 12, weight: .medium))
+            Text(mergeInProgressMessage)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        // An explicit label: a combined element of these texts reads back with an empty label.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Merge in progress. \(mergeInProgressMessage)")
+        .accessibilityIdentifier("workspace-changes-merge-in-progress")
     }
 
     private func changeSection(title: String, entries: [WorkspaceChangeEntry]) -> some View {
@@ -1753,6 +2074,20 @@ struct TaskConversationView: View {
                     Image(systemName: isViewedSectionExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
+                } else if !entries.isEmpty {
+                    Button {
+                        Task { await markAllViewed() }
+                    } label: {
+                        Image(systemName: "checklist.checked")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 20, height: 18)
+                    }
+                    .buttonStyle(.plain)
+                    .buttonHoverPointer()
+                    .nativeHelp("Mark all as viewed")
+                    .accessibilityLabel("Mark all as viewed")
+                    .accessibilityIdentifier("mark-all-viewed-button")
                 }
             }
             .padding(.horizontal, 14)
@@ -1831,6 +2166,20 @@ struct TaskConversationView: View {
                                 .nativeHelp("Mark as viewed")
                                 .accessibilityLabel("Mark \(entry.path) as viewed")
                                 .accessibilityIdentifier("mark-viewed-\(entry.path)")
+                            } else {
+                                Button {
+                                    Task { await markUnviewed(entry) }
+                                } label: {
+                                    Image(systemName: "arrow.uturn.backward.circle")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 20, height: 22)
+                                }
+                                .buttonStyle(.plain)
+                                .buttonHoverPointer()
+                                .nativeHelp("Mark as unviewed")
+                                .accessibilityLabel("Mark \(entry.path) as unviewed")
+                                .accessibilityIdentifier("mark-unviewed-\(entry.path)")
                             }
                         }
                         .padding(.horizontal, 7)
@@ -2160,13 +2509,34 @@ struct TaskConversationView: View {
         }
     }
 
+    private func markUnviewed(_ entry: WorkspaceChangeEntry) async {
+        do {
+            try await workspaceManager.markUnviewed(for: task.id, repository: entry.repository, path: entry.path)
+            await refreshWorkspaceChanges()
+        } catch {
+            changesError = error.localizedDescription
+        }
+    }
+
+    private func markAllViewed() async {
+        do {
+            _ = try await workspaceManager.markAllViewed(for: task.id)
+            await refreshWorkspaceChanges()
+        } catch {
+            changesError = error.localizedDescription
+        }
+    }
+
     private func refreshWorkspaceChanges() async {
         guard !isLoadingChanges else {
             changesNeedRefresh = true
             return
         }
         isLoadingChanges = true
-        defer { isLoadingChanges = false }
+        defer {
+            isLoadingChanges = false
+            hasLoadedChanges = true
+        }
 
         repeat {
             changesNeedRefresh = false
@@ -2277,71 +2647,107 @@ struct TaskConversationView: View {
 
     private var repositoryBadges: some View {
         let suggestedRepositoryPaths = suggestedRepositories.map(\.path)
-        return HStack(spacing: 5) {
+        let attachedRepositoryPaths = task.repositoryWorktrees.map(\.repositoryPath)
+        return HStack(spacing: 10) {
             ForEach(task.repositoryWorktrees, id: \.repositoryPath) { repository in
-                let name = URL(fileURLWithPath: repository.repositoryPath).lastPathComponent
-                Button {
-                    repositoryBeingEdited = repository
-                    editedBranch = repository.branch
-                    editedBranchFrom = repository.branchFrom
-                    editedMergeTarget = repository.mergeTarget ?? ""
-                    editingRepositoryField = nil
-                } label: {
-                    Text(name).font(.system(size: 10, weight: .medium)).lineLimit(1)
-                        .padding(.horizontal, 8).padding(.vertical, 5)
-                        .background(Color.accentColor.opacity(0.1), in: Capsule())
-                }
-                .buttonHoverPointer()
-                .nativeHelp("Edit repository settings for \(name)")
-                .buttonStyle(.plain)
-                .disabled(isReadOnly)
-                .popover(item: Binding(
-                    get: { repositoryBeingEdited?.repositoryPath == repository.repositoryPath ? RepositoryBadgeEditID(path: repository.repositoryPath) : nil },
-                    set: { if $0 == nil { repositoryBeingEdited = nil } }
-                )) { _ in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(name).font(.system(size: 12, weight: .semibold))
-                        repositoryDetailRow("Branch name", value: $editedBranch, field: "branch", placeholder: "auto", identifier: "conversation-repository-branch", editable: repository.isPending)
-                        repositoryDetailRow("Branch from", value: $editedBranchFrom, field: "from", placeholder: "default", identifier: "conversation-repository-branch-from", editable: repository.isPending)
-                        repositoryDetailRow("Merge to", value: $editedMergeTarget, field: "to", placeholder: "default", identifier: "conversation-repository-merge-target", editable: repository.isPending)
-                        HStack {
-                            Button("Remove Repository", role: .destructive) { removeConversationRepository(repository) }
-                            .buttonHoverPointer()
-                            .nativeHelp("Remove Repository")
-                                .accessibilityIdentifier("remove-conversation-repository-button")
-                            Spacer()
-                            if repository.isPending {
-                                Button("Save") { saveConversationRepository(repository) }
-                                    .buttonHoverPointer()
-                                    .nativeHelp("Save repository settings")
-                                    .buttonStyle(.borderedProminent)
-                                    .accessibilityIdentifier("save-conversation-repository-button")
-                            } else {
-                                Text("Settings are locked after the task starts.")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.secondary)
-                                    .accessibilityIdentifier("conversation-repository-settings-locked")
-                            }
-                        }
-                    }
-                    .font(.system(size: 11)).padding(12).frame(minWidth: 270, alignment: .leading)
-                }
-                .accessibilityIdentifier("conversation-repository-badge-\(name)")
+                repositoryChip(repository)
             }
             Button {
                 isShowingRepositoryPicker.toggle()
+                loadRecentRepositories()
                 if suggestedRepositories.isEmpty { loadSuggestedRepositories() }
             } label: {
-                Image(systemName: "plus").font(.system(size: 10, weight: .semibold))
-                    .frame(width: 22, height: 22).background(Color.primary.opacity(0.07), in: Circle())
+                Image(systemName: "plus").font(.system(size: 12, weight: .semibold))
+                    .frame(width: 28, height: 28).background(Color.primary.opacity(0.07), in: Circle())
             }
             .buttonHoverPointer()
             .buttonStyle(.plain).nativeHelp("Add a repository").accessibilityLabel("Add repository")
             .accessibilityIdentifier("add-conversation-repository-button")
             // The popover content only refreshes with this view, so key it to the suggestions it lists.
-            .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker.id(suggestedRepositoryPaths) }
+            .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker.id(suggestedRepositoryPaths + recentRepositoryPaths) }
             .disabled(isReadOnly)
         }
+        .onAppear { loadRecentRepositories() }
+        .onChange(of: attachedRepositoryPaths) { _, _ in loadRecentRepositories() }
+    }
+
+    private func repositoryChip(_ repository: RepositoryWorktreeRecord) -> some View {
+        let name = URL(fileURLWithPath: repository.repositoryPath).lastPathComponent
+        return Button {
+            repositoryBeingEdited = repository
+            resetRepositoryEdits(to: repository)
+            editingRepositoryField = nil
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(WorkspaceTheme.accent)
+                Text(name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    .foregroundStyle(.primary)
+            }
+            .padding(.leading, 11).padding(.trailing, 14).padding(.vertical, 7)
+            .background(Color.primary.opacity(0.08), in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.14), lineWidth: 1))
+        }
+        .buttonHoverPointer()
+        .nativeHelp("Edit repository settings for \(name)")
+        .buttonStyle(.plain)
+        .disabled(isReadOnly)
+        .popover(item: Binding(
+            get: { repositoryBeingEdited?.repositoryPath == repository.repositoryPath ? RepositoryBadgeEditID(path: repository.repositoryPath) : nil },
+            set: { if $0 == nil { repositoryBeingEdited = nil } }
+        )) { _ in
+            repositorySettingsPopover(repository, name: name)
+        }
+        .accessibilityIdentifier("conversation-repository-badge-\(name)")
+        .overlay(alignment: .topTrailing) {
+            if !isReadOnly {
+                Button { removeConversationRepository(repository) } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 6.5, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14, height: 14)
+                        .background(WorkspaceTheme.panelBackground, in: Circle())
+                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.16), lineWidth: 1))
+                        .contentShape(Circle())
+                }
+                .buttonHoverPointer()
+                .buttonStyle(.plain)
+                .nativeHelp("Remove \(name) from this task")
+                .accessibilityLabel("Remove \(name)")
+                .accessibilityIdentifier("remove-conversation-repository-\(name)")
+                .offset(x: 4, y: -4)
+            }
+        }
+    }
+
+    private func repositorySettingsPopover(_ repository: RepositoryWorktreeRecord, name: String) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(name).font(.system(size: 15, weight: .semibold))
+                .allowsHitTesting(false)
+                .accessibilityIdentifier("conversation-repository-settings-title")
+            VStack(alignment: .leading, spacing: 8) {
+                repositoryDetailRow("Branch name", value: $editedBranch, field: "branch", placeholder: "auto", identifier: "conversation-repository-branch", repository: repository)
+                repositoryDetailRow("Branch from", value: $editedBranchFrom, field: "from", placeholder: "default", identifier: "conversation-repository-branch-from", repository: repository)
+                repositoryDetailRow("Merge to", value: $editedMergeTarget, field: "to", placeholder: "default", identifier: "conversation-repository-merge-target", repository: repository)
+            }
+            if !repository.isPending {
+                Text("Settings are locked after the task starts.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("conversation-repository-settings-locked")
+            }
+        }
+        .font(.system(size: 13))
+        .padding(18)
+        .frame(width: 360, alignment: .leading)
+        // A click anywhere outside the field being edited dismisses the edit unsaved.
+        .background(
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture { cancelRepositoryFieldEdit(repository) }
+        )
     }
 
     private var repositoryPicker: some View {
@@ -2381,7 +2787,7 @@ struct TaskConversationView: View {
                     }
                 }
                 .onKeyPress { press in
-                    let available = availableRepositorySuggestions
+                    let available = pickerRepositories
                     switch press.key {
                     case .downArrow:
                         guard !available.isEmpty else { return .ignored }
@@ -2409,8 +2815,15 @@ struct TaskConversationView: View {
                     }
                 }
                 .accessibilityIdentifier("conversation-repository-search")
-            let available = availableRepositorySuggestions
-            if WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) == nil {
+            let available = pickerRepositories
+            let isListingRecent = isShowingRecentRepositories
+            if isListingRecent {
+                Text("Recent")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("conversation-repository-recent-header")
+            }
+            if !isListingRecent, WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) == nil {
                 EmptyView()
             } else if available.isEmpty {
                 Text("No matching repositories.").font(.system(size: 10)).foregroundStyle(.secondary)
@@ -2430,7 +2843,7 @@ struct TaskConversationView: View {
                             .nativeHelp("Select repository")
                             .buttonStyle(.plain)
                             .background(index == repositorySuggestionIndex ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
-                            .accessibilityIdentifier("conversation-repository-suggestion-\(repository.lastPathComponent)")
+                            .accessibilityIdentifier("conversation-repository-\(isListingRecent ? "recent" : "suggestion")-\(repository.lastPathComponent)")
                         }
                     }
                 }.frame(width: 280, height: min(CGFloat(available.count * 42), 180))
@@ -2459,6 +2872,18 @@ struct TaskConversationView: View {
             let gitMarker = repository.appendingPathComponent(".git")
             return FileManager.default.fileExists(atPath: gitMarker.path) ? repository : nil
         }
+    }
+
+    /// Before anything is typed the picker offers recently used repositories, newest first;
+    /// typing switches to searching every repository under the suggestion folder.
+    private var isShowingRecentRepositories: Bool {
+        repositorySearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !recentRepositoryPaths.isEmpty
+    }
+
+    private var pickerRepositories: [URL] {
+        isShowingRecentRepositories
+            ? recentRepositoryPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            : availableRepositorySuggestions
     }
 
     private var availableRepositorySuggestions: [URL] {
@@ -2502,12 +2927,20 @@ struct TaskConversationView: View {
                     FileManager.default.fileExists(atPath: URL(fileURLWithPath: path).appendingPathComponent(".git").path)
                 }
                 try WorkspaceSettingsManager().setLastSelectedRepositories(availablePaths)
+                loadRecentRepositories()
                 await refreshWorkspaceChanges()
             } catch {
                 errorMessage = "Couldn't add repository: \(error.localizedDescription)"
                 isShowingRepositoryPicker = reopenPickerOnError
             }
         }
+    }
+
+    private func loadRecentRepositories() {
+        guard !task.isStandaloneChat else { return }
+        recentRepositoryPaths = (try? WorkspaceManager(
+            taskManager: BoardTaskManager(modelContext: modelContext)
+        ).recentRepositorySuggestions(for: task.id)) ?? []
     }
 
     private func loadSuggestedRepositories() {
@@ -2579,6 +3012,50 @@ struct TaskConversationView: View {
         }
     }
 
+    /// One message of the rendered window with the rows anchored to it: its
+    /// page separator and activity disclosure above, and the boundaries, goal
+    /// achievements, tool calls, and compactions that follow it.
+    @ViewBuilder
+    private func transcriptRows(for message: ConversationMessage, inlineTools: [String: [ConversationActivity]]) -> some View {
+        if let page = standaloneChatPageSeparator(before: message) {
+            standaloneChatPageSeparator(page)
+                .id("chat-page-separator-\(page.id)-\(message.id)")
+        }
+        if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
+            activityList
+        }
+        transcriptEntry(message)
+            .id(message.id)
+            // The question itself starts the newest turn, below any page
+            // separator, so a pin lands on the bubble.
+            .layoutValue(key: ConversationLatestTurnStartKey.self, value: message.id == latestConversationTurnStartID)
+        ForEach(providerBoundaries.filter {
+            renderedAnchorMessageID(for: boundaryAnchorID(for: $0)) == message.id
+        }) { boundary in
+            providerBoundaryRow(boundary)
+        }
+        ForEach(goalAchievementTimelineEntries.filter {
+            renderedAnchorMessageID(for: goalAchievementAnchorMessageID(for: $0)) == message.id
+        }) { entry in
+            goalAchievementTimelineRow(entry)
+                .id(entry.id)
+        }
+        ForEach(inlineTools[message.id] ?? []) { activity in
+            ToolCallTimelineRow(activity: activity)
+        }
+        let nextOrder = conversationMessages.first(where: {
+            guard let current = message.timelineOrder, let candidate = $0.timelineOrder else { return false }
+            return candidate > current
+        })?.timelineOrder
+        ForEach(activities.filter {
+            guard $0.isContextCompaction, let eventOrder = $0.timelineOrder,
+                  let messageOrder = message.timelineOrder, eventOrder > messageOrder else { return false }
+            return nextOrder.map { eventOrder < $0 } ?? true
+        }) { activity in
+            contextCompactionTimelineRow(activity)
+        }
+    }
+
     private var conversation: some View {
         GeometryReader { viewport in
             ScrollViewReader { scrollProxy in
@@ -2620,7 +3097,24 @@ struct TaskConversationView: View {
                     }
                     .frame(height: 0)
 
-                VStack(alignment: .leading, spacing: 16) {
+                // One stack for the whole rendered window, so rows keep their
+                // identity, and with it their state, as a newer question moves
+                // the start of the newest turn past them. The layout reserves
+                // the filler below the newest turn itself: from its question to
+                // the end of the transcript it is at least a viewport tall, less
+                // the bottom padding and end marker already below it, which lets
+                // a turn shorter than the viewport be pinned to the top, and
+                // makes that pin exactly the bottom, which following starts
+                // from. The runway above the window does the same for the other
+                // end. Sizing the filler from measurements instead, which
+                // SwiftUI reports a pass later, left it stale and opened blank
+                // overscroll below the transcript.
+                let leadingGoalEntries = goalAchievementTimelineEntries.filter { goalAchievementAnchorMessageID(for: $0) == nil }
+                let inlineTools = inlineToolCalls.byMessageID
+                ConversationTranscriptLayout(
+                    spacing: 16,
+                    minimumLatestTurnHeight: max(0, viewport.size.height - Self.conversationVerticalPadding - Self.conversationScrollEndHeight)
+                ) {
                     if messages.isEmpty && activeGoal?.status != "complete" && !isLoadingHistory {
                         VStack(spacing: 0) {
                             if task.isStandaloneChat {
@@ -2660,66 +3154,18 @@ struct TaskConversationView: View {
                         // A plain stack: a LazyVStack of these AppKit-backed rows could keep
                         // re-estimating its rows after a send and never finish layout. At most
                         // a recent window of messages renders, and older batches load on demand.
-                        let inlineTools = inlineToolCalls.byMessageID
-                        VStack(alignment: .leading, spacing: 16) {
-                            ForEach(goalAchievementTimelineEntries.filter {
-                                goalAchievementAnchorMessageID(for: $0) == nil
-                            }) { entry in
-                                goalAchievementTimelineRow(entry)
-                                    .id(entry.id)
-                            }
-                            ForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
-                                providerBoundaryRow(boundary)
-                            }
-                            ForEach(renderedConversationMessages) { message in
-                                if let page = standaloneChatPageSeparator(before: message) {
-                                    standaloneChatPageSeparator(page)
-                                        .id("chat-page-separator-\(page.id)-\(message.id)")
-                                }
-                                if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
-                                    activityList
-                                }
-                                transcriptEntry(message)
-                                    .id(message.id)
-                                    .background {
-                                        if message.id == latestConversationTurnStartID {
-                                            GeometryReader { geometry in
-                                                Color.clear.preference(
-                                                    key: ConversationLatestTurnTopKey.self,
-                                                    value: geometry.frame(in: .named(Self.conversationContentCoordinateSpace)).minY
-                                                )
-                                            }
-                                        }
-                                    }
-                                ForEach(providerBoundaries.filter {
-                                    renderedAnchorMessageID(for: boundaryAnchorID(for: $0)) == message.id
-                                }) { boundary in
-                                    providerBoundaryRow(boundary)
-                                }
-                                ForEach(goalAchievementTimelineEntries.filter {
-                                    renderedAnchorMessageID(for: goalAchievementAnchorMessageID(for: $0)) == message.id
-                                }) { entry in
-                                    goalAchievementTimelineRow(entry)
-                                        .id(entry.id)
-                                }
-                                ForEach(inlineTools[message.id] ?? []) { activity in
-                                    ToolCallTimelineRow(activity: activity)
-                                }
-                                let nextOrder = conversationMessages.first(where: {
-                                    guard let current = message.timelineOrder, let candidate = $0.timelineOrder else { return false }
-                                    return candidate > current
-                                })?.timelineOrder
-                                ForEach(activities.filter {
-                                    guard $0.isContextCompaction, let eventOrder = $0.timelineOrder,
-                                          let messageOrder = message.timelineOrder, eventOrder > messageOrder else { return false }
-                                    return nextOrder.map { eventOrder < $0 } ?? true
-                                }) { activity in
-                                    contextCompactionTimelineRow(activity)
-                                }
-                            }
-                            if shouldShowActivityDisclosure, activityDisclosureAnchorID == nil {
-                                activityList
-                            }
+                        ForEach(leadingGoalEntries) { entry in
+                            goalAchievementTimelineRow(entry)
+                                .id(entry.id)
+                        }
+                        ForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
+                            providerBoundaryRow(boundary)
+                        }
+                        ForEach(renderedConversationMessages) { message in
+                            transcriptRows(for: message, inlineTools: inlineTools)
+                        }
+                        if shouldShowActivityDisclosure, activityDisclosureAnchorID == nil {
+                            activityList
                         }
                     }
 
@@ -2732,9 +3178,7 @@ struct TaskConversationView: View {
                         }
                     }
                     if messages.isEmpty {
-                        ForEach(goalAchievementTimelineEntries.filter {
-                            goalAchievementAnchorMessageID(for: $0) == nil
-                        }) { entry in
+                        ForEach(leadingGoalEntries) { entry in
                             goalAchievementTimelineRow(entry)
                                 .id(entry.id)
                         }
@@ -2757,54 +3201,32 @@ struct TaskConversationView: View {
                     Color.clear
                         .frame(height: 1)
                         .id("conversation-latest-anchor")
+                    // Spans the newest turn at its natural height, which only
+                    // "does the newest turn fit the viewport?" is asked of.
+                    Color.clear
                         .background {
                             GeometryReader { geometry in
                                 Color.clear.preference(
-                                    key: ConversationTranscriptBottomKey.self,
-                                    value: geometry.frame(in: .named(Self.conversationContentCoordinateSpace)).maxY
+                                    key: ConversationLatestTurnHeightKey.self,
+                                    value: geometry.size.height
                                 )
                             }
                         }
+                        .accessibilityHidden(true)
+                        .layoutValue(key: ConversationLatestTurnExtentKey.self, value: true)
                 }
-                // The latest turn's top and the transcript's bottom are measured in this
-                // space, which scrolls with them: only their difference is used, and
-                // scroll-relative values would publish state, and re-render the whole
-                // transcript, on every scroll frame.
-                .coordinateSpace(name: Self.conversationContentCoordinateSpace)
                 .padding(.horizontal, 28)
                 .padding(.vertical, Self.conversationVerticalPadding)
+                // A window that holds older messages back needs the runway's
+                // counterpart below even when no turn of its own is rendered.
+                .frame(
+                    minHeight: hasOlderConversationMessages
+                        ? max(0, viewport.size.height - Self.conversationScrollEndHeight)
+                        : nil,
+                    alignment: .top
+                )
                 .frame(maxWidth: 820)
                 .frame(maxWidth: .infinity)
-                .background {
-                    GeometryReader { geometry in
-                        Color.clear.preference(
-                            key: ConversationScrollContentHeightKey.self,
-                            value: geometry.size.height
-                        )
-                    }
-                }
-
-                // Filler below the rendered window. Together with the runway
-                // above it, this is what lets a turn that is shorter than the
-                // viewport still be scrolled to the top. The window-based
-                // measure only covers a transcript still short enough to
-                // measure whole, so the newest turn's own height carries the
-                // pin once older messages are revealed above it. Each leaves
-                // out what already sits below its measure — the end marker,
-                // and for the turn the bottom padding — so the pinned
-                // position is exactly the bottom, which following starts from.
-                let windowFiller = hasOlderConversationMessages
-                    ? max(0, viewport.size.height - conversationContentHeight - Self.conversationScrollEndHeight)
-                    : 0
-                let turnFiller = latestTurnHeight.map {
-                    max(0, viewport.size.height - $0 - Self.conversationVerticalPadding - Self.conversationScrollEndHeight)
-                } ?? 0
-                let filler = max(windowFiller, turnFiller)
-                if filler > 0 {
-                    Color.clear
-                        .frame(height: filler)
-                        .accessibilityHidden(true)
-                }
                 // The very end of the scroll content, filler included, which is
                 // where following new content keeps the viewport. Unlike
                 // `scrollToLatest`, following can target it: a scroll that
@@ -2861,25 +3283,12 @@ struct TaskConversationView: View {
                     using: scrollProxy
                 )
             })
-            // A row the LazyVStack has not realized reports nothing; keeping the
-            // last measurement stops the filler from collapsing — and the
-            // transcript from jumping under the reader — while the newest turn
-            // is scrolled out of view.
-            .onPreferenceChange(ConversationLatestTurnTopKey.self) { top in
-                guard let top, latestTurnTopY != top else { return }
-                latestTurnTopY = top
-            }
-            .onPreferenceChange(ConversationTranscriptBottomKey.self) { bottom in
-                guard let bottom, transcriptBottomY != bottom else { return }
-                transcriptBottomY = bottom
-            }
-            .onPreferenceChange(ConversationScrollContentHeightKey.self) { height in
+            .onPreferenceChange(ConversationLatestTurnHeightKey.self) { height in
                 // Only "shorter than the viewport?" is ever asked of this value,
-                // and a LazyVStack keeps revising its measured height as rows
-                // realize while scrolling. Publishing each revision re-renders
-                // the whole transcript, so cap it once the content overflows.
+                // and publishing each revision re-renders the whole transcript,
+                // so cap it once the turn overflows.
                 let clamped = min(height, viewport.size.height + 1)
-                if clamped != conversationContentHeight { conversationContentHeight = clamped }
+                if clamped != latestTurnContentHeight { latestTurnContentHeight = clamped }
             }
             .onChange(of: isLoadingHistory) { _, isLoading in
                 // Every completed history load reopens on the newest turn,
@@ -2939,7 +3348,6 @@ struct TaskConversationView: View {
     }
 
     private static let conversationScrollCoordinateSpace = "conversation-transcript-scroll"
-    private static let conversationContentCoordinateSpace = "conversation-transcript-content"
     private static let conversationScrollEndID = "conversation-scroll-end"
     private static let conversationScrollEndHeight: CGFloat = 1
     private static let conversationVerticalPadding: CGFloat = 24
@@ -4217,7 +4625,7 @@ struct TaskConversationView: View {
 
                                 Button {
                                     pendingImages.removeAll { $0.id == attachment.id }
-                                    persistDraftImages()
+                                    persistDraft()
                                 } label: {
                                     Image(systemName: "xmark.circle.fill").foregroundStyle(.white, .black.opacity(0.7))
                                 }
@@ -4461,9 +4869,6 @@ struct TaskConversationView: View {
                         } else if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/goal", provider.supportsGoals {
                             isEnteringGoal = true
                             draft = ""
-                        }
-                        if !isReadOnly, !isResponding, !isLoadingHistory {
-                            draftNeedsAutosave = true
                         }
                         scheduleDraftAutosave(newValue)
                     }
@@ -4860,9 +5265,6 @@ struct TaskConversationView: View {
         isOlderConversationRevealArmed = false
         // Following resumes once the pinned turn is observed at the bottom.
         lastConversationScrollSample.isFollowingLatest = false
-        conversationContentHeight = 0
-        latestTurnTopY = nil
-        transcriptBottomY = nil
         oldestRenderedMessageID = nil
         errorMessage = nil
         let draftAtLoadStart = draft
@@ -4925,8 +5327,8 @@ struct TaskConversationView: View {
                 }
             }
             goalStatusUpdatedAt = .now
-            // Autosave pauses during a turn, so the saved draft can be text that
-            // was since steered or queued; neither belongs back in the composer.
+            // Stores from before drafts were marked can hold an already sent prompt
+            // as the saved prompt; that one does not belong back in the composer.
             let queuedTexts = Set(((try? conversationManager.queuedMessages(taskID: task.id)) ?? []).map(\.text))
             let promptWasSent = task.savedPrompt.map { prompt in
                 history.messages.contains { $0.role == .user && $0.text == prompt }
@@ -4939,10 +5341,21 @@ struct TaskConversationView: View {
                !submittedPrompt.isEmpty {
                 messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: submittedPrompt))
             }
-            if draft == draftAtLoadStart {
-                draft = promptWasSent || hasPendingSubmittedPrompt ? "" : (task.savedPrompt ?? "")
+            // A marked draft is unsent by definition: steering, queueing, and sending clear it.
+            let savedDraft = task.hasUnsentDraft || !(promptWasSent || hasPendingSubmittedPrompt)
+                ? task.savedPrompt ?? ""
+                : ""
+            let restoresDraftImages = task.hasUnsentDraft || !(promptWasSent || hasPendingSubmittedPrompt)
+            // Unsent composer text is never replaced by a saved draft, which can only be older.
+            // A composer the user just cleared is unsaved, and stays cleared.
+            if draft == draftAtLoadStart, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isDraftUnsaved {
+                composerDraft.settledText = savedDraft
+                draft = savedDraft
+            } else if isDraftUnsaved {
+                // Autosave skips a reload, so save text that was still waiting for it.
+                persistDraft()
             }
-            if !promptWasSent && !hasPendingSubmittedPrompt && pendingImages.isEmpty {
+            if restoresDraftImages && pendingImages.isEmpty {
                 pendingImages = task.draftImageDataURLs.compactMap { dataURL in
                     guard let comma = dataURL.firstIndex(of: ","),
                           let data = Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...])),
@@ -5193,7 +5606,10 @@ struct TaskConversationView: View {
         completedResponseDuration = nil
         WorkspaceSettings.preferencesStore.set(startedAt, forKey: responseStartedAtDefaultsKey)
         WorkspaceSettings.preferencesStore.removeObject(forKey: completedResponseDurationDefaultsKey)
-        if usesComposerDraft { draft = "" }
+        if usesComposerDraft {
+            composerDraft.settledText = ""
+            draft = ""
+        }
         let imageDataURLs = usesComposerDraft ? pendingImages.map(\.dataURL) : []
         if usesComposerDraft { pendingImages = [] }
         // Question IDs can repeat across turns.
@@ -5211,7 +5627,8 @@ struct TaskConversationView: View {
                 status: .inProgress,
                 prompt: text,
                 generateTitle: false,
-                reserveTitleForSend: true
+                reserveTitleForSend: true,
+                sendsComposerDraft: usesComposerDraft
             )
             isPreparingSubmittedMessage = false
             guard saved else {
@@ -5226,6 +5643,7 @@ struct TaskConversationView: View {
                         guard let image = Self.image(fromDataURL: dataURL) else { return nil }
                         return PendingImage(dataURL: dataURL, image: image)
                     }
+                    persistDraft()
                 }
                 isResponding = false
                 responseStartedAt = nil
@@ -5415,6 +5833,7 @@ struct TaskConversationView: View {
                             guard let image = Self.image(fromDataURL: dataURL) else { return nil }
                             return PendingImage(dataURL: dataURL, image: image)
                         }
+                        persistDraft()
                     }
                     errorMessage = error.localizedDescription
                 }
@@ -5422,11 +5841,6 @@ struct TaskConversationView: View {
             }
 
             isResponding = false
-            if !usesComposerDraft, !draft.isEmpty {
-                do {
-                    _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: draft)
-                } catch { errorMessage = error.localizedDescription }
-            }
         }
     }
 
@@ -5617,8 +6031,7 @@ struct TaskConversationView: View {
         guard !text.isEmpty || !imageDataURLs.isEmpty else { return }
         do {
             _ = try conversationManager.queueMessage(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
-            draft = ""
-            clearSteeredDraftImages()
+            clearHandedOffDraft()
             refreshQueuedMessages()
             errorMessage = nil
         } catch { errorMessage = error.localizedDescription }
@@ -5668,8 +6081,7 @@ struct TaskConversationView: View {
                 let accepted = try await conversationManager.steer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
                 guard accepted else {
                     _ = try await conversationManager.queueMissedSteer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
-                    draft = ""
-                    clearSteeredDraftImages()
+                    clearHandedOffDraft()
                     refreshQueuedMessages()
                     if let history = try? await conversationManager.history(taskID: task.id, messageLimit: Self.historyPageSize) {
                         applyHistoryMessages(history)
@@ -5679,8 +6091,7 @@ struct TaskConversationView: View {
                     return
                 }
                 showLocalSteer(text, imageDataURLs: imageDataURLs)
-                draft = ""
-                clearSteeredDraftImages()
+                clearHandedOffDraft()
                 errorMessage = nil
             } catch {
                 refreshQueuedMessages()
@@ -5749,23 +6160,35 @@ struct TaskConversationView: View {
             throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
         }
         pendingImages.append(PendingImage(dataURL: "data:\(encoded.mimeType);base64,\(encoded.data.base64EncodedString())", image: previewImage))
-        persistDraftImages()
+        persistDraft()
     }
 
-    /// Images handed to the active turn or the queue leave the saved draft too,
-    /// so reopening the task doesn't restore them to the composer.
-    private func clearSteeredDraftImages() {
-        guard !pendingImages.isEmpty else { return }
+    /// Text and images handed to the active turn or the queue leave the saved draft
+    /// at once, so reopening the task doesn't restore them to the composer.
+    private func clearHandedOffDraft() {
+        composerDraft.settledText = ""
+        draft = ""
         pendingImages.removeAll()
-        persistDraftImages()
+        persistDraft()
     }
 
-    private func persistDraftImages() {
+    /// Saves the composer's text and images together as the task's draft, during a turn
+    /// as well as between turns. Values are captured now, so a save still completes after
+    /// the view goes away.
+    private func persistDraft(reportingErrors: Bool = true) {
+        draftAutosaveTask?.cancel()
+        draftAutosaveTask = nil
+        let text = draft
         let images = pendingImages.map(\.dataURL)
+        let taskID = task.id
+        let taskManager = BoardTaskManager(modelContext: modelContext)
+        composerDraft.settledText = text
         Task { @MainActor in
             do {
-                _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: draft, imageDataURLs: images)
-            } catch { errorMessage = error.localizedDescription }
+                _ = try await taskManager.saveDraft(taskID, prompt: text, imageDataURLs: images)
+            } catch {
+                if reportingErrors { errorMessage = error.localizedDescription }
+            }
         }
     }
 
@@ -5832,7 +6255,12 @@ struct TaskConversationView: View {
             return
         }
         if isReadOnly { onBack(); return }
-        if isResponding { onBack(); return }
+        if isResponding {
+            // The turn keeps running, and so does the draft typed beside it.
+            if isDraftUnsaved { persistDraft() }
+            onBack()
+            return
+        }
         let hasStartedRepository = task.repositoryWorktrees.contains { !$0.isPending }
         let hasDraft = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         // Folder-only context is not work in progress: an otherwise empty new task is discarded.
@@ -5849,11 +6277,12 @@ struct TaskConversationView: View {
             }
             return
         }
-        if draftNeedsAutosave, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if isDraftUnsaved, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let images = pendingImages.map(\.dataURL)
             Task { @MainActor in
                 do {
-                    _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: "")
-                    draftNeedsAutosave = false
+                    _ = try await BoardTaskManager(modelContext: modelContext).saveDraft(task.id, prompt: "", imageDataURLs: images)
+                    composerDraft.settledText = draft
                     await saveDraftAndGenerateTitle(status: nil, then: onBack)
                 } catch {
                     errorMessage = error.localizedDescription
@@ -5891,23 +6320,20 @@ struct TaskConversationView: View {
         messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: text, imageDataURLs: imageDataURLs))
     }
 
+    /// Autosaves typed text while the agent responds as well as between turns. Composer
+    /// changes that need no save (a restored draft, or the empty composer a send leaves)
+    /// match the settled text and are skipped.
     private func scheduleDraftAutosave(_ value: String) {
         draftAutosaveTask?.cancel()
-        let prompt = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isReadOnly, !isDisplayingActiveResponse, !isLoadingHistory else { return }
+        guard !isReadOnly, !isLoadingHistory, value != composerDraft.settledText else { return }
         draftAutosaveTask = Task { @MainActor in
             // Let AppKit finish a burst of synthesized keystrokes before the
             // main-actor SwiftData write starts. This keeps long XCTest
             // `typeText` operations responsive while retaining prompt
             // autosave once typing settles.
             try? await Task.sleep(nanoseconds: 750_000_000)
-            guard !Task.isCancelled, !isResponding, !isLoadingHistory else { return }
-            do {
-                _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: prompt)
-                if draft == value { draftNeedsAutosave = false }
-            } catch {
-                errorMessage = error.localizedDescription
-            }
+            guard !Task.isCancelled, !isLoadingHistory, draft == value else { return }
+            persistDraft()
         }
     }
 
@@ -5917,10 +6343,21 @@ struct TaskConversationView: View {
         prompt submittedPrompt: String? = nil,
         generateTitle: Bool = true,
         reserveTitleForSend: Bool = false,
+        sendsComposerDraft: Bool = false,
         then completion: (() -> Void)? = nil
     ) async -> Bool {
         let prompt = (submittedPrompt ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else {
+            // An image-only send has no prompt to submit, but its draft is no longer unsent. Its
+            // images leave the draft once the turn starts.
+            if sendsComposerDraft {
+                do {
+                    _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: "")
+                } catch {
+                    errorMessage = error.localizedDescription
+                    return false
+                }
+            }
             if task.title == "Generating title…", task.pendingSubmittedPrompt == nil {
                 _ = try? await BoardTaskManager(modelContext: modelContext).renameIfTitleMatches(
                     task.id,
@@ -5934,12 +6371,17 @@ struct TaskConversationView: View {
         let taskManager = BoardTaskManager(modelContext: modelContext)
         var shouldGenerateTitle = false
         do {
-            let savedTask = try await taskManager.savePrompt(
-                task.id,
-                prompt: prompt,
-                status: status,
-                submitted: reserveTitleForSend
-            )
+            // Without a status change this saves the composer's draft, text and images together.
+            let savedTask = status == nil && !reserveTitleForSend
+                ? try await taskManager.saveDraft(task.id, prompt: prompt, imageDataURLs: pendingImages.map(\.dataURL))
+                : try await taskManager.savePrompt(
+                    task.id,
+                    prompt: prompt,
+                    status: status,
+                    submitted: reserveTitleForSend,
+                    replacingDraft: sendsComposerDraft
+                )
+            if status == nil && !reserveTitleForSend { composerDraft.settledText = draft }
             if generateTitle, ["Generating title…", "Untitled task"].contains(savedTask.title) {
                 shouldGenerateTitle = try await taskManager.renameIfTitleMatches(
                     task.id,
@@ -6143,7 +6585,7 @@ struct TaskConversationView: View {
         }
     }
 
-    private func saveConversationRepository(_ original: RepositoryWorktreeRecord) {
+    private func saveConversationRepository(_ original: RepositoryWorktreeRecord, field: String) {
         let branch = editedBranch.trimmingCharacters(in: .whitespacesAndNewlines)
         let branchFrom = editedBranchFrom.trimmingCharacters(in: .whitespacesAndNewlines)
         let mergeTarget = editedMergeTarget.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -6160,12 +6602,39 @@ struct TaskConversationView: View {
                     branchFrom: branchFrom,
                     mergeTarget: mergeTarget.isEmpty ? nil : mergeTarget
                 )
-                repositoryBeingEdited = nil
+                // The popover stays open on the saved value so another field can be edited next.
+                if editingRepositoryField == field { editingRepositoryField = nil }
                 errorMessage = nil
             } catch {
                 errorMessage = "Couldn't save repository settings: \(error.localizedDescription)"
             }
         }
+    }
+
+    /// The stored settings for a repository, read fresh so an edit starts from what is saved.
+    private func currentRepositoryRecord(_ repository: RepositoryWorktreeRecord) -> RepositoryWorktreeRecord {
+        task.repositoryWorktrees.first { $0.repositoryPath == repository.repositoryPath } ?? repository
+    }
+
+    private func resetRepositoryEdits(to repository: RepositoryWorktreeRecord) {
+        let current = currentRepositoryRecord(repository)
+        editedBranch = current.branch
+        editedBranchFrom = current.branchFrom
+        editedMergeTarget = current.mergeTarget ?? ""
+    }
+
+    private func beginRepositoryFieldEdit(_ field: String, repository: RepositoryWorktreeRecord) {
+        // Only one field is edited at a time; switching fields drops the unsaved one.
+        resetRepositoryEdits(to: repository)
+        editingRepositoryField = field
+        DispatchQueue.main.async { focusedRepositoryField = field }
+    }
+
+    private func cancelRepositoryFieldEdit(_ repository: RepositoryWorktreeRecord) {
+        guard editingRepositoryField != nil else { return }
+        resetRepositoryEdits(to: repository)
+        editingRepositoryField = nil
+        focusedRepositoryField = nil
     }
 
     @ViewBuilder
@@ -6175,30 +6644,68 @@ struct TaskConversationView: View {
         field: String,
         placeholder: String,
         identifier: String,
-        editable: Bool
+        repository: RepositoryWorktreeRecord
     ) -> some View {
-        HStack(spacing: 8) {
-            Text(title).foregroundStyle(.secondary).frame(width: 82, alignment: .leading)
+        let editable = repository.isPending
+        HStack(spacing: 12) {
+            Text(title).foregroundStyle(.secondary).frame(width: 96, alignment: .leading)
+                .allowsHitTesting(false)
             if editable, editingRepositoryField == field {
-                TextField(placeholder, text: value).textFieldStyle(.roundedBorder).accessibilityIdentifier(identifier)
+                TextField(placeholder, text: value)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .focused($focusedRepositoryField, equals: field)
+                    .onSubmit { saveConversationRepository(repository, field: field) }
+                    .accessibilityIdentifier(identifier)
+                    .padding(.leading, 9).padding(.trailing, 34).padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color.accentColor.opacity(0.8), lineWidth: 1.5))
+                    .overlay(alignment: .trailing) {
+                        Button { saveConversationRepository(repository, field: field) } label: {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 22, height: 22)
+                                .background(Color.accentColor, in: Circle())
+                                .contentShape(Circle())
+                        }
+                        .buttonHoverPointer()
+                        .buttonStyle(.plain)
+                        .nativeHelp("Save \(title)")
+                        .accessibilityLabel("Save \(title)")
+                        .accessibilityIdentifier("\(identifier)-save")
+                        .padding(.trailing, 5)
+                    }
             } else {
                 let displayValue = value.wrappedValue.isEmpty ? placeholder : value.wrappedValue
-                Text(displayValue)
-                    .lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityLabel(displayValue)
-                    .accessibilityIdentifier("\(identifier)-value")
-                if editable {
-                    Button {
-                        editingRepositoryField = field
-                    } label: {
-                        Image(systemName: "pencil").font(.system(size: 10, weight: .medium))
+                HStack(spacing: 3) {
+                    Text(displayValue)
+                        .fontWeight(.medium)
+                        .lineLimit(1).truncationMode(.middle)
+                        .allowsHitTesting(false)
+                        .accessibilityLabel(displayValue)
+                        .accessibilityIdentifier("\(identifier)-value")
+                    if editable {
+                        Button {
+                            beginRepositoryFieldEdit(field, repository: repository)
+                        } label: {
+                            EditPencilShape()
+                                .stroke(style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 14, height: 14)
+                                .frame(width: 22, height: 24)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonHoverPointer()
+                        .buttonStyle(.plain).nativeHelp("Edit \(title)").accessibilityLabel("Edit \(title)")
+                        .accessibilityIdentifier("\(identifier)-edit")
                     }
-                    .buttonHoverPointer()
-                    .buttonStyle(.plain).nativeHelp("Edit \(title)").accessibilityLabel("Edit \(title)")
-                    .accessibilityIdentifier("\(identifier)-edit")
                 }
+                .padding(.vertical, 6)
+                Spacer(minLength: 0)
             }
         }
+        .frame(minHeight: 34)
     }
 
     private func removeConversationRepository(_ repository: RepositoryWorktreeRecord) {
@@ -6207,8 +6714,9 @@ struct TaskConversationView: View {
                 _ = try await WorkspaceManager(
                     taskManager: BoardTaskManager(modelContext: modelContext)
                 ).removeRepository(repository.repositoryPath, from: task.id)
-                repositoryBeingEdited = nil
+                if repositoryBeingEdited?.repositoryPath == repository.repositoryPath { repositoryBeingEdited = nil }
                 errorMessage = nil
+                loadRecentRepositories()
                 await refreshWorkspaceChanges()
             } catch {
                 errorMessage = "Couldn't remove repository: \(error.localizedDescription)"
@@ -6229,8 +6737,8 @@ struct TaskConversationView: View {
         // that makes that pin reachable.
         if let turnStartID = latestConversationTurnStartID,
            oldestRenderedMessageID == turnStartID,
-           conversationContentHeight > 0,
-           conversationContentHeight <= viewportHeight {
+           latestTurnContentHeight > 0,
+           latestTurnContentHeight + 2 * Self.conversationVerticalPadding <= viewportHeight {
             presentLatestConversationTurn(using: proxy)
             return
         }
@@ -6364,30 +6872,91 @@ private struct ConversationTopMarkerPositionKey: PreferenceKey {
     }
 }
 
-private struct ConversationScrollContentHeightKey: PreferenceKey {
+private struct ConversationLatestTurnHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
-    /// Only the transcript reports a height; the filler and end marker after
-    /// it contribute the default, which must not replace the measurement.
+    /// Only the newest turn reports a height; every other view contributes the
+    /// default, which must not replace the measurement.
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
     }
 }
 
-/// Only the newest turn reports a top, so the first non-nil value is it.
-private struct ConversationLatestTurnTopKey: PreferenceKey {
-    static var defaultValue: CGFloat?
-
-    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
-        value = nextValue() ?? value
-    }
+/// Marks the row whose top starts the newest turn.
+private struct ConversationLatestTurnStartKey: LayoutValueKey {
+    static let defaultValue = false
 }
 
-private struct ConversationTranscriptBottomKey: PreferenceKey {
-    static var defaultValue: CGFloat?
+/// Marks the view the layout stretches over the newest turn instead of stacking.
+private struct ConversationLatestTurnExtentKey: LayoutValueKey {
+    static let defaultValue = false
+}
 
-    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
-        value = nextValue() ?? value
+/// A leading-aligned vertical stack that keeps at least
+/// `minimumLatestTurnHeight` from the top of the newest turn's first row to its
+/// end, adding the difference as blank space below the last row. The extent
+/// view is not stacked: it is laid over the newest turn at its natural height.
+private struct ConversationTranscriptLayout: Layout {
+    var spacing: CGFloat
+    var minimumLatestTurnHeight: CGFloat
+
+    private struct Measurement {
+        var sizes: [CGSize]
+        var tops: [CGFloat]
+        var contentHeight: CGFloat
+        var latestTurnTop: CGFloat?
+    }
+
+    // Measured on every call rather than cached: a row that grows on its own,
+    // like an AppKit text view, would otherwise leave a stale filler behind.
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let measurement = measure(width: proposal.width, subviews: subviews)
+        // As wide as its widest row, as a leading-aligned VStack is.
+        let width = measurement.sizes.map(\.width).max() ?? 0
+        let latestTurnHeight = measurement.latestTurnTop.map { measurement.contentHeight - $0 } ?? 0
+        let filler = measurement.latestTurnTop == nil ? 0 : max(0, minimumLatestTurnHeight - latestTurnHeight)
+        return CGSize(width: width, height: measurement.contentHeight + filler)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let measurement = measure(width: bounds.width, subviews: subviews)
+        for (index, subview) in subviews.enumerated() {
+            if subview[ConversationLatestTurnExtentKey.self] {
+                let top = measurement.latestTurnTop ?? measurement.contentHeight
+                subview.place(
+                    at: CGPoint(x: bounds.minX, y: bounds.minY + top),
+                    proposal: ProposedViewSize(width: bounds.width, height: measurement.contentHeight - top)
+                )
+            } else {
+                subview.place(
+                    at: CGPoint(x: bounds.minX, y: bounds.minY + measurement.tops[index]),
+                    proposal: ProposedViewSize(width: bounds.width, height: measurement.sizes[index].height)
+                )
+            }
+        }
+    }
+
+    private func measure(width: CGFloat?, subviews: Subviews) -> Measurement {
+        var sizes: [CGSize] = []
+        var tops: [CGFloat] = []
+        var y: CGFloat = 0
+        var hasStacked = false
+        var latestTurnTop: CGFloat?
+        for subview in subviews {
+            guard !subview[ConversationLatestTurnExtentKey.self] else {
+                sizes.append(.zero)
+                tops.append(0)
+                continue
+            }
+            if hasStacked { y += spacing }
+            hasStacked = true
+            let size = subview.sizeThatFits(ProposedViewSize(width: width, height: nil))
+            if latestTurnTop == nil, subview[ConversationLatestTurnStartKey.self] { latestTurnTop = y }
+            sizes.append(size)
+            tops.append(y)
+            y += size.height
+        }
+        return Measurement(sizes: sizes, tops: tops, contentHeight: y, latestTurnTop: latestTurnTop)
     }
 }
 

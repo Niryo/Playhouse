@@ -224,7 +224,7 @@ enum PlayhouseCLI {
                 let title = try requiredFlag("--title", flags: flags).first!
                 return BridgeRequest(command: "task.rename", arguments: ["taskID": .string(id), "title": .string(title)])
             case "repository":
-                guard tail.count >= 2 else { throw CLIError.usage("Use: playhouse task repository add|add-batch|replace|edit|remove <task-id> ...") }
+                guard tail.count >= 2 else { throw CLIError.usage("Use: playhouse task repository add|add-batch|replace|edit|remove|recent <task-id> ...") }
                 let id = tail[1]
                 switch tail[0] {
                 case "add-batch":
@@ -248,6 +248,9 @@ enum PlayhouseCLI {
                         command: "task.repository.\(tail[0])",
                         arguments: ["taskID": .string(id), "repositoryPath": .string(repository)]
                     )
+                case "recent":
+                    guard tail.count == 2 else { throw CLIError.usage("Use: playhouse task repository recent <task-id>") }
+                    return BridgeRequest(command: "task.repository.recent", arguments: ["taskID": .string(id)])
                 case "edit":
                     let flags = try parseFlags(
                         Array(tail.dropFirst(2)),
@@ -265,7 +268,7 @@ enum PlayhouseCLI {
                         "mergeTarget": .string(mergeTarget)
                     ])
                 default:
-                    throw CLIError.usage("Use: playhouse task repository add|add-batch|replace|edit|remove <task-id> ...")
+                    throw CLIError.usage("Use: playhouse task repository add|add-batch|replace|edit|remove|recent <task-id> ...")
                 }
             case "prompt":
                 guard let id = tail.first else { throw CLIError.usage("Use: playhouse task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]") }
@@ -285,18 +288,21 @@ enum PlayhouseCLI {
                 }
                 var arguments: [String: BridgeValue] = ["taskID": .string(id), "prompt": .string(prompt)]
                 if let imagePaths = flags["--image"] {
-                    arguments["images"] = .array(try imagePaths.map { path in
-                        let data = try Data(contentsOf: URL(fileURLWithPath: path))
-                        let mime: String
-                        if data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) { mime = "image/png" }
-                        else if data.starts(with: [255, 216, 255]) { mime = "image/jpeg" }
-                        else { throw CLIError.usage("Images must be PNG or JPEG files.") }
-                        return .string("data:\(mime);base64,\(data.base64EncodedString())")
-                    })
+                    arguments["images"] = .array(try imagePaths.map(draftImageDataURL))
                 }
                 if let status { arguments["status"] = .string(status) }
                 if submitted { arguments["submitted"] = .boolean(true) }
                 return BridgeRequest(command: "task.prompt.save", arguments: arguments)
+            case "draft":
+                // Saves the composer draft as a whole: text plus every attached image.
+                guard let id = tail.first else { throw CLIError.usage("Use: playhouse task draft <task-id> --text <draft> [--image <path>...]") }
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--text", "--image"])
+                let prompt = try requiredFlag("--text", flags: flags).first!
+                return BridgeRequest(command: "task.draft.save", arguments: [
+                    "taskID": .string(id),
+                    "prompt": .string(prompt),
+                    "images": .array(try (flags["--image"] ?? []).map(draftImageDataURL))
+                ])
             case "delete":
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.delete", arguments: ["taskID": .string(id)])
@@ -314,9 +320,12 @@ enum PlayhouseCLI {
                 return BridgeRequest(command: "task.roots.set", arguments: [
                     "taskID": .string(id), "roots": .array((flags["--root"] ?? []).map(BridgeValue.string))
                 ])
+            case "terminal":
+                guard tail.count == 1 else { throw CLIError.usage("Use: playhouse task terminal <task-id>") }
+                return BridgeRequest(command: "task.terminal", arguments: ["taskID": .string(tail[0])])
             case "changes":
                 guard let action = tail.first else {
-                    throw CLIError.usage("Use: playhouse task changes list <task-id>, mark-viewed <task-id> --repository <path> --path <relative-path>, or diff <task-id> --repository <path> --path <relative-path> --group <unviewed|viewed>")
+                    throw CLIError.usage("Use: playhouse task changes list <task-id>, mark-viewed <task-id> --repository <path> --path <relative-path>, mark-unviewed <task-id> --repository <path> --path <relative-path>, mark-all-viewed <task-id>, or diff <task-id> --repository <path> --path <relative-path> --group <unviewed|viewed>")
                 }
                 switch action {
                 case "list":
@@ -344,6 +353,17 @@ enum PlayhouseCLI {
                         "repository": .string(try requiredFlag("--repository", flags: flags).first!),
                         "path": .string(try requiredFlag("--path", flags: flags).first!),
                     ])
+                case "mark-unviewed":
+                    guard tail.count >= 2 else { throw CLIError.usage("Use: playhouse task changes mark-unviewed <task-id> --repository <path> --path <relative-path>") }
+                    let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repository", "--path"])
+                    return BridgeRequest(command: "task.changes.mark-unviewed", arguments: [
+                        "taskID": .string(tail[1]),
+                        "repository": .string(try requiredFlag("--repository", flags: flags).first!),
+                        "path": .string(try requiredFlag("--path", flags: flags).first!),
+                    ])
+                case "mark-all-viewed":
+                    guard tail.count == 2 else { throw CLIError.usage("Use: playhouse task changes mark-all-viewed <task-id>") }
+                    return BridgeRequest(command: "task.changes.mark-all-viewed", arguments: ["taskID": .string(tail[1])])
                 default:
                     throw CLIError.usage("Unknown task changes operation '\(action)'.")
                 }
@@ -642,6 +662,15 @@ enum PlayhouseCLI {
         return values
     }
 
+    private static func draftImageDataURL(_ path: String) throws -> BridgeValue {
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let mime: String
+        if data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) { mime = "image/png" }
+        else if data.starts(with: [255, 216, 255]) { mime = "image/jpeg" }
+        else { throw CLIError.usage("Images must be PNG or JPEG files.") }
+        return .string("data:\(mime);base64,\(data.base64EncodedString())")
+    }
+
     private static func keyedOptions(_ values: [String]) throws -> [String: String] {
         var result: [String: String] = [:]
         for value in values {
@@ -710,12 +739,17 @@ enum PlayhouseCLI {
       playhouse task repository replace <task-id> --repo <path> [--repo <path>...]
       playhouse task repository edit <task-id> --repo <path> --branch <name> --branch-from <ref> [--merge-target <ref>]
       playhouse task repository remove <task-id> --repo <path>
+      playhouse task repository recent <task-id>
       playhouse task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]
+      playhouse task draft <task-id> --text <draft> [--image <path>...]
       playhouse task roots get <task-id>
       playhouse task roots set <task-id> --root <path> [--root <path>...]
+      playhouse task terminal <task-id>
       playhouse task changes list <task-id>
       playhouse task changes diff <task-id> --repository <path> --path <relative-path> --group <unviewed|viewed>
       playhouse task changes mark-viewed <task-id> --repository <path> --path <relative-path>
+      playhouse task changes mark-unviewed <task-id> --repository <path> --path <relative-path>
+      playhouse task changes mark-all-viewed <task-id>
       playhouse task delete <task-id>
       playhouse task delete-check <task-id>
       playhouse chat open

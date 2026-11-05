@@ -970,6 +970,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
         self.run_git(self.changes, "reset", "--mixed", "HEAD")
         self.run_git(self.changes, "checkout", "--", ".")
+        # Earlier cases can leave untracked files (for example a recreated ephemeral.txt);
+        # the ownership marker lives outside this repository, so cleaning cannot remove it.
+        self.run_git(self.changes, "clean", "-fd")
         (self.changes / "staged.txt").write_text("Staged index version.\n", encoding="utf-8")
         (self.changes / "shared.txt").write_text("Shared index version.\n", encoding="utf-8")
         (self.changes / "syntax.json").write_text('{"value":"working version"}\n', encoding="utf-8")
@@ -2517,8 +2520,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(rejected.get("codexThreadID"))
         self.assertEqual(self.run_git(self.primary, "worktree", "list", "--porcelain").count("worktree "), claimed_count)
 
-    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
-    def test_task_done_preserves_worktree_and_branch(self):
+    # case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
+    def test_task_done_removes_worktree_and_preserves_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary, self.secondary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
         self.assertEqual(self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", draft)[0])["savedPrompt"], draft)
@@ -2582,7 +2585,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(response)["status"], "Done")
         calls = gh_calls.read_text(encoding="utf-8").splitlines()
         self.assertEqual(sorted(calls), ["123", "123", "123", "456", "456", "456"], "The status probe and the Done verification each check both PRs once, plus the earlier move attempt.")
-        self.assertTrue(worktree.exists(), "Moving a task to Done must preserve its worktree.")
+        self.assertFalse(worktree.exists(), "Moving a task to Done must remove its managed worktree.")
         self.assertTrue(self.branch_exists(self.primary, "generated-fixture-title"))
         self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_head, "Moving a task to Done must not merge into the local target.")
         self.assertEqual((self.primary / "target-only.txt").read_text(encoding="utf-8"), "Master advanced after this task branch was created.\n")
@@ -3608,7 +3611,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         notice = json.loads((self.data_directory / "task-lifecycle-v2-notice.json").read_text(encoding="utf-8"))
         self.assertEqual(notice, [str(dirty_path)])
 
-    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing.
+    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize.
     def test_task_status_transitions_and_rejects_unknown_status(self):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli("task", "move", task_id, "Unknown", expected_status=2)
@@ -4421,7 +4424,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], replaced["repositoryWorktrees"])
 
 
-    # case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation.
+    # case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field dismisses the edit without saving. The settings popover is wider than before with a larger title.
     def test_task_repository_settings_validate_persist_and_lock_after_start(self):
         task = self.create_repo_task("Repository settings", [self.primary])
         task_id = task["id"]
@@ -4506,6 +4509,86 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(final_record["branch"], "settings-edited")
         self.assertEqual(final_record["branchFrom"], "branch-source")
         self.assertEqual(final_record["mergeTarget"], "branch-source")
+
+    # case-contract: test_task_repository_branch_from_fetches_remote_branch | A branch-from that exists only on a Git remote and was never fetched is fetched when repository settings are saved, and the pending record stores its remote-tracking branch; a branch-from missing locally and on every remote is rejected without changing the saved settings; a remote that can't be reached reports the fetch failure instead of a missing branch and also keeps the saved settings; starting the task creates its worktree from the fetched remote commit without making the remote branch the task branch's upstream.
+    def test_task_repository_branch_from_fetches_remote_branch(self):
+        remote = self.data_directory / "branch-from-origin.git"
+        remote_branch = "remote-only/branch-from"
+        tracking_ref = f"refs/remotes/origin/{remote_branch}"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+        remote_commit = self.run_git(
+            self.primary, "commit-tree", "main^{tree}", "-p", "main", "-m", "Create remote-only branch-from fixture commit",
+        ).strip()
+        self.run_git(self.primary, "remote", "add", "origin", str(remote))
+        try:
+            self.run_git(self.primary, "push", "--quiet", "origin", "main", f"{remote_commit}:refs/heads/{remote_branch}")
+            # Pushing records the remote-tracking ref; drop it so the branch exists only on the remote.
+            self.run_git(self.primary, "update-ref", "-d", tracking_ref)
+            unfetched = subprocess.run(
+                ["git", "-C", str(self.primary), "rev-parse", "--verify", "--quiet", tracking_ref],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertNotEqual(unfetched.returncode, 0, "The remote branch must start unfetched.")
+            self.assertFalse(self.branch_exists(self.primary, remote_branch))
+
+            task = self.create_repo_task("Remote branch-from", [self.primary])
+            task_id = task["id"]
+            changed, _ = self.call_cli(
+                "task", "repository", "edit", task_id,
+                "--repo", self.primary,
+                "--branch", "remote-branch-from-task",
+                "--branch-from", remote_branch,
+                "--merge-target", "main",
+            )
+            edited = self.assert_success(changed)["repositoryWorktrees"][0]
+            self.assertEqual(edited["branchFrom"], f"origin/{remote_branch}")
+            self.assertTrue(edited["isPending"])
+            self.assertEqual(self.run_git(self.primary, "rev-parse", tracking_ref).strip(), remote_commit)
+            self.assertFalse(self.branch_exists(self.primary, remote_branch), "Fetching must not create a local branch.")
+
+            missing, _ = self.call_cli(
+                "task", "repository", "edit", task_id,
+                "--repo", self.primary,
+                "--branch", "remote-branch-from-task",
+                "--branch-from", "missing-everywhere/branch",
+                "--merge-target", "main",
+                expected_status=2,
+            )
+            self.assert_failure(missing, "invalid_argument")
+            self.assertIn("missing-everywhere/branch", missing["error"]["message"])
+            fresh, _ = self.call_cli("task", "get", task_id)
+            self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"][0]["branchFrom"], f"origin/{remote_branch}")
+
+            self.run_git(self.primary, "remote", "set-url", "origin", str(self.data_directory / "unreachable-origin.git"))
+            unreachable, _ = self.call_cli(
+                "task", "repository", "edit", task_id,
+                "--repo", self.primary,
+                "--branch", "remote-branch-from-task",
+                "--branch-from", "unfetched/branch",
+                "--merge-target", "main",
+                expected_status=1,
+            )
+            self.assert_failure(unreachable, "operation_failed")
+            self.assertIn("couldn't fetch 'unfetched/branch' from origin", unreachable["error"]["message"])
+            self.run_git(self.primary, "remote", "set-url", "origin", str(remote))
+            fresh, _ = self.call_cli("task", "get", task_id)
+            self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"][0]["branchFrom"], f"origin/{remote_branch}")
+
+            self.complete_fixture_turn(task_id)
+            started, _ = self.call_cli("task", "get", task_id)
+            started_record = self.assert_success(started)["repositoryWorktrees"][0]
+            self.assertFalse(started_record["isPending"])
+            self.assertEqual(started_record["branchFrom"], f"origin/{remote_branch}")
+            worktree = Path(started_record["worktreePath"])
+            self.assertTrue(worktree.is_dir())
+            self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), remote_commit)
+            upstream = subprocess.run(
+                ["git", "-C", str(worktree), "config", "--get", "branch.remote-branch-from-task.remote"],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(upstream.stdout.strip(), "", "The remote branch-from must not become the task branch's upstream.")
+        finally:
+            self.run_git(self.primary, "remote", "remove", "origin")
 
     # case-contract: test_task_repository_edit_rejects_stale_validation_after_removal | If a pending repository is removed while its settings are being validated, the stale edit is rejected and the newer repository removal and context root remain saved.
     def test_task_repository_edit_rejects_stale_validation_after_removal(self):
@@ -4866,7 +4949,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertNotIn(str(self.nested), repositories)
         self.assertNotIn(str(self.external), repositories)
 
-    # case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations.
+    # case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations. Each saved selection also feeds a newest-first recent repository history of up to twenty repositories that keeps repositories after they are removed from the selection; the task repository recent command lists those that still exist and are not attached to the task, and rejects an unknown task. In the UI, attached repositories appear as large chips carrying a remove badge and the header shows no suggestion chips; removing a repository through its badge makes the add-repository picker list it under Recent before anything is typed, clicking it adds it back to the task and saved selection, and typing a query replaces the recent list with the regular search suggestions.
     def test_new_task_remembers_last_selected_repositories(self):
         response, _ = self.call_cli("settings", "set-last-repositories", "--repo", self.secondary, "--repo", self.primary)
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
@@ -4919,6 +5002,66 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_failure(response, "invalid_argument")
         response, _ = self.call_cli("settings", "get")
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.alternate)])
+
+        # Every saved selection feeds a newest-first recent history that outlives the selection.
+        response, _ = self.call_cli("settings", "get")
+        self.assertEqual(
+            self.assert_success(response)["recentRepositories"],
+            [str(self.alternate), str(self.secondary), str(self.primary)],
+        )
+        recent, _ = self.call_cli("task", "repository", "recent", second_task_id)
+        self.assertEqual(
+            self.assert_success(recent)["repositories"],
+            [str(self.secondary), str(self.primary)],
+            "Recent suggestions should exclude repositories already attached to the task.",
+        )
+        removed, _ = self.call_cli("task", "repository", "remove", second_task_id, "--repo", self.alternate)
+        self.assertEqual(self.assert_success(removed)["repositoryWorktrees"], [])
+        response, _ = self.call_cli("settings", "get")
+        removed_settings = self.assert_success(response)
+        self.assertEqual(removed_settings["lastSelectedRepositories"], [])
+        self.assertEqual(
+            removed_settings["recentRepositories"],
+            [str(self.alternate), str(self.secondary), str(self.primary)],
+            "Removing a repository must keep it in the recent history.",
+        )
+        recent, _ = self.call_cli("task", "repository", "recent", second_task_id)
+        self.assertEqual(
+            self.assert_success(recent)["repositories"],
+            [str(self.alternate), str(self.secondary), str(self.primary)],
+            "A removed repository should be suggested again for quick re-adding.",
+        )
+        created, _ = self.call_cli("task", "create", "--title", "Quick add recent repository", "--prompt", "Fixture task description.")
+        quick_task_id = self.assert_success(created)["id"]
+        quick_added, _ = self.call_cli("task", "repository", "add", quick_task_id, "--repo", self.alternate)
+        self.assertEqual(
+            [item["repositoryPath"] for item in self.assert_success(quick_added)["repositoryWorktrees"]],
+            [str(self.alternate)],
+        )
+        recent, _ = self.call_cli("task", "repository", "recent", quick_task_id)
+        self.assertEqual(self.assert_success(recent)["repositories"], [str(self.secondary), str(self.primary)])
+
+        # The history keeps twenty repositories and skips missing ones when suggesting.
+        extras = []
+        for index in range(21):
+            extra = self.data_directory / f"recent-repository-{index:02d}"
+            extra.mkdir()
+            subprocess.run(["git", "init", "-q", str(extra)], check=True)
+            extras.append(extra)
+        command = ["settings", "set-last-repositories"]
+        for extra in extras:
+            command.extend(["--repo", extra])
+        self.assert_success(self.call_cli(*command)[0])
+        response, _ = self.call_cli("settings", "get")
+        self.assertEqual(self.assert_success(response)["recentRepositories"], [str(extra) for extra in extras[:20]])
+        shutil.rmtree(extras[1])
+        recent, _ = self.call_cli("task", "repository", "recent", quick_task_id)
+        self.assertEqual(
+            self.assert_success(recent)["repositories"],
+            [str(extras[0])] + [str(extra) for extra in extras[2:20]],
+        )
+        response, _ = self.call_cli("task", "repository", "recent", str(uuid.uuid4()), expected_status=3)
+        self.assert_failure(response, "not_found")
 
     # case-contract: test_new_task_repository_restore_is_atomic_on_invalid_default | Applying an ordered repository batch with a valid repository followed by an empty Git repository fails without mutation: the CLI reports invalid_argument and fresh reads show no repository attachments or workspace roots; New Task automatically applies saved repositories; an invalid batch shows an error, attaches neither repository, keeps roots empty, preserves the saved order, and leaves the picker closed by default.
     def test_new_task_repository_restore_is_atomic_on_invalid_default(self):
@@ -5085,6 +5228,124 @@ class PlayhouseBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
+    # case-contract: test_composer_draft_autosaves_during_active_turn | Composer text typed while the agent responds is autosaved as an unsent draft together with its attached image, without ending the turn's submitted prompt or changing its status, and malformed draft images fail validation without changing the draft. A follow-up queued from elsewhere and dispatched after the turn does not replace the draft, which stays saved after the turn ends and is restored to the composer with its image after navigating away and after an app restart. Text steered or queued from the composer leaves the saved draft and does not reappear after the turn, and sending the draft clears it, its images leaving once the turn starts. A submitted prompt whose turn never started returns to the composer with its images, together with the draft typed after it.
+    def test_composer_draft_autosaves_during_active_turn(self):
+        task_id = self.create_task(title="Draft beside an active turn")["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-draft-serial-success-wait"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        image = self.data_directory / "draft-tiny.png"
+        image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
+        invalid_image = self.data_directory / "draft-invalid.png"
+        invalid_image.write_bytes(b"not an image")
+        first_prompt = "Start the turn the draft is typed beside."
+        typed_draft = "Typed while the agent responds; keep me after the turn."
+        queued_text = "A follow-up queued from elsewhere during the turn."
+        # The prompt's image stays in the draft until its turn starts.
+        self.assert_success(self.call_cli("task", "prompt", task_id, "--text", first_prompt, "--image", image)[0])
+        send_command = ["conversation", "send", task_id, "--message", first_prompt, "--image", image]
+        process = self.start_cli(*send_command, extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)})
+        ready = Path(str(executable) + ".resolve-ready")
+        release = Path(str(executable) + ".resolve-continue")
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not ready.exists() and process.poll() is None:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "The fixture should hold the turn active while the draft is typed.")
+            running = self.assert_success(self.call_cli("task", "get", task_id)[0])
+            self.assertEqual(running["status"], "In Progress")
+            self.assertEqual(running["pendingSubmittedPrompt"], first_prompt)
+            self.assertFalse(running["hasUnsentDraft"], "The sent prompt is not an unsent draft.")
+            self.assertEqual(running["draftImageDataURLs"], [], "A sent image should leave the draft once its turn starts.")
+
+            saved = self.assert_success(self.call_cli("task", "draft", task_id, "--text", typed_draft, "--image", image)[0])
+            self.assertEqual(saved["savedPrompt"], typed_draft)
+            self.assertTrue(saved["hasUnsentDraft"])
+            self.assertEqual(len(saved["draftImageDataURLs"]), 1)
+            self.assertTrue(saved["draftImageDataURLs"][0].startswith("data:image/png;base64,"))
+            self.assertEqual(saved["status"], "In Progress", "Saving a draft must not change the running task's status.")
+            self.assertEqual(saved["pendingSubmittedPrompt"], first_prompt, "Saving a draft must not end the turn's submitted prompt.")
+            invalid, _ = self.call_cli("task", "draft", task_id, "--text", "Replace with a bad image", "--image", invalid_image, expected_status=2)
+            self.assert_failure(invalid, "invalid_argument")
+            excess, _ = self.call_cli(
+                "task", "draft", task_id, "--text", "Replace with too many images",
+                *[argument for _ in range(9) for argument in ("--image", image)],
+                expected_status=2,
+            )
+            self.assert_failure(excess, "invalid_argument")
+            unchanged = self.assert_success(self.call_cli("task", "get", task_id)[0])
+            self.assertEqual(unchanged["savedPrompt"], typed_draft)
+            self.assertEqual(unchanged["draftImageDataURLs"], saved["draftImageDataURLs"])
+            self.assert_success(self.call_cli("conversation", "queue", task_id, "--message", queued_text)[0])
+        finally:
+            release.write_text("Release the active turn.\n", encoding="utf-8")
+        self.finish_cli(process, send_command)
+
+        history = self.assert_success(self.call_cli(
+            "conversation", "history", task_id,
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
+        )[0])
+        user_texts = [message["text"] for message in history["messages"] if message["role"] == "user"]
+        self.assertEqual(user_texts.count(queued_text), 1, "The queued follow-up should dispatch after the turn.")
+        self.assertNotIn(typed_draft, user_texts, "An unsent draft must never be sent.")
+        settled = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertIsNone(settled.get("pendingSubmittedPrompt"))
+        self.assertNotEqual(settled["status"], "In Progress")
+        self.assertEqual(settled["savedPrompt"], typed_draft, "A dispatched follow-up must not replace the unsent draft.")
+        self.assertTrue(settled["hasUnsentDraft"])
+        self.assertEqual(settled["draftImageDataURLs"], saved["draftImageDataURLs"])
+
+        # The composer hands a steered or queued draft off by saving the emptied composer.
+        cleared = self.assert_success(self.call_cli("task", "draft", task_id, "--text", "")[0])
+        self.assertIsNone(cleared.get("savedPrompt"))
+        self.assertEqual(cleared["draftImageDataURLs"], [])
+        self.assertFalse(cleared["hasUnsentDraft"])
+        # An image-only send unmarks its draft, and its image leaves once the turn starts.
+        self.assert_success(self.call_cli("task", "draft", task_id, "--text", "", "--image", image)[0])
+        unmarked = self.assert_success(self.call_cli("task", "prompt", task_id, "--text", "")[0])
+        self.assertFalse(unmarked["hasUnsentDraft"])
+        self.assertEqual(len(unmarked["draftImageDataURLs"]), 1, "An image waiting for its turn stays in the draft.")
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--image", image,
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
+        )[0])
+        image_only_sent = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(image_only_sent["draftImageDataURLs"], [], "An image-only send must not return its image to the composer.")
+        self.assertFalse(image_only_sent["hasUnsentDraft"])
+        # A send of the draft itself clears the mark even when the draft text matches.
+        self.assert_success(self.call_cli("task", "draft", task_id, "--text", typed_draft)[0])
+        sent = self.assert_success(self.call_cli(
+            "task", "prompt", task_id, "--text", typed_draft, "--status", "In Progress", "--submitted", "true"
+        )[0])
+        self.assertFalse(sent["hasUnsentDraft"])
+        self.assertEqual(sent["pendingSubmittedPrompt"], typed_draft)
+
+        never_started = self.create_task(title="Draft beside a turn that never started")["id"]
+        submitted = "Submitted before Playhouse restarted."
+        later_draft = "Typed after sending, before the restart."
+        self.assert_success(self.call_cli(
+            "task", "prompt", never_started, "--text", submitted, "--status", "In Progress", "--submitted", "true"
+        )[0])
+        self.assert_success(self.call_cli("task", "draft", never_started, "--text", later_draft)[0])
+        recovered = self.assert_success(self.call_cli("task", "reconcile", never_started)[0])
+        self.assertEqual(recovered["status"], "Waiting Response")
+        self.assertIsNone(recovered.get("pendingSubmittedPrompt"))
+        self.assertEqual(recovered["savedPrompt"], submitted + "\n\n" + later_draft)
+        self.assertTrue(recovered["hasUnsentDraft"])
+        never_started_image = self.create_task(title="Image prompt whose turn never started")["id"]
+        self.assert_success(self.call_cli(
+            "task", "prompt", never_started_image, "--text", submitted, "--image", image,
+            "--status", "In Progress", "--submitted", "true",
+        )[0])
+        recovered_image = self.assert_success(self.call_cli("task", "reconcile", never_started_image)[0])
+        self.assertEqual(recovered_image["savedPrompt"], submitted)
+        self.assertEqual(len(recovered_image["draftImageDataURLs"]), 1, "A never-started prompt should return with its image.")
+        self.assertTrue(recovered_image["hasUnsentDraft"])
+
     # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. As content is typed in short increments through successive wrapped lines after a line break, the newest insertion remains inside the visible composer viewport while its internal document follows the caret without scrolling backward. Typed straight quotes, apostrophes, and double hyphens stay literal rather than being substituted. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -6796,7 +7057,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             send_arguments=("--model", "gpt-6-sol"),
         )
 
-    # case-contract: test_conversation_follows_latest_streamed_messages | While a Claude Code fixture reply streams in held stages below its question, mid-turn CLI/XPC history holds every streamed line before the newest, which Claude may still extend as its answer, once each and in order after the question, with no final line until the reply is released, and the settled turn ends with its final line after every streamed line. In the visible transcript, a reader at the bottom follows the reply: once it outgrows the viewport, the newest streamed line stays in view and the question scrolls away. Scrolling up stops following, so the next stage leaves the reader's position unchanged and its lines out of view; scrolling back to the bottom resumes following, so the next stage's newest line is in view while the turn is still running, and the settled turn leaves its final line in view. Following is shared transcript presentation, so one representative provider covers it.
+    # case-contract: test_conversation_follows_latest_streamed_messages | While a Claude Code fixture reply streams in held stages below its question, mid-turn CLI/XPC history holds every streamed line before the newest, which Claude may still extend as its answer, once each and in order after the question, with no final line until the reply is released, and the settled turn ends with its final line after every streamed line. In the visible transcript, a reader at the bottom follows the reply: once it outgrows the viewport, the newest streamed line stays in view and the question scrolls away. Scrolling up stops following, so the next stage leaves the reader's position unchanged and its lines out of view; scrolling back to the bottom resumes following, so the next stage's newest line is in view while the turn is still running, and the settled turn leaves its final line in view. A short follow-up with a tool call then becomes the newest turn, and the newest history page ends with its question, tool call, and answer after the streamed turn. Scrolled as far down as it goes, the transcript has no blank overscroll: while the held reply outgrows the viewport it ends at its newest line, and the settled reply, whose streamed lines fold into Worked for, and the short follow-up, both once it settles and after the settled conversation is reopened, keep the newest question pinned near the top. Following is shared transcript presentation, so one representative provider covers it.
     def test_conversation_follows_latest_streamed_messages(self):
         executable = self.data_directory / "claude-fixture-stream-follow"
         shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
@@ -6854,6 +7115,22 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual([text for text in texts if text.startswith("Streamed follow line ")], expected)
         self.assertIn(final_text, texts, "The settled turn should end with its final line.")
         self.assertGreater(texts.index(final_text), texts.index(expected[-1]), "The final line should come after every streamed line.")
+
+        # A short follow-up with a tool call becomes the newest turn, and the newest page a
+        # reopened conversation reads ends with that whole turn: question, tool, then answer.
+        follow_up = "Summarize the release notes."
+        closing = "Tell me if you want the upgrade command."
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", follow_up, extra_environment=environment)[0])
+        page = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80", extra_environment=environment)[0])
+        page_messages = page["messages"]
+        last_user = max(index for index, message in enumerate(page_messages) if message["role"] == "user")
+        self.assertEqual(page_messages[last_user]["text"], follow_up, "The follow-up should be the newest question.")
+        self.assertEqual(page_messages[-1]["text"], closing, "The newest page should end with the follow-up's answer.")
+        self.assertIn("toolu_chat_read", {activity["id"] for activity in page["activities"]},
+                      "The follow-up's tool call should belong to the newest turn.")
+        page_texts = [message["text"] for message in page_messages]
+        self.assertLess(page_texts.index(final_text), last_user,
+                        "The streamed turn should sit before the follow-up, where a reopened window holds it back.")
 
     def assert_earlier_turn_tool_calls_in_history(self, provider, environment, call_ids, summaries):
         """Runs a tool-call turn and a later turn, then checks the earlier turn's calls in history."""
@@ -7191,7 +7468,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual([read["source"] for read in paged_reads], ["composed", "composed"],
                          "A Codex thread is composed from the app-server before it is paged.")
 
-    # case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, then reads the older page from the store as the reader scrolls up until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again.
+    # case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, scrolling straight down from that pin keeps the latest question near the top and the latest answer below it with no blank overscroll, and scrolling up then reads the older page from the store as the reader scrolls up until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again.
     def test_conversation_history_pages_claude_transcript_from_store(self):
         claude = self.data_directory / "claude-fixture-long-history"
         shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", claude)
@@ -9414,7 +9691,63 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(event.get("event") == "workspace.file.read.failed" and event.get("path") == "stale.txt" for event in diagnostics))
         self.assertNotIn("Shared working version.", json.dumps(diagnostics))
 
-    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes.
+    # case-contract: test_task_workspace_changes_mark_all_viewed_and_unview | The Changes section header offers Mark all as viewed while it lists files: one action saves a viewed snapshot of every current Changes entry and stages each in Git, so Changes empties and every file is listed under Viewed, and the operation reports how many files it marked, zero when nothing is pending. Each Viewed entry offers Mark as unviewed, which drops that file's snapshot without touching the Git index, so its whole change from the branch base is listed under Changes again; unviewing a file that isn't a current Viewed entry, including one already unviewed and an unknown path, is rejected. These results persist across fresh CLI/XPC connections. The Changes section collapses inside the task sidebar, hiding its Viewed and Changes lists while its header and pending count stay visible and the sidebar stays open for other sections; separately, the whole sidebar hides to a narrow rail that still shows how many files are pending. Each collapsed or expanded state is its own global preference, so opening another task keeps it. Once loaded, refreshing a task with no changes keeps its No changes state on screen instead of flashing the loading placeholder.
+    def test_task_workspace_changes_mark_all_viewed_and_unview(self):
+        # The sidebar collapse preference and the loading placeholder are window presentation
+        # state outside the bridge API; the paired UI case asserts them.
+        self.prepare_workspace_changes()
+        task_id = self.create_task(title="Mark all viewed", roots=[self.changes])["id"]
+        pending_paths = {"deleted.txt", "shared.txt", "staged-deleted.txt", "staged.txt", "syntax.json", "untracked.txt", "working.txt"}
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        self.assertEqual({entry["path"] for entry in inventory["unviewed"]}, pending_paths)
+        self.assertEqual(inventory["viewed"], [])
+
+        marked, _ = self.call_cli("task", "changes", "mark-all-viewed", task_id)
+        self.assertEqual(self.assert_success(marked), {"markedCount": len(pending_paths)})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        self.assertEqual(inventory["unviewed"], [], "Marking all viewed leaves nothing pending.")
+        viewed = {entry["path"]: entry for entry in inventory["viewed"]}
+        self.assertEqual(set(viewed), pending_paths, "Every pending file is listed under Viewed.")
+        self.assertEqual(viewed["deleted.txt"]["status"], "deleted")
+        self.assertEqual(viewed["untracked.txt"]["status"], "added")
+        self.assertEqual(self.run_git(self.changes, "status", "--porcelain", "--", "untracked.txt").strip(), "A  untracked.txt", "Marking all viewed stages each file.")
+        self.assertEqual(self.run_git(self.changes, "status", "--porcelain", "--", "shared.txt").strip(), "M  shared.txt")
+        self.assertEqual(self.run_git(self.changes, "status", "--porcelain", "--", "deleted.txt").strip(), "D  deleted.txt", "A deleted file is staged as a deletion.")
+        self.assertEqual(self.run_git(self.changes, "status", "--porcelain", "--", "staged-deleted.txt").strip(), "D  staged-deleted.txt", "An already staged deletion is accepted and stays staged.")
+        again, _ = self.call_cli("task", "changes", "mark-all-viewed", task_id)
+        self.assertEqual(self.assert_success(again), {"markedCount": 0}, "With nothing pending, marking all viewed marks nothing.")
+
+        unviewed, _ = self.call_cli("task", "changes", "mark-unviewed", task_id, "--repository", str(self.changes), "--path", "shared.txt")
+        self.assertEqual(self.assert_success(unviewed), {"viewed": False})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        pending = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertEqual(set(pending), {"shared.txt"}, "Unviewing lists the file under Changes again.")
+        self.assertFalse(pending["shared.txt"]["hasViewedSnapshot"], "An unviewed file no longer has a saved snapshot baseline.")
+        self.assertNotIn("shared.txt", [entry["path"] for entry in inventory["viewed"]])
+        self.assertEqual(len(inventory["viewed"]), len(pending_paths) - 1, "Other viewed files are unaffected.")
+        self.assertEqual(self.run_git(self.changes, "status", "--porcelain", "--", "shared.txt").strip(), "M  shared.txt", "Unviewing leaves the Git index as it was.")
+        unviewed_diff = self.assert_success(self.changes_diff(task_id, "shared.txt", "unviewed"))
+        self.assertEqual(unviewed_diff["original"], "Shared baseline.\n", "An unviewed file diffs from the branch base again.")
+        self.assertEqual(unviewed_diff["modified"], "Shared working version.\n")
+
+        repeat, _ = self.call_cli("task", "changes", "mark-unviewed", task_id, "--repository", str(self.changes), "--path", "shared.txt", expected_status=3)
+        self.assert_failure(repeat, "not_found")
+        unknown, _ = self.call_cli("task", "changes", "mark-unviewed", task_id, "--repository", str(self.changes), "--path", "missing.txt", expected_status=3)
+        self.assert_failure(unknown, "not_found")
+
+        unviewed_deleted, _ = self.call_cli("task", "changes", "mark-unviewed", task_id, "--repository", str(self.changes), "--path", "deleted.txt")
+        self.assertEqual(self.assert_success(unviewed_deleted), {"viewed": False})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        pending = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertEqual(set(pending), {"deleted.txt", "shared.txt"})
+        self.assertEqual(pending["deleted.txt"]["status"], "deleted")
+        final, _ = self.call_cli("task", "changes", "mark-all-viewed", task_id)
+        self.assertEqual(self.assert_success(final), {"markedCount": 2})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        self.assertEqual(inventory["unviewed"], [])
+        self.assertEqual({entry["path"] for entry in inventory["viewed"]}, pending_paths)
+
+    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes. While a merge is still open in the task's worktree, its files are held back and the sidebar shows a 'Merge in progress' notice naming the repository instead of the files the merge staged; the CLI reports the repository under mergingRepositories with empty sections, and aborting the merge lists the task's changes again.
     def test_external_git_edits_and_commit_refresh_workspace_changes(self):
         repository = self.data_directory / "external-git"
         repository.mkdir()
@@ -9501,6 +9834,51 @@ class PlayhouseBridgeTests(unittest.TestCase):
         entries = {entry["path"]: entry for entry in self.assert_success(response)["unviewed"]}
         self.assertEqual(set(entries), {"post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"})
         self.assertNotIn("local-ahead.txt", entries)
+
+        # An open merge stages everything the merged branch brings in, so the repository's files are
+        # held back until the merge is concluded rather than listed as task changes.
+        task_repository = entries["tracked.txt"]["repository"]
+        (repository / "merging-in.txt").write_text("Merged with the merge still open.\n", encoding="utf-8")
+        self.run_git(repository, "add", "merging-in.txt")
+        self.run_git(repository, "commit", "-m", "Base commit merged without committing")
+        self.run_git(worktree, "merge", "--no-commit", "--no-ff", "main")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        merging = self.assert_success(response)
+        self.assertEqual(merging["unviewed"], [])
+        self.assertEqual(merging["viewed"], [])
+        self.assertEqual(merging["mergingRepositories"], [task_repository])
+        self.run_git(worktree, "merge", "--abort")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        aborted = self.assert_success(response)
+        self.assertEqual(aborted["mergingRepositories"], [])
+        self.assertEqual({entry["path"] for entry in aborted["unviewed"]}, {"post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"})
+
+    # case-contract: test_task_workspace_changes_over_limit_show_notice | A task whose worktree holds more than 1000 changed files still reports every one of them through fresh CLI connections, while the open task's Changes sidebar shows a 'Too many changes to list' notice naming the count instead of rendering the file list, so the window stays responsive. Bringing the count back under the limit lists the files again.
+    def test_task_workspace_changes_over_limit_show_notice(self):
+        repository = self.data_directory / "many-changes"
+        repository.mkdir()
+        (repository / "tracked.txt").write_text("Baseline.\n", encoding="utf-8")
+        self.run_git(repository, "init", "--initial-branch=main")
+        self.run_git(repository, "config", "user.name", "Playhouse Bridge Test")
+        self.run_git(repository, "config", "user.email", "playhouse-bridge-test@example.invalid")
+        self.run_git(repository, "add", "tracked.txt")
+        self.run_git(repository, "commit", "-m", "Baseline")
+        task_id = self.create_task(title="Many changes", roots=[])["id"]
+        added, _ = self.call_cli("task", "repository", "add", task_id, "--repo", str(repository))
+        record = next(item for item in self.assert_success(added)["repositoryWorktrees"] if item["repositoryPath"] == str(repository))
+        generated = Path(record["worktreePath"]) / "generated"
+        generated.mkdir()
+        for index in range(1001):
+            (generated / f"file-{index:04d}.txt").write_text(f"Generated {index}.\n", encoding="utf-8")
+
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        inventory = self.assert_success(response)
+        self.assertEqual(len(inventory["unviewed"]), 1001, "The limit only affects the sidebar; the CLI still reports every file.")
+        self.assertEqual(inventory["viewed"], [])
+
+        (generated / "file-1000.txt").unlink()
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        self.assertEqual(len(self.assert_success(response)["unviewed"]), 1000)
 
     # case-contract: test_claude_nudged_turn_work_stays_in_conversation | A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt and every private placeholder stay hidden.
     def test_claude_nudged_turn_work_stays_in_conversation(self):
@@ -9676,7 +10054,86 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         return {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
 
-    # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and the Token Stats context-menu item opens a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
+    # case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The terminal only ever opens in the task's created repository worktree, never in its source repository or a context folder, and never creates a worktree itself: while the task's worktree is still pending, or the task has no repository, the button is disabled and the CLI reports terminal_unavailable without creating the worktree, and the button enables in the open conversation once the worktree is created. The CLI reports how the terminal starts: the account's executable login shell with -l in that worktree, with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Clicking the button slides a terminal panel in from the window's right edge, floating over the conversation's right side without moving or resizing the conversation, whose shell runs in the task's worktree with the task ID in its environment and which uses macOS Terminal's Clear Dark ANSI palette (such as its blue, distinct from the emulator's own default) on a solid black background, switching to the Clear Light profile's white background and blue when the app's appearance turns light and back when it returns to dark; hiding the panel keeps the same shell, so reopening it reaches the same process. Dragging the panel's left border resizes it against the right edge, between a 320-point minimum and leaving 260 points of conversation uncovered, without resizing the conversation, and reopening the panel keeps the dragged width. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task whose worktree no longer exists reports terminal_unavailable from the CLI, and the panel shows that error with a Try Again action that opens the shell once the worktree is back; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.
+    def test_task_terminal_opens_shell_in_task_worktree(self):
+        repository = self.data_directory / "terminal-repository"
+        repository.mkdir()
+        (repository / "README.md").write_text("Terminal fixture.\n", encoding="utf-8")
+        self.run_git(repository, "init", "--initial-branch=main")
+        self.run_git(repository, "config", "user.name", "Playhouse Bridge Test")
+        self.run_git(repository, "config", "user.email", "playhouse-bridge-test@example.invalid")
+        self.run_git(repository, "add", "README.md")
+        self.run_git(repository, "commit", "-m", "Baseline")
+        task_id = self.create_task(title="Terminal task", roots=[])["id"]
+        added, _ = self.call_cli("task", "repository", "add", task_id, "--repo", str(repository))
+        worktree = next(
+            item["worktreePath"] for item in self.assert_success(added)["repositoryWorktrees"]
+            if item["repositoryPath"] == str(repository)
+        )
+
+        response, _ = self.call_cli("task", "terminal", task_id)
+        launch = self.assert_success(response)
+        self.assertEqual(launch["taskID"], task_id)
+        self.assertEqual(launch["directory"], os.path.normpath(worktree), "The terminal opens in the task's worktree, not its source repository.")
+        self.assertNotEqual(os.path.realpath(launch["directory"]), os.path.realpath(repository))
+        self.assertTrue(os.path.isabs(launch["shell"]) and os.access(launch["shell"], os.X_OK), launch["shell"])
+        self.assertEqual(launch["arguments"], ["-l"])
+        self.assertEqual(launch["environment"]["TERM"], "xterm-256color")
+        self.assertEqual(launch["environment"]["PLAYHOUSE_TASK_ID"], task_id)
+        fresh, _ = self.call_cli("task", "terminal", task_id)
+        self.assertEqual(self.assert_success(fresh), launch, "A fresh CLI/XPC connection resolves the same terminal.")
+
+        # The reported launch is runnable as given: that shell, in that folder, with those variables.
+        shell = subprocess.run(
+            [launch["shell"], *launch["arguments"], "-c", 'pwd -P; printf "%s\\n" "$PLAYHOUSE_TASK_ID"'],
+            cwd=launch["directory"],
+            env={**os.environ, **launch["environment"]},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(shell.returncode, 0, shell.stderr)
+        self.assertEqual(shell.stdout.strip().splitlines()[-2:], [os.path.realpath(worktree), task_id])
+
+        # A pending worktree is named and created when the task starts; the terminal waits for it
+        # rather than creating it early, and never opens in the source repository instead.
+        pending = self.create_repo_task("Terminal pending task", [str(repository)])
+        self.assertTrue(pending["repositoryWorktrees"][0]["isPending"])
+        response, _ = self.call_cli("task", "terminal", pending["id"], expected_status=1)
+        self.assert_failure(response, "terminal_unavailable")
+        self.assertIn("once the task's worktree is created", response["error"]["message"])
+        still_pending = self.assert_success(self.call_cli("task", "get", pending["id"])[0])["repositoryWorktrees"][0]
+        self.assertTrue(still_pending["isPending"], "Asking for the terminal does not create the worktree.")
+        self.assertEqual(still_pending["branch"], "auto", "The branch is still named when the task starts.")
+
+        # A folder-only task has no worktree, so the terminal refuses rather than open in the folder.
+        folder = self.data_directory / "terminal-folder"
+        folder.mkdir()
+        folder_task_id = self.create_task(title="Terminal folder task", roots=[str(folder)])["id"]
+        response, _ = self.call_cli("task", "terminal", folder_task_id, expected_status=1)
+        self.assert_failure(response, "terminal_unavailable")
+        self.assertIn("Add a repository", response["error"]["message"])
+        # Once it has a created worktree, the terminal opens there, never in the folder.
+        repaired = self.assert_success(self.call_cli("task", "repository", "add", folder_task_id, "--repo", str(repository))[0])
+        repaired_worktree = repaired["repositoryWorktrees"][0]["worktreePath"]
+        self.assertFalse(repaired["repositoryWorktrees"][0]["isPending"])
+        response, _ = self.call_cli("task", "terminal", folder_task_id)
+        repaired_launch = self.assert_success(response)
+        self.assertEqual(repaired_launch["directory"], os.path.normpath(repaired_worktree))
+        self.assertNotEqual(repaired_launch["directory"], os.path.normpath(str(folder)))
+        self.assertNotEqual(os.path.realpath(repaired_launch["directory"]), os.path.realpath(repository))
+
+        shutil.rmtree(repaired_launch["directory"])
+        response, _ = self.call_cli("task", "terminal", folder_task_id, expected_status=1)
+        self.assert_failure(response, "terminal_unavailable")
+        self.assertIn("no longer exists", response["error"]["message"])
+        response, _ = self.call_cli("task", "terminal", "00000000-0000-0000-0000-000000000000", expected_status=3)
+        self.assert_failure(response, "not_found")
+        chat_id = self.assert_success(self.call_cli("chat", "open")[0])["id"]
+        response, _ = self.call_cli("task", "terminal", chat_id, expected_status=3)
+        self.assert_failure(response, "not_found")
+
+    # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and both the Token Stats context-menu item and a click on the counter itself, a button that highlights on hover, open a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
     def test_task_token_usage_records_claude_turn_breakdown(self):
         # Matches TURN_USAGE in scripts/fixtures/claude-code-fixture.py.
         expected_turn_usage = {

@@ -4,7 +4,10 @@ import Foundation
 import OSLog
 import SwiftUI
 
-private struct ButtonHoverPointer: ViewModifier {
+/// Shows `cursor` while the pointer is over the view, keeping the cursor stack balanced:
+/// repeated hover events are ignored, and a view that disappears under the pointer pops it.
+private struct HoverCursor: ViewModifier {
+    let cursor: NSCursor
     @State private var isHovering = false
 
     func body(content: Content) -> some View {
@@ -13,7 +16,7 @@ private struct ButtonHoverPointer: ViewModifier {
                 guard isInside != isHovering else { return }
                 isHovering = isInside
                 if isInside {
-                    NSCursor.pointingHand.push()
+                    cursor.push()
                 } else {
                     NSCursor.pop()
                 }
@@ -29,7 +32,11 @@ private struct ButtonHoverPointer: ViewModifier {
 
 extension View {
     func buttonHoverPointer() -> some View {
-        modifier(ButtonHoverPointer())
+        hoverCursor(.pointingHand)
+    }
+
+    func hoverCursor(_ cursor: NSCursor) -> some View {
+        modifier(HoverCursor(cursor: cursor))
     }
 }
 
@@ -89,7 +96,14 @@ extension View {
 enum WorkspaceSettings {
     static let defaultParentFolderKey = "defaultWorkspaceParentFolderPath"
     static let lastSelectedRepositoriesKey = "lastSelectedRepositories"
+    static let recentRepositoriesKey = "recentRepositories"
+    /// How many recently selected repositories are remembered and offered by the repository picker.
+    static let recentRepositoryHistoryLimit = 20
     static let appearanceKey = "appearance"
+    /// Whether the task view's sidebar is hidden to a narrow rail; one value shared by every task.
+    static let taskSidebarCollapsedKey = "taskSidebarCollapsed"
+    /// Whether the Changes section inside the task sidebar is collapsed; one value shared by every task.
+    static let workspaceChangesSectionCollapsedKey = "workspaceChangesSectionCollapsed"
     static let defaultConversationProviderKey = "defaultConversationProvider"
     static let autoCreatePullRequestDefaultKey = "autoCreatePullRequestDefault"
     static let pullRequestModeDefaultKey = "pullRequestModeDefault"
@@ -844,7 +858,8 @@ enum PlayhouseWorktreeManager {
         if branchExists {
             _ = try git(repository, ["worktree", "add", destination.path, branch])
         } else {
-            _ = try git(repository, ["worktree", "add", "-b", branch, destination.path, branchFrom])
+            // A remote branch-from must not become the task branch's upstream.
+            _ = try git(repository, ["worktree", "add", "--no-track", "-b", branch, destination.path, branchFrom])
         }
         return RepositoryWorktreeRecord(repositoryPath: repository, branch: branch, worktreePath: destination.path, branchFrom: branchFrom, createdByPlayhouse: true, mergeTarget: mergeTarget)
     }
@@ -1087,12 +1102,53 @@ enum PlayhouseWorktreeManager {
     ) throws -> String {
         if let requested, !requested.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let base = requested.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard try git(repository, ["rev-parse", "--verify", "--quiet", "\(base)^{commit}"], allowFailure: true).status == 0 else {
-                throw BridgeCommandError(code: "invalid_argument", message: "Branch-from '\(base)' doesn't exist in \(repository).")
+            guard !base.hasPrefix("-") else {
+                throw BridgeCommandError(code: "invalid_argument", message: "Branch-from names can't begin with a hyphen.")
             }
-            return base
+            if try isCommit(repository: repository, base) { return base }
+            if let remoteBase = try remoteBase(repository: repository, branch: base) { return remoteBase }
+            throw BridgeCommandError(code: "invalid_argument", message: "Branch-from '\(base)' doesn't exist in \(repository) or on its remotes.")
         }
         return try (defaults ?? defaultBranches(repository: repository)).branchFrom
+    }
+
+    private static func isCommit(repository: String, _ ref: String) throws -> Bool {
+        try git(repository, ["rev-parse", "--verify", "--quiet", "\(ref)^{commit}"], allowFailure: true).status == 0
+    }
+
+    /// Resolves a branch that isn't local to its remote-tracking ref, fetching it
+    /// when the remote has it but it was never fetched. Origin is tried first.
+    /// A name already qualified with a remote ("origin/feature") fetches that branch.
+    private static func remoteBase(repository: String, branch: String) throws -> String? {
+        let remotes = try git(repository, ["remote"]).output.split(whereSeparator: \.isNewline).map(String.init)
+            .sorted { lhs, rhs in lhs == "origin" && rhs != "origin" }
+        var candidates = remotes.map { (remote: $0, branch: branch) }
+        if let qualified = remotes.first(where: { branch.hasPrefix("\($0)/") && branch.count > $0.count + 1 }) {
+            candidates.insert((qualified, String(branch.dropFirst(qualified.count + 1))), at: 0)
+        }
+        var fetchFailure: String?
+        for candidate in candidates {
+            guard try git(repository, ["check-ref-format", "--branch", candidate.branch], allowFailure: true).status == 0 else { continue }
+            let trackingRef = "refs/remotes/\(candidate.remote)/\(candidate.branch)"
+            if try isCommit(repository: repository, trackingRef) { return "\(candidate.remote)/\(candidate.branch)" }
+            let fetch = try git(
+                repository,
+                ["fetch", "--quiet", "--no-tags", candidate.remote, "+refs/heads/\(candidate.branch):\(trackingRef)"],
+                allowFailure: true
+            )
+            if fetch.status == 0, try isCommit(repository: repository, trackingRef) {
+                return "\(candidate.remote)/\(candidate.branch)"
+            }
+            // A remote that answered without the branch just lacks it; any other
+            // failure (offline, auth) must not be reported as a missing branch.
+            if fetch.status != 0, !fetch.error.localizedCaseInsensitiveContains("couldn't find remote ref") {
+                fetchFailure = fetchFailure ?? "Git couldn't fetch '\(candidate.branch)' from \(candidate.remote): \(fetch.error.isEmpty ? "unknown error" : fetch.error)"
+            }
+        }
+        if let fetchFailure {
+            throw BridgeCommandError(code: "operation_failed", message: fetchFailure)
+        }
+        return nil
     }
 
     private static func resolveMergeTarget(
@@ -1132,7 +1188,7 @@ enum PlayhouseWorktreeManager {
             .appendingPathComponent(branchToken, isDirectory: true)
     }
 
-    private struct GitResult { let status: Int32; let output: String }
+    private struct GitResult { let status: Int32; let output: String; var error: String = "" }
 
     private static func git(_ path: String, _ arguments: [String], allowFailure: Bool = false) throws -> GitResult {
         let candidates = (PlayhouseProcessEnvironment.current["PATH"] ?? "").split(separator: ":").map {
@@ -1146,11 +1202,11 @@ enum PlayhouseWorktreeManager {
             arguments: ["-C", path] + arguments
         )
         let text = String(data: result.stdout, encoding: .utf8) ?? ""
+        let detail = String(data: result.stderr, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard result.status == 0 || allowFailure else {
-            let detail = String(data: result.stderr, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             throw BridgeCommandError(code: "operation_failed", message: detail.isEmpty ? "Git command failed." : detail)
         }
-        return GitResult(status: result.status, output: text)
+        return GitResult(status: result.status, output: text, error: detail)
     }
 }
 

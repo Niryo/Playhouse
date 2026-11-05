@@ -166,9 +166,12 @@ def main() -> int:
                     errors.append(f"{location}: {kind} has a missing or generic help hint")
 
     support = (APP / "WorkspaceSupport.swift").read_text(encoding="utf-8")
-    for required in (".onHover", "NSCursor.pointingHand.push()", "NSCursor.pop()"):
+    for required in (".onHover", "cursor.push()", "NSCursor.pop()", ".onDisappear"):
         if required not in support:
             errors.append(f"Shared cursor handler is missing {required}")
+    # Buttons get the pointing hand through the shared, stack-balanced cursor handler.
+    if "hoverCursor(.pointingHand)" not in support:
+        errors.append("buttonHoverPointer() does not use the shared handler with NSCursor.pointingHand")
 
     if errors:
         print("Button feedback check failed:", file=sys.stderr)

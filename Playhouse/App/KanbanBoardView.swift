@@ -50,6 +50,8 @@ struct KanbanBoardView: View {
     @State private var boardSearchText = ""
     @FocusState private var isBoardSearchFocused: Bool
     @State private var isShowingChatSidebar = false
+    /// The thickness a legacy (always visible) scroller takes from the board's visible area.
+    @State private var boardScrollerInset = KanbanBoardView.legacyScrollerInset()
     @State private var chatTask: StandaloneChat?
     @State private var isOpeningChatSidebar = false
 
@@ -250,6 +252,14 @@ struct KanbanBoardView: View {
         }
     }
 
+    /// Before macOS 15 the board can't anchor smaller content top leading, so it fills the full
+    /// frame instead: a legacy scroller then gets a few points of needless travel, but the clip
+    /// origin never goes negative, which is what desynchronized hit testing.
+    private static func legacyScrollerInset() -> CGFloat {
+        guard #available(macOS 15.0, *), NSScroller.preferredScrollerStyle == .legacy else { return 0 }
+        return NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
+    }
+
     private var boardContent: some View {
         VStack(spacing: 0) {
             boardHeader
@@ -286,46 +296,65 @@ struct KanbanBoardView: View {
             }
 
             HStack(spacing: 0) {
-                ScrollView([.horizontal, .vertical]) {
-                    HStack(alignment: .top, spacing: 16) {
-                        ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
-                            if status == .backlog {
-                                let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
-                                VStack(spacing: 12) {
-                                    if hasBlockedTasks {
-                                        kanbanColumn(.blocked, minHeight: 220)
-                                            .transition(.opacity.combined(with: .move(edge: .top)))
+                // The board centers its columns with its own frame and keeps the scroll view's
+                // clip origin at zero. Left to itself, the two-axis scroll view centers narrower
+                // content by giving AppKit's clip view a negative bounds origin, and after a
+                // horizontal scroll nudge followed by a content-height change, SwiftUI's hit
+                // testing lost that offset: the board drew centered while clicks resolved as if
+                // it were flush left, so buttons stopped responding until the window was resized.
+                // The minimum size tracks the visible area, not the reader's frame: legacy
+                // scrollers take their thickness out of the visible area, and content sized to the
+                // full frame would show a needless scroll bar.
+                GeometryReader { viewport in
+                    ScrollView([.horizontal, .vertical]) {
+                        HStack(alignment: .top, spacing: 16) {
+                            ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
+                                if status == .backlog {
+                                    let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
+                                    VStack(spacing: 12) {
+                                        if hasBlockedTasks {
+                                            kanbanColumn(.blocked, minHeight: 220)
+                                                .transition(.opacity.combined(with: .move(edge: .top)))
+                                        }
+                                        kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
                                     }
-                                    kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
-                                }
-                                .frame(width: 264)
-                                .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
-                            } else if status == .inProgress {
-                                let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
-                                VStack(spacing: 12) {
-                                    if hasWaitingResponseTasks {
-                                        kanbanColumn(.waitingResponse, minHeight: 220)
-                                            .transition(.opacity.combined(with: .move(edge: .top)))
-                                    }
-                                    kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
-                                }
-                                .frame(width: 264)
-                                .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
-                            } else {
-                                kanbanColumn(status)
                                     .frame(width: 264)
+                                    .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
+                                } else if status == .inProgress {
+                                    let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
+                                    VStack(spacing: 12) {
+                                        if hasWaitingResponseTasks {
+                                            kanbanColumn(.waitingResponse, minHeight: 220)
+                                                .transition(.opacity.combined(with: .move(edge: .top)))
+                                        }
+                                        kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
+                                    }
+                                    .frame(width: 264)
+                                    .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
+                                } else {
+                                    kanbanColumn(status)
+                                        .frame(width: 264)
+                                }
                             }
                         }
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 30)
+                        .padding(.top, 22)
+                        .padding(.bottom, 28)
+                        .frame(
+                            minWidth: max(0, viewport.size.width - boardScrollerInset),
+                            minHeight: max(0, viewport.size.height - boardScrollerInset)
+                        )
                     }
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 30)
-                    .padding(.top, 22)
-                    .padding(.bottom, 28)
+                    .modifier(TopLeadingScrollAlignment())
+                    .scrollIndicators(.visible)
+                    .background(WorkspaceTheme.windowBackground)
+                    .scrollContentBackground(.hidden)
+                    .accessibilityIdentifier("board-columns-scroll-view")
                 }
-                .scrollIndicators(.visible)
-                .background(WorkspaceTheme.windowBackground)
-                .scrollContentBackground(.hidden)
-                .accessibilityIdentifier("board-columns-scroll-view")
+                .onReceive(NotificationCenter.default.publisher(for: NSScroller.preferredScrollerStyleDidChangeNotification)) { _ in
+                    boardScrollerInset = Self.legacyScrollerInset()
+                }
 
                 // A fixed gutter beside the scroll view rather than an overlay, so the opened
                 // drawer never covers a column and stays put while scrolling.
@@ -359,7 +388,7 @@ struct KanbanBoardView: View {
         // resolved to the board's scroll view underneath: the rows still took mouse clicks, but
         // XCUITest (and so assistive clients) did not find them. A platform view here restores
         // it; that was found by bisecting and experiment, and the AppKit mechanism is not
-        // confirmed. Do not remove it without rerunning test_task_done_preserves_worktree_and_branch,
+        // confirmed. Do not remove it without rerunning test_task_done_removes_worktree_and_preserves_branch,
         // whose archive hittability check guards it.
         .background(BoardAccessibilityHitTestAnchor())
         .overlay(alignment: .topTrailing) {
@@ -1122,6 +1151,18 @@ struct KanbanBoardView: View {
 
 }
 
+/// Places scroll content smaller than its container at the top leading corner instead of
+/// centering it through a negative clip origin; the board centers its columns itself.
+private struct TopLeadingScrollAlignment: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.defaultScrollAnchor(.topLeading, for: .alignment)
+        } else {
+            content
+        }
+    }
+}
+
 /// An empty, zero-size AppKit view kept behind the board because, empirically, the Done
 /// archive overlay's accessibility hit testing breaks without one; see its use in `body`.
 private struct BoardAccessibilityHitTestAnchor: NSViewRepresentable {
@@ -1719,41 +1760,55 @@ private struct TaskCardView: View {
 
     private var timeRow: some View {
         HStack(spacing: 6) {
-            Image(systemName: "clock")
-                .font(.system(size: 10))
-            if task.status == .inProgress {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text(workingDuration(at: context.date))
-                        .font(.system(size: 10))
-                        .accessibilityIdentifier("task-working-duration-\(task.id.uuidString)")
-                }
-            } else {
-                Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
+            Group {
+                Image(systemName: "clock")
                     .font(.system(size: 10))
+                if task.status == .inProgress {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(workingDuration(at: context.date))
+                            .font(.system(size: 10))
+                            .accessibilityIdentifier("task-working-duration-\(task.id.uuidString)")
+                    }
+                } else {
+                    Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
+                        .font(.system(size: 10))
+                }
             }
+            .allowsHitTesting(false)
             // A zero counter says nothing yet, so it stays hidden until the task has sent tokens.
             if task.counterTokens > 0 {
                 tokenCounter
             }
         }
         .foregroundStyle(.tertiary)
-        .allowsHitTesting(false)
     }
 
     /// Everything the task has sent to the model so far, subagents included.
     /// It climbs while a turn runs and keeps the heatmap colour, so the
     /// configured ceiling still reads as "this task is getting expensive".
+    /// Clicking it opens Token Stats. The hover capsule pads the hit area well
+    /// past the small text, and the matching negative padding keeps that
+    /// larger target from growing the time row.
     private var tokenCounter: some View {
         let tokens = task.counterTokens
-        return Text(TokenUsageHeatmap.compact(tokens))
-            .font(.system(size: 10, weight: .medium, design: .monospaced))
-            .foregroundStyle(TokenUsageHeatmap.color(totalTokens: tokens, max: tokenUsageColorMax))
-            .contentTransition(.numericText())
-            .animation(.default, value: tokens)
-            .nativeHelp(counterDescription)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(counterDescription)
-            .accessibilityIdentifier("task-token-usage-counter-\(task.id.uuidString)")
+        return Button(action: onShowTokenStats) {
+            Text(TokenUsageHeatmap.compact(tokens))
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(TokenUsageHeatmap.color(totalTokens: tokens, max: tokenUsageColorMax))
+                .contentTransition(.numericText())
+                .animation(.default, value: tokens)
+                .padding(.horizontal, 4)
+                .actionButtonHoverEmphasis(padding: 6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .buttonHoverPointer()
+        .padding(.horizontal, -10)
+        .padding(.vertical, -6)
+        .nativeHelp("\(counterDescription). Click for Token Stats")
+        .accessibilityLabel(counterDescription)
+        .accessibilityHint("Open Token Stats")
+        .accessibilityIdentifier("task-token-usage-counter-\(task.id.uuidString)")
     }
 
     private var counterDescription: String {

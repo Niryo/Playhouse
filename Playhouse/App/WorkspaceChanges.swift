@@ -130,8 +130,57 @@ struct WorkspaceChangeEntry: Codable, Equatable, Identifiable {
 struct WorkspaceChangeInventory: Codable, Equatable {
     let unviewed: [WorkspaceChangeEntry]
     let viewed: [WorkspaceChangeEntry]
+    /// Repositories with a merge still open; their files are left out until it is committed or aborted.
+    let mergingRepositories: [String]
 
     var isEmpty: Bool { unviewed.isEmpty && viewed.isEmpty }
+    var count: Int { unviewed.count + viewed.count }
+}
+
+/// How a task's terminal panel starts its shell. `environment` holds only the variables
+/// Playhouse sets on top of the app's own environment.
+struct TaskTerminalLaunch: Codable, Equatable {
+    let taskID: UUID
+    let directory: String
+    let shell: String
+    /// The shell runs as a login shell, as Terminal.app starts it, so the user's profile applies.
+    let arguments: [String]
+    let environment: [String: String]
+
+    /// Why a task can't open a terminal yet, or nil when it has a created worktree. The terminal
+    /// only runs in a worktree, and opening it never creates one: a pending worktree is named
+    /// and created when the task starts, so the terminal waits for that.
+    static func unavailableReason(for records: [RepositoryWorktreeRecord]) -> String? {
+        if records.isEmpty {
+            return "Add a repository to this task to open a terminal in its worktree."
+        }
+        if records.allSatisfy(\.isPending) {
+            return "The terminal opens once the task's worktree is created, when the task starts."
+        }
+        return nil
+    }
+
+    /// The account's login shell, falling back to `$SHELL` and then zsh.
+    static func loginShell() -> String {
+        var candidates: [String] = []
+        if let entry = getpwuid(getuid()), let shell = entry.pointee.pw_shell {
+            candidates.append(String(cString: shell))
+        }
+        if let shell = ProcessInfo.processInfo.environment["SHELL"] { candidates.append(shell) }
+        return candidates.first { !$0.isEmpty && FileManager.default.isExecutableFile(atPath: $0) } ?? "/bin/zsh"
+    }
+
+    static func environment(taskID: UUID) -> [String: String] {
+        var environment = [
+            "TERM": "xterm-256color",
+            "COLORTERM": "truecolor",
+            "TERM_PROGRAM": "Playhouse",
+            "PLAYHOUSE_TASK_ID": taskID.uuidString
+        ]
+        // Apps launched from Finder get no locale, which leaves shells and CLIs in ASCII mode.
+        if ProcessInfo.processInfo.environment["LANG"] == nil { environment["LANG"] = "en_US.UTF-8" }
+        return environment
+    }
 }
 
 struct WorkspaceFileDiff: Codable, Equatable {
@@ -204,6 +253,7 @@ enum WorkspaceChangeScanner {
                 "operationID": operationID,
                 "unviewedCount": String(inventory.unviewed.count),
                 "viewedCount": String(inventory.viewed.count),
+                "mergingRepositoryCount": String(inventory.mergingRepositories.count),
                 "durationMilliseconds": String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
             ])
             return inventory
@@ -265,28 +315,42 @@ enum WorkspaceChangeScanner {
 
     @MainActor
     static func captureViewedChange(workspaceRoots: [String], repositoryPath: String, relativePath: String) async throws -> WorkspaceViewedChange {
-        let (isPresent, contents) = try await PlayhouseBackgroundOperation.run {
-            guard isSafeRelativePath(relativePath) else {
+        try await captureViewedChanges(workspaceRoots: workspaceRoots, files: [(repositoryPath, relativePath)])[0]
+    }
+
+    /// Snapshots and stages each file, reading the task's repositories once for the whole batch.
+    @MainActor
+    static func captureViewedChanges(workspaceRoots: [String], files: [(repository: String, path: String)]) async throws -> [WorkspaceViewedChange] {
+        try await PlayhouseBackgroundOperation.run {
+            guard files.allSatisfy({ isSafeRelativePath($0.path) }) else {
                 throw BridgeCommandError(code: "invalid_argument", message: "The changed file path must be relative to its repository.")
             }
             let inventory = try inventorySynchronously(workspaceRoots: workspaceRoots)
-            let repository = URL(fileURLWithPath: repositoryPath, isDirectory: true).standardizedFileURL
-            guard inventory.repositories.contains(repository) else {
-                throw BridgeCommandError(code: "invalid_argument", message: "The repository isn't inside this task's working folders.")
+            return try files.map { file in
+                let repository = URL(fileURLWithPath: file.repository, isDirectory: true).standardizedFileURL
+                guard inventory.repositories.contains(repository) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "The repository isn't inside this task's working folders.")
+                }
+                let fileURL = repository.appendingPathComponent(file.path).standardizedFileURL
+                let isPresent = FileManager.default.fileExists(atPath: fileURL.path)
+                let contents = isPresent ? try worktreeBytes(repository: repository, path: file.path) : Data()
+                try stageViewedChange(repository: repository, path: file.path)
+                return WorkspaceViewedChange(repository: URL(fileURLWithPath: file.repository).standardizedFileURL.path, path: file.path, isPresent: isPresent, contents: contents)
             }
-            let fileURL = repository.appendingPathComponent(relativePath).standardizedFileURL
-            let isPresent = FileManager.default.fileExists(atPath: fileURL.path)
-            let contents = isPresent ? try worktreeBytes(repository: repository, path: relativePath) : Data()
-            try stageViewedChange(repository: repository, path: relativePath)
-            return (isPresent, contents)
         }
-        return WorkspaceViewedChange(repository: URL(fileURLWithPath: repositoryPath).standardizedFileURL.path, path: relativePath, isPresent: isPresent, contents: contents)
     }
 
     /// Records the file in the Git index when it is marked viewed, so later edits to a formerly
     /// untracked file are reported as ordinary worktree changes against a staged baseline.
+    /// A missing file is recorded as a deletion with `rm --cached`, which also accepts a deletion
+    /// that is already staged; `add` rejects that path because it matches nothing left to add.
     private static func stageViewedChange(repository: URL, path: String) throws {
-        let result = try runGit(repository: repository, arguments: ["add", "--all", "--", path])
+        // `attributesOfItem` doesn't follow symlinks, so a dangling link still counts as present.
+        let isPresent = (try? FileManager.default.attributesOfItem(atPath: repository.appendingPathComponent(path).path)) != nil
+        let arguments = isPresent
+            ? ["add", "--all", "--", path]
+            : ["rm", "--cached", "--ignore-unmatch", "--force", "--quiet", "--", path]
+        let result = try runGit(repository: repository, arguments: arguments)
         guard result.status == 0 else {
             throw BridgeCommandError(
                 code: "operation_failed",
@@ -316,7 +380,13 @@ enum WorkspaceChangeScanner {
         let snapshots = Dictionary(grouping: viewedChanges, by: \.repository).mapValues { Dictionary($0.map { ($0.path, $0) }) { _, latest in latest } }
         var unviewed: [WorkspaceChangeEntry] = []
         var viewed: [WorkspaceChangeEntry] = []
+        var mergingRepositories: [String] = []
         for repository in repositories {
+            // An open merge stages everything the merged branch brought in, which isn't the task's work.
+            if try runGit(repository: repository, arguments: ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).status == 0 {
+                mergingRepositories.append(repository.path)
+                continue
+            }
             let statusResult = try runGit(repository: repository, arguments: ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
             guard statusResult.status == 0 else {
                 throw BridgeCommandError(code: "operation_failed", message: "Git couldn't read changes in \(repository.path): \(statusResult.error.trimmingCharacters(in: .whitespacesAndNewlines))")
@@ -407,7 +477,7 @@ enum WorkspaceChangeScanner {
         func sort(_ entries: [WorkspaceChangeEntry]) -> [WorkspaceChangeEntry] {
             entries.sorted { $0.repository == $1.repository ? $0.path.localizedStandardCompare($1.path) == .orderedAscending : $0.repository.localizedStandardCompare($1.repository) == .orderedAscending }
         }
-        return RepositoryInventory(repositories: repositories, changes: WorkspaceChangeInventory(unviewed: sort(unviewed), viewed: sort(viewed)))
+        return RepositoryInventory(repositories: repositories, changes: WorkspaceChangeInventory(unviewed: sort(unviewed), viewed: sort(viewed), mergingRepositories: mergingRepositories))
     }
 
     private static func diffSynchronously(
