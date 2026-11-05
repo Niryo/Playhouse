@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-vm_name="${STATIONAI_UI_TART_VM:-stationai-ui}"
-image="${STATIONAI_UI_TART_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-xcode:26.5}"
+vm_name="${PLAYHOUSE_UI_TART_VM:-playhouse-ui}"
+image="${PLAYHOUSE_UI_TART_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-xcode:26.5}"
 tart_home="${TART_HOME:-${HOME}/.tart}"
 minimum_free_kib=$((110 * 1024 * 1024))
 

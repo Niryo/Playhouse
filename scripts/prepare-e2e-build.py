@@ -54,7 +54,7 @@ def source_fingerprint():
         if relative_path.as_posix() in {
             "README.md",
             "AGENTS.md",
-            "StationAI/BridgeTests/BridgeTestContracts.json",
+            "Playhouse/BridgeTests/BridgeTestContracts.json",
             "scripts/check-button-feedback.py",
             "scripts/check-test-parity.py",
             "scripts/prepare-e2e-fixture.py",
@@ -82,32 +82,29 @@ fingerprint = source_fingerprint()
 if arguments.fingerprint_only:
     print(fingerprint)
     raise SystemExit(0)
-cache_root = Path(tempfile.gettempdir()) / "StationAI-E2E-BuildCache"
+cache_root = Path(tempfile.gettempdir()) / "Playhouse-E2E-BuildCache"
 root_key = hashlib.sha256(os.fsencode(root)).hexdigest()[:16]
 cache_path = cache_root / f"{root_key}-{fingerprint}"
 derived_data = cache_path / "DerivedData"
-app = derived_data / "Build/Products/Debug/StationAI.app"
-cli = app / "Contents/MacOS/stationai-cli"
+app = derived_data / "Build/Products/Debug/Playhouse.app"
+cli = app / "Contents/MacOS/playhouse-cli"
 bundle_id = f"{arguments.profile_bundle_id}.e2e.{fingerprint[:16]}"
 manifest = cache_path / "source-fingerprint"
 cache_root.mkdir(parents=True, exist_ok=True)
 
 
 def cache_bundle_is_valid():
-    bridge = app / "Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist"
+    # The bridge daemon and CLI ship flat in Contents/MacOS and resolve their
+    # identity from this same Info.plist via `Bundle.main` (no separate XPC
+    # bundle/Info.plist to cross-check anymore).
     try:
         app_info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
-        bridge_info = plistlib.loads(bridge.read_bytes())
     except (OSError, plistlib.InvalidFileException):
         return False
     return (
         app_info.get("CFBundleIdentifier") == bundle_id
-        and app_info.get("StationAISourceWorktree") == str(root)
-        and app_info.get("StationAIStoreCompatibilityVersion") == "2"
-        and bridge_info.get("CFBundleIdentifier") == bundle_id + ".bridge"
-        and bridge_info.get("StationAIApplicationBundleIdentifier") == bundle_id
-        and bridge_info.get("StationAISourceWorktree") == str(root)
-        and bridge_info.get("StationAIStoreCompatibilityVersion") == "2"
+        and app_info.get("PlayhouseSourceWorktree") == str(root)
+        and app_info.get("PlayhouseStoreCompatibilityVersion") == "2"
     )
 
 
@@ -131,17 +128,17 @@ with (cache_root / f"{root_key}.lock").open("a+") as lock_file:
         subprocess.run(
             [
                 "xcodebuild", "build-for-testing", "-quiet",
-                "-project", str(root / "StationAI.xcodeproj"),
-                "-scheme", "StationAI",
+                "-project", str(root / "Playhouse.xcodeproj"),
+                "-scheme", "Playhouse",
                 "-configuration", "Debug",
                 "-destination", f"platform=macOS,arch={arguments.architecture}",
                 "-derivedDataPath", str(derived_data),
-                "-only-testing:StationAIUITests/StationAIUITests",
+                "-only-testing:PlayhouseUITests/PlayhouseUITests",
                 "CODE_SIGNING_ALLOWED=YES",
                 "CODE_SIGN_IDENTITY=-",
                 f"ARCHS={arguments.architecture}",
                 "ONLY_ACTIVE_ARCH=YES",
-                f"STATIONAI_APP_BUNDLE_IDENTIFIER={bundle_id}",
+                f"PLAYHOUSE_APP_BUNDLE_IDENTIFIER={bundle_id}",
             ],
             cwd=root,
             stdout=sys.stderr,

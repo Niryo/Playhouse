@@ -45,12 +45,12 @@ import SwiftData
             throw NSError(domain: "LegacyStoreSeeder", code: 1)
         }
         let directory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
-        let store = directory.appendingPathComponent("StationAI.store")
+        let store = directory.appendingPathComponent("Playhouse.store")
         guard !FileManager.default.fileExists(atPath: store.path) else {
             throw NSError(domain: "LegacyStoreSeeder", code: 2)
         }
         let schema = Schema([BoardTask.self])
-        let configuration = ModelConfiguration("StationAI", schema: schema, url: store, cloudKitDatabase: .none)
+        let configuration = ModelConfiguration("Playhouse", schema: schema, url: store, cloudKitDatabase: .none)
         let container = try ModelContainer(for: schema, configurations: [configuration])
         let context = ModelContext(container)
         let task = BoardTask()

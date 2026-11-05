@@ -6,8 +6,10 @@ import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "StationAI" / "App"
+APP = ROOT / "Playhouse" / "App"
 FILES = tuple(sorted(APP.rglob("*.swift")))
+# Files whose controls are menu-bar commands rather than views in the window.
+MENU_BAR_FILES = {"PlayhouseApp.swift", "DebugConversationImport/DebugConversationImport.swift"}
 CONTROL = re.compile(r"\b(Button(?=\s*(?:\(|\{))|Link(?=\s*\()|Menu(?=\s*\{))")
 
 
@@ -66,7 +68,13 @@ def control_end(source: str, kind: str, start: int) -> int | None:
     opening_paren = source.find("(", start, start + 80)
     opening_brace = source.find("{", start, start + 350)
     if kind == "Link":
-        return matching(source, "(", ")", opening_paren) if opening_paren >= 0 else None
+        end = matching(source, "(", ")", opening_paren) if opening_paren >= 0 else None
+        if end is None:
+            return None
+        next_token = skip_space(source, end + 1)
+        if next_token < len(source) and source[next_token] == "{":
+            return matching(source, "{", "}", next_token)
+        return end
 
     if kind == "Button" and opening_paren >= 0 and (opening_brace < 0 or opening_paren < opening_brace):
         end = matching(source, "(", ")", opening_paren)
@@ -111,12 +119,24 @@ def modifier_chain(source: str, end: int, declaration_indent: int) -> str:
     return "".join(chain)
 
 
+def menu_content_ranges(source: str) -> list[tuple[int, int]]:
+    """Spans of `Menu { ... }` and `.contextMenu { ... }` content, whose buttons become menu items."""
+    ranges = []
+    for match in re.finditer(r"(?<![A-Za-z])Menu\s*\{|\.contextMenu\s*\{", source):
+        opening = match.end() - 1
+        closing = matching(source, "{", "}", opening)
+        if closing is not None:
+            ranges.append((opening, closing))
+    return ranges
+
+
 def main() -> int:
     errors: list[str] = []
     controls_seen = 0
     for path in FILES:
         name = path.relative_to(APP).as_posix()
         source = path.read_text(encoding="utf-8")
+        menus = menu_content_ranges(source)
         for match in CONTROL.finditer(source):
             kind = match.group(1)
             start = match.start()
@@ -131,18 +151,27 @@ def main() -> int:
             chain = modifier_chain(source, end, indent)
             if ".buttonHoverPointer()" not in chain:
                 errors.append(f"{location}: {kind} is missing buttonHoverPointer()")
-            help_match = re.search(r"\.help\(\s*(\"(?:\\.|[^\"\\])*\"|[^)\n]+)\s*\)", chain)
+            # Window controls use `.nativeHelp`: SwiftUI's `.help` alone does not present its
+            # tooltip for most controls in the main window. Menu items (menu-bar commands and
+            # `Menu`/`.contextMenu` content) are native menu items and keep `.help`.
+            in_menu = name in MENU_BAR_FILES or any(a < start < b for a, b in menus)
+            help_modifier = r"\.help" if in_menu else r"\.nativeHelp"
+            help_match = re.search(help_modifier + r"\(\s*(\"(?:\\.|[^\"\\])*\"|[^)\n]+)\s*\)", chain)
             if not help_match:
-                errors.append(f"{location}: {kind} is missing a help hint")
+                errors.append(f"{location}: {kind} is missing a help hint"
+                              + ("" if in_menu else " (use .nativeHelp, not .help)"))
             else:
                 hint = help_match.group(1).strip().strip('"')
                 if not hint or hint == "Activate this button":
                     errors.append(f"{location}: {kind} has a missing or generic help hint")
 
     support = (APP / "WorkspaceSupport.swift").read_text(encoding="utf-8")
-    for required in (".onHover", "NSCursor.pointingHand.push()", "NSCursor.pop()"):
+    for required in (".onHover", "cursor.push()", "NSCursor.pop()", ".onDisappear"):
         if required not in support:
             errors.append(f"Shared cursor handler is missing {required}")
+    # Buttons get the pointing hand through the shared, stack-balanced cursor handler.
+    if "hoverCursor(.pointingHand)" not in support:
+        errors.append("buttonHoverPointer() does not use the shared handler with NSCursor.pointingHand")
 
     if errors:
         print("Button feedback check failed:", file=sys.stderr)

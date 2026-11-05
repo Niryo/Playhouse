@@ -159,9 +159,6 @@ def finish(args: argparse.Namespace) -> int:
         if len(expected_cases) != len(set(expected_cases)):
             print("Batch UI test case IDs must be unique.", file=sys.stderr)
             return 2
-        if len(expected_cases) > 8:
-            print("A UI test batch cannot contain more than 8 cases.", file=sys.stderr)
-            return 2
         known_cases = {case["id"] for case in cases}
         unknown_cases = sorted(set(expected_cases) - known_cases)
         if unknown_cases:
@@ -193,7 +190,7 @@ def finish(args: argparse.Namespace) -> int:
             if test_case["id"] in failure_cases:
                 test_case["status"] = "failed"
             elif status in {"queued", "running"}:
-                test_case["status"] = "passed" if batch_passed else "not_run"
+                test_case["status"] = "passed" if batch_passed else ("failed" if args.exit_status != 0 else "not_run")
 
         state.setdefault("batches", []).append({
             "cases": expected_cases,
@@ -338,7 +335,7 @@ def render_dashboard(screen: Any, state_path: Path, follow: bool, scroll: int) -
     completed = counts["passed"] + counts["failed"] + counts["skipped"] + counts["not_run"]
     suite_status = state.get("suite_status", "starting")
     title_color = curses.color_pair(2) if suite_status == "failed" else curses.color_pair(1)
-    draw_text(screen, 0, 0, f"StationAI visible UI tests · {suite_status.upper()}", width, title_color | curses.A_BOLD)
+    draw_text(screen, 0, 0, f"Playhouse visible UI tests · {suite_status.upper()}", width, title_color | curses.A_BOLD)
     progress_line = (
         f"Progress {completed}/{len(cases)}  ✓ {counts['passed']} passed  "
         f"✗ {counts['failed']} failed  ○ {counts['queued']} remaining"
@@ -476,7 +473,7 @@ def watch(args: argparse.Namespace) -> int:
         print(f"Dashboard closed; UI tests are still running. State: {state_path}")
     elif state is not None:
         cases = state.get("cases", [])
-        print(f"StationAI visible UI tests · {state.get('suite_status', 'finished').upper()}")
+        print(f"Playhouse visible UI tests · {state.get('suite_status', 'finished').upper()}")
         for test_case in cases:
             marker, label, duration = status_text(test_case, time.time())
             print(f"{marker} {label:>8}  {duration:>8}  {test_case['id']}")

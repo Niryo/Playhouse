@@ -1,11 +1,11 @@
 ---
 name: full-ui-verification
-description: Run StationAI's full visible UI test suite on demand, repair failures, and commit and push only the scoped verification changes.
+description: Run Playhouse's full visible UI test suite on demand, repair failures, and commit and push only the scoped verification changes.
 ---
 
 # Full UI verification
 
-Use this skill only when explicitly invoked. It runs the full StationAI UI suite, diagnoses and repairs failures, confirms the full suite is green, then commits and pushes the changes made by this skill.
+Use this skill only when explicitly invoked. It runs the full Playhouse UI suite, diagnoses and repairs failures, confirms the full suite is green, then commits and pushes the changes made by this skill.
 
 ## Workflow
 

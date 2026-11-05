@@ -1,8 +1,8 @@
 {
-  "name": "stationai-monaco-diff-bundle",
+  "name": "playhouse-monaco-diff-bundle",
   "private": true,
   "version": "1.0.0",
-  "description": "Pinned ESM bundle for StationAI's read-only Monaco diff viewer",
+  "description": "Pinned ESM bundle for Playhouse's read-only Monaco diff viewer",
   "engines": {
     "node": ">=20"
   },

@@ -13,7 +13,7 @@ report_phase() {
   phase="$1"
 }
 source "${repository_root}/scripts/app-profile.sh"
-stationai_load_app_profile "${repository_root}"
+playhouse_load_app_profile "${repository_root}"
 
 selected_cases=()
 while (( $# > 0 )); do
@@ -33,7 +33,7 @@ while (( $# > 0 )); do
   esac
 done
 
-test_output_dir="$(mktemp -d /tmp/stationai-bridge.XXXXXX)"
+test_output_dir="$(mktemp -d /tmp/playhouse-bridge.XXXXXX)"
 cleanup() {
   local status=$?
   report_phase finished
@@ -47,13 +47,13 @@ python3 "${repository_root}/scripts/check-e2e-locking.py"
 report_phase build
 build_info="$(python3 "${repository_root}/scripts/prepare-e2e-build.py" \
   --root "${repository_root}" \
-  --profile-bundle-id "${STATIONAI_PROFILE_BUNDLE_ID}" \
+  --profile-bundle-id "${PLAYHOUSE_PROFILE_BUNDLE_ID}" \
   --architecture "${architecture}")"
 report_phase fixture
 derived_data_dir="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["derivedData"])' "${build_info}")"
 e2e_bundle_identifier="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["bundleID"])' "${build_info}")"
-app_bundle="${derived_data_dir}/Build/Products/Debug/StationAI.app"
-cli_path="${app_bundle}/Contents/MacOS/stationai-cli"
+app_bundle="${derived_data_dir}/Build/Products/Debug/Playhouse.app"
+cli_path="${app_bundle}/Contents/MacOS/playhouse-cli"
 data_root="${test_output_dir}/data"
 fixture_root="${test_output_dir}/fixtures"
 bridge_log="${test_output_dir}/bridge-tests.log"
@@ -65,13 +65,24 @@ legacy_store_seeder="${fixture_root}/seed-legacy-task-store"
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/seed-legacy-task-store.swift" \
   -o "${legacy_store_seeder}"
+# Pure-logic unit checks of the Codex CPU working-directory attribution.
+codex_cpu_attribution_tests="${test_output_dir}/codex-cpu-attribution-tests"
+xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/Playhouse/App/ProcessCPUSampler.swift" \
+  "${repository_root}/scripts/unit/codex-cpu-attribution-tests.swift" \
+  -o "${codex_cpu_attribution_tests}"
+"${codex_cpu_attribution_tests}"
 if [[ ! -x "${cli_path}" ]]; then
   printf 'The app build did not produce its bundled CLI at %s.\n' "${cli_path}" >&2
   exit 1
 fi
 
-service_info="${app_bundle}/Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist"
-service_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${service_info}")"
+# The bridge daemon resolves its identity from the app's own Info.plist via
+# `Bundle.main` (it ships flat in Contents/MacOS, no separate bundle anymore),
+# so its service name is just the app's identifier plus the same ".bridge"
+# suffix `BridgeContract.serviceName(forApplication:)` derives at runtime.
+app_info="${app_bundle}/Contents/Info.plist"
+service_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${app_info}").bridge"
 bridge_arguments=(
   "${repository_root}/scripts/test-bridge.py"
   --cli "${cli_path}"
@@ -99,4 +110,4 @@ if (( bridge_status != 0 )); then
   exit "${bridge_status}"
 fi
 
-printf 'StationAI CLI/XPC bridge verification passed without launching the UI.\n'
+printf 'Playhouse CLI/XPC bridge verification passed without launching the UI.\n'

@@ -1,6 +1,6 @@
 # Add Conflict Solver Button for Pull Requests — workflow observations
 
-Task: `C98F3770-2164-42E0-A036-2701506D3D99`  
+Task: `C98F3770-2164-42E0-A036-2701506D3D99`
 Client date: 2026-10-22
 
 ## Observed timeline
@@ -10,10 +10,10 @@ Client date: 2026-10-22
 | Before 19:37:51 | Request, Downloads permission troubleshooting, and any work before task-card creation. Conversation order is available; event times are not. | Duration unknown. |
 | 19:37:51 | Task card created (`createdAt` supplied in task progress). | Recorded timestamp. |
 | 19:37:51–20:41:09 | Planning, repository inspection, icon import, implementation, builds, static checks, three static-review rounds, and repairs. Round 1 rejected; round 2 approved task and architecture but UI rejected the missing pushed-head proof; round 3 approved UI after repair. Parity reported 57 paired cases; Swift parse, Python AST, and diff checks passed. Supplied conversation and verification ledger establish order, but no per-operation timestamps. | **63m18s elapsed**, derived from anchors; active work, tool wait, user wait, and gaps cannot be separated. |
-| 20:41:09–20:44:27 | First full `scripts/test-e2e.sh` run passed all 57 CLI/XPC cases. The runner reported build 88s, fixture 2s, cases 107s, total 198s; the remaining roughly 1s reflects coarse whole-second phase reporting. Runtime log: `/tmp/stationai-bridge.RbKdv4/bridge-tests.log`. | **3m18s runtime**, measured by runner; start derived from the test-log timestamp and supplied progress marker. |
+| 20:41:09–20:44:27 | First full `scripts/test-e2e.sh` run passed all 57 CLI/XPC cases. The runner reported build 88s, fixture 2s, cases 107s, total 198s; the remaining roughly 1s reflects coarse whole-second phase reporting. Runtime log: `/tmp/playhouse-bridge.RbKdv4/bridge-tests.log`. | **3m18s runtime**, measured by runner; start derived from the test-log timestamp and supplied progress marker. |
 | After 20:44:27 | Handoff and task completion. No completion timestamp was supplied or accessible to this audit. Routine UI execution was excluded by repository policy. | Duration unknown. |
 
-The visible interval from task-card creation through the passing runtime run is **at least 66m36s**. This is a partial lifecycle: the initial request predates the card, and the final completion signal is not timed. It is wall-clock elapsed time, not active agent time. The `stationai.sh task get` audit attempt could not read the card because the app/data profile was rejected for this worktree. I checked the supplied conversation and verification ledger, the runner and per-case log, `scripts/test-e2e.sh`, and progress storage in `BridgeCore.swift`; the latter stores the current progress label, not a timestamped history.
+The visible interval from task-card creation through the passing runtime run is **at least 66m36s**. This is a partial lifecycle: the initial request predates the card, and the final completion signal is not timed. It is wall-clock elapsed time, not active agent time. The `playhouse.sh task get` audit attempt could not read the card because the app/data profile was rejected for this worktree. I checked the supplied conversation and verification ledger, the runner and per-case log, `scripts/test-e2e.sh`, and progress storage in `BridgeCore.swift`; the latter stores the current progress label, not a timestamped history.
 
 The two longest recorded cases were `test_task_done_preserves_worktree_and_branch` (**24.468s**) and `test_review_pr_conflicts_probe_and_verify` (**14.738s**). Together they took **39.206s**, or **36.8%** of the 106.688s case runner time. The next case was 5.703s. The 88s cache-miss build was **44.4%** of the 198s full run; a source-changing task requires a build, so this observation alone does not show avoidable build work. A build-copy diagnostic reportedly said “failed” with exit 0, while the suite continued and passed; its cause and impact are unmeasured.
 
