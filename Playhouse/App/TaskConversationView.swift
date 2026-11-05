@@ -908,6 +908,8 @@ struct TaskConversationView: View {
     @State private var isLoadingChanges = false
     @State private var changesNeedRefresh = false
     @State private var changeWatcher: WorkspaceChangeWatcher?
+    @State private var isTerminalPresented = false
+    @StateObject private var terminalSession = TaskTerminalSession()
     @State private var changesError: String?
     @State private var selectedChange: WorkspaceChangeEntry?
     @State private var selectedDiff: WorkspaceFileDiff?
@@ -1437,7 +1439,23 @@ struct TaskConversationView: View {
 
                     conversationPanel
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    if isTerminalPresented {
+                        HStack(spacing: 0) {
+                            Rectangle()
+                                .fill(Color.primary.opacity(0.08))
+                                .frame(width: 1)
+                            TaskTerminalPanel(
+                                session: terminalSession,
+                                onRestart: { terminalSession.restart(workspaceManager: workspaceManager) },
+                                onClose: { setTerminalPresented(false) }
+                            )
+                        }
+                        .frame(width: 460)
+                        .transition(.move(edge: .trailing))
+                    }
                 }
+                .clipped()
             }
         }
         .background(WorkspaceTheme.windowBackground)
@@ -1638,7 +1656,43 @@ struct TaskConversationView: View {
         .onDisappear {
             changeWatcher?.stop()
             changeWatcher = nil
+            terminalSession.terminate()
         }
+    }
+
+    private func setTerminalPresented(_ presented: Bool) {
+        if presented { terminalSession.startIfNeeded(taskID: task.id, workspaceManager: workspaceManager) }
+        withAnimation(.easeOut(duration: 0.22)) { isTerminalPresented = presented }
+    }
+
+    /// Quick actions for the task, right-aligned along the bottom of the sidebar.
+    private var sidebarCommandRow: some View {
+        HStack(spacing: 4) {
+            Spacer(minLength: 0)
+            Button {
+                setTerminalPresented(!isTerminalPresented)
+            } label: {
+                Image(systemName: "terminal")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 26, height: 24)
+                    .foregroundStyle(isTerminalPresented ? WorkspaceTheme.accent : Color.secondary)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(isTerminalPresented ? WorkspaceTheme.accent.opacity(0.14) : Color.clear)
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .buttonHoverPointer()
+            .nativeHelp(isTerminalPresented ? "Hide the terminal" : "Open a terminal in this task's folder")
+            .accessibilityLabel(isTerminalPresented ? "Hide terminal" : "Open terminal")
+            .accessibilityValue(isTerminalPresented ? "Shown" : "Hidden")
+            .accessibilityIdentifier("toggle-terminal-button")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("sidebar-command-row")
     }
 
     private var taskSidebar: some View {
@@ -1721,6 +1775,14 @@ struct TaskConversationView: View {
                 .scrollIndicators(.visible)
                 .accessibilityIdentifier("workspace-changes-list")
             }
+
+            Spacer(minLength: 0)
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.07))
+                .frame(height: 1)
+
+            sidebarCommandRow
         }
         .frame(width: 232)
         .frame(maxHeight: .infinity)

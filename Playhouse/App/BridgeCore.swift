@@ -4393,6 +4393,41 @@ final class WorkspaceManager {
         }
     }
 
+    /// How the task's terminal starts: the user's login shell, opened in the task's first
+    /// repository worktree (or its first folder when it has none) that still exists on disk.
+    func terminalLaunch(for taskID: UUID) throws -> TaskTerminalLaunch {
+        guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
+        let task = try taskManager.get(taskID)
+        // A pending worktree's root is still its source repository, which the terminal must not open in.
+        let pendingSources = Set(task.repositoryWorktrees.filter(\.isPending).map(\.repositoryPath))
+        let candidates = task.workspaceRoots.filter { !pendingSources.contains($0) }
+        guard let directory = candidates.first(where: { WorkspaceSettings.validDirectoryURL(for: $0) != nil }) else {
+            PlayhouseDiagnostics.record("workspace.terminal.launch.failed", fields: [
+                "taskID": taskID.uuidString,
+                "candidateCount": String(candidates.count)
+            ])
+            throw BridgeCommandError(
+                code: "terminal_unavailable",
+                message: candidates.isEmpty
+                    ? "This task has no folder to open a terminal in."
+                    : "This task's folders no longer exist, so there is nowhere to open a terminal."
+            )
+        }
+        let launch = TaskTerminalLaunch(
+            taskID: taskID,
+            directory: URL(fileURLWithPath: directory, isDirectory: true).standardizedFileURL.path,
+            shell: TaskTerminalLaunch.loginShell(),
+            arguments: ["-l"],
+            environment: TaskTerminalLaunch.environment(taskID: taskID)
+        )
+        PlayhouseDiagnostics.record("workspace.terminal.launch.resolved", fields: [
+            "taskID": taskID.uuidString,
+            "directory": launch.directory,
+            "shell": launch.shell
+        ])
+        return launch
+    }
+
     func changes(for taskID: UUID) async throws -> WorkspaceChangeInventory {
         guard let taskManager else {
             throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
@@ -8192,6 +8227,8 @@ final class PlayhouseBridgeRuntime {
                 try Self.rejectStandaloneChat(taskManager, request.requiredUUID("taskID"))
                 let roots = try request.requiredStrings("roots")
                 result = try Self.value(await workspaces.setRoots(roots, for: request.requiredUUID("taskID")))
+            case "task.terminal":
+                result = try Self.value(workspaces.terminalLaunch(for: request.requiredUUID("taskID")))
             case "task.changes.list":
                 result = try Self.value(await workspaces.changes(for: request.requiredUUID("taskID")))
             case "task.changes.mark-viewed":
