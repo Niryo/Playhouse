@@ -94,7 +94,7 @@ enum WorkspaceSettings {
     /// to suggest after excluding the ones already attached to a task.
     static let recentRepositoryHistoryLimit = 10
     /// How many recent repositories a task header suggests.
-    static let recentRepositorySuggestionLimit = 5
+    static let recentRepositorySuggestionLimit = 3
     static let appearanceKey = "appearance"
     static let defaultConversationProviderKey = "defaultConversationProvider"
     static let autoCreatePullRequestDefaultKey = "autoCreatePullRequestDefault"

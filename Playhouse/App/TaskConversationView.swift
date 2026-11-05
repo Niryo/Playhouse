@@ -2281,6 +2281,19 @@ struct TaskConversationView: View {
         let suggestedRepositoryPaths = suggestedRepositories.map(\.path)
         let attachedRepositoryPaths = task.repositoryWorktrees.map(\.repositoryPath)
         return HStack(spacing: 10) {
+            if !isReadOnly, !recentRepositoryPaths.isEmpty {
+                HStack(spacing: 7) {
+                    ForEach(recentRepositoryPaths, id: \.self) { path in
+                        recentRepositoryChip(path)
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("conversation-recent-repositories")
+                Rectangle()
+                    .fill(Color.primary.opacity(0.18))
+                    .frame(width: 1, height: 22)
+                    .accessibilityIdentifier("conversation-recent-repositories-separator")
+            }
             ForEach(task.repositoryWorktrees, id: \.repositoryPath) { repository in
                 repositoryChip(repository)
             }
@@ -2297,20 +2310,6 @@ struct TaskConversationView: View {
             // The popover content only refreshes with this view, so key it to the suggestions it lists.
             .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker.id(suggestedRepositoryPaths) }
             .disabled(isReadOnly)
-
-            if !isReadOnly, !recentRepositoryPaths.isEmpty {
-                Rectangle()
-                    .fill(Color.primary.opacity(0.18))
-                    .frame(width: 1, height: 22)
-                    .accessibilityIdentifier("conversation-recent-repositories-separator")
-                HStack(spacing: 7) {
-                    ForEach(recentRepositoryPaths, id: \.self) { path in
-                        recentRepositoryChip(path)
-                    }
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("conversation-recent-repositories")
-            }
         }
         .onAppear { loadRecentRepositories() }
         .onChange(of: attachedRepositoryPaths) { _, _ in loadRecentRepositories() }
@@ -2323,10 +2322,16 @@ struct TaskConversationView: View {
             resetRepositoryEdits(to: repository)
             editingRepositoryField = nil
         } label: {
-            Text(name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                .padding(.horizontal, 14).padding(.vertical, 7)
-                .background(Color.accentColor.opacity(0.16), in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.35), lineWidth: 1))
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(WorkspaceTheme.accent)
+                Text(name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    .foregroundStyle(.primary)
+            }
+            .padding(.leading, 11).padding(.trailing, 14).padding(.vertical, 7)
+            .background(Color.primary.opacity(0.08), in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.14), lineWidth: 1))
         }
         .buttonHoverPointer()
         .nativeHelp("Edit repository settings for \(name)")
@@ -2343,11 +2348,11 @@ struct TaskConversationView: View {
             if !isReadOnly {
                 Button { removeConversationRepository(repository) } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 16, height: 16)
-                        .background(Color(nsColor: .systemGray), in: Circle())
-                        .overlay(Circle().strokeBorder(WorkspaceTheme.windowBackground, lineWidth: 1.5))
+                        .font(.system(size: 6.5, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14, height: 14)
+                        .background(WorkspaceTheme.panelBackground, in: Circle())
+                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.16), lineWidth: 1))
                         .contentShape(Circle())
                 }
                 .buttonHoverPointer()
@@ -2355,7 +2360,7 @@ struct TaskConversationView: View {
                 .nativeHelp("Remove \(name) from this task")
                 .accessibilityLabel("Remove \(name)")
                 .accessibilityIdentifier("remove-conversation-repository-\(name)")
-                .offset(x: 5, y: -5)
+                .offset(x: 4, y: -4)
             }
         }
     }
@@ -2383,7 +2388,7 @@ struct TaskConversationView: View {
                 .font(.system(size: 7, weight: .heavy))
                 .foregroundStyle(.white)
                 .frame(width: 13, height: 13)
-                .background(Color.accentColor, in: Circle())
+                .background(WorkspaceTheme.accent, in: Circle())
                 .overlay(Circle().strokeBorder(WorkspaceTheme.windowBackground, lineWidth: 1.5))
                 .offset(x: 4, y: -4)
                 .allowsHitTesting(false)
@@ -6328,7 +6333,7 @@ struct TaskConversationView: View {
                     }
             } else {
                 let displayValue = value.wrappedValue.isEmpty ? placeholder : value.wrappedValue
-                HStack(spacing: 8) {
+                HStack(spacing: 3) {
                     Text(displayValue)
                         .fontWeight(.medium)
                         .lineLimit(1).truncationMode(.middle)
@@ -6339,10 +6344,10 @@ struct TaskConversationView: View {
                         Button {
                             beginRepositoryFieldEdit(field, repository: repository)
                         } label: {
-                            Image(systemName: "pencil")
-                                .font(.system(size: 13, weight: .medium))
+                            Image(systemName: "square.and.pencil")
+                                .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(.secondary)
-                                .frame(width: 24, height: 24)
+                                .frame(width: 22, height: 24)
                                 .contentShape(Rectangle())
                         }
                         .buttonHoverPointer()

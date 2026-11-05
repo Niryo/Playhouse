@@ -4172,7 +4172,7 @@ final class PlayhouseUITests: XCTestCase {
         let settingsTitle = element("conversation-repository-settings-title")
         XCTAssertGreaterThanOrEqual(app.popovers.firstMatch.frame.width, 340, "The repository settings popover should be roomier than before.")
         XCTAssertGreaterThanOrEqual(settingsTitle.frame.height, 17, "The repository settings title should use a larger font.")
-        XCTAssertLessThan(branchEdit.frame.minX - initialBranchValue.frame.maxX, 20, "The edit pencil should sit right beside its value.")
+        XCTAssertLessThan(branchEdit.frame.minX - initialBranchValue.frame.maxX, 6, "The edit pencil should sit right beside its value.")
         XCTAssertGreaterThanOrEqual(branchEdit.frame.width, 20, "The edit pencil should be an easy target.")
         XCTAssertFalse(element("save-conversation-repository-button").exists, "Per-field checkmarks replace the popover-wide Save button.")
         XCTAssertFalse(element("remove-conversation-repository-button").exists, "Removal moved from the popover to the repository chip badge.")
@@ -4850,7 +4850,7 @@ final class PlayhouseUITests: XCTestCase {
         assertScreenshotIfVisible(named: "Repository suggestions exclude nested and symlinked folders")
     }
 
-    // case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations. Each saved selection also feeds a newest-first recent repository history of up to ten repositories that keeps repositories after they are removed from the selection; the task repository recent command lists up to five of them that still exist and are not attached to the task, and rejects an unknown task. In the UI, attached repositories appear as large chips carrying a remove badge, and recent repositories outside the task follow a vertical separator as smaller grayed chips with a plus badge; removing an attached repository through its badge turns it into a recent chip, and clicking that chip adds it back to the task and saved selection.
+    // case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations. Each saved selection also feeds a newest-first recent repository history of up to ten repositories that keeps repositories after they are removed from the selection; the task repository recent command lists up to three of them that still exist and are not attached to the task, and rejects an unknown task. In the UI, attached repositories appear as large chips carrying a remove badge, and up to three recent repositories outside the task precede them as smaller grayed chips with a plus badge, divided from the attached chips by a vertical separator; removing an attached repository through its badge turns it into a recent chip, and clicking that chip adds it back to the task and saved selection.
     func test_new_task_remembers_last_selected_repositories() throws {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["settings", "set-last-repositories", "--repo", fixture.secondary.path, "--repo", fixture.primary.path])
@@ -4893,9 +4893,10 @@ final class PlayhouseUITests: XCTestCase {
         let recentAlternate = element("conversation-recent-repository-alternate")
         let recentSeparator = element("conversation-recent-repositories-separator")
         XCTAssertFalse(recentAlternate.exists, "An attached repository is not suggested again.")
-        XCTAssertFalse(recentSeparator.exists, "With every recent repository attached, no suggestions follow the chips.")
+        XCTAssertFalse(recentSeparator.exists, "With every recent repository attached, no suggestions precede the chips.")
         XCTAssertTrue(alternateRemove.exists, "Each attached repository chip should carry its own remove badge.")
         XCTAssertGreaterThanOrEqual(alternateBadge.frame.height, 28, "Attached repository chips should be prominent.")
+        XCTAssertLessThanOrEqual(alternateRemove.frame.width, 15, "The remove badge should stay small and unobtrusive.")
         XCTAssertGreaterThan(alternateRemove.frame.midX, alternateBadge.frame.midX, "The remove badge should sit on the chip's trailing corner.")
         XCTAssertLessThan(alternateRemove.frame.midY, alternateBadge.frame.midY, "The remove badge should sit on the chip's top corner.")
         attachScreenshot(named: "Attached repositories as large chips with remove badges")
@@ -4903,8 +4904,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitForDisappearance(alternateBadge, timeout: 10), "The remove badge should detach the repository.")
         XCTAssertTrue(recentAlternate.waitForExistence(timeout: 10), "A removed repository should be offered as a recent repository.")
         XCTAssertTrue(recentSeparator.exists, "Recent suggestions should be separated from the attached chips.")
-        XCTAssertGreaterThan(recentSeparator.frame.minX, primaryBadge.frame.maxX)
-        XCTAssertGreaterThan(recentAlternate.frame.minX, recentSeparator.frame.maxX)
+        XCTAssertGreaterThan(recentSeparator.frame.minX, recentAlternate.frame.maxX, "Recent suggestions should sit left of the separator.")
+        XCTAssertGreaterThan(element("conversation-repository-badge-secondary").frame.minX, recentSeparator.frame.maxX, "Attached chips should follow the separator.")
         XCTAssertLessThan(recentAlternate.frame.height, primaryBadge.frame.height, "Recent suggestions should be smaller than attached chips.")
         XCTAssertTrue(element("conversation-recent-repository-add-badge-alternate").exists, "Recent suggestions should carry a plus badge.")
         XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], [fixture.secondary.path, fixture.primary.path])
@@ -4912,7 +4913,7 @@ final class PlayhouseUITests: XCTestCase {
             (try runCLI(["task", "repository", "recent", quickAddTaskID])["result"] as? [String: Any])?["repositories"] as? [String],
             [fixture.alternate.path]
         )
-        attachScreenshot(named: "Removed repository offered as a grayed recent chip after the separator")
+        attachScreenshot(named: "Removed repository offered as a grayed recent chip before the separator")
         recentAlternate.click()
         XCTAssertTrue(alternateBadge.waitForExistence(timeout: 10), "Clicking a recent chip should add the repository back.")
         XCTAssertTrue(waitForDisappearance(recentAlternate, timeout: 10), "A re-added repository leaves the suggestions.")
@@ -15423,14 +15424,19 @@ final class PlayhouseUITests: XCTestCase {
         let element = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS %@", expected)).firstMatch
         movePointerToHelpRunway(below: element)
+        // A single synthesized move can leave the system tooltip up until the next mouse
+        // movement, so keep moving away before concluding that it did not dismiss.
+        if !waitUntil({ !self.nativeHelpTextIsVisible(expected) }, timeout: 4) {
+            movePointerToHelpRunway(below: element, horizontalShift: -60)
+        }
         XCTAssertTrue(waitUntil({ !self.nativeHelpTextIsVisible(expected) }, timeout: 8), "Moving away should dismiss the native help text ‘\(expected)’ outside the PR control.")
     }
 
-    private func movePointerToHelpRunway(below control: XCUIElement) {
+    private func movePointerToHelpRunway(below control: XCUIElement, horizontalShift: CGFloat = 0) {
         let window = app.windows.firstMatch
         let windowFrame = window.frame
         let controlFrame = control.frame
-        let target = CGPoint(x: controlFrame.midX, y: min(windowFrame.maxY - 10, controlFrame.maxY + 100))
+        let target = CGPoint(x: controlFrame.midX + horizontalShift, y: min(windowFrame.maxY - 10, controlFrame.maxY + 100))
         let offset = CGVector(
             dx: (target.x - windowFrame.minX) / windowFrame.width,
             dy: (target.y - windowFrame.minY) / windowFrame.height
