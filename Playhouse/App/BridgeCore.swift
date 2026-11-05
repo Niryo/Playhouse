@@ -2329,6 +2329,11 @@ final class BoardTaskManager {
             guard task.repositoryWorktrees == originalRepositories else {
                 throw BridgeCommandError(code: "invalid_transition", message: "The task's pull request links changed while they were being checked. Try again.")
             }
+            try await withRepositoryAllocationLocks(originalRepositories.map(\.repositoryPath)) {
+                for record in originalRepositories where !record.isPending && record.createdByPlayhouse {
+                    try await worktreeService.removeAfterConfirmation(record)
+                }
+            }
             task.status = .done
             task.statusMessage = nil
             clearProgressReport(task)
