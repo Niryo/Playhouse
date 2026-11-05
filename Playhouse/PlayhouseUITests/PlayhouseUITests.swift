@@ -3230,7 +3230,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private nudge prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A private nudge that only reports status keeps its prompt, reply, and bookkeeping activities out of Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -11978,6 +11978,202 @@ final class PlayhouseUITests: XCTestCase {
             (recorded["turns"] as? [[String: Any]] ?? []).contains { ($0["userText"] as? String)?.contains("previous request finished without reporting") == true },
             "An outcome reported in the woken turn must not trigger private outcome reminders."
         )
+    }
+
+    // case-contract: test_claude_nudged_turn_work_stays_in_conversation | A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt and every private placeholder stay hidden.
+    func test_claude_nudged_turn_work_stays_in_conversation() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-nudged-work")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8
+        )
+        claudeFixtureExecutable = executable.path
+        let claudeEnvironment = ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": executable.path]
+        let staleAnswer = "The task review is approved. Only the UI review is still pending."
+        let finalReport = "All checks passed and the screenshot is attached. The work is complete."
+        let nudgedCommentary = ["Every review is approved. Running the final check.", "Starting the final suite in the background."]
+        let steerReady = URL(fileURLWithPath: executable.path + ".nudged-steer-ready")
+        try "Hold the nudged turn for a steer.\n".write(to: URL(fileURLWithPath: executable.path + ".nudged-steer-pause"), atomically: true, encoding: .utf8)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude nudged work", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Claude nudged work")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Wait for the pending UI review.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: steerReady.path) }, timeout: 40),
+                      "The private nudge turn should start and wait for a steer.")
+        let steerResult = try runCLI(["conversation", "steer", taskID, "--message", "Also double check the docs."], extraEnvironment: claudeEnvironment)
+        XCTAssertEqual((steerResult["result"] as? [String: Any])?["accepted"] as? Bool, true, "A user can steer the running nudge turn.")
+
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 40),
+                      "The completed outcome reported inside the nudged turn should move the task to Review.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(finalReport) }, timeout: 15),
+                      "The nudged turn's final report should appear in the visible transcript.")
+        XCTAssertTrue(transcriptContains(staleAnswer), "The earlier turn's answer should stay in the transcript.")
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID], extraEnvironment: claudeEnvironment)["result"] as? [String: Any])
+        let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
+        let assistant = messages.filter { $0["role"] as? String == "assistant" }.map { [($0["phase"] as? String) ?? "", ($0["text"] as? String) ?? ""] }
+        XCTAssertTrue(assistant.contains(["subagent_report", "UI review approved."]),
+                      "The review report that arrived right after the answer should be kept.")
+        XCTAssertTrue(messages.contains { $0["role"] as? String == "user" && $0["text"] as? String == "Also double check the docs." },
+                      "The steered message that joined the nudge turn should stay in the conversation.")
+        XCTAssertEqual(Array(assistant.filter { $0 != ["subagent_report", "UI review approved."] }.suffix(7)), [
+            ["final_answer", staleAnswer],
+            ["commentary", nudgedCommentary[0]],
+            ["commentary", "STEERED NUDGE: Also double check the docs."],
+            ["commentary", nudgedCommentary[1]],
+            ["subagent_report", "Final suite passed: all cases green."],
+            ["agent_image", "Nudged turn screenshot"],
+            ["final_answer", finalReport],
+        ], "The nudged turn's work should be recorded in order after the stale answer.")
+        XCTAssertEqual(messages.last?["text"] as? String, finalReport, "The final report is the latest message.")
+        let imageID = try XCTUnwrap(messages.first { $0["phase"] as? String == "agent_image" }?["id"] as? String)
+        XCTAssertTrue(element("chat-image-\(imageID)-0").waitForExistence(timeout: 10), "The screenshot the nudged turn presented should render.")
+        let timeline = (history["timelineActivities"] as? [[String: Any]] ?? []).filter { $0["id"] as? String == "toolu_nudged_check" }
+        XCTAssertEqual(timeline.first?["input"] as? String, "echo NUDGED CHECK PASSED", "The nudged turn's shell call should be a timeline row.")
+        for hidden in ["ended without reporting a task outcome", "Playhouse internal outcome nudge", "Playhouse private outcome"] {
+            XCTAssertFalse(transcriptContains(hidden), "The private nudge prompt must stay out of the transcript: \(hidden)")
+        }
+        attachScreenshot(named: "Claude nudged turn work follows the stale answer")
+        XCTAssertTrue(expandLatestWorkedFor(), "The nudged turn's work should collapse into an expandable Worked for summary.")
+        XCTAssertTrue(element("codex-activity-row-toolu_nudged_check").waitForExistence(timeout: 10),
+                      "The nudged turn's shell call should be listed in its Worked for details.")
+        for text in nudgedCommentary {
+            XCTAssertTrue(waitUntil({ self.transcriptContains(text) }, timeout: 10), "Worked for should list the nudged turn's commentary: \(text)")
+        }
+        XCTAssertTrue(element("agent-report-row-toolu_nudged_suite").waitForExistence(timeout: 10),
+                      "The background suite's report from the woken turn should render as its agent row.")
+        attachScreenshot(named: "Claude nudged turn Worked for shows its call and agent report")
+        let page = try XCTUnwrap(try runCLI(["conversation", "history", taskID, "--limit", "3"], extraEnvironment: claudeEnvironment)["result"] as? [String: Any])
+        XCTAssertEqual((page["messages"] as? [[String: Any]] ?? []).map { $0["text"] as? String ?? "" },
+                       ["Final suite passed: all cases green.", "Nudged turn screenshot", finalReport],
+                       "A paged read should end on the nudged turn's work.")
+
+        element("back-to-board-button").click()
+        assertTaskVisible("Claude nudged work", inColumn: "Review")
+        attachScreenshot(named: "Claude nudged task in Review")
+        openTask(named: "Claude nudged work")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(finalReport) }, timeout: 15), "Reopening keeps the nudged turn's final report.")
+        XCTAssertTrue(element("chat-image-\(imageID)-0").waitForExistence(timeout: 10), "Reopening keeps the nudged turn's screenshot.")
+        XCTAssertTrue(expandLatestWorkedFor(), "Reopening keeps the nudged turn's Worked for summary.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(nudgedCommentary[0]) }, timeout: 10), "Reopening keeps the nudged turn's commentary.")
+
+        try sendLaterTurnAndAssertNudgedCallInline(taskID: taskID, callID: "toolu_nudged_check", visibleTexts: [finalReport] + nudgedCommentary)
+        XCTAssertTrue(element("chat-image-\(imageID)-0").exists, "A later turn keeps the nudged turn's screenshot.")
+        attachScreenshot(named: "Claude nudged turn work after a later turn")
+    }
+
+    // case-contract: test_codex_nudged_turn_work_stays_in_conversation | A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. The nudge prompt and every private placeholder stay out of history, including after a later ordinary turn.
+    func test_codex_nudged_turn_work_stays_in_conversation() throws {
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-nudged-work-success")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
+        codexFixtureExecutable = executable.path
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        let codexEnvironment = ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path]
+        let steerReady = URL(fileURLWithPath: executable.path + ".nudged-steer-ready")
+        try "Hold the nudged turn for a steer.\n".write(to: URL(fileURLWithPath: executable.path + ".nudged-steer-pause"), atomically: true, encoding: .utf8)
+        let commentary = "Codex is finishing the remaining check after the nudge."
+        let finalReport = "Codex finished the remaining check after the nudge. Everything is done."
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Codex nudged work", roots: [fixture.primary.path])
+        let nudgedTaskID = try taskID(named: "Codex nudged work")
+        openTask(named: "Codex nudged work")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Start the work.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: steerReady.path) }, timeout: 40),
+                      "The private nudge turn should start and wait for a steer.")
+        let steerResult = try runCLI(["conversation", "steer", nudgedTaskID, "--message", "Also double check the docs."], extraEnvironment: codexEnvironment)
+        XCTAssertEqual((steerResult["result"] as? [String: Any])?["accepted"] as? Bool, true, "A user can steer the running nudge turn.")
+
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: nudgedTaskID)?["status"] as? String) == "Review" }, timeout: 40),
+                      "The completed outcome reported inside the nudged turn should move the task to Review.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(finalReport) }, timeout: 15),
+                      "The nudged turn's final answer should appear in the visible transcript.")
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", nudgedTaskID], extraEnvironment: codexEnvironment)["result"] as? [String: Any])
+        let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
+        let assistant = messages.filter { $0["role"] as? String == "assistant" }.map { [($0["phase"] as? String) ?? "", ($0["text"] as? String) ?? ""] }
+        XCTAssertTrue(messages.contains { $0["role"] as? String == "user" && $0["text"] as? String == "Also double check the docs." },
+                      "The steered message that joined the nudge turn should stay in the conversation.")
+        XCTAssertGreaterThan(assistant.count, 2, "The earlier answer should stay ahead of the nudged work.")
+        XCTAssertEqual(Array(assistant[1...2]), [["commentary", commentary], ["final_answer", finalReport]],
+                       "The nudged work should follow the earlier answer in order.")
+        XCTAssertEqual(messages.last?["text"] as? String, finalReport, "The nudged turn's final answer is the latest message.")
+        let timeline = (history["timelineActivities"] as? [[String: Any]] ?? []).filter { $0["id"] as? String == "item_nudged_check_1" }
+        XCTAssertEqual(timeline.first?["input"] as? String, "echo NUDGED CHECK PASSED", "The nudged shell command should be a timeline row.")
+        for hidden in ["ended without reporting a task outcome", "Playhouse internal outcome nudge", "Playhouse private outcome"] {
+            XCTAssertFalse(transcriptContains(hidden), "The private nudge prompt must stay out of the transcript: \(hidden)")
+        }
+        attachScreenshot(named: "Codex nudged turn work follows the earlier answer")
+        XCTAssertTrue(expandLatestWorkedFor(), "The nudged turn's work should collapse into an expandable Worked for summary.")
+        XCTAssertTrue(element("codex-activity-row-item_nudged_check_1").waitForExistence(timeout: 10),
+                      "The nudged turn's shell command should be listed in its Worked for details.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(commentary) }, timeout: 10), "Worked for should list the nudged turn's commentary.")
+        attachScreenshot(named: "Codex nudged turn Worked for shows its command")
+
+        element("back-to-board-button").click()
+        assertTaskVisible("Codex nudged work", inColumn: "Review")
+        attachScreenshot(named: "Codex nudged task in Review")
+        openTask(named: "Codex nudged work")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(finalReport) }, timeout: 15), "Reopening keeps the nudged turn's final answer.")
+        XCTAssertTrue(expandLatestWorkedFor(), "Reopening keeps the nudged turn's Worked for summary.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(commentary) }, timeout: 10), "Reopening keeps the nudged turn's commentary.")
+
+        try sendLaterTurnAndAssertNudgedCallInline(taskID: nudgedTaskID, callID: "item_nudged_check_1", visibleTexts: [finalReport, commentary])
+        attachScreenshot(named: "Codex nudged turn work after a later turn")
+    }
+
+    /// Expands the latest turn's Worked for summary when it is collapsed.
+    private func expandLatestWorkedFor() -> Bool {
+        let disclosure = element("codex-activity-disclosure")
+        guard waitUntil({ disclosure.exists && disclosure.label.hasPrefix("Worked for") }, timeout: 15) else { return false }
+        if (disclosure.value as? String ?? "").hasPrefix("Collapsed") { disclosure.click() }
+        return element("codex-activity-details").waitForExistence(timeout: 5)
+    }
+
+    /// Sends an ordinary turn from the composer, then checks that the earlier nudged
+    /// turn's work stays visible, its call now renders inline, and no private nudge text shows.
+    private func sendLaterTurnAndAssertNudgedCallInline(taskID: String, callID: String, visibleTexts: [String]) throws {
+        let message = "Thanks, that's all."
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText(message)
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            let history = (try? self.runCLI(["conversation", "history", taskID]))?["result"] as? [String: Any]
+            let messages = history?["messages"] as? [[String: Any]] ?? []
+            guard let user = messages.lastIndex(where: { $0["role"] as? String == "user" && $0["text"] as? String == message }) else { return false }
+            return messages[(user + 1)...].contains { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+                && self.noTurnIsRunning()
+        }, timeout: 60), "The later ordinary turn should finish with an answer.")
+        XCTAssertTrue(revealWholeTranscript(), "The earlier nudged turn should load as the reader scrolls up.")
+        let input = element("conversation-tool-call-input-\(callID)")
+        XCTAssertTrue(input.waitForExistence(timeout: 10), "After a later turn, the nudged turn's call should render inline.")
+        XCTAssertTrue([input.label, input.value as? String ?? ""].joined(separator: " ").contains("echo NUDGED CHECK PASSED"),
+                      "The inline call should show the nudged turn's exact command.")
+        for text in visibleTexts {
+            XCTAssertTrue(transcriptContains(text), "A later turn keeps the nudged turn's message: \(text)")
+        }
+        for hidden in ["ended without reporting a task outcome", "Playhouse internal outcome nudge", "Playhouse private outcome"] {
+            XCTAssertFalse(transcriptContains(hidden), "A later turn must keep the private nudge prompt hidden: \(hidden)")
+        }
+        let later = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let texts = (later["messages"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+        XCTAssertFalse(texts.contains { $0.contains("ended without reporting a task outcome") || $0.contains("private outcome") },
+                       "History after a later turn must keep the private nudge prompt hidden.")
+        for text in visibleTexts {
+            XCTAssertTrue(texts.contains(text), "History after a later turn keeps: \(text)")
+        }
     }
 
     // case-contract: test_claude_steers_turn_parked_on_background_work | A Claude turn whose result is already out while a background shell keeps it open is still steerable: a queued follow-up's Steer reaches the running turn instead of silently staying queued, leaves the queue, appears in the conversation, and the turn waits for Claude's answer to it before the woken parent turn ends the send.
