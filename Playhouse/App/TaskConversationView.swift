@@ -931,6 +931,11 @@ struct TaskConversationView: View {
     @State private var isLoadingChanges = false
     @State private var changesNeedRefresh = false
     @State private var changeWatcher: WorkspaceChangeWatcher?
+    @State private var isTerminalPresented = false
+    @AppStorage(TerminalPanelLayout.widthKey, store: WorkspaceSettings.preferencesStore)
+    private var terminalPanelWidth = Double(TerminalPanelLayout.defaultWidth)
+    @State private var terminalResizeStartWidth: CGFloat?
+    @StateObject private var terminalSession = TaskTerminalSession()
     @State private var changesError: String?
     @State private var selectedChange: WorkspaceChangeEntry?
     @State private var selectedDiff: WorkspaceFileDiff?
@@ -1456,6 +1461,29 @@ struct TaskConversationView: View {
                     conversationPanel
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+                // The terminal floats over the conversation's right edge rather than taking
+                // its width, so opening it never reflows the transcript or the composer.
+                .overlay(alignment: .trailing) {
+                    if isTerminalPresented {
+                        GeometryReader { geometry in
+                            let available = conversationWidth(in: geometry.size.width)
+                            let width = TerminalPanelLayout.clampedWidth(CGFloat(terminalPanelWidth), available: available)
+                            HStack(spacing: 0) {
+                                terminalResizeHandle(width: width, available: available)
+                                TaskTerminalPanel(
+                                    session: terminalSession,
+                                    onRestart: { terminalSession.restart(workspaceManager: workspaceManager) },
+                                    onClose: { setTerminalPresented(false) }
+                                )
+                            }
+                            .frame(width: width)
+                            .shadow(color: .black.opacity(0.22), radius: 12, x: -4, y: 0)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                        }
+                        .transition(.move(edge: .trailing))
+                    }
+                }
+                .clipped()
             }
         }
         .background(WorkspaceTheme.windowBackground)
@@ -1656,9 +1684,102 @@ struct TaskConversationView: View {
         .onDisappear {
             changeWatcher?.stop()
             changeWatcher = nil
+            terminalSession.terminate()
             // Switching tasks replaces this view without going back first.
             if !isReadOnly, isDraftUnsaved { persistDraft(reportingErrors: false) }
         }
+    }
+
+    private func setTerminalPresented(_ presented: Bool) {
+        if presented { terminalSession.startIfNeeded(taskID: task.id, workspaceManager: workspaceManager) }
+        withAnimation(.easeOut(duration: 0.22)) { isTerminalPresented = presented }
+    }
+
+    /// The panel's left border; dragging it left widens the terminal and right narrows it.
+    private func terminalResizeHandle(width: CGFloat, available: CGFloat) -> some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.08))
+            .frame(width: 1)
+            .frame(maxHeight: .infinity)
+            .overlay {
+                Color.clear
+                    .frame(width: 9)
+                    .contentShape(Rectangle())
+                    .hoverCursor(.resizeLeftRight)
+                    .gesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                            .onChanged { value in
+                                if terminalResizeStartWidth == nil {
+                                    // Held for the whole drag, so the pointer can leave the thin border.
+                                    NSCursor.resizeLeftRight.push()
+                                }
+                                let start = terminalResizeStartWidth ?? width
+                                terminalResizeStartWidth = start
+                                terminalPanelWidth = Double(TerminalPanelLayout.clampedWidth(
+                                    start - value.translation.width, available: available
+                                ))
+                            }
+                            .onEnded { _ in
+                                if terminalResizeStartWidth != nil { NSCursor.pop() }
+                                terminalResizeStartWidth = nil
+                            }
+                    )
+                    .onDisappear {
+                        // A panel closed mid-drag may never end the gesture.
+                        if terminalResizeStartWidth != nil {
+                            NSCursor.pop()
+                            terminalResizeStartWidth = nil
+                        }
+                    }
+                    .accessibilityElement()
+                    .accessibilityLabel("Resize terminal")
+                    .accessibilityValue("\(Int(width.rounded())) points")
+                    .accessibilityIdentifier("terminal-resize-handle")
+            }
+    }
+
+    private static let expandedSidebarWidth: CGFloat = 232
+    private static let collapsedSidebarWidth: CGFloat = 38
+
+    /// The width the terminal panel can float over: the conversation, beside the sidebar and its divider.
+    private func conversationWidth(in containerWidth: CGFloat) -> CGFloat {
+        containerWidth - (isTaskSidebarCollapsed ? Self.collapsedSidebarWidth : Self.expandedSidebarWidth) - 1
+    }
+
+    /// Why this task can't open a terminal yet, shared with the CLI's `task terminal`.
+    private var terminalUnavailableReason: String? {
+        TaskTerminalLaunch.unavailableReason(for: task.repositoryWorktrees)
+    }
+
+    /// Quick actions for the task, right-aligned along the bottom of the sidebar.
+    private var sidebarCommandRow: some View {
+        HStack(spacing: 4) {
+            Spacer(minLength: 0)
+            Button {
+                setTerminalPresented(!isTerminalPresented)
+            } label: {
+                Image(systemName: "terminal")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 26, height: 24)
+                    .foregroundStyle(isTerminalPresented ? WorkspaceTheme.accent : Color.secondary)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(isTerminalPresented ? WorkspaceTheme.accent.opacity(0.14) : Color.clear)
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .buttonHoverPointer()
+            .disabled(terminalUnavailableReason != nil && !isTerminalPresented)
+            .nativeHelp(terminalUnavailableReason ?? (isTerminalPresented ? "Hide the terminal" : "Open a terminal in this task's worktree"))
+            .accessibilityLabel(isTerminalPresented ? "Hide terminal" : "Open terminal")
+            .accessibilityValue(isTerminalPresented ? "Shown" : "Hidden")
+            .accessibilityIdentifier("toggle-terminal-button")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("sidebar-command-row")
     }
 
     @ViewBuilder
@@ -1708,7 +1829,7 @@ struct TaskConversationView: View {
             Spacer(minLength: 0)
         }
         .padding(.top, 12)
-        .frame(width: 38)
+        .frame(width: Self.collapsedSidebarWidth)
         .frame(maxHeight: .infinity)
         .background(WorkspaceTheme.panelBackground.opacity(0.62))
         .accessibilityElement(children: .contain)
@@ -1747,8 +1868,16 @@ struct TaskConversationView: View {
             } else {
                 changesSectionContent
             }
+
+            Spacer(minLength: 0)
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.07))
+                .frame(height: 1)
+
+            sidebarCommandRow
         }
-        .frame(width: 232)
+        .frame(width: Self.expandedSidebarWidth)
         .frame(maxHeight: .infinity)
         .background(WorkspaceTheme.panelBackground.opacity(0.62))
         .accessibilityElement(children: .contain)

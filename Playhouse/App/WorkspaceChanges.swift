@@ -134,6 +134,52 @@ struct WorkspaceChangeInventory: Codable, Equatable {
     var isEmpty: Bool { unviewed.isEmpty && viewed.isEmpty }
 }
 
+/// How a task's terminal panel starts its shell. `environment` holds only the variables
+/// Playhouse sets on top of the app's own environment.
+struct TaskTerminalLaunch: Codable, Equatable {
+    let taskID: UUID
+    let directory: String
+    let shell: String
+    /// The shell runs as a login shell, as Terminal.app starts it, so the user's profile applies.
+    let arguments: [String]
+    let environment: [String: String]
+
+    /// Why a task can't open a terminal yet, or nil when it has a created worktree. The terminal
+    /// only runs in a worktree, and opening it never creates one: a pending worktree is named
+    /// and created when the task starts, so the terminal waits for that.
+    static func unavailableReason(for records: [RepositoryWorktreeRecord]) -> String? {
+        if records.isEmpty {
+            return "Add a repository to this task to open a terminal in its worktree."
+        }
+        if records.allSatisfy(\.isPending) {
+            return "The terminal opens once the task's worktree is created, when the task starts."
+        }
+        return nil
+    }
+
+    /// The account's login shell, falling back to `$SHELL` and then zsh.
+    static func loginShell() -> String {
+        var candidates: [String] = []
+        if let entry = getpwuid(getuid()), let shell = entry.pointee.pw_shell {
+            candidates.append(String(cString: shell))
+        }
+        if let shell = ProcessInfo.processInfo.environment["SHELL"] { candidates.append(shell) }
+        return candidates.first { !$0.isEmpty && FileManager.default.isExecutableFile(atPath: $0) } ?? "/bin/zsh"
+    }
+
+    static func environment(taskID: UUID) -> [String: String] {
+        var environment = [
+            "TERM": "xterm-256color",
+            "COLORTERM": "truecolor",
+            "TERM_PROGRAM": "Playhouse",
+            "PLAYHOUSE_TASK_ID": taskID.uuidString
+        ]
+        // Apps launched from Finder get no locale, which leaves shells and CLIs in ASCII mode.
+        if ProcessInfo.processInfo.environment["LANG"] == nil { environment["LANG"] = "en_US.UTF-8" }
+        return environment
+    }
+}
+
 struct WorkspaceFileDiff: Codable, Equatable {
     let repository: String
     let path: String

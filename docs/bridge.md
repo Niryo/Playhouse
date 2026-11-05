@@ -15,6 +15,7 @@ The daemon accepts a versioned, length-prefixed JSON request over its socket, st
 | `task get <task-id>` | Read a task and its thread/root state |
 | `task move <task-id> <Review\|Done>` | Move a Waiting Response task to Review (after the same pull request sync and PR mode a completed turn gets; rejected while its turn is still running), or a Review task to Done. Other statuses are set by the conversation |
 | `task rename <task-id> --title <title>` | Rename a task |
+| `task terminal <task-id>` | Read how the task's terminal panel starts: the login shell, opened in the task's first created repository worktree (never the source repository or a context folder), and the variables Playhouse adds (`TERM`, `PLAYHOUSE_TASK_ID`). It never creates a worktree; fails with `terminal_unavailable` when the task has no repository, its worktree is still pending (it is created when the task starts), or the worktree no longer exists |
 | `task repository add <task-id> --repo <path>` / `task repository add-batch <task-id> --repo <path> [--repo <path>...]` | Add repository context, prepare managed worktrees immediately, and update saved repository selection |
 | `task repository replace <task-id> --repo <path> [--repo <path>...]` | Replace the task's repository set while preserving folder-only context |
 | `task repository remove <task-id> --repo <path>` | Remove a repository from a task, subject to managed-worktree safety checks |

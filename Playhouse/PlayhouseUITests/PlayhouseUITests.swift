@@ -13616,6 +13616,252 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Merged upstream commits are excluded when the local base branch is stale")
     }
 
+    // case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The terminal only ever opens in the task's created repository worktree, never in its source repository or a context folder, and never creates a worktree itself: while the task's worktree is still pending, or the task has no repository, the button is disabled and the CLI reports terminal_unavailable without creating the worktree, and the button enables in the open conversation once the worktree is created. The CLI reports how the terminal starts: the account's executable login shell with -l in that worktree, with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Clicking the button slides a terminal panel in from the window's right edge, floating over the conversation's right side without moving or resizing the conversation, whose shell runs in the task's worktree with the task ID in its environment and which uses macOS Terminal's Clear Dark ANSI palette (such as its blue, distinct from the emulator's own default) on a solid black background, switching to the Clear Light profile's white background and blue when the app's appearance turns light and back when it returns to dark; hiding the panel keeps the same shell, so reopening it reaches the same process. Dragging the panel's left border resizes it against the right edge, between a 320-point minimum and leaving 260 points of conversation uncovered, without resizing the conversation, and reopening the panel keeps the dragged width. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task whose worktree no longer exists reports terminal_unavailable from the CLI, and the panel shows that error with a Try Again action that opens the shell once the worktree is back; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.
+    func test_task_terminal_opens_shell_in_task_worktree() throws {
+        let repository = runDirectory.appendingPathComponent("terminal-repository", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try "Terminal fixture.\n".write(to: repository.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try runGit(repository, "init", "--initial-branch=main")
+        try runGit(repository, "config", "user.name", "Playhouse UI Test")
+        try runGit(repository, "config", "user.email", "playhouse-ui-test@example.invalid")
+        try runGit(repository, "add", "README.md")
+        try runGit(repository, "commit", "-m", "Baseline")
+        let secondRepository = runDirectory.appendingPathComponent("terminal-second-repository", isDirectory: true)
+        try FileManager.default.createDirectory(at: secondRepository, withIntermediateDirectories: true)
+        try "Second fixture.\n".write(to: secondRepository.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try runGit(secondRepository, "init", "--initial-branch=main")
+        try runGit(secondRepository, "config", "user.name", "Playhouse UI Test")
+        try runGit(secondRepository, "config", "user.email", "playhouse-ui-test@example.invalid")
+        try runGit(secondRepository, "add", "README.md")
+        try runGit(secondRepository, "commit", "-m", "Baseline")
+
+        // A task whose worktree is created: a titled task prepares it as soon as its repository is added.
+        let created = try runCLI(["task", "create", "--title", "Terminal Task", "--prompt", "Fixture task description."])
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        let added = try runCLI(["task", "repository", "add", taskID, "--repo", repository.path])
+        let record = try XCTUnwrap(((added["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        XCTAssertEqual(record["isPending"] as? Bool, false)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+        let launch = try XCTUnwrap(try runCLI(["task", "terminal", taskID])["result"] as? [String: Any])
+        XCTAssertEqual(launch["directory"] as? String, worktree.standardizedFileURL.path)
+        XCTAssertEqual((launch["environment"] as? [String: String])?["PLAYHOUSE_TASK_ID"], taskID)
+
+        // A task whose worktree is still pending: named and created only when the task starts.
+        let pendingCreated = try runCLI([
+            "task", "create", "--title", "Pending Terminal Task", "--prompt", "Fixture task description.", "--repo", repository.path
+        ])
+        let pendingTaskID = try XCTUnwrap((pendingCreated["result"] as? [String: Any])?["id"] as? String)
+        let folder = runDirectory.appendingPathComponent("terminal-folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        _ = try runCLI(["task", "create", "--title", "No Repository Terminal", "--prompt", "Fixture task description.", "--root", folder.path])
+
+        launchApp(defaultParent: fixture.parent.path)
+        let toggle = element("toggle-terminal-button")
+        func worktreeRecord(_ id: String) throws -> [String: Any] {
+            try XCTUnwrap(((try taskRecord(id: id))?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        }
+
+        openTask(named: "Pending Terminal Task")
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertFalse(toggle.isEnabled, "The terminal button stays disabled until the task's worktree is created.")
+        toggle.click()
+        XCTAssertFalse(element("task-terminal-panel").exists, "A disabled button opens no panel.")
+        XCTAssertEqual(try worktreeRecord(pendingTaskID)["isPending"] as? Bool, true, "Clicking it does not create the worktree.")
+        attachScreenshot(named: "Terminal button disabled until the task's worktree exists")
+        // Creating the worktree, as a task's start does, enables the button in the open conversation.
+        _ = try runCLI(["task", "repository", "add", pendingTaskID, "--repo", secondRepository.path])
+        XCTAssertEqual(try worktreeRecord(pendingTaskID)["isPending"] as? Bool, false)
+        XCTAssertTrue(waitUntil({ toggle.isEnabled }, timeout: 10), "The button enables once the worktree exists.")
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        openTask(named: "No Repository Terminal")
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertFalse(toggle.isEnabled, "A task with no repository has no worktree, so no terminal.")
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        openTask(named: "Terminal Task")
+        let sidebar = element("task-sidebar")
+        let commandRow = element("sidebar-command-row")
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(toggle.isEnabled)
+        XCTAssertTrue(commandRow.exists)
+        XCTAssertEqual(toggle.value as? String, "Hidden")
+        XCTAssertFalse(element("task-terminal-panel").exists, "The terminal stays hidden until the button opens it.")
+        // The row's accessibility frame spans only its buttons, so placement is measured against the sidebar.
+        XCTAssertTrue(commandRow.buttons["toggle-terminal-button"].exists, "The terminal button belongs to the command row.")
+        XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10))
+        XCTAssertGreaterThan(toggle.frame.minY, element("workspace-changes-empty").frame.maxY, "The command row sits below the Changes list.")
+        XCTAssertEqual(toggle.frame.maxY, sidebar.frame.maxY, accuracy: 10, "The command row is the sidebar's bottom row.")
+        XCTAssertEqual(toggle.frame.maxX, sidebar.frame.maxX, accuracy: 14, "Command row buttons align to the right.")
+        XCTAssertGreaterThan(toggle.frame.minX, sidebar.frame.midX, "The terminal button sits on the right half of the sidebar.")
+        attachScreenshot(named: "Sidebar command row with the terminal button on the right")
+
+        let window = app.windows.firstMatch
+        let conversation = element("empty-conversation")
+        XCTAssertTrue(conversation.exists)
+        XCTAssertGreaterThan(conversation.frame.maxX, window.frame.maxX - 470, "Before the panel opens, the conversation reaches into the space the panel will take.")
+        let conversationFrameBefore = conversation.frame
+        toggle.click()
+        let panel = element("task-terminal-panel")
+        XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil({ abs(panel.frame.maxX - window.frame.maxX) <= 2 }, timeout: 5), "The panel settles against the window's right edge.")
+        XCTAssertGreaterThan(panel.frame.minX, sidebar.frame.maxX, "The panel opens on the right, leaving the sidebar in place.")
+        XCTAssertLessThan(panel.frame.minX, conversation.frame.maxX, "The panel floats over the conversation's right side.")
+        XCTAssertEqual(conversation.frame.minX, conversationFrameBefore.minX, accuracy: 1, "Opening the terminal does not move the conversation.")
+        XCTAssertEqual(conversation.frame.width, conversationFrameBefore.width, accuracy: 1, "Opening the terminal does not resize the conversation.")
+        XCTAssertEqual(toggle.value as? String, "Shown")
+        assertText("task-terminal-title", equals: "Terminal")
+
+        let terminal = element("task-terminal-view")
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10))
+        XCTAssertNotEqual(worktree.standardizedFileURL.path, repository.standardizedFileURL.path, "The terminal never opens in the source repository.")
+        terminal.click()
+        // `pwd -P` keeps the /private prefix that Foundation's symlink resolution drops for /tmp.
+        let resolvedWorktree = try XCTUnwrap(realpath(worktree.path, nil).map { pointer in
+            defer { free(pointer) }
+            return String(cString: pointer)
+        })
+        terminal.typeText("cd . && printf 'dir=%s task=%s pid=%s;\\n' \"$(pwd -P)\" \"$PLAYHOUSE_TASK_ID\" \"$$\"\n")
+        let expectedPrefix = "dir=\(resolvedWorktree) task=\(taskID) pid="
+        var shellPID = ""
+        XCTAssertTrue(waitUntil({
+            guard let pid = self.terminalNumber(after: expectedPrefix, in: terminal) else { return false }
+            shellPID = pid
+            return true
+        }, timeout: 20), "The shell runs in the task worktree with the task ID: \(String(reflecting: terminal.value as? String ?? ""))")
+        // Clear Dark's ANSI blue #6D96B4 (the emulator's own is #492EE1) on a solid black
+        // background. Clear Light: blue #5685A8 on 93%-opaque white, within the pixel tolerance.
+        terminal.typeText("printf '\\033[44m%24s\\033[0m\\n' ''\n")
+        XCTAssertTrue(waitUntil({
+            self.screenshotContains(srgb: (0x6D, 0x96, 0xB4), in: terminal)
+        }, timeout: 10), "ANSI blue renders in Clear Dark's blue.")
+        XCTAssertFalse(screenshotContains(srgb: (0x49, 0x2E, 0xE1), in: terminal), "The emulator's own default blue is replaced.")
+        XCTAssertTrue(screenshotContains(srgb: (0x00, 0x00, 0x00), in: terminal, tolerance: 3), "The terminal uses a black background.")
+        attachScreenshot(named: "Terminal slid in from the right, running in the task worktree")
+
+        _ = try runCLI(["settings", "set-appearance", "light"])
+        XCTAssertTrue(waitUntil({
+            self.screenshotContains(srgb: (0x56, 0x85, 0xA8), in: terminal)
+                && !self.screenshotContains(srgb: (0x00, 0x00, 0x00), in: terminal, tolerance: 3)
+        }, timeout: 10), "Light appearance switches the terminal to Clear Light's colors.")
+        XCTAssertTrue(screenshotContains(srgb: (0xFF, 0xFF, 0xFF), in: terminal), "Clear Light uses a white background.")
+        attachScreenshot(named: "Terminal in light appearance uses the Clear Light profile")
+        _ = try runCLI(["settings", "set-appearance", "dark"])
+        XCTAssertTrue(waitUntil({
+            self.screenshotContains(srgb: (0x00, 0x00, 0x00), in: terminal, tolerance: 3)
+        }, timeout: 10), "Returning to dark appearance restores the black background.")
+        terminal.click()
+
+        element("close-terminal-button").click()
+        XCTAssertTrue(waitUntil({ !panel.exists }, timeout: 5), "Hide slides the panel away.")
+        XCTAssertEqual(toggle.value as? String, "Hidden")
+        toggle.click()
+        XCTAssertTrue(terminal.waitForExistence(timeout: 5))
+        terminal.click()
+        terminal.typeText("printf 'again=%s;\\n' \"$$\"\n")
+        XCTAssertTrue(waitUntil({
+            self.terminalNumber(after: "again=", in: terminal) == shellPID
+        }, timeout: 20), "Reopening the panel reaches the same shell: \(String(reflecting: terminal.value as? String ?? ""))")
+        attachScreenshot(named: "Reopened terminal keeps the same shell session")
+
+        // Dragging the left border resizes the panel, within limits, and the width is remembered.
+        let handle = element("terminal-resize-handle")
+        XCTAssertTrue(handle.waitForExistence(timeout: 5))
+        XCTAssertEqual(handle.frame.midX, panel.frame.minX, accuracy: 6, "The resize handle is the panel's left border.")
+        let widthBefore = panel.frame.width
+        let conversationBeforeResize = conversation.frame
+        handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.2, thenDragTo: handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: -50, dy: 0)))
+        XCTAssertTrue(waitUntil({ abs(panel.frame.width - (widthBefore + 50)) <= 6 }, timeout: 5), "Dragging left widens the panel: \(panel.frame.width)")
+        XCTAssertEqual(abs(panel.frame.maxX - window.frame.maxX), 0, accuracy: 2, "The panel stays against the right edge.")
+        XCTAssertEqual(conversation.frame.width, conversationBeforeResize.width, accuracy: 1, "Resizing does not resize the conversation.")
+        let widened = panel.frame.width
+        attachScreenshot(named: "Terminal widened by dragging its left border")
+        element("close-terminal-button").click()
+        XCTAssertTrue(waitUntil({ !panel.exists }, timeout: 5))
+        toggle.click()
+        XCTAssertTrue(waitUntil({ panel.exists && abs(panel.frame.width - widened) <= 2 }, timeout: 5), "Reopening keeps the dragged width.")
+        handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.2, thenDragTo: handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: 900, dy: 0)))
+        XCTAssertTrue(waitUntil({ abs(panel.frame.width - 320) <= 3 }, timeout: 5), "The panel stops at its minimum width: \(panel.frame.width)")
+        handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.2, thenDragTo: handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: -3000, dy: 0)))
+        XCTAssertTrue(waitUntil({ abs(panel.frame.minX - (sidebar.frame.maxX + 1 + 260)) <= 4 }, timeout: 5),
+                      "The panel stops where 260 points of conversation stay uncovered: \(panel.frame.minX)")
+        XCTAssertTrue(terminal.exists)
+        terminal.click()
+
+        terminal.typeText("exit\n")
+        let exitStatus = element("task-terminal-exit-status")
+        XCTAssertTrue(exitStatus.waitForExistence(timeout: 10), "Exiting the shell is reported in the panel.")
+        let exitText = exitStatus.value as? String ?? exitStatus.label
+        XCTAssertTrue(exitText.hasPrefix("Shell exited"), exitText)
+        attachScreenshot(named: "Terminal reports the shell exited and offers Restart")
+        element("restart-terminal-button").click()
+        XCTAssertTrue(waitUntil({ !exitStatus.exists }, timeout: 5), "Restart clears the exit report.")
+        XCTAssertTrue(terminal.waitForExistence(timeout: 5))
+        terminal.click()
+        terminal.typeText("printf 'dir=%s task=%s pid=%s;\\n' \"$(pwd -P)\" \"$PLAYHOUSE_TASK_ID\" \"$$\"\n")
+        var restartedPID = ""
+        XCTAssertTrue(waitUntil({
+            guard let pid = self.terminalNumber(after: expectedPrefix, in: terminal) else { return false }
+            restartedPID = pid
+            return true
+        }, timeout: 20), "The restarted shell runs in the task worktree: \(String(reflecting: terminal.value as? String ?? ""))")
+        XCTAssertNotEqual(restartedPID, shellPID, "Restart starts a new shell process.")
+        toggle.click()
+        XCTAssertTrue(waitUntil({ !panel.exists }, timeout: 5), "The sidebar button also hides the panel.")
+
+        // A worktree that is missing shows an error with Try Again, which recovers once it is back.
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        // The terminal falls back to a task's next existing worktree, so every one is moved aside.
+        let pendingWorktrees = try XCTUnwrap(
+            (try taskRecord(id: pendingTaskID))?["repositoryWorktrees"] as? [[String: Any]]
+        ).compactMap { $0["worktreePath"] as? String }
+        XCTAssertEqual(pendingWorktrees.count, 2)
+        let pendingWorktree = try XCTUnwrap(pendingWorktrees.first)
+        for path in pendingWorktrees {
+            try FileManager.default.moveItem(at: URL(fileURLWithPath: path, isDirectory: true), to: URL(fileURLWithPath: path + "-moved", isDirectory: true))
+        }
+        openTask(named: "Pending Terminal Task")
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(toggle.isEnabled)
+        toggle.click()
+        XCTAssertTrue(element("task-terminal-error").waitForExistence(timeout: 10))
+        let errorMessage = element("task-terminal-error-message")
+        let errorText = errorMessage.value as? String ?? errorMessage.label
+        XCTAssertTrue(errorText.contains("no longer exists"), errorText)
+        XCTAssertFalse(terminal.exists, "No shell starts without the worktree.")
+        attachScreenshot(named: "Terminal panel reports a missing worktree and offers Try Again")
+        for path in pendingWorktrees {
+            try FileManager.default.moveItem(at: URL(fileURLWithPath: path + "-moved", isDirectory: true), to: URL(fileURLWithPath: path, isDirectory: true))
+        }
+        element("retry-terminal-button").click()
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "Try Again starts a shell once the worktree is back.")
+        XCTAssertFalse(element("task-terminal-error").exists)
+        XCTAssertNotEqual(pendingWorktree, repository.standardizedFileURL.path)
+        let resolvedPendingWorktree = try XCTUnwrap(realpath(pendingWorktree, nil).map { pointer in
+            defer { free(pointer) }
+            return String(cString: pointer)
+        })
+        terminal.click()
+        terminal.typeText("printf 'dir=%s pid=%s;\\n' \"$(pwd -P)\" \"$$\"\n")
+        XCTAssertTrue(waitUntil({
+            self.terminalNumber(after: "dir=\(resolvedPendingWorktree) pid=", in: terminal) != nil
+        }, timeout: 20), "The retried shell runs in the task's worktree: \(String(reflecting: terminal.value as? String ?? ""))")
+        attachScreenshot(named: "Try Again opens the shell once the worktree is back")
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("message-composer").waitForExistence(timeout: 10))
+        XCTAssertFalse(toggle.exists, "The standalone chat has no task sidebar, so no terminal button.")
+    }
+
     // case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and both the Token Stats context-menu item and a click on the counter itself, a button that highlights on hover, open a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
     func test_task_token_usage_records_claude_turn_breakdown() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-usage")
@@ -15879,6 +16125,44 @@ final class PlayhouseUITests: XCTestCase {
 
     private func element(_ identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    /// Whether a screenshot of `element` has a pixel within a small tolerance of an sRGB color.
+    /// The expected color is converted into the screenshot's own color space (the Tart VM's
+    /// display profile) and compared with raw pixels; converting each pixel to sRGB instead
+    /// shifts it by more than the tolerance.
+    private func screenshotContains(srgb expected: (Int, Int, Int), in element: XCUIElement, tolerance: Int = 10) -> Bool {
+        let image = element.screenshot().image
+        guard let bitmap = image.representations.compactMap({ $0 as? NSBitmapImageRep }).first
+                ?? image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)),
+              let target = NSColor(
+                  srgbRed: CGFloat(expected.0) / 255, green: CGFloat(expected.1) / 255,
+                  blue: CGFloat(expected.2) / 255, alpha: 1
+              ).usingColorSpace(bitmap.colorSpace) else { return false }
+        let expected = (Int(round(target.redComponent * 255)), Int(round(target.greenComponent * 255)), Int(round(target.blueComponent * 255)))
+        let step = max(1, min(bitmap.pixelsWide, bitmap.pixelsHigh) / 120)
+        for y in stride(from: 0, to: bitmap.pixelsHigh, by: step) {
+            for x in stride(from: 0, to: bitmap.pixelsWide, by: step) {
+                guard let color = bitmap.colorAt(x: x, y: y) else { continue }
+                let rgb = (Int(round(color.redComponent * 255)), Int(round(color.greenComponent * 255)), Int(round(color.blueComponent * 255)))
+                if abs(rgb.0 - expected.0) <= tolerance, abs(rgb.1 - expected.1) <= tolerance, abs(rgb.2 - expected.2) <= tolerance {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /// The digits the shell printed between `marker` and a `;` in a terminal's text, latest first.
+    /// Row breaks are ignored, since the shell's line editor can leave output on a row that
+    /// continues the wrapped command. The echoed command holds `%s` there, never digits, and
+    /// the `;` keeps a following prompt from running into the number.
+    private func terminalNumber(after marker: String, in terminal: XCUIElement) -> String? {
+        guard let text = (terminal.value as? String)?.replacingOccurrences(of: "\n", with: ""),
+              let range = text.range(of: marker, options: .backwards) else { return nil }
+        let digits = text[range.upperBound...].prefix(while: \.isNumber)
+        guard !digits.isEmpty, text[digits.endIndex...].first == ";" else { return nil }
+        return String(digits)
     }
 
     /// The diff header's report of which Monaco load rendered the open diff, and of which

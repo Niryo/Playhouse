@@ -320,6 +320,9 @@ enum PlayhouseCLI {
                 return BridgeRequest(command: "task.roots.set", arguments: [
                     "taskID": .string(id), "roots": .array((flags["--root"] ?? []).map(BridgeValue.string))
                 ])
+            case "terminal":
+                guard tail.count == 1 else { throw CLIError.usage("Use: playhouse task terminal <task-id>") }
+                return BridgeRequest(command: "task.terminal", arguments: ["taskID": .string(tail[0])])
             case "changes":
                 guard let action = tail.first else {
                     throw CLIError.usage("Use: playhouse task changes list <task-id>, mark-viewed <task-id> --repository <path> --path <relative-path>, mark-unviewed <task-id> --repository <path> --path <relative-path>, mark-all-viewed <task-id>, or diff <task-id> --repository <path> --path <relative-path> --group <unviewed|viewed>")
@@ -741,6 +744,7 @@ enum PlayhouseCLI {
       playhouse task draft <task-id> --text <draft> [--image <path>...]
       playhouse task roots get <task-id>
       playhouse task roots set <task-id> --root <path> [--root <path>...]
+      playhouse task terminal <task-id>
       playhouse task changes list <task-id>
       playhouse task changes diff <task-id> --repository <path> --path <relative-path> --group <unviewed|viewed>
       playhouse task changes mark-viewed <task-id> --repository <path> --path <relative-path>

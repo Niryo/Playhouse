@@ -4,7 +4,10 @@ import Foundation
 import OSLog
 import SwiftUI
 
-private struct ButtonHoverPointer: ViewModifier {
+/// Shows `cursor` while the pointer is over the view, keeping the cursor stack balanced:
+/// repeated hover events are ignored, and a view that disappears under the pointer pops it.
+private struct HoverCursor: ViewModifier {
+    let cursor: NSCursor
     @State private var isHovering = false
 
     func body(content: Content) -> some View {
@@ -13,7 +16,7 @@ private struct ButtonHoverPointer: ViewModifier {
                 guard isInside != isHovering else { return }
                 isHovering = isInside
                 if isInside {
-                    NSCursor.pointingHand.push()
+                    cursor.push()
                 } else {
                     NSCursor.pop()
                 }
@@ -29,7 +32,11 @@ private struct ButtonHoverPointer: ViewModifier {
 
 extension View {
     func buttonHoverPointer() -> some View {
-        modifier(ButtonHoverPointer())
+        hoverCursor(.pointingHand)
+    }
+
+    func hoverCursor(_ cursor: NSCursor) -> some View {
+        modifier(HoverCursor(cursor: cursor))
     }
 }
 

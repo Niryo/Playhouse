@@ -9846,6 +9846,85 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         return {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
 
+    # case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The terminal only ever opens in the task's created repository worktree, never in its source repository or a context folder, and never creates a worktree itself: while the task's worktree is still pending, or the task has no repository, the button is disabled and the CLI reports terminal_unavailable without creating the worktree, and the button enables in the open conversation once the worktree is created. The CLI reports how the terminal starts: the account's executable login shell with -l in that worktree, with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Clicking the button slides a terminal panel in from the window's right edge, floating over the conversation's right side without moving or resizing the conversation, whose shell runs in the task's worktree with the task ID in its environment and which uses macOS Terminal's Clear Dark ANSI palette (such as its blue, distinct from the emulator's own default) on a solid black background, switching to the Clear Light profile's white background and blue when the app's appearance turns light and back when it returns to dark; hiding the panel keeps the same shell, so reopening it reaches the same process. Dragging the panel's left border resizes it against the right edge, between a 320-point minimum and leaving 260 points of conversation uncovered, without resizing the conversation, and reopening the panel keeps the dragged width. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task whose worktree no longer exists reports terminal_unavailable from the CLI, and the panel shows that error with a Try Again action that opens the shell once the worktree is back; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.
+    def test_task_terminal_opens_shell_in_task_worktree(self):
+        repository = self.data_directory / "terminal-repository"
+        repository.mkdir()
+        (repository / "README.md").write_text("Terminal fixture.\n", encoding="utf-8")
+        self.run_git(repository, "init", "--initial-branch=main")
+        self.run_git(repository, "config", "user.name", "Playhouse Bridge Test")
+        self.run_git(repository, "config", "user.email", "playhouse-bridge-test@example.invalid")
+        self.run_git(repository, "add", "README.md")
+        self.run_git(repository, "commit", "-m", "Baseline")
+        task_id = self.create_task(title="Terminal task", roots=[])["id"]
+        added, _ = self.call_cli("task", "repository", "add", task_id, "--repo", str(repository))
+        worktree = next(
+            item["worktreePath"] for item in self.assert_success(added)["repositoryWorktrees"]
+            if item["repositoryPath"] == str(repository)
+        )
+
+        response, _ = self.call_cli("task", "terminal", task_id)
+        launch = self.assert_success(response)
+        self.assertEqual(launch["taskID"], task_id)
+        self.assertEqual(launch["directory"], os.path.normpath(worktree), "The terminal opens in the task's worktree, not its source repository.")
+        self.assertNotEqual(os.path.realpath(launch["directory"]), os.path.realpath(repository))
+        self.assertTrue(os.path.isabs(launch["shell"]) and os.access(launch["shell"], os.X_OK), launch["shell"])
+        self.assertEqual(launch["arguments"], ["-l"])
+        self.assertEqual(launch["environment"]["TERM"], "xterm-256color")
+        self.assertEqual(launch["environment"]["PLAYHOUSE_TASK_ID"], task_id)
+        fresh, _ = self.call_cli("task", "terminal", task_id)
+        self.assertEqual(self.assert_success(fresh), launch, "A fresh CLI/XPC connection resolves the same terminal.")
+
+        # The reported launch is runnable as given: that shell, in that folder, with those variables.
+        shell = subprocess.run(
+            [launch["shell"], *launch["arguments"], "-c", 'pwd -P; printf "%s\\n" "$PLAYHOUSE_TASK_ID"'],
+            cwd=launch["directory"],
+            env={**os.environ, **launch["environment"]},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(shell.returncode, 0, shell.stderr)
+        self.assertEqual(shell.stdout.strip().splitlines()[-2:], [os.path.realpath(worktree), task_id])
+
+        # A pending worktree is named and created when the task starts; the terminal waits for it
+        # rather than creating it early, and never opens in the source repository instead.
+        pending = self.create_repo_task("Terminal pending task", [str(repository)])
+        self.assertTrue(pending["repositoryWorktrees"][0]["isPending"])
+        response, _ = self.call_cli("task", "terminal", pending["id"], expected_status=1)
+        self.assert_failure(response, "terminal_unavailable")
+        self.assertIn("once the task's worktree is created", response["error"]["message"])
+        still_pending = self.assert_success(self.call_cli("task", "get", pending["id"])[0])["repositoryWorktrees"][0]
+        self.assertTrue(still_pending["isPending"], "Asking for the terminal does not create the worktree.")
+        self.assertEqual(still_pending["branch"], "auto", "The branch is still named when the task starts.")
+
+        # A folder-only task has no worktree, so the terminal refuses rather than open in the folder.
+        folder = self.data_directory / "terminal-folder"
+        folder.mkdir()
+        folder_task_id = self.create_task(title="Terminal folder task", roots=[str(folder)])["id"]
+        response, _ = self.call_cli("task", "terminal", folder_task_id, expected_status=1)
+        self.assert_failure(response, "terminal_unavailable")
+        self.assertIn("Add a repository", response["error"]["message"])
+        # Once it has a created worktree, the terminal opens there, never in the folder.
+        repaired = self.assert_success(self.call_cli("task", "repository", "add", folder_task_id, "--repo", str(repository))[0])
+        repaired_worktree = repaired["repositoryWorktrees"][0]["worktreePath"]
+        self.assertFalse(repaired["repositoryWorktrees"][0]["isPending"])
+        response, _ = self.call_cli("task", "terminal", folder_task_id)
+        repaired_launch = self.assert_success(response)
+        self.assertEqual(repaired_launch["directory"], os.path.normpath(repaired_worktree))
+        self.assertNotEqual(repaired_launch["directory"], os.path.normpath(str(folder)))
+        self.assertNotEqual(os.path.realpath(repaired_launch["directory"]), os.path.realpath(repository))
+
+        shutil.rmtree(repaired_launch["directory"])
+        response, _ = self.call_cli("task", "terminal", folder_task_id, expected_status=1)
+        self.assert_failure(response, "terminal_unavailable")
+        self.assertIn("no longer exists", response["error"]["message"])
+        response, _ = self.call_cli("task", "terminal", "00000000-0000-0000-0000-000000000000", expected_status=3)
+        self.assert_failure(response, "not_found")
+        chat_id = self.assert_success(self.call_cli("chat", "open")[0])["id"]
+        response, _ = self.call_cli("task", "terminal", chat_id, expected_status=3)
+        self.assert_failure(response, "not_found")
+
     # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and both the Token Stats context-menu item and a click on the counter itself, a button that highlights on hover, open a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
     def test_task_token_usage_records_claude_turn_breakdown(self):
         # Matches TURN_USAGE in scripts/fixtures/claude-code-fixture.py.
