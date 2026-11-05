@@ -5919,6 +5919,180 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
+    // case-contract: test_composer_draft_autosaves_during_active_turn | Composer text typed while the agent responds is autosaved as an unsent draft together with its attached image, without ending the turn's submitted prompt or changing its status, and malformed draft images fail validation without changing the draft. A follow-up queued from elsewhere and dispatched after the turn does not replace the draft, which stays saved after the turn ends and is restored to the composer with its image after navigating away and after an app restart. Text steered or queued from the composer leaves the saved draft and does not reappear after the turn, and sending the draft clears it, its images leaving once the turn starts. A submitted prompt whose turn never started returns to the composer with its images, together with the draft typed after it.
+    func test_composer_draft_autosaves_during_active_turn() throws {
+        let sharedFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-draft-serial-success-wait")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: sharedFixture.path), "The draft active-turn fixture should be prepared as an executable by the UI runner.")
+        for suffix in ["resolve-ready", "resolve-continue", "serial-first-turn", "serial-second-turn-started", "history", "reject-next-steer"] {
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: sharedFixture.path + ".\(suffix)"))
+        }
+        codexFixtureExecutable = sharedFixture.path
+        launchApp(defaultParent: fixture.parent.path)
+        let title = "Draft beside an active turn"
+        try createTaskFixture(title: title, roots: [fixture.primary.path])
+        let taskID = try taskID(named: title)
+        openTask(named: title)
+        XCTAssertTrue(modelPrompt().waitForExistence(timeout: 15), "Conversation history should finish loading before the composer is used.")
+        let composer = app.textViews.matching(identifier: "message-composer").firstMatch
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15))
+        let firstPrompt = "Start the turn the draft is typed beside."
+        let steeredText = "Steer this into the running turn."
+        let queuedText = "Queue this follow-up for after the turn."
+        let typedDraft = "Typed while the agent responds; keep me after the turn."
+        composer.click()
+        composer.typeKey("a", modifierFlags: .command)
+        composer.typeKey(.delete, modifierFlags: [])
+        composer.typeText(firstPrompt)
+        element("send-message-button").click()
+        let ready = URL(fileURLWithPath: sharedFixture.path + ".resolve-ready")
+        let release = URL(fileURLWithPath: sharedFixture.path + ".resolve-continue")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "The fixture should hold the turn active while the draft is typed.")
+        defer { try? Data("release\n".utf8).write(to: release) }
+
+        // Steered and queued text leaves the composer and the saved draft at once.
+        composer.click()
+        composer.typeText(steeredText)
+        XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) ?? nil) == steeredText }, timeout: 10), "Text typed during a turn should autosave.")
+        composer.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(transcriptMessage(steeredText).waitForExistence(timeout: 10), "Command-Return should steer the running turn.")
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "" }, timeout: 10))
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) == nil }, timeout: 10), "A steered draft should leave the saved draft.")
+        composer.typeText(queuedText)
+        composer.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "" }, timeout: 10), "Return should queue the follow-up and clear the composer.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) == nil }, timeout: 10), "A queued draft should leave the saved draft.")
+
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setData(try XCTUnwrap(bitmap.representation(using: .png, properties: [:])), forType: .png)
+        composer.typeText(typedDraft)
+        composer.typeKey("v", modifierFlags: .command)
+        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil({
+            guard let record = try? self.taskRecord(id: taskID) else { return false }
+            return record["savedPrompt"] as? String == typedDraft
+                && record["hasUnsentDraft"] as? Bool == true
+                && (record["draftImageDataURLs"] as? [String])?.count == 1
+        }, timeout: 10), "Text and image typed while the agent responds should autosave together.")
+        let running = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertEqual(running["status"] as? String, "In Progress", "Autosaving a draft must not change the running task's status.")
+        XCTAssertEqual(running["pendingSubmittedPrompt"] as? String, firstPrompt, "Autosaving a draft must not end the turn's submitted prompt.")
+        let invalidImage = dataDirectory.appendingPathComponent("invalid-draft.png")
+        try Data("not an image".utf8).write(to: invalidImage)
+        assertCLIError(try runCLI(["task", "draft", taskID, "--text", "Bad image", "--image", invalidImage.path], expectedStatus: 2), code: "invalid_argument")
+        let validImage = dataDirectory.appendingPathComponent("valid-draft.png")
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: validImage)
+        let excessImages = Array(repeating: ["--image", validImage.path], count: 9).flatMap { $0 }
+        assertCLIError(try runCLI(["task", "draft", taskID, "--text", "Too many images"] + excessImages, expectedStatus: 2), code: "invalid_argument")
+        XCTAssertEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, typedDraft, "A rejected draft must leave the saved draft unchanged.")
+        attachScreenshot(named: "Draft and image typed while the agent responds")
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        openTask(named: title)
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == typedDraft }, timeout: 10), "Reopening during the turn should restore the draft typed beside it.")
+        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "Reopening during the turn should restore the draft image.")
+        // Leaving right after typing, before the autosave delay, must still save the text.
+        let fullDraft = typedDraft + " Added just before leaving."
+        composer.click()
+        composer.typeKey(.downArrow, modifierFlags: .command)
+        composer.typeText(" Added just before leaving.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) ?? nil) == fullDraft }, timeout: 10), "Going back mid-turn should save text typed just before leaving.")
+        openTask(named: title)
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == fullDraft }, timeout: 10), "Reopening should restore text typed just before leaving.")
+
+        // The turn ends and the queued follow-up dispatches while the task is closed.
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        try Data("release\n".utf8).write(to: release)
+        XCTAssertTrue(waitUntil({
+            guard let record = try? self.taskRecord(id: taskID) else { return false }
+            let queue = (try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? nil
+            return record["status"] as? String != "In Progress" && record["pendingSubmittedPrompt"] == nil && queue?.isEmpty == true
+        }, timeout: 30), "The turn and its queued follow-up should finish.")
+        let settled = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertEqual(settled["savedPrompt"] as? String, fullDraft, "A dispatched follow-up must not replace the unsent draft.")
+        XCTAssertEqual((settled["draftImageDataURLs"] as? [String])?.count, 1)
+        openTask(named: title)
+        XCTAssertTrue(transcriptMessage(queuedText).waitForExistence(timeout: 15), "The queued follow-up should have run as its own turn.")
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == fullDraft }, timeout: 10), "Reopening after the turn must restore the draft, not an empty or steered one.")
+        XCTAssertTrue(element("pending-chat-images").exists, "Reopening after the turn should restore the draft image.")
+        attachScreenshot(named: "Draft restored after the turn ends")
+
+        app.terminate()
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: title)
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == fullDraft }, timeout: 15), "The draft typed during the turn should survive an app restart.")
+        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "The draft image should survive an app restart.")
+        attachScreenshot(named: "Draft restored after restarting the app")
+
+        XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 10))
+        element("send-message-button").click()
+        XCTAssertTrue(transcriptMessage(fullDraft).waitForExistence(timeout: 15), "Sending should deliver the restored draft.")
+        XCTAssertTrue(waitUntil({
+            guard let record = try? self.taskRecord(id: taskID) else { return false }
+            return record["hasUnsentDraft"] as? Bool == false && (record["draftImageDataURLs"] as? [String])?.isEmpty == true
+        }, timeout: 15), "Sending the draft should clear the saved draft.")
+        XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: taskID)?["status"] as? String) ?? nil) != "In Progress" }, timeout: 30))
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        openTask(named: title)
+        XCTAssertTrue(transcriptMessage(fullDraft).waitForExistence(timeout: 15))
+        XCTAssertEqual(composer.value as? String, "", "A sent draft must not return to the composer.")
+        XCTAssertFalse(element("pending-chat-images").exists, "A sent draft image must not return to the composer.")
+        attachScreenshot(named: "Sent draft leaves the composer empty")
+
+        // An image-only send leaves the composer and the saved draft too.
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setData(try XCTUnwrap(bitmap.representation(using: .png, properties: [:])), forType: .png)
+        composer.click()
+        composer.typeKey("v", modifierFlags: .command)
+        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: taskID)?["draftImageDataURLs"] as? [String]) ?? nil)?.count == 1 }, timeout: 10), "An attached image should autosave.")
+        XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 10))
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            guard let record = try? self.taskRecord(id: taskID) else { return false }
+            return record["hasUnsentDraft"] as? Bool == false && (record["draftImageDataURLs"] as? [String])?.isEmpty == true
+                && record["status"] as? String != "In Progress"
+        }, timeout: 30), "An image-only send should clear its image from the saved draft.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        openTask(named: title)
+        // The reopened transcript pins the latest turn, the image-only send.
+        let transcriptImages = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-image-"))
+        XCTAssertTrue(transcriptImages.firstMatch.waitForExistence(timeout: 15), "The image-only send should appear in the transcript.")
+        XCTAssertEqual(composer.value as? String, "")
+        XCTAssertFalse(element("pending-chat-images").exists, "A sent image-only draft must not return to the composer.")
+
+        let neverStarted = "Draft beside a turn that never started"
+        try createTaskFixture(title: neverStarted, roots: [fixture.primary.path])
+        let neverStartedID = try self.taskID(named: neverStarted)
+        let submitted = "Submitted before Playhouse restarted."
+        let laterDraft = "Typed after sending, before the restart."
+        _ = try runCLI(["task", "prompt", neverStartedID, "--text", submitted, "--status", "In Progress", "--submitted", "true"])
+        _ = try runCLI(["task", "draft", neverStartedID, "--text", laterDraft])
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        openTask(named: neverStarted)
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == submitted + "\n\n" + laterDraft }, timeout: 15), "A prompt whose turn never started should return to the composer with the draft typed after it.")
+        XCTAssertEqual(try taskRecord(id: neverStartedID)?["status"] as? String, "Waiting Response")
+        attachScreenshot(named: "Never-started prompt returns with the later draft")
+
+        let neverStartedImage = "Image prompt whose turn never started"
+        try createTaskFixture(title: neverStartedImage, roots: [fixture.primary.path])
+        let neverStartedImageID = try self.taskID(named: neverStartedImage)
+        _ = try runCLI(["task", "prompt", neverStartedImageID, "--text", submitted, "--image", validImage.path, "--status", "In Progress", "--submitted", "true"])
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        openTask(named: neverStartedImage)
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == submitted }, timeout: 15), "A never-started prompt should return to the composer.")
+        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "A never-started prompt should return with its image.")
+        attachScreenshot(named: "Never-started prompt returns with its image")
+    }
+
     // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. As content is typed in short increments through successive wrapped lines after a line break, the newest insertion remains inside the visible composer viewport while its internal document follows the caret without scrolling backward. Typed straight quotes, apostrophes, and double hyphens stay literal rather than being substituted. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path

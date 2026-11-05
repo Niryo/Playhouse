@@ -176,8 +176,13 @@ final class BoardTask {
     var conversationEffortRawValue: String?
     // Retained for one-time migration to the global provider model preference.
     var conversationModelIDsData: Data?
+    /// The unsent composer draft when `hasUnsentDraft` is true; otherwise the last prompt
+    /// saved or sent, which can already be in the conversation.
     var savedPrompt: String?
     var pendingSubmittedPrompt: String?
+    /// True while `savedPrompt` and the draft images are the user's unsent composer draft,
+    /// rather than the last prompt that was sent.
+    var hasUnsentDraft: Bool = false
     var workspaceRootPathsData: Data?
     var repositoryWorktreesData: Data?
     var contextFolderPathsData: Data?

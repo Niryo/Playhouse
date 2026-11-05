@@ -5085,6 +5085,124 @@ class PlayhouseBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
+    # case-contract: test_composer_draft_autosaves_during_active_turn | Composer text typed while the agent responds is autosaved as an unsent draft together with its attached image, without ending the turn's submitted prompt or changing its status, and malformed draft images fail validation without changing the draft. A follow-up queued from elsewhere and dispatched after the turn does not replace the draft, which stays saved after the turn ends and is restored to the composer with its image after navigating away and after an app restart. Text steered or queued from the composer leaves the saved draft and does not reappear after the turn, and sending the draft clears it, its images leaving once the turn starts. A submitted prompt whose turn never started returns to the composer with its images, together with the draft typed after it.
+    def test_composer_draft_autosaves_during_active_turn(self):
+        task_id = self.create_task(title="Draft beside an active turn")["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-draft-serial-success-wait"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        image = self.data_directory / "draft-tiny.png"
+        image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
+        invalid_image = self.data_directory / "draft-invalid.png"
+        invalid_image.write_bytes(b"not an image")
+        first_prompt = "Start the turn the draft is typed beside."
+        typed_draft = "Typed while the agent responds; keep me after the turn."
+        queued_text = "A follow-up queued from elsewhere during the turn."
+        # The prompt's image stays in the draft until its turn starts.
+        self.assert_success(self.call_cli("task", "prompt", task_id, "--text", first_prompt, "--image", image)[0])
+        send_command = ["conversation", "send", task_id, "--message", first_prompt, "--image", image]
+        process = self.start_cli(*send_command, extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)})
+        ready = Path(str(executable) + ".resolve-ready")
+        release = Path(str(executable) + ".resolve-continue")
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not ready.exists() and process.poll() is None:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "The fixture should hold the turn active while the draft is typed.")
+            running = self.assert_success(self.call_cli("task", "get", task_id)[0])
+            self.assertEqual(running["status"], "In Progress")
+            self.assertEqual(running["pendingSubmittedPrompt"], first_prompt)
+            self.assertFalse(running["hasUnsentDraft"], "The sent prompt is not an unsent draft.")
+            self.assertEqual(running["draftImageDataURLs"], [], "A sent image should leave the draft once its turn starts.")
+
+            saved = self.assert_success(self.call_cli("task", "draft", task_id, "--text", typed_draft, "--image", image)[0])
+            self.assertEqual(saved["savedPrompt"], typed_draft)
+            self.assertTrue(saved["hasUnsentDraft"])
+            self.assertEqual(len(saved["draftImageDataURLs"]), 1)
+            self.assertTrue(saved["draftImageDataURLs"][0].startswith("data:image/png;base64,"))
+            self.assertEqual(saved["status"], "In Progress", "Saving a draft must not change the running task's status.")
+            self.assertEqual(saved["pendingSubmittedPrompt"], first_prompt, "Saving a draft must not end the turn's submitted prompt.")
+            invalid, _ = self.call_cli("task", "draft", task_id, "--text", "Replace with a bad image", "--image", invalid_image, expected_status=2)
+            self.assert_failure(invalid, "invalid_argument")
+            excess, _ = self.call_cli(
+                "task", "draft", task_id, "--text", "Replace with too many images",
+                *[argument for _ in range(9) for argument in ("--image", image)],
+                expected_status=2,
+            )
+            self.assert_failure(excess, "invalid_argument")
+            unchanged = self.assert_success(self.call_cli("task", "get", task_id)[0])
+            self.assertEqual(unchanged["savedPrompt"], typed_draft)
+            self.assertEqual(unchanged["draftImageDataURLs"], saved["draftImageDataURLs"])
+            self.assert_success(self.call_cli("conversation", "queue", task_id, "--message", queued_text)[0])
+        finally:
+            release.write_text("Release the active turn.\n", encoding="utf-8")
+        self.finish_cli(process, send_command)
+
+        history = self.assert_success(self.call_cli(
+            "conversation", "history", task_id,
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
+        )[0])
+        user_texts = [message["text"] for message in history["messages"] if message["role"] == "user"]
+        self.assertEqual(user_texts.count(queued_text), 1, "The queued follow-up should dispatch after the turn.")
+        self.assertNotIn(typed_draft, user_texts, "An unsent draft must never be sent.")
+        settled = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertIsNone(settled.get("pendingSubmittedPrompt"))
+        self.assertNotEqual(settled["status"], "In Progress")
+        self.assertEqual(settled["savedPrompt"], typed_draft, "A dispatched follow-up must not replace the unsent draft.")
+        self.assertTrue(settled["hasUnsentDraft"])
+        self.assertEqual(settled["draftImageDataURLs"], saved["draftImageDataURLs"])
+
+        # The composer hands a steered or queued draft off by saving the emptied composer.
+        cleared = self.assert_success(self.call_cli("task", "draft", task_id, "--text", "")[0])
+        self.assertIsNone(cleared.get("savedPrompt"))
+        self.assertEqual(cleared["draftImageDataURLs"], [])
+        self.assertFalse(cleared["hasUnsentDraft"])
+        # An image-only send unmarks its draft, and its image leaves once the turn starts.
+        self.assert_success(self.call_cli("task", "draft", task_id, "--text", "", "--image", image)[0])
+        unmarked = self.assert_success(self.call_cli("task", "prompt", task_id, "--text", "")[0])
+        self.assertFalse(unmarked["hasUnsentDraft"])
+        self.assertEqual(len(unmarked["draftImageDataURLs"]), 1, "An image waiting for its turn stays in the draft.")
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--image", image,
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
+        )[0])
+        image_only_sent = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(image_only_sent["draftImageDataURLs"], [], "An image-only send must not return its image to the composer.")
+        self.assertFalse(image_only_sent["hasUnsentDraft"])
+        # A send of the draft itself clears the mark even when the draft text matches.
+        self.assert_success(self.call_cli("task", "draft", task_id, "--text", typed_draft)[0])
+        sent = self.assert_success(self.call_cli(
+            "task", "prompt", task_id, "--text", typed_draft, "--status", "In Progress", "--submitted", "true"
+        )[0])
+        self.assertFalse(sent["hasUnsentDraft"])
+        self.assertEqual(sent["pendingSubmittedPrompt"], typed_draft)
+
+        never_started = self.create_task(title="Draft beside a turn that never started")["id"]
+        submitted = "Submitted before Playhouse restarted."
+        later_draft = "Typed after sending, before the restart."
+        self.assert_success(self.call_cli(
+            "task", "prompt", never_started, "--text", submitted, "--status", "In Progress", "--submitted", "true"
+        )[0])
+        self.assert_success(self.call_cli("task", "draft", never_started, "--text", later_draft)[0])
+        recovered = self.assert_success(self.call_cli("task", "reconcile", never_started)[0])
+        self.assertEqual(recovered["status"], "Waiting Response")
+        self.assertIsNone(recovered.get("pendingSubmittedPrompt"))
+        self.assertEqual(recovered["savedPrompt"], submitted + "\n\n" + later_draft)
+        self.assertTrue(recovered["hasUnsentDraft"])
+        never_started_image = self.create_task(title="Image prompt whose turn never started")["id"]
+        self.assert_success(self.call_cli(
+            "task", "prompt", never_started_image, "--text", submitted, "--image", image,
+            "--status", "In Progress", "--submitted", "true",
+        )[0])
+        recovered_image = self.assert_success(self.call_cli("task", "reconcile", never_started_image)[0])
+        self.assertEqual(recovered_image["savedPrompt"], submitted)
+        self.assertEqual(len(recovered_image["draftImageDataURLs"]), 1, "A never-started prompt should return with its image.")
+        self.assertTrue(recovered_image["hasUnsentDraft"])
+
     # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. As content is typed in short increments through successive wrapped lines after a line break, the newest insertion remains inside the visible composer viewport while its internal document follows the caret without scrolling backward. Typed straight quotes, apostrophes, and double hyphens stay literal rather than being substituted. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
