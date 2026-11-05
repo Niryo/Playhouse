@@ -777,6 +777,27 @@ struct TaskConversationView: View {
         var id: String { path }
     }
 
+    /// An outlined pencil with a wide body, drawn on a 24-point grid. The SF Symbol pencil
+    /// stays a thin stick at small sizes, which does not read as an edit button.
+    private struct EditPencilShape: Shape {
+        func path(in rect: CGRect) -> Path {
+            let scale = min(rect.width, rect.height) / 24
+            func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+                CGPoint(x: rect.minX + x * scale, y: rect.minY + y * scale)
+            }
+            var path = Path()
+            path.move(to: point(4, 16.5))
+            path.addLine(to: point(15.5, 5))
+            path.addLine(to: point(19, 8.5))
+            path.addLine(to: point(7.5, 20))
+            path.addLine(to: point(3.5, 20.5))
+            path.closeSubpath()
+            path.move(to: point(13, 7.5))
+            path.addLine(to: point(16.5, 11))
+            return path
+        }
+    }
+
     private struct ChangeRepositoryGroup: Identifiable {
         let repository: String
         let entries: [WorkspaceChangeEntry]
@@ -6312,9 +6333,10 @@ struct TaskConversationView: View {
                         Button {
                             beginRepositoryFieldEdit(field, repository: repository)
                         } label: {
-                            Image(systemName: "square.and.pencil")
-                                .font(.system(size: 13, weight: .semibold))
+                            EditPencilShape()
+                                .stroke(style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
                                 .foregroundStyle(.secondary)
+                                .frame(width: 14, height: 14)
                                 .frame(width: 22, height: 24)
                                 .contentShape(Rectangle())
                         }
