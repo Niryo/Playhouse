@@ -7908,9 +7908,12 @@ final class PlayhouseBridgeRuntime {
             let callerCodexHome = request.arguments["__codexHome"]?.string
             let skillsHome: String?
             #if DEBUG
-            // A test data directory gets its own skill homes, so bridge tests
-            // never read or bridge the host's own skills.
-            skillsHome = dataDirectory == nil ? nil : storeDirectory.map { $0 + "/skills-home" }
+            // A test bundle's data directory gets its own skill homes, so bridge
+            // tests never read or bridge the host's own skills. Development
+            // builds still use the user's real skills.
+            skillsHome = PlayhouseAppIdentity.isTestBundle && dataDirectory != nil
+                ? storeDirectory.map { $0 + "/skills-home" }
+                : nil
             #else
             skillsHome = nil
             #endif

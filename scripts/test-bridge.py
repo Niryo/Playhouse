@@ -1822,7 +1822,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["savedPrompt"], "Protected draft")
 
-    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory. A saved conversation remains visible after an app restart.
+    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory, and run.sh drops PLAYHOUSE_BRIDGE_SERVICE_NAME and PLAYHOUSE_BRIDGE_SOCKET_PATH inherited from another Playhouse app, saying so, while keeping the launching worktree's own bridge. A saved conversation remains visible after an app restart.
     def test_worktree_app_profiles_isolate_identity_and_store(self):
         script = Path(__file__).resolve().parent / "app-profile.sh"
         linked = self.fixture / "existing-worktree"
@@ -1901,6 +1901,33 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2, result.stdout)
             self.assertEqual(result.stdout, "")
             self.assertIn("PLAYHOUSE_DATA_DIRECTORY points elsewhere", result.stderr)
+        # `open -n` hands the app run.sh's whole environment, so run.sh drops a
+        # bridge daemon override inherited from another Playhouse app.
+        clear_bridge = ('source "$1"; playhouse_load_app_profile "$2"; playhouse_clear_inherited_bridge_overrides; '
+                        'printf "%s|%s" "${PLAYHOUSE_BRIDGE_SERVICE_NAME:-}" "${PLAYHOUSE_BRIDGE_SOCKET_PATH:-}"')
+
+        def cleared_bridge(service, socket):
+            environment = os.environ.copy()
+            for name, value in (("PLAYHOUSE_BRIDGE_SERVICE_NAME", service), ("PLAYHOUSE_BRIDGE_SOCKET_PATH", socket)):
+                environment.pop(name, None)
+                if value is not None:
+                    environment[name] = value
+            return subprocess.run(["bash", "-c", clear_bridge, "bridge-check", str(script), str(linked)],
+                                  env=environment, capture_output=True, text=True)
+
+        own_bridge = linked_profile["bridgeID"]
+        for service, socket, expected, ignored in [
+            (primary_profile["bridgeID"], "/tmp/parent-bridge.sock", "|", True),
+            (None, "/tmp/parent-bridge.sock", "|", True),
+            (own_bridge, "/tmp/own-bridge.sock", f"{own_bridge}|/tmp/own-bridge.sock", False),
+            (None, None, "|", False),
+        ]:
+            result = cleared_bridge(service, socket)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, expected, f"Inherited {service!r} / {socket!r}")
+            self.assertEqual("inherited from another Playhouse app" in result.stderr, ignored, result.stderr)
+        self.assertIn("playhouse_clear_inherited_bridge_overrides\nopen -n", (Path(script).parent / "run.sh").read_text(encoding="utf-8"),
+                      "run.sh must clear inherited bridge overrides right before it opens the app.")
         # The bridge daemon and CLI ship flat in Contents/MacOS and resolve
         # their identity from this same Info.plist via `Bundle.main` (no
         # separate XPC bundle/Info.plist to cross-check anymore); the service

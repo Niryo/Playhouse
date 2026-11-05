@@ -17,13 +17,22 @@ The launcher builds the app, closes an existing Playhouse instance from the same
 
 ## Environment overrides
 
-Agent sessions inherit `PLAYHOUSE_DATA_DIRECTORY` from the Playhouse app that started them. When that value is another Playhouse app's profile directory (the primary app's or another worktree's), `scripts/run.sh` ignores it, says so on stderr, and launches with the selected worktree's own data directory. Any other value must match the selected worktree's profile. If `scripts/run.sh` rejects it with “uses this worktree’s isolated data directory,” do not retry unchanged and do not manually construct an app launch. Clear only that override and rerun the worktree launcher:
+Agent sessions inherit three variables from the Playhouse app that started them, and all three point at that app, not at the worktree being launched: `PLAYHOUSE_DATA_DIRECTORY` (its data directory) and `PLAYHOUSE_BRIDGE_SERVICE_NAME` / `PLAYHOUSE_BRIDGE_SOCKET_PATH` (its bridge daemon). `open -n` hands the launched app the caller's whole environment, so a window launched with the parent's bridge variables would send its own data directory to the parent's daemon, and every bridge request would fail with "This Playhouse worktree app cannot open another app's task store."
+
+`scripts/run.sh` handles all three, saying so on stderr:
+
+- A `PLAYHOUSE_DATA_DIRECTORY` that names another Playhouse app's profile directory (the primary app's or another worktree's) is replaced with this worktree's own. Any other value must match this worktree's profile; if `run.sh` rejects it with "uses this worktree's isolated data directory," do not retry unchanged or construct an app launch by hand. Clear it and rerun: `env -u PLAYHOUSE_DATA_DIRECTORY ./scripts/run.sh`.
+- Bridge variables that don't name this worktree's own bridge (`playhouse_clear_inherited_bridge_overrides` in `scripts/app-profile.sh`) are dropped before `open`, so the window derives this worktree's bridge itself.
+
+If a window already shows the task-store error, it was launched by an older `run.sh` with the parent's bridge variables. Relaunch it with `./scripts/run.sh`; it closes the old instance first.
+
+`scripts/playhouse.sh` does not clear inherited bridge variables: it refuses with "The bridge service override does not match the selected app" rather than guess. Clear them for calls aimed at the launched worktree app, for example to create a task for the user to try:
 
 ```bash
-env -u PLAYHOUSE_DATA_DIRECTORY ./scripts/run.sh
+env -u PLAYHOUSE_DATA_DIRECTORY -u PLAYHOUSE_BRIDGE_SERVICE_NAME -u PLAYHOUSE_BRIDGE_SOCKET_PATH ./scripts/playhouse.sh task list
 ```
 
-This lets `run.sh` select the profile directory computed by `scripts/app-profile.sh`. Preserve other environment variables unless the launcher identifies them as the cause.
+Keep the variables when you report progress or outcomes for your own task through the parent app's CLI; that path needs them. Preserve other environment variables unless the launcher identifies them as the cause.
 
 ## Confirm the launch
 

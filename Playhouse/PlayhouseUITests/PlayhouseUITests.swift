@@ -519,7 +519,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(element("message-composer").value as? String, "Protected draft")
     }
 
-    // case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory. A saved conversation remains visible after an app restart.
+    // case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory, and run.sh drops PLAYHOUSE_BRIDGE_SERVICE_NAME and PLAYHOUSE_BRIDGE_SOCKET_PATH inherited from another Playhouse app, saying so, while keeping the launching worktree's own bridge. A saved conversation remains visible after an app restart.
     func test_worktree_app_profiles_isolate_identity_and_store() throws {
         let script = repositoryRoot.appendingPathComponent("scripts/app-profile.sh")
         func profileScriptEnvironment() throws -> [String: String] {
@@ -625,6 +625,47 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertEqual(result.output, "")
             XCTAssertTrue(result.error.contains("PLAYHOUSE_DATA_DIRECTORY points elsewhere"), result.error)
         }
+        // `open -n` hands the app run.sh's whole environment, so run.sh drops a
+        // bridge daemon override inherited from another Playhouse app.
+        func clearedBridge(service: String?, socket: String?) throws -> (status: Int32, output: String, error: String) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = [
+                "-c", "source \"$1\"; playhouse_load_app_profile \"$2\"; playhouse_clear_inherited_bridge_overrides; printf \"%s|%s\" \"${PLAYHOUSE_BRIDGE_SERVICE_NAME:-}\" \"${PLAYHOUSE_BRIDGE_SOCKET_PATH:-}\"",
+                "bridge-check", script.path, fixture.existingWorktree.path
+            ]
+            var environment = try profileScriptEnvironment()
+            environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = service
+            environment["PLAYHOUSE_BRIDGE_SOCKET_PATH"] = socket
+            process.environment = environment
+            let output = Pipe()
+            let error = Pipe()
+            process.standardOutput = output
+            process.standardError = error
+            try process.run()
+            process.waitUntilExit()
+            return (
+                process.terminationStatus,
+                String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
+                String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            )
+        }
+        let ownBridge = try XCTUnwrap(linked["bridgeID"])
+        let bridgeCases: [(String?, String?, String, Bool)] = [
+            (try XCTUnwrap(primary["bridgeID"]), "/tmp/parent-bridge.sock", "|", true),
+            (nil, "/tmp/parent-bridge.sock", "|", true),
+            (ownBridge, "/tmp/own-bridge.sock", "\(ownBridge)|/tmp/own-bridge.sock", false),
+            (nil, nil, "|", false)
+        ]
+        for (service, socket, expected, ignored) in bridgeCases {
+            let result = try clearedBridge(service: service, socket: socket)
+            XCTAssertEqual(result.status, 0, result.error)
+            XCTAssertEqual(result.output, expected, "Inherited \(service ?? "nil") / \(socket ?? "nil")")
+            XCTAssertEqual(result.error.contains("inherited from another Playhouse app"), ignored, result.error)
+        }
+        let runScript = try String(contentsOf: script.deletingLastPathComponent().appendingPathComponent("run.sh"), encoding: .utf8)
+        XCTAssertTrue(runScript.contains("playhouse_clear_inherited_bridge_overrides\nopen -n"),
+                      "run.sh must clear inherited bridge overrides right before it opens the app.")
         let launchedIdentifier = try XCTUnwrap(Bundle(url: appBundle)?.bundleIdentifier)
         let sourceProfile = try profile(for: repositoryRoot)
         XCTAssertTrue(launchedIdentifier.hasPrefix(try XCTUnwrap(sourceProfile["bundleID"]) + ".e2e."), "The test app must use the actual source checkout's identity, not a repository fixture's identity.")
