@@ -1869,9 +1869,13 @@ extension ClaudeCodeClient {
         store.setLoginInProgress(.claude, true)
     }
 
-    func logoutAccount() async {
-        _ = await runAuthCommand(["auth", "logout"])
-        AgentUsageStore.shared(scope: runtimeScope).setAuth(.claude, loggedIn: false, account: nil, plan: nil)
+    /// Signs out through the CLI. The state shown afterwards is read back from
+    /// `claude auth status`, so a logout that failed is reported, not assumed.
+    func logoutAccount() async throws {
+        guard await runAuthCommand(["auth", "logout"]) != nil else {
+            throw ClientError.protocolFailure("Claude Code could not sign out.")
+        }
+        await refreshAgentUsage()
     }
 
     private func makeAuthProcess(_ arguments: [String]) throws -> Process {

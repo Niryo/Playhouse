@@ -175,7 +175,7 @@ enum AgentUsageService {
         let store = AgentUsageStore.shared(scope: clients.codex.runtimeScope)
         switch provider {
         case .codex: try await clients.codex.logoutAccount()
-        case .claude: await clients.claude.logoutAccount()
+        case .claude: try await clients.claude.logoutAccount()
         }
         store.clearUsage(provider)
         return try await login(provider, clients: clients)
