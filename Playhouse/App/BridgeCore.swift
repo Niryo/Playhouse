@@ -4729,7 +4729,10 @@ final class ConversationManager {
     }
 
     private static func historyRoots(_ task: any ConversationSubject) -> [String] {
-        task.workspaceRootPaths.isEmpty && task.status == .done
+        // Moving a task to Done removes its managed worktrees, so a finished task
+        // reads its history from the repositories once any worktree folder is gone.
+        let worktreesGone = task.workspaceRootPaths.contains { !FileManager.default.fileExists(atPath: $0) }
+        return (task.workspaceRootPaths.isEmpty || worktreesGone) && task.status == .done
             ? task.repositoryWorktrees.map { $0.repositoryPath }
             : task.workspaceRootPaths
     }
