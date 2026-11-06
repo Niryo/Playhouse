@@ -924,7 +924,7 @@ struct TaskConversationView: View {
     @State private var subagentHistory: ConversationHistory?
     @State private var isLoadingSubagent = false
     @State private var subagentError: String?
-    @State private var changeInventory = WorkspaceChangeInventory(unviewed: [], viewed: [])
+    @State private var changeInventory = WorkspaceChangeInventory(unviewed: [], viewed: [], mergingRepositories: [])
     @State private var isViewedSectionExpanded = false
     @AppStorage(WorkspaceSettings.taskSidebarCollapsedKey, store: WorkspaceSettings.preferencesStore) private var isTaskSidebarCollapsed = false
     @AppStorage(WorkspaceSettings.workspaceChangesSectionCollapsedKey, store: WorkspaceSettings.preferencesStore) private var isChangesSectionCollapsed = false
@@ -1104,6 +1104,8 @@ struct TaskConversationView: View {
     /// How close to the bottom, in points, still counts as at the bottom, so
     /// new content keeps being followed.
     private static let conversationBottomFollowThreshold: CGFloat = 16
+    /// Above this many changed files the sidebar shows a notice instead of the list, which would stall layout.
+    private static let maxRenderedChangeCount = 1000
 
     /// First message of the newest user turn. Opening a conversation renders
     /// this message and everything after it, so the latest question sits at the
@@ -1709,7 +1711,7 @@ struct TaskConversationView: View {
             .frame(maxHeight: .infinity)
             .overlay {
                 Color.clear
-                    .frame(width: 9)
+                    .frame(width: 17)
                     .contentShape(Rectangle())
                     .hoverCursor(.resizeLeftRight)
                     .gesture(
@@ -1767,7 +1769,9 @@ struct TaskConversationView: View {
                 Image(systemName: "terminal")
                     .font(.system(size: 12, weight: .medium))
                     .frame(width: 26, height: 24)
-                    .foregroundStyle(isTerminalPresented ? WorkspaceTheme.accent : Color.secondary)
+                    .foregroundStyle(terminalUnavailableReason != nil && !isTerminalPresented
+                        ? Color.secondary.opacity(0.35)
+                        : (isTerminalPresented ? WorkspaceTheme.accent : Color.secondary))
                     .background(
                         RoundedRectangle(cornerRadius: 5)
                             .fill(isTerminalPresented ? WorkspaceTheme.accent.opacity(0.14) : Color.clear)
@@ -1970,6 +1974,10 @@ struct TaskConversationView: View {
                 .font(.system(size: 11))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityIdentifier("workspace-changes-loading")
+        } else if changeInventory.isEmpty && !changeInventory.mergingRepositories.isEmpty {
+            mergeInProgressNotice
+                .padding(15)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if changeInventory.isEmpty {
             VStack(spacing: 8) {
                 Image(systemName: "checkmark.circle")
@@ -1985,9 +1993,32 @@ struct TaskConversationView: View {
             .padding(15)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .accessibilityIdentifier("workspace-changes-empty")
+        } else if changeInventory.count > Self.maxRenderedChangeCount {
+            VStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.secondary)
+                Text("Too many changes to list")
+                    .font(.system(size: 12, weight: .medium))
+                Text(tooManyChangesMessage)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(15)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // An explicit label: a combined element of these texts reads back with an empty label.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Too many changes to list. \(tooManyChangesMessage)")
+            .accessibilityIdentifier("workspace-changes-too-many")
         } else {
             ScrollView {
-                VStack(alignment: .leading, spacing: 15) {
+                // Lazy so off-screen rows stay out of the view tree; every row carries AppKit tooltip views.
+                LazyVStack(alignment: .leading, spacing: 15) {
+                    if !changeInventory.mergingRepositories.isEmpty {
+                        mergeInProgressNotice
+                            .padding(.horizontal, 14)
+                    }
                     changeSection(title: "Viewed", entries: changeInventory.viewed)
                     changeSection(title: "Changes", entries: changeInventory.unviewed)
                 }
@@ -2002,6 +2033,35 @@ struct TaskConversationView: View {
     /// after that review is measured from the saved snapshot.
     private func diffBaselineLabel(_ entry: WorkspaceChangeEntry) -> String {
         entry.group == .unviewed && entry.hasViewedSnapshot ? "Since last viewed" : "Since branch base"
+    }
+
+    private var mergeInProgressMessage: String {
+        "Changes in \(changeInventory.mergingRepositories.map(repositoryLabel).joined(separator: ", ")) are hidden until the merge is committed or aborted."
+    }
+
+    private var tooManyChangesMessage: String {
+        "\(changeInventory.count) changed files is more than the \(Self.maxRenderedChangeCount) this list shows. Check for files that should be ignored, such as build output."
+    }
+
+    /// Shown in place of a repository's files while it has a merge open, since the merge stages
+    /// everything the merged branch brought in.
+    private var mergeInProgressNotice: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "arrow.triangle.merge")
+                .font(.system(size: 20))
+                .foregroundStyle(.secondary)
+            Text("Merge in progress")
+                .font(.system(size: 12, weight: .medium))
+            Text(mergeInProgressMessage)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        // An explicit label: a combined element of these texts reads back with an empty label.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Merge in progress. \(mergeInProgressMessage)")
+        .accessibilityIdentifier("workspace-changes-merge-in-progress")
     }
 
     private func changeSection(title: String, entries: [WorkspaceChangeEntry]) -> some View {
@@ -5544,6 +5604,9 @@ struct TaskConversationView: View {
         let previousResponseDuration = completedResponseDuration
         isComposerFocused = false
         let hadExistingMessages = !messages.isEmpty
+        // The newest message shown before this send; a failed send's prompt counts as delivered
+        // only when the conversation has it after this point.
+        let sendAnchorID = messages.last?.id
         messages.append(ConversationMessage(id: userMessageID, role: .user, text: text,
                                          imageDataURLs: usesComposerDraft ? pendingImages.map(\.dataURL) : []))
         if !hadExistingMessages {
@@ -5774,6 +5837,12 @@ struct TaskConversationView: View {
                 WorkspaceSettings.preferencesStore.removeObject(forKey: responseStartedAtDefaultsKey)
                 if conversationRuntime.wasLastTurnInterrupted(threadID: task.activeConversationID ?? "") {
                     hasPausedResponse = true
+                } else if let deliveredHistory = await historyIfSendReachedConversation(text, after: sendAnchorID) {
+                    // The send failed after its prompt was saved to the conversation (for example,
+                    // Codex exited after the turn started). Returning it to the composer would save
+                    // it as an unsent draft and prefix it to the next message.
+                    applyHistoryMessages(deliveredHistory)
+                    errorMessage = error.localizedDescription
                 } else {
                     messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
                     if usesComposerDraft {
@@ -5791,6 +5860,23 @@ struct TaskConversationView: View {
 
             isResponding = false
         }
+    }
+
+    /// The conversation's history when a send that reported failure still added its prompt after
+    /// `anchorID`, the newest message shown before the send; nil when it didn't. When the anchor
+    /// isn't in the fetched page the answer is nil, so the prompt returns to the composer rather
+    /// than risk dropping text that never reached the conversation.
+    private func historyIfSendReachedConversation(_ text: String, after anchorID: String?) async -> ConversationHistory? {
+        guard let history = try? await conversationManager.history(taskID: task.id, messageLimit: Self.historyPageSize) else { return nil }
+        let later: ArraySlice<ConversationMessage>
+        if let anchorID {
+            guard let anchorIndex = history.messages.firstIndex(where: { $0.id == anchorID }) else { return nil }
+            later = history.messages[history.messages.index(after: anchorIndex)...]
+        } else {
+            later = history.messages[...]
+        }
+        let sent = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return later.contains { $0.role == .user && $0.text.trimmingCharacters(in: .whitespacesAndNewlines) == sent } ? history : nil
     }
 
     private func mutateGoal(_ action: String, objective: String? = nil, observeRuntime: Bool = false) async -> Bool {
@@ -6557,7 +6643,7 @@ struct TaskConversationView: View {
         }
         Task { @MainActor in
             do {
-                _ = try await BoardTaskManager(modelContext: modelContext).updateRepository(
+                let saved = try await BoardTaskManager(modelContext: modelContext).updateRepository(
                     task.id,
                     repositoryPath: original.repositoryPath,
                     branch: branch,
@@ -6565,7 +6651,16 @@ struct TaskConversationView: View {
                     mergeTarget: mergeTarget.isEmpty ? nil : mergeTarget
                 )
                 // The popover stays open on the saved value so another field can be edited next.
-                if editingRepositoryField == field { editingRepositoryField = nil }
+                if editingRepositoryField == field {
+                    editingRepositoryField = nil
+                    // Show what was saved, which can differ from what was typed: a branch-from
+                    // found only on the remote is saved as its remote-tracking branch.
+                    if let record = saved.repositoryWorktrees.first(where: { $0.repositoryPath == original.repositoryPath }) {
+                        editedBranch = record.branch
+                        editedBranchFrom = record.branchFrom
+                        editedMergeTarget = record.mergeTarget ?? ""
+                    }
+                }
                 errorMessage = nil
             } catch {
                 errorMessage = "Couldn't save repository settings: \(error.localizedDescription)"

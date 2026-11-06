@@ -1175,12 +1175,12 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         var subagentIndexes: [String: Int] = [:]
         var lastAssistantTurnID: String?
         var lastAssistantPhase: String?
-        var privateOutcomeReminderTurnIDs = Set<String>()
         var cursor: String?
         var visitedCursors = Set<String>()
         var historyItemOrder = 0
         var timelineToolItems: [(item: [String: Any], anchor: String?)] = []
         var timelineToolItemIndexes: [String: Int] = [:]
+        var entries: [[String: Any]] = []
 
         repeat {
             var params: [String: Any] = [
@@ -1194,102 +1194,128 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
 
             let response = try await request(method: "thread/items/list", params: params)
             // The installed codex-cli 0.162.1 schema returns {data:[{threadId,turnId,item}],nextCursor}.
-            let data = response["data"] as? [[String: Any]] ?? []
-            for entry in data {
-                guard let item = entry["item"] as? [String: Any] else { continue }
-                let turnID = entry["turnId"] as? String
-                if item["type"] as? String == "userMessage",
-                   PrivateOutcomeNudgeMarker.matches(Self.chatMessage(from: entry)?.text ?? ""),
-                   let turnID {
-                    privateOutcomeReminderTurnIDs.insert(turnID)
-                }
-                if let turnID, privateOutcomeReminderTurnIDs.contains(turnID) {
-                    historyItemOrder += 1
-                    continue
-                }
-                if item["type"] as? String == "contextCompaction" {
-                    compactionHistory.append((item, entry["turnId"] as? String, historyItemOrder))
-                    // Preserve the event boundary between same-phase assistant
-                    // items so timeline ordering is not collapsed into one bubble.
-                    lastAssistantTurnID = nil
-                    lastAssistantPhase = nil
-                }
-                if ["mcpToolCall", "dynamicToolCall"].contains(item["type"] as? String ?? ""),
-                   let itemID = item["id"] as? String {
-                    var historicalItem = item
-                    historicalItem["_playhouseTurnID"] = entry["turnId"]
-                    if let index = toolItemIndexes[itemID] {
-                        historicalToolItems[index] = historicalItem
-                    } else {
-                        toolItemIndexes[itemID] = historicalToolItems.count
-                        historicalToolItems.append(historicalItem)
-                    }
-                }
-                var historicalSubagentItem = item
-                historicalSubagentItem["_playhouseTurnID"] = entry["turnId"]
-                if item["type"] as? String == "subAgentActivity",
-                   let activity = ConversationActivity.from(item: historicalSubagentItem),
-                   let childThreadID = activity.childThreadID {
-                    if let index = subagentIndexes[childThreadID] {
-                        var mergedItem = historicalSubagentItem
-                        for metadataKey in ["agentPath", "model", "reasoningEffort"]
-                        where mergedItem[metadataKey] == nil {
-                            mergedItem[metadataKey] = historicalSubagentItems[index][metadataKey]
-                        }
-                        historicalSubagentItems[index] = mergedItem
-                    } else {
-                        subagentIndexes[childThreadID] = historicalSubagentItems.count
-                        historicalSubagentItems.append(historicalSubagentItem)
-                    }
-                }
-                if item["type"] as? String == "userMessage" {
-                    latestTurnItems.removeAll()
-                    lastAssistantTurnID = nil
-                    lastAssistantPhase = nil
-                }
-                var latestTurnItem = item
-                latestTurnItem["_playhouseTurnID"] = entry["turnId"]
-                latestTurnItems.append(latestTurnItem)
-                if Self.timelineToolItemTypes.contains(item["type"] as? String ?? ""),
-                   let itemID = item["id"] as? String {
-                    // A repeated item updates the call but keeps the place it first took.
-                    let anchor = timelineToolItemIndexes[itemID].map { timelineToolItems[$0].anchor } ?? messages.last?.id
-                    let record = (item: latestTurnItem, anchor: anchor)
-                    if let index = timelineToolItemIndexes[itemID] {
-                        timelineToolItems[index] = record
-                    } else {
-                        timelineToolItemIndexes[itemID] = timelineToolItems.count
-                        timelineToolItems.append(record)
-                    }
-                    // Text after the call is a message of its own, below the call.
-                    lastAssistantTurnID = nil
-                    lastAssistantPhase = nil
-                }
-                if var message = Self.chatMessage(from: entry) {
-                    message.timelineOrder = historyItemOrder
-                    if message.role == .assistant,
-                       message.asyncQuestions == nil,
-                       let turnID = entry["turnId"] as? String,
-                       turnID == lastAssistantTurnID,
-                       message.phase == lastAssistantPhase,
-                       let lastIndex = messages.indices.last,
-                       messages[lastIndex].role == .assistant,
-                       messages[lastIndex].asyncQuestions == nil {
-                        messages[lastIndex].text += "\n\n" + message.text
-                    } else {
-                        messages.append(message)
-                    }
-                    lastAssistantTurnID = message.role == .assistant ? entry["turnId"] as? String : nil
-                    lastAssistantPhase = message.role == .assistant ? message.phase : nil
-                }
-                historyItemOrder += 1
-            }
+            entries += response["data"] as? [[String: Any]] ?? []
             cursor = response["nextCursor"] as? String
 
             if let cursor, !visitedCursors.insert(cursor).inserted {
                 throw ClientError.protocolFailure("Codex returned a repeated history cursor.")
             }
         } while cursor != nil
+
+        // A private status nudge turn stays out of history while it only reports
+        // status. The nudge tells the agent to keep working when work remains, so a
+        // nudge turn that did work is shown like any other turn, minus its prompt.
+        var privateOutcomeReminderTurnIDs = Set<String>()
+        var workingTurnIDs = Set<String>()
+        for entry in entries {
+            guard let item = entry["item"] as? [String: Any], let turnID = entry["turnId"] as? String else { continue }
+            if item["type"] as? String == "userMessage" {
+                // A message the user steered into a nudge turn shows it, as it does live.
+                if PrivateOutcomeNudgeMarker.matches(Self.chatMessage(from: entry)?.text ?? "") {
+                    privateOutcomeReminderTurnIDs.insert(turnID)
+                } else {
+                    workingTurnIDs.insert(turnID)
+                }
+            } else if ConversationActivity.from(item: item)?.isAgentWork == true {
+                workingTurnIDs.insert(turnID)
+            }
+        }
+
+        for entry in entries {
+            guard let item = entry["item"] as? [String: Any] else { continue }
+            let turnID = entry["turnId"] as? String
+            if let turnID, privateOutcomeReminderTurnIDs.contains(turnID) {
+                if !workingTurnIDs.contains(turnID) {
+                    historyItemOrder += 1
+                    continue
+                }
+                if item["type"] as? String == "userMessage",
+                   PrivateOutcomeNudgeMarker.matches(Self.chatMessage(from: entry)?.text ?? "") {
+                    // The prompt still starts the turn, but is never shown.
+                    latestTurnItems.removeAll()
+                    lastAssistantTurnID = nil
+                    lastAssistantPhase = nil
+                    historyItemOrder += 1
+                    continue
+                }
+            }
+            if item["type"] as? String == "contextCompaction" {
+                compactionHistory.append((item, entry["turnId"] as? String, historyItemOrder))
+                // Preserve the event boundary between same-phase assistant
+                // items so timeline ordering is not collapsed into one bubble.
+                lastAssistantTurnID = nil
+                lastAssistantPhase = nil
+            }
+            if ["mcpToolCall", "dynamicToolCall"].contains(item["type"] as? String ?? ""),
+               let itemID = item["id"] as? String {
+                var historicalItem = item
+                historicalItem["_playhouseTurnID"] = entry["turnId"]
+                if let index = toolItemIndexes[itemID] {
+                    historicalToolItems[index] = historicalItem
+                } else {
+                    toolItemIndexes[itemID] = historicalToolItems.count
+                    historicalToolItems.append(historicalItem)
+                }
+            }
+            var historicalSubagentItem = item
+            historicalSubagentItem["_playhouseTurnID"] = entry["turnId"]
+            if item["type"] as? String == "subAgentActivity",
+               let activity = ConversationActivity.from(item: historicalSubagentItem),
+               let childThreadID = activity.childThreadID {
+                if let index = subagentIndexes[childThreadID] {
+                    var mergedItem = historicalSubagentItem
+                    for metadataKey in ["agentPath", "model", "reasoningEffort"]
+                    where mergedItem[metadataKey] == nil {
+                        mergedItem[metadataKey] = historicalSubagentItems[index][metadataKey]
+                    }
+                    historicalSubagentItems[index] = mergedItem
+                } else {
+                    subagentIndexes[childThreadID] = historicalSubagentItems.count
+                    historicalSubagentItems.append(historicalSubagentItem)
+                }
+            }
+            if item["type"] as? String == "userMessage" {
+                latestTurnItems.removeAll()
+                lastAssistantTurnID = nil
+                lastAssistantPhase = nil
+            }
+            var latestTurnItem = item
+            latestTurnItem["_playhouseTurnID"] = entry["turnId"]
+            latestTurnItems.append(latestTurnItem)
+            if Self.timelineToolItemTypes.contains(item["type"] as? String ?? ""),
+               let itemID = item["id"] as? String {
+                // A repeated item updates the call but keeps the place it first took.
+                let anchor = timelineToolItemIndexes[itemID].map { timelineToolItems[$0].anchor } ?? messages.last?.id
+                let record = (item: latestTurnItem, anchor: anchor)
+                if let index = timelineToolItemIndexes[itemID] {
+                    timelineToolItems[index] = record
+                } else {
+                    timelineToolItemIndexes[itemID] = timelineToolItems.count
+                    timelineToolItems.append(record)
+                }
+                // Text after the call is a message of its own, below the call.
+                lastAssistantTurnID = nil
+                lastAssistantPhase = nil
+            }
+            if var message = Self.chatMessage(from: entry) {
+                message.timelineOrder = historyItemOrder
+                if message.role == .assistant,
+                   message.asyncQuestions == nil,
+                   let turnID = entry["turnId"] as? String,
+                   turnID == lastAssistantTurnID,
+                   message.phase == lastAssistantPhase,
+                   let lastIndex = messages.indices.last,
+                   messages[lastIndex].role == .assistant,
+                   messages[lastIndex].asyncQuestions == nil {
+                    messages[lastIndex].text += "\n\n" + message.text
+                } else {
+                    messages.append(message)
+                }
+                lastAssistantTurnID = message.role == .assistant ? entry["turnId"] as? String : nil
+                lastAssistantPhase = message.role == .assistant ? message.phase : nil
+            }
+            historyItemOrder += 1
+        }
 
         var activityIndexes: [String: Int] = [:]
         var activities: [ConversationActivity] = []
@@ -1564,7 +1590,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             turnID: nil, usage: ConversationTokenUsage(), toolLabels: [],
             liveCall: ConversationLiveCall(
                 agentID: rootID == threadID ? nil : threadID,
-                calls: 1, sentTokens: sent, outputTokens: call.outputTokens, contextTokens: sent
+                calls: 1, sentTokens: sent, outputTokens: call.outputTokens,
+                uncachedInputTokens: call.inputTokens, cacheReadTokens: call.cacheReadTokens, cacheWriteTokens: call.cacheCreationTokens,
+                contextTokens: sent
             )
         ))
     }

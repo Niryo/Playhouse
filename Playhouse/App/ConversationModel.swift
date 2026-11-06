@@ -345,6 +345,9 @@ struct ConversationLiveCall: Sendable, Equatable {
     var calls: Int
     var sentTokens: Int
     var outputTokens: Int
+    var uncachedInputTokens: Int
+    var cacheReadTokens: Int
+    var cacheWriteTokens: Int
     /// The context size of this call, for the main agent's final transcript size.
     var contextTokens: Int
 }
@@ -391,18 +394,24 @@ struct TaskTokenUsageSummary: Codable, Equatable {
             let sentTokens: Int
             let outputTokens: Int
             let finalTranscriptTokens: Int
+            /// Uncached input + cache writes + output; nil when recorded before the cache split.
+            let tokensExcludingCacheReads: Int?
         }
         struct Subagents: Codable, Equatable {
             let count: Int
             let calls: Int
             let sentTokens: Int
             let outputTokens: Int
+            let tokensExcludingCacheReads: Int?
         }
         let available: Bool
         let finalTranscriptTokens: Int
         let totalSentTokens: Int
         let totalCalls: Int
         let totalOutputTokens: Int
+        /// Uncached input + cache writes + output, subagents included; nil when
+        /// any call was recorded before the cache split was stored.
+        let totalTokensExcludingCacheReads: Int?
         let mainAgent: Agent
         let subagents: Subagents
 
@@ -415,12 +424,18 @@ struct TaskTokenUsageSummary: Codable, Equatable {
             totalSentTokens = active.reduce(0) { $0 + $1.totalSentTokens }
             totalCalls = active.reduce(0) { $0 + $1.totalCalls }
             totalOutputTokens = active.reduce(0) { $0 + $1.totalOutputTokens }
-            mainAgent = Agent(calls: main.calls, sentTokens: main.sentTokens, outputTokens: main.outputTokens, finalTranscriptTokens: finalTranscriptTokens)
+            let hasSplit = !active.isEmpty && active.allSatisfy(\.hasCacheSplit)
+            totalTokensExcludingCacheReads = hasSplit ? active.reduce(0) { $0 + $1.totalTokensExcludingCacheReads } : nil
+            mainAgent = Agent(
+                calls: main.calls, sentTokens: main.sentTokens, outputTokens: main.outputTokens, finalTranscriptTokens: finalTranscriptTokens,
+                tokensExcludingCacheReads: hasSplit ? main.tokensExcludingCacheReads : nil
+            )
             subagents = Subagents(
                 count: subs.count,
                 calls: subs.reduce(0) { $0 + $1.calls },
                 sentTokens: subs.reduce(0) { $0 + $1.sentTokens },
-                outputTokens: subs.reduce(0) { $0 + $1.outputTokens }
+                outputTokens: subs.reduce(0) { $0 + $1.outputTokens },
+                tokensExcludingCacheReads: hasSplit ? subs.reduce(0) { $0 + $1.tokensExcludingCacheReads } : nil
             )
         }
     }
@@ -432,6 +447,9 @@ struct TaskTokenUsageSummary: Codable, Equatable {
     let callUsage: CallUsage
     /// Stored rather than computed so the CLI payload carries it too.
     let totalTokens: Int
+    /// Uncached input + cache writes + output. Includes subagents when call
+    /// usage with the cache split exists; otherwise the turn-level buckets.
+    let tokensExcludingCacheReads: Int
 
     var turnCount: Int { turns.count }
 
@@ -442,6 +460,7 @@ struct TaskTokenUsageSummary: Codable, Equatable {
         self.tools = tools
         self.callUsage = callUsage
         totalTokens = usage.totalTokens
+        tokensExcludingCacheReads = callUsage.totalTokensExcludingCacheReads ?? usage.totalTokens - usage.cacheReadTokens
     }
 }
 

@@ -831,11 +831,19 @@ final class PlayhouseUITests: XCTestCase {
             $0["event"] as? String == "workspace.repository.add.succeeded"
                 && $0["taskID"] as? String == createdTaskID
         }.count, 2)
+        // An unsent prompt is saved as the composer's draft, not as a submitted prompt.
         let promptSave = try XCTUnwrap(events.first {
-            $0["event"] as? String == "task.prompt.write.succeeded" && $0["taskID"] as? String == createdTaskID
+            $0["event"] as? String == "task.draft.write.succeeded" && $0["taskID"] as? String == createdTaskID
         })
         XCTAssertEqual(promptSave["status"] as? String, "Backlog")
-        XCTAssertEqual(promptSave["submitted"] as? String, "false")
+        XCTAssertTrue(events.contains {
+            $0["event"] as? String == "task.draft.write.started" && $0["taskID"] as? String == createdTaskID
+                && $0["promptByteCount"] as? String == String(prompt.utf8.count)
+        }, "The draft write should record the prompt's size without its text.")
+        XCTAssertFalse(events.contains {
+            $0["event"] as? String == "task.prompt.write.started" && $0["taskID"] as? String == createdTaskID
+                && $0["submitted"] as? String == "true"
+        }, "Saving an unsent prompt must not submit it.")
         XCTAssertTrue(events.contains {
             $0["event"] as? String == "persistence.read.succeeded"
                 && $0["operation"] as? String == "BoardTaskManager.requireTask"
@@ -1543,8 +1551,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
     }
 
-    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
-    func test_task_done_preserves_worktree_and_branch() throws {
+    // case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
+    func test_task_done_removes_worktree_and_preserves_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture().merging(Self.prCheckCooldownEnvironment) { $1 }
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
@@ -1707,7 +1715,7 @@ final class PlayhouseUITests: XCTestCase {
         let completedHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         XCTAssertTrue((completedHistory["messages"] as? [[String: Any]] ?? []).contains { $0["role"] as? String == "user" && $0["text"] as? String == taskPrompt })
         XCTAssertEqual(try runCLI(["task", "move", taskID, "Done"])["ok"] as? Bool, true)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: path), "Moving a task to Done must preserve its worktree.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path), "Moving a task to Done must remove its managed worktree.")
         try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)")
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead, "Moving a task to Done must not merge into the local target.")
         XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent("target-only.txt"), encoding: .utf8), "Master advanced after this task branch was created.\n")
@@ -1900,7 +1908,7 @@ final class PlayhouseUITests: XCTestCase {
         try "Continue after verified conflict resolution.\n".write(to: continueURL, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ element("send-message-button").exists }, timeout: 15), "The second Codex turn should finish after the verified push.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
-        element("back-to-board-button").click()
+        returnToBoard()
         XCTAssertTrue(resolveButton.exists, "A mergeable PR with a mismatched remote head must retain the conflict action.")
         try runGit(primaryWorktree, "push", remote.path, "HEAD:refs/heads/pr-123")
         XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/pr-123"), resolvedLocalHead)
@@ -2893,7 +2901,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
 
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         let waitingFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: waitingFixture.path))
@@ -3076,6 +3084,40 @@ final class PlayhouseUITests: XCTestCase {
             boardViewport.scroll(byDeltaX: 0, deltaY: -300)
         }
         XCTAssertTrue(waitUntil({ lowestTask.exists && lowestTask.isHittable }, timeout: 10), "Vertical board scrolling should make lower backlog tasks reachable.")
+
+        // The columns are narrower than the window, so the board centers them. A sideways
+        // scroll nudge followed by a content-height change used to leave hit testing flush
+        // left while the columns still drew centered, so clicks missed every card and button
+        // until the window was resized.
+        // The newest card lands at the top, so start there; any later vertical scroll would
+        // re-sync the stale geometry and hide the regression.
+        let newestBacklogTask = app.buttons["Backlog scroll 12"]
+        for _ in 0..<20 where !newestBacklogTask.isHittable {
+            boardViewport.scroll(byDeltaX: 0, deltaY: 300)
+        }
+        XCTAssertTrue(waitUntil({ newestBacklogTask.isHittable }, timeout: 10), "Scrolling up should return to the top of the backlog.")
+        let mainWindow = app.windows["main"]
+        XCTAssertTrue(mainWindow.exists)
+        let centeredBacklogMinX = backlogColumn.frame.minX
+        XCTAssertGreaterThan(centeredBacklogMinX - mainWindow.frame.minX, 40, "The window is wider than the columns, so they should sit centered: backlog=\(backlogColumn.frame), window=\(mainWindow.frame).")
+        boardViewport.scroll(byDeltaX: -120, deltaY: 0)
+        boardViewport.scroll(byDeltaX: 120, deltaY: 0)
+        try createTaskFixture(title: "Backlog after nudge", roots: [fixture.primary.path])
+        let nudgedTask = app.buttons["Backlog after nudge"]
+        XCTAssertTrue(waitUntil({ nudgedTask.exists && nudgedTask.isHittable }, timeout: 10), "The new backlog card should appear at the top of the column.")
+        XCTAssertTrue(waitUntil({ abs(backlogColumn.frame.minX - centeredBacklogMinX) <= 4 }, timeout: 3), "A sideways nudge and a new card should not move the board's hit-test layout away from where it draws: backlog=\(backlogColumn.frame), expected minX=\(centeredBacklogMinX).")
+        attachScreenshot(named: "Centered board after a sideways nudge and a new card: columns stay where they draw")
+        // Click near the card's drawn trailing edge, derived from the centered layout
+        // rather than its current accessibility frame, so a stale hit-test layout
+        // (shifted toward the leading edge) would miss the card.
+        let cardTrailingInset = nudgedTask.frame.maxX - backlogColumn.frame.minX
+        let drawnCardPoint = CGPoint(x: centeredBacklogMinX + cardTrailingInset - 12, y: nudgedTask.frame.midY)
+        mainWindow.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: drawnCardPoint.x - mainWindow.frame.minX, dy: drawnCardPoint.y - mainWindow.frame.minY))
+            .click()
+        XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10), "Clicking the card where it draws should open the task.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
     }
 
     // case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response, so a retry after the fix moves it to Review.
@@ -3237,7 +3279,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private nudge prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A private nudge that only reports status keeps its prompt, reply, and bookkeeping activities out of Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -4368,25 +4410,26 @@ final class PlayhouseUITests: XCTestCase {
         badge.click()
         element("conversation-repository-branch-from-edit").click()
         let branchFromField = element("conversation-repository-branch-from")
+        let branchFromSave = element("conversation-repository-branch-from-save")
+        XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
         replaceText(branchFromField, with: remoteBranch)
         attachScreenshot(named: "Branch-from names a branch that exists only on the remote")
-        element("save-conversation-repository-button").click()
+        branchFromSave.click()
         XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "branchFrom", expected: "origin/\(remoteBranch)"))
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", trackingRef).trimmingCharacters(in: .whitespacesAndNewlines), remoteCommit)
         let localBranches = try runGitOutput(fixture.primary, "for-each-ref", "--format=%(refname)", "refs/heads/\(remoteBranch)")
         XCTAssertEqual(localBranches.trimmingCharacters(in: .whitespacesAndNewlines), "", "Fetching must not create a local branch.")
-        XCTAssertTrue(waitForDisappearance(element("save-conversation-repository-button")), "A successful repository save should close its editor.")
+        XCTAssertTrue(waitForDisappearance(branchFromField), "A successful save should leave edit mode.")
 
-        badge.click()
-        app.activate()
         let branchFromValue = element("conversation-repository-branch-from-value")
         XCTAssertTrue(branchFromValue.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(accessibleLabelOrValue(of: branchFromValue), "origin/\(remoteBranch)", app.debugDescription)
         attachScreenshot(named: "Remote branch-from is fetched and saved as its remote-tracking branch")
 
         element("conversation-repository-branch-from-edit").click()
+        XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
         replaceText(branchFromField, with: "missing-everywhere/branch")
-        element("save-conversation-repository-button").click()
+        branchFromSave.click()
         let error = element("codex-chat-error")
         XCTAssertTrue(error.waitForExistence(timeout: 10), "A branch-from missing locally and on the remote should be shown in the conversation.")
         XCTAssertTrue(error.label.contains("missing-everywhere/branch"), error.label)
@@ -4396,10 +4439,11 @@ final class PlayhouseUITests: XCTestCase {
             "origin/\(remoteBranch)",
             "Rejecting a missing branch-from must preserve the saved value."
         )
+        XCTAssertTrue(branchFromField.exists, "A rejected value should stay open for correction.")
 
         try runGit(fixture.primary, "remote", "set-url", "origin", runDirectory.appendingPathComponent("unreachable-origin.git").path)
         replaceText(branchFromField, with: "unfetched/branch")
-        element("save-conversation-repository-button").click()
+        branchFromSave.click()
         XCTAssertTrue(
             waitUntil({ error.exists && error.label.contains("couldn't fetch 'unfetched/branch' from origin") }, timeout: 10),
             "A fetch failure should be reported as such, not as a missing branch: \(error.label)"
@@ -4412,7 +4456,7 @@ final class PlayhouseUITests: XCTestCase {
             "A failed fetch must preserve the saved value."
         )
         app.typeKey(.escape, modifierFlags: [])
-        XCTAssertTrue(waitForDisappearance(element("save-conversation-repository-button")), "Dismissing the editor should close it before the turn starts.")
+        XCTAssertTrue(waitForDisappearance(branchFromValue), "Dismissing the editor should close it before the turn starts.")
 
         try completeCurrentTaskWithFixtureAnswers(taskTitle: title)
         let started = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
@@ -8278,7 +8322,7 @@ final class PlayhouseUITests: XCTestCase {
                        URL(fileURLWithPath: secondWorktree).resolvingSymlinksInPath().path)
     }
 
-    // case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history.
+    // case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message in its conversation, where the open and reopened task show it, with an empty composer and no unsent draft, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history.
     func test_conversation_isolates_failing_claude_turn_from_parallel_send() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-parallel-failure")
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
@@ -8336,6 +8380,12 @@ final class PlayhouseUITests: XCTestCase {
             $0["event"] as? String == "claude.process.exited" && $0["exitStatus"] as? String == "1"
         }.compactMap { $0["activeThreadID"] as? String })
         XCTAssertEqual(failureThreadIDs, [firstSessionID], "Only the failing conversation's Claude process should exit with a failure.")
+        // The failed send keeps its prompt in the conversation, so it isn't also returned to the composer.
+        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "The failing turn should be reported in its conversation.")
+        XCTAssertTrue(transcriptMessage(firstPrompt).exists, "The failing turn's prompt stays in its conversation.")
+        XCTAssertEqual(firstComposer.value as? String, "", "The failing turn's prompt must not return to the composer.")
+        XCTAssertEqual(try taskRecord(id: firstID)?["hasUnsentDraft"] as? Bool, false, "The failing turn's prompt must not be saved as an unsent draft.")
+        attachScreenshot(named: "Failed Claude turn keeps its prompt in the conversation with an empty composer")
 
         let firstHistory = try XCTUnwrap(try runCLI(["conversation", "history", firstID])["result"] as? [String: Any])
         let firstMessages = firstHistory["messages"] as? [[String: Any]] ?? []
@@ -8346,7 +8396,11 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(secondMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == secondPrompt })
         XCTAssertTrue(secondMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "OK." })
 
-        element("back-to-board-button").click()
+        returnToBoard()
+        openTask(named: "Failing Claude conversation")
+        XCTAssertTrue(transcriptMessage(firstPrompt).waitForExistence(timeout: 15), "Reopening keeps the failing prompt in the conversation.")
+        XCTAssertEqual(element("message-composer").value as? String, "", "Reopening must not restore the failing prompt to the composer.")
+        returnToBoard()
         openTask(named: "Unaffected Claude conversation")
         XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15), "The reopened UI should show the parallel answer from persisted history.")
     }
@@ -11985,6 +12039,202 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
+    // case-contract: test_claude_nudged_turn_work_stays_in_conversation | A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt and every private placeholder stay hidden.
+    func test_claude_nudged_turn_work_stays_in_conversation() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-nudged-work")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8
+        )
+        claudeFixtureExecutable = executable.path
+        let claudeEnvironment = ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": executable.path]
+        let staleAnswer = "The task review is approved. Only the UI review is still pending."
+        let finalReport = "All checks passed and the screenshot is attached. The work is complete."
+        let nudgedCommentary = ["Every review is approved. Running the final check.", "Starting the final suite in the background."]
+        let steerReady = URL(fileURLWithPath: executable.path + ".nudged-steer-ready")
+        try "Hold the nudged turn for a steer.\n".write(to: URL(fileURLWithPath: executable.path + ".nudged-steer-pause"), atomically: true, encoding: .utf8)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude nudged work", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Claude nudged work")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Wait for the pending UI review.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: steerReady.path) }, timeout: 40),
+                      "The private nudge turn should start and wait for a steer.")
+        let steerResult = try runCLI(["conversation", "steer", taskID, "--message", "Also double check the docs."], extraEnvironment: claudeEnvironment)
+        XCTAssertEqual((steerResult["result"] as? [String: Any])?["accepted"] as? Bool, true, "A user can steer the running nudge turn.")
+
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 40),
+                      "The completed outcome reported inside the nudged turn should move the task to Review.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(finalReport) }, timeout: 15),
+                      "The nudged turn's final report should appear in the visible transcript.")
+        XCTAssertTrue(transcriptContains(staleAnswer), "The earlier turn's answer should stay in the transcript.")
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID], extraEnvironment: claudeEnvironment)["result"] as? [String: Any])
+        let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
+        let assistant = messages.filter { $0["role"] as? String == "assistant" }.map { [($0["phase"] as? String) ?? "", ($0["text"] as? String) ?? ""] }
+        XCTAssertTrue(assistant.contains(["subagent_report", "UI review approved."]),
+                      "The review report that arrived right after the answer should be kept.")
+        XCTAssertTrue(messages.contains { $0["role"] as? String == "user" && $0["text"] as? String == "Also double check the docs." },
+                      "The steered message that joined the nudge turn should stay in the conversation.")
+        XCTAssertEqual(Array(assistant.filter { $0 != ["subagent_report", "UI review approved."] }.suffix(7)), [
+            ["final_answer", staleAnswer],
+            ["commentary", nudgedCommentary[0]],
+            ["commentary", "STEERED NUDGE: Also double check the docs."],
+            ["commentary", nudgedCommentary[1]],
+            ["subagent_report", "Final suite passed: all cases green."],
+            ["agent_image", "Nudged turn screenshot"],
+            ["final_answer", finalReport],
+        ], "The nudged turn's work should be recorded in order after the stale answer.")
+        XCTAssertEqual(messages.last?["text"] as? String, finalReport, "The final report is the latest message.")
+        let imageID = try XCTUnwrap(messages.first { $0["phase"] as? String == "agent_image" }?["id"] as? String)
+        XCTAssertTrue(element("chat-image-\(imageID)-0").waitForExistence(timeout: 10), "The screenshot the nudged turn presented should render.")
+        let timeline = (history["timelineActivities"] as? [[String: Any]] ?? []).filter { $0["id"] as? String == "toolu_nudged_check" }
+        XCTAssertEqual(timeline.first?["input"] as? String, "echo NUDGED CHECK PASSED", "The nudged turn's shell call should be a timeline row.")
+        for hidden in ["ended without reporting a task outcome", "Playhouse internal outcome nudge", "Playhouse private outcome"] {
+            XCTAssertFalse(transcriptContains(hidden), "The private nudge prompt must stay out of the transcript: \(hidden)")
+        }
+        attachScreenshot(named: "Claude nudged turn work follows the stale answer")
+        XCTAssertTrue(expandLatestWorkedFor(), "The nudged turn's work should collapse into an expandable Worked for summary.")
+        XCTAssertTrue(element("codex-activity-row-toolu_nudged_check").waitForExistence(timeout: 10),
+                      "The nudged turn's shell call should be listed in its Worked for details.")
+        for text in nudgedCommentary {
+            XCTAssertTrue(waitUntil({ self.transcriptContains(text) }, timeout: 10), "Worked for should list the nudged turn's commentary: \(text)")
+        }
+        XCTAssertTrue(element("agent-report-row-toolu_nudged_suite").waitForExistence(timeout: 10),
+                      "The background suite's report from the woken turn should render as its agent row.")
+        attachScreenshot(named: "Claude nudged turn Worked for shows its call and agent report")
+        let page = try XCTUnwrap(try runCLI(["conversation", "history", taskID, "--limit", "3"], extraEnvironment: claudeEnvironment)["result"] as? [String: Any])
+        XCTAssertEqual((page["messages"] as? [[String: Any]] ?? []).map { $0["text"] as? String ?? "" },
+                       ["Final suite passed: all cases green.", "Nudged turn screenshot", finalReport],
+                       "A paged read should end on the nudged turn's work.")
+
+        element("back-to-board-button").click()
+        assertTaskVisible("Claude nudged work", inColumn: "Review")
+        attachScreenshot(named: "Claude nudged task in Review")
+        openTask(named: "Claude nudged work")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(finalReport) }, timeout: 15), "Reopening keeps the nudged turn's final report.")
+        XCTAssertTrue(element("chat-image-\(imageID)-0").waitForExistence(timeout: 10), "Reopening keeps the nudged turn's screenshot.")
+        XCTAssertTrue(expandLatestWorkedFor(), "Reopening keeps the nudged turn's Worked for summary.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(nudgedCommentary[0]) }, timeout: 10), "Reopening keeps the nudged turn's commentary.")
+
+        try sendLaterTurnAndAssertNudgedCallInline(taskID: taskID, callID: "toolu_nudged_check", visibleTexts: [finalReport] + nudgedCommentary)
+        XCTAssertTrue(element("chat-image-\(imageID)-0").exists, "A later turn keeps the nudged turn's screenshot.")
+        attachScreenshot(named: "Claude nudged turn work after a later turn")
+    }
+
+    // case-contract: test_codex_nudged_turn_work_stays_in_conversation | A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. The nudge prompt and every private placeholder stay out of history, including after a later ordinary turn.
+    func test_codex_nudged_turn_work_stays_in_conversation() throws {
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-nudged-work-success")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
+        codexFixtureExecutable = executable.path
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        let codexEnvironment = ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path]
+        let steerReady = URL(fileURLWithPath: executable.path + ".nudged-steer-ready")
+        try "Hold the nudged turn for a steer.\n".write(to: URL(fileURLWithPath: executable.path + ".nudged-steer-pause"), atomically: true, encoding: .utf8)
+        let commentary = "Codex is finishing the remaining check after the nudge."
+        let finalReport = "Codex finished the remaining check after the nudge. Everything is done."
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Codex nudged work", roots: [fixture.primary.path])
+        let nudgedTaskID = try taskID(named: "Codex nudged work")
+        openTask(named: "Codex nudged work")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Start the work.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: steerReady.path) }, timeout: 40),
+                      "The private nudge turn should start and wait for a steer.")
+        let steerResult = try runCLI(["conversation", "steer", nudgedTaskID, "--message", "Also double check the docs."], extraEnvironment: codexEnvironment)
+        XCTAssertEqual((steerResult["result"] as? [String: Any])?["accepted"] as? Bool, true, "A user can steer the running nudge turn.")
+
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: nudgedTaskID)?["status"] as? String) == "Review" }, timeout: 40),
+                      "The completed outcome reported inside the nudged turn should move the task to Review.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(finalReport) }, timeout: 15),
+                      "The nudged turn's final answer should appear in the visible transcript.")
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", nudgedTaskID], extraEnvironment: codexEnvironment)["result"] as? [String: Any])
+        let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
+        let assistant = messages.filter { $0["role"] as? String == "assistant" }.map { [($0["phase"] as? String) ?? "", ($0["text"] as? String) ?? ""] }
+        XCTAssertTrue(messages.contains { $0["role"] as? String == "user" && $0["text"] as? String == "Also double check the docs." },
+                      "The steered message that joined the nudge turn should stay in the conversation.")
+        XCTAssertGreaterThan(assistant.count, 2, "The earlier answer should stay ahead of the nudged work.")
+        XCTAssertEqual(Array(assistant[1...2]), [["commentary", commentary], ["final_answer", finalReport]],
+                       "The nudged work should follow the earlier answer in order.")
+        XCTAssertEqual(messages.last?["text"] as? String, finalReport, "The nudged turn's final answer is the latest message.")
+        let timeline = (history["timelineActivities"] as? [[String: Any]] ?? []).filter { $0["id"] as? String == "item_nudged_check_1" }
+        XCTAssertEqual(timeline.first?["input"] as? String, "echo NUDGED CHECK PASSED", "The nudged shell command should be a timeline row.")
+        for hidden in ["ended without reporting a task outcome", "Playhouse internal outcome nudge", "Playhouse private outcome"] {
+            XCTAssertFalse(transcriptContains(hidden), "The private nudge prompt must stay out of the transcript: \(hidden)")
+        }
+        attachScreenshot(named: "Codex nudged turn work follows the earlier answer")
+        XCTAssertTrue(expandLatestWorkedFor(), "The nudged turn's work should collapse into an expandable Worked for summary.")
+        XCTAssertTrue(element("codex-activity-row-item_nudged_check_1").waitForExistence(timeout: 10),
+                      "The nudged turn's shell command should be listed in its Worked for details.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(commentary) }, timeout: 10), "Worked for should list the nudged turn's commentary.")
+        attachScreenshot(named: "Codex nudged turn Worked for shows its command")
+
+        element("back-to-board-button").click()
+        assertTaskVisible("Codex nudged work", inColumn: "Review")
+        attachScreenshot(named: "Codex nudged task in Review")
+        openTask(named: "Codex nudged work")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(finalReport) }, timeout: 15), "Reopening keeps the nudged turn's final answer.")
+        XCTAssertTrue(expandLatestWorkedFor(), "Reopening keeps the nudged turn's Worked for summary.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains(commentary) }, timeout: 10), "Reopening keeps the nudged turn's commentary.")
+
+        try sendLaterTurnAndAssertNudgedCallInline(taskID: nudgedTaskID, callID: "item_nudged_check_1", visibleTexts: [finalReport, commentary])
+        attachScreenshot(named: "Codex nudged turn work after a later turn")
+    }
+
+    /// Expands the latest turn's Worked for summary when it is collapsed.
+    private func expandLatestWorkedFor() -> Bool {
+        let disclosure = element("codex-activity-disclosure")
+        guard waitUntil({ disclosure.exists && disclosure.label.hasPrefix("Worked for") }, timeout: 15) else { return false }
+        if (disclosure.value as? String ?? "").hasPrefix("Collapsed") { disclosure.click() }
+        return element("codex-activity-details").waitForExistence(timeout: 5)
+    }
+
+    /// Sends an ordinary turn from the composer, then checks that the earlier nudged
+    /// turn's work stays visible, its call now renders inline, and no private nudge text shows.
+    private func sendLaterTurnAndAssertNudgedCallInline(taskID: String, callID: String, visibleTexts: [String]) throws {
+        let message = "Thanks, that's all."
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText(message)
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            let history = (try? self.runCLI(["conversation", "history", taskID]))?["result"] as? [String: Any]
+            let messages = history?["messages"] as? [[String: Any]] ?? []
+            guard let user = messages.lastIndex(where: { $0["role"] as? String == "user" && $0["text"] as? String == message }) else { return false }
+            return messages[(user + 1)...].contains { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+                && self.noTurnIsRunning()
+        }, timeout: 60), "The later ordinary turn should finish with an answer.")
+        XCTAssertTrue(revealWholeTranscript(), "The earlier nudged turn should load as the reader scrolls up.")
+        let input = element("conversation-tool-call-input-\(callID)")
+        XCTAssertTrue(input.waitForExistence(timeout: 10), "After a later turn, the nudged turn's call should render inline.")
+        XCTAssertTrue([input.label, input.value as? String ?? ""].joined(separator: " ").contains("echo NUDGED CHECK PASSED"),
+                      "The inline call should show the nudged turn's exact command.")
+        for text in visibleTexts {
+            XCTAssertTrue(transcriptContains(text), "A later turn keeps the nudged turn's message: \(text)")
+        }
+        for hidden in ["ended without reporting a task outcome", "Playhouse internal outcome nudge", "Playhouse private outcome"] {
+            XCTAssertFalse(transcriptContains(hidden), "A later turn must keep the private nudge prompt hidden: \(hidden)")
+        }
+        let later = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let texts = (later["messages"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+        XCTAssertFalse(texts.contains { $0.contains("ended without reporting a task outcome") || $0.contains("private outcome") },
+                       "History after a later turn must keep the private nudge prompt hidden.")
+        for text in visibleTexts {
+            XCTAssertTrue(texts.contains(text), "History after a later turn keeps: \(text)")
+        }
+    }
+
     // case-contract: test_claude_steers_turn_parked_on_background_work | A Claude turn whose result is already out while a background shell keeps it open is still steerable: a queued follow-up's Steer reaches the running turn instead of silently staying queued, leaves the queue, appears in the conversation, and the turn waits for Claude's answer to it before the woken parent turn ends the send.
     func test_claude_steers_turn_parked_on_background_work() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-parked-steer")
@@ -12235,7 +12485,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Answer: Green")).firstMatch.exists)
     }
 
-    // case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; Playhouse restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream retains safe assistant text while redacting secret echoes; persisted history hides secret recovery responses, provider activities, and file-change diffs. A later non-sensitive Codex turn keeps its own diff and safe response visible in refreshed CLI/UI history while the earlier secret stays absent. In one task, a no-secret recovery response remains visible after a later secret recovery while the secret response is hidden. Secret answers with surrounding whitespace are still redacted when Codex normalizes its echo; the visible UI shows the safe response immediately and after app restart.
+    // case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; Playhouse restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream retains safe assistant text while redacting secret echoes; persisted history hides secret recovery responses, provider activities, and file-change diffs. A later non-sensitive Codex turn keeps its own diff and safe response visible in refreshed CLI/UI history while the earlier secret stays absent. In one task, a no-secret recovery response remains visible after a later secret recovery while the secret response is hidden. Secret answers with surrounding whitespace are still redacted when Codex normalizes its echo; the visible UI shows the safe response immediately and after app restart. The first prompt, delivered before the provider exited although its send reported failure, is in history, never returns to the composer, and is not saved as an unsent draft.
     func test_codex_pending_question_recovers_after_provider_process_restarts() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-restart-question")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -12256,12 +12506,25 @@ final class PlayhouseUITests: XCTestCase {
         element("send-message-button").click()
         XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        // The fixture exits right after asking, so the send reports failure; wait until the app
+        // has handled it, or the checks below could pass before the handler runs.
+        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "The provider exit should be reported in the conversation.")
+        XCTAssertTrue(transcriptMessage("Ask a restart-safe structured question.").exists,
+            "The prompt Codex received stays in the conversation after its send reports failure.")
+        XCTAssertEqual(element("message-composer").value as? String, "",
+            "The prompt Codex received must not return to the composer.")
+        attachScreenshot(named: "Delivered prompt stays in the conversation while the composer is empty")
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Restart-safe Codex question")
         XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
+        XCTAssertEqual(try taskRecord(id: taskID)?["hasUnsentDraft"] as? Bool, false,
+            "A prompt the provider received before it exited must not be saved as an unsent draft.")
+        XCTAssertTrue(transcriptMessage("Ask a restart-safe structured question.").exists,
+            "After restart the delivered prompt is still in the conversation.")
+        attachScreenshot(named: "After restart the pending question shows with the delivered prompt")
         XCTAssertFalse(element("conversation-provider-menu").isEnabled, "A saved structured question must block provider switching after restart.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         element("back-to-board-button").click()
@@ -12308,6 +12571,8 @@ final class PlayhouseUITests: XCTestCase {
             "The reloaded section must still be open, so the redaction check above was not vacuous.")
 
         let followUpComposer = element("message-composer")
+        XCTAssertEqual(followUpComposer.value as? String, "",
+            "The delivered first prompt must not come back to the composer after restarts.")
         followUpComposer.click()
         followUpComposer.typeText("Follow up after private recovery.")
         element("send-message-button").click()
@@ -13556,7 +13821,7 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
-    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes.
+    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes. While a merge is still open in the task's worktree, its files are held back and the sidebar shows a 'Merge in progress' notice naming the repository instead of the files the merge staged; the CLI reports the repository under mergingRepositories with empty sections, and aborting the merge lists the task's changes again.
     func test_external_git_edits_and_commit_refresh_workspace_changes() throws {
         let repository = runDirectory.appendingPathComponent("external-git", isDirectory: true)
         try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
@@ -13653,6 +13918,73 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("workspace-change-unviewed-local-ahead.txt").exists)
         XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").exists)
         attachScreenshot(named: "Merged upstream commits are excluded when the local base branch is stale")
+
+        // An open merge stages everything the merged branch brings in, so the repository's files are
+        // held back until the merge is concluded rather than listed as task changes.
+        let taskRepository = try XCTUnwrap(aheadBaseEntries.first?["repository"] as? String)
+        try "Merged with the merge still open.\n".write(to: repository.appendingPathComponent("merging-in.txt"), atomically: true, encoding: .utf8)
+        try runGit(repository, "add", "merging-in.txt")
+        try runGit(repository, "commit", "-m", "Base commit merged without committing")
+        try runGit(worktree, "merge", "--no-commit", "--no-ff", "main")
+        let mergeNotice = element("workspace-changes-merge-in-progress")
+        XCTAssertTrue(mergeNotice.waitForExistence(timeout: 10))
+        let mergingRepositoryLabel = URL(fileURLWithPath: taskRepository).pathComponents.suffix(2).joined(separator: "/")
+        XCTAssertTrue(mergeNotice.label.contains(mergingRepositoryLabel), "The merge notice should name the merging repository: \(mergeNotice.label)")
+        XCTAssertFalse(element("workspace-change-unviewed-tracked.txt").exists)
+        XCTAssertFalse(element("workspace-change-unviewed-merging-in.txt").exists)
+        let merging = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((merging?["unviewed"] as? [[String: Any]])?.count, 0)
+        XCTAssertEqual((merging?["viewed"] as? [[String: Any]])?.count, 0)
+        XCTAssertEqual(merging?["mergingRepositories"] as? [String], [taskRepository])
+        attachScreenshot(named: "An open merge hides the files it staged")
+
+        try runGit(worktree, "merge", "--abort")
+        XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({ !mergeNotice.exists }, timeout: 10))
+        let aborted = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual(aborted?["mergingRepositories"] as? [String], [])
+        XCTAssertEqual(Set((aborted?["unviewed"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }), ["post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"])
+    }
+
+    // case-contract: test_task_workspace_changes_over_limit_show_notice | A task whose worktree holds more than 1000 changed files still reports every one of them through fresh CLI connections, while the open task's Changes sidebar shows a 'Too many changes to list' notice naming the count instead of rendering the file list, so the window stays responsive. Bringing the count back under the limit lists the files again.
+    func test_task_workspace_changes_over_limit_show_notice() throws {
+        let repository = runDirectory.appendingPathComponent("many-changes", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try "Baseline.\n".write(to: repository.appendingPathComponent("tracked.txt"), atomically: true, encoding: .utf8)
+        try runGit(repository, "init", "--initial-branch=main")
+        try runGit(repository, "config", "user.name", "Playhouse UI Test")
+        try runGit(repository, "config", "user.email", "playhouse-ui-test@example.invalid")
+        try runGit(repository, "add", "tracked.txt")
+        try runGit(repository, "commit", "-m", "Baseline")
+
+        let created = try runCLI(["task", "create", "--title", "Many changes", "--prompt", "Fixture task description."])
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        let added = try runCLI(["task", "repository", "add", taskID, "--repo", repository.path])
+        let record = try XCTUnwrap(((added["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+        let generated = worktree.appendingPathComponent("generated", isDirectory: true)
+        try FileManager.default.createDirectory(at: generated, withIntermediateDirectories: true)
+        for index in 0..<1001 {
+            try "Generated \(index).\n".write(to: generated.appendingPathComponent(String(format: "file-%04d.txt", index)), atomically: true, encoding: .utf8)
+        }
+
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Many changes")
+        let notice = element("workspace-changes-too-many")
+        XCTAssertTrue(notice.waitForExistence(timeout: 15))
+        XCTAssertTrue(notice.label.contains("1001 changed files"), "The notice should name the count: \(notice.label)")
+        XCTAssertFalse(element("workspace-changes-list").exists, "The file list must not render over the limit.")
+        let inventory = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((inventory?["unviewed"] as? [[String: Any]])?.count, 1001, "The limit only affects the sidebar; the CLI still reports every file.")
+        XCTAssertEqual((inventory?["viewed"] as? [[String: Any]])?.count, 0)
+        attachScreenshot(named: "Over 1000 changed files shows a notice instead of the list")
+
+        try FileManager.default.removeItem(at: generated.appendingPathComponent("file-1000.txt"))
+        XCTAssertTrue(element("workspace-changes-list").waitForExistence(timeout: 15))
+        XCTAssertTrue(waitUntil({ !notice.exists }, timeout: 10))
+        let underLimit = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((underLimit?["unviewed"] as? [[String: Any]])?.count, 1000)
+        attachScreenshot(named: "At the limit the files are listed again")
     }
 
     // case-contract: test_task_terminal_opens_shell_in_task_worktree | Each task's sidebar ends in a command row whose buttons sit at its right edge; it holds a terminal button. The terminal only ever opens in the task's created repository worktree, never in its source repository or a context folder, and never creates a worktree itself: while the task's worktree is still pending, or the task has no repository, the button is disabled and the CLI reports terminal_unavailable without creating the worktree, and the button enables in the open conversation once the worktree is created. The CLI reports how the terminal starts: the account's executable login shell with -l in that worktree, with TERM=xterm-256color and PLAYHOUSE_TASK_ID set, and the same answer on a fresh CLI/XPC connection; running that shell in that folder prints the worktree path and the task ID. Clicking the button slides a terminal panel in from the window's right edge, floating over the conversation's right side without moving or resizing the conversation, whose shell runs in the task's worktree with the task ID in its environment and which uses macOS Terminal's Clear Dark ANSI palette (such as its blue, distinct from the emulator's own default) on a solid black background, switching to the Clear Light profile's white background and blue when the app's appearance turns light and back when it returns to dark; hiding the panel keeps the same shell, so reopening it reaches the same process. Dragging the panel's left border resizes it against the right edge, between a 320-point minimum and leaving 260 points of conversation uncovered, without resizing the conversation, and reopening the panel keeps the dragged width. Typing exit shows that the shell exited, and Restart starts a new shell, with a different process, in the same worktree. A task whose worktree no longer exists reports terminal_unavailable from the CLI, and the panel shows that error with a Try Again action that opens the shell once the worktree is back; an unknown task ID and the standalone chat's ID are not_found, and the standalone chat offers no terminal button.
@@ -13901,7 +14233,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(toggle.exists, "The standalone chat has no task sidebar, so no terminal button.")
     }
 
-    // case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and both the Token Stats context-menu item and a click on the counter itself, a button that highlights on hover, open a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
+    // case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and both the Token Stats context-menu item and a click on the counter itself, a button that highlights on hover, open a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown. Excluding cache reads (uncached input + cache write + output, subagent included) is 855 per turn, doubling after a second turn, and also reaches the live stream when the session files cannot be read; an empty task reports it unavailable. A task saved before the cache split existed (call usage without the split, plus turn-level buckets) still loads, reports its call counts and total sent, omits the per-call excluding-cache figures, and falls back to the turn buckets minus cache reads (170 for 100 input, 50 output, 400 cache read and 20 cache write); its modal hides the Excluding cache reads headline. The modal also labels 'Excluding cache reads (incl. subagents)' with its main-agent and subagent split.
     func test_task_token_usage_records_claude_turn_breakdown() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-usage")
         launchApp(defaultParent: fixture.parent.path)
@@ -13913,6 +14245,10 @@ final class PlayhouseUITests: XCTestCase {
         let counter = element("task-token-usage-counter-\(taskID)")
         XCTAssertFalse(counter.exists, "A task with no recorded tokens should hide its card counter.")
         attachScreenshot(named: "Task card hides its counter before any tokens are recorded")
+        let emptySummary = try XCTUnwrap(try runCLI(["task", "token-usage", taskID])["result"] as? [String: Any])
+        XCTAssertEqual((emptySummary["callUsage"] as? [String: Any])?["available"] as? Bool, false)
+        XCTAssertNil((emptySummary["callUsage"] as? [String: Any])?["totalTokensExcludingCacheReads"])
+        XCTAssertEqual(emptySummary["tokensExcludingCacheReads"] as? Int, 0)
 
         card.rightClick()
         element("token-stats-task-menu-item").click()
@@ -13958,6 +14294,9 @@ final class PlayhouseUITests: XCTestCase {
         assertText("token-stats-total", equals: "3,200")
         assertText("token-stats-final-transcript", equals: "650")
         assertText("token-stats-total-sent", equals: "3,680")
+        // Per turn, uncached input + cache write + output: 360 main + 495 subagent.
+        assertText("token-stats-excluding-cache", equals: "1,710")
+        assertText("token-stats-excluding-cache-split", equals: "Excluding cache reads: 720 main agent · 990 subagents")
         assertText("token-stats-total-calls", equals: "8 model calls · 4 main, 4 across 2 subagents")
         assertText("token-stats-output", equals: "Output 170")
         XCTAssertTrue(element("token-stats-tool-Bash").exists, "The rollup should name the tool the turns ran.")
@@ -13975,11 +14314,51 @@ final class PlayhouseUITests: XCTestCase {
         let calls = try XCTUnwrap(summary["callUsage"] as? [String: Any])
         XCTAssertEqual(calls["totalCalls"] as? Int, 8)
         XCTAssertEqual(calls["totalSentTokens"] as? Int, 3_680)
+        XCTAssertEqual(calls["totalTokensExcludingCacheReads"] as? Int, 1_710)
+        XCTAssertEqual(summary["tokensExcludingCacheReads"] as? Int, 1_710)
+
+        // A task saved before the cache split existed: call usage without the split plus turn buckets.
+        let legacyTitle = "Legacy token usage task"
+        let legacyID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", legacyTitle, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        let legacySnapshots = #"{"claude:legacy":{"provider":"claude","updatedAt":800000000,"main":{"calls":2,"sentTokens":1200,"outputTokens":60,"lastContextTokens":650},"subagents":{"old":{"calls":1,"sentTokens":300,"outputTokens":10,"lastContextTokens":300}}}}"#
+        // The app holds its container open, so close it before seeding the store.
+        app.terminate()
+        XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its SwiftData container before seeding the pre-split task.")
+        let seed = Process()
+        seed.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        seed.arguments = [
+            dataDirectory.appendingPathComponent("Playhouse-v2.store").path,
+            "UPDATE ZBOARDTASK SET ZCALLUSAGESNAPSHOTSDATA = CAST('\(legacySnapshots)' AS BLOB), ZTOTALINPUTTOKENS = 100, ZTOTALOUTPUTTOKENS = 50, ZTOTALCACHEREADTOKENS = 400, ZTOTALCACHECREATIONTOKENS = 20 WHERE ZTITLE = '\(legacyTitle)'",
+        ]
+        try seed.run()
+        seed.waitUntilExit()
+        XCTAssertEqual(seed.terminationStatus, 0, "Seeding the pre-split task should succeed.")
+        // A fresh bridge daemon (its own service name, started by the relaunched app) reads the seeded row instead of a cached task.
+        let freshDaemon = ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).legacy-\(UUID().uuidString.prefix(8))"]
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: freshDaemon)
+        let legacySummary = try XCTUnwrap(try runCLI(
+            ["task", "token-usage", legacyID], extraEnvironment: freshDaemon
+        )["result"] as? [String: Any])
+        let legacyCalls = try XCTUnwrap(legacySummary["callUsage"] as? [String: Any])
+        XCTAssertEqual(legacyCalls["available"] as? Bool, true)
+        XCTAssertEqual(legacyCalls["totalSentTokens"] as? Int, 1_500)
+        XCTAssertNil(legacyCalls["totalTokensExcludingCacheReads"], "Without the split there is no per-call figure.")
+        XCTAssertEqual(legacySummary["tokensExcludingCacheReads"] as? Int, 170, "The fallback is the turn buckets minus cache reads.")
+        let legacyCard = app.buttons[legacyTitle]
+        XCTAssertTrue(legacyCard.waitForExistence(timeout: 10))
+        legacyCard.rightClick()
+        element("token-stats-task-menu-item").click()
+        assertText("token-stats-total-sent", equals: "1,500")
+        XCTAssertFalse(element("token-stats-excluding-cache").exists, "A pre-split task hides the Excluding cache reads headline.")
+        attachScreenshot(named: "Token Stats modal for a task saved before the cache split")
+        element("close-token-stats-button").click()
         XCTAssertEqual(calls["finalTranscriptTokens"] as? Int, 650)
         XCTAssertEqual((calls["subagents"] as? [String: Any])?["count"] as? Int, 2)
     }
 
-    // case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, Codex's input count includes its cached tokens, so the input bucket excludes them rather than counting them twice. Per-call usage notifications streamed before the turn ends, including those of a subagent thread that names its parent, reach the same call-level accounting once each (a repeated notification is ignored), and the Token Stats modal shows those Codex totals, call counts and final transcript size in the app.
+    // case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, Codex's input count includes its cached tokens, so the input bucket excludes them rather than counting them twice. Per-call usage notifications streamed before the turn ends, including those of a subagent thread that names its parent, reach the same call-level accounting once each (a repeated notification is ignored), and the Token Stats modal shows those Codex totals, call counts and final transcript size in the app. Excluding cache reads, the figure counts each call's uncached input plus cache write plus output, main thread and subagent alike (780), and the modal shows it with its main-agent and subagent split.
     func test_task_token_usage_records_codex_turn_breakdown() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Codex token usage", roots: [fixture.primary.path])
@@ -14037,6 +14416,9 @@ final class PlayhouseUITests: XCTestCase {
         assertText("token-stats-total", equals: "1,050")
         assertText("token-stats-final-transcript", equals: "900")
         assertText("token-stats-total-sent", equals: "1,900")
+        // Codex's input includes cached tokens: main (200+30)+(300+40), subagent 200+10.
+        assertText("token-stats-excluding-cache", equals: "780")
+        assertText("token-stats-excluding-cache-split", equals: "Excluding cache reads: 570 main agent · 210 subagents")
         assertText("token-stats-total-calls", equals: "3 model calls · 2 main, 1 across 1 subagent")
         attachScreenshot(named: "Token Stats modal shows a Codex turn's usage")
         element("close-token-stats-button").click()
@@ -14050,6 +14432,8 @@ final class PlayhouseUITests: XCTestCase {
         let calls = try XCTUnwrap(summary["callUsage"] as? [String: Any])
         XCTAssertEqual(calls["totalCalls"] as? Int, 3)
         XCTAssertEqual(calls["totalSentTokens"] as? Int, 1_900)
+        XCTAssertEqual(calls["totalTokensExcludingCacheReads"] as? Int, 780)
+        XCTAssertEqual(summary["tokensExcludingCacheReads"] as? Int, 780)
         XCTAssertEqual(calls["totalOutputTokens"] as? Int, 80)
         XCTAssertEqual(calls["finalTranscriptTokens"] as? Int, 900)
         XCTAssertEqual((calls["subagents"] as? [String: Any])?["calls"] as? Int, 1)
@@ -15654,6 +16038,17 @@ final class PlayhouseUITests: XCTestCase {
         field.typeText(value)
     }
 
+    /// Leaves the open task for the board. Right after a turn ends the back
+    /// button can be re-rendered and swallow a click, so wait for it to be
+    /// hittable and confirm the board actually appeared.
+    private func returnToBoard() {
+        let backToBoard = element("back-to-board-button")
+        XCTAssertTrue(waitUntil({ backToBoard.isHittable }, timeout: 5), "The back-to-board button never became clickable.")
+        XCTAssertTrue(waitForStableFrame(backToBoard), "The back-to-board button kept moving.")
+        backToBoard.click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5), "Clicking back-to-board should show the board.")
+    }
+
     private func openTask(named title: String, horizontalRecovery: Bool = false) {
         // Task cards are only on the board; leave an open task first. The back
         // button can be briefly non-hittable right after a send (tooltip,
@@ -15691,15 +16086,15 @@ final class PlayhouseUITests: XCTestCase {
         if !useCoordinateFallback {
             XCTAssertTrue(card.isHittable, "Task card must be hittable after bounded board scrolling.")
         }
-        // Aim at the title area: the bottom time row holds the token counter button,
-        // whose padded hit area opens Token Stats instead of the task once tokens exist.
-        let openPoint = CGPoint(
-            x: card.frame.minX + card.frame.width * 0.5,
-            y: card.frame.minY + card.frame.height * 0.3
-        )
-        XCTAssertTrue(card.frame.contains(openPoint), "Task card open point must remain inside the visible card.")
-        card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).click()
-        XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
+        // Open the card through its title. The card's center can sit on one of
+        // its own controls (the token counter button opens Token stats), so a
+        // plain card.click() may open that control instead of the task.
+        let cardTitle = element(card.identifier.replacingOccurrences(of: "task-card-", with: "task-title-"))
+        XCTAssertTrue(cardTitle.exists, "Task card title is missing: \(title)")
+        let titleCenter = CGPoint(x: cardTitle.frame.midX, y: cardTitle.frame.midY)
+        XCTAssertTrue(card.frame.contains(titleCenter), "Task card title must lie inside the visible card.")
+        cardTitle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10), "Clicking the task card title should open the task.")
     }
 
     private func completeCurrentTaskWithFixtureAnswers(

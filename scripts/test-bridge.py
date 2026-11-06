@@ -2547,8 +2547,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(rejected.get("codexThreadID"))
         self.assertEqual(self.run_git(self.primary, "worktree", "list", "--porcelain").count("worktree "), claimed_count)
 
-    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
-    def test_task_done_preserves_worktree_and_branch(self):
+    # case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
+    def test_task_done_removes_worktree_and_preserves_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary, self.secondary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
         self.assertEqual(self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", draft)[0])["savedPrompt"], draft)
@@ -2612,7 +2612,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(response)["status"], "Done")
         calls = gh_calls.read_text(encoding="utf-8").splitlines()
         self.assertEqual(sorted(calls), ["123", "123", "123", "456", "456", "456"], "The status probe and the Done verification each check both PRs once, plus the earlier move attempt.")
-        self.assertTrue(worktree.exists(), "Moving a task to Done must preserve its worktree.")
+        self.assertFalse(worktree.exists(), "Moving a task to Done must remove its managed worktree.")
         self.assertTrue(self.branch_exists(self.primary, "generated-fixture-title"))
         self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_head, "Moving a task to Done must not merge into the local target.")
         self.assertEqual((self.primary / "target-only.txt").read_text(encoding="utf-8"), "Master advanced after this task branch was created.\n")
@@ -3638,7 +3638,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         notice = json.loads((self.data_directory / "task-lifecycle-v2-notice.json").read_text(encoding="utf-8"))
         self.assertEqual(notice, [str(dirty_path)])
 
-    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing.
+    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize.
     def test_task_status_transitions_and_rejects_unknown_status(self):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli("task", "move", task_id, "Unknown", expected_status=2)
@@ -3786,7 +3786,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         done = self.assert_success(self.call_cli("task", "move", task["id"], "Done", "--allow-unmerged")[0])
         self.assertEqual(done["status"], "Done")
 
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private nudge prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A private nudge that only reports status keeps its prompt, reply, and bookkeeping activities out of Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -6187,7 +6187,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn(first_record.get("claudeSessionID"), fixture_sessions, turns)
         self.assertIn(second_record.get("claudeSessionID"), fixture_sessions, turns)
 
-    # case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history.
+    # case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message in its conversation, where the open and reopened task show it, with an empty composer and no unsent draft, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history.
     def test_conversation_isolates_failing_claude_turn_from_parallel_send(self):
         source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-parallel-failure"
@@ -6252,6 +6252,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
         diagnostics = (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8")
         first_record = self.assert_success(self.call_cli("task", "get", first["id"])[0])
+        self.assertFalse(first_record["hasUnsentDraft"], "The failing turn's prompt stays in history, not in an unsent draft.")
         exits = [
             json.loads(line) for line in diagnostics.splitlines()
             if '"event":"claude.process.exited"' in line and json.loads(line).get("exitStatus") == "1"
@@ -9110,7 +9111,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertNotIn("Answer: Green", diagnostics)
         self.assertNotIn("private recovery prompt", diagnostics.lower())
 
-    # case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; Playhouse restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream retains safe assistant text while redacting secret echoes; persisted history hides secret recovery responses, provider activities, and file-change diffs. A later non-sensitive Codex turn keeps its own diff and safe response visible in refreshed CLI/UI history while the earlier secret stays absent. In one task, a no-secret recovery response remains visible after a later secret recovery while the secret response is hidden. Secret answers with surrounding whitespace are still redacted when Codex normalizes its echo; the visible UI shows the safe response immediately and after app restart.
+    # case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; Playhouse restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream retains safe assistant text while redacting secret echoes; persisted history hides secret recovery responses, provider activities, and file-change diffs. A later non-sensitive Codex turn keeps its own diff and safe response visible in refreshed CLI/UI history while the earlier secret stays absent. In one task, a no-secret recovery response remains visible after a later secret recovery while the secret response is hidden. Secret answers with surrounding whitespace are still redacted when Codex normalizes its echo; the visible UI shows the safe response immediately and after app restart. The first prompt, delivered before the provider exited although its send reported failure, is in history, never returns to the composer, and is not saved as an unsent draft.
     def test_codex_pending_question_recovers_after_provider_process_restarts(self):
         task_id = self.create_task("Restart-safe Codex question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -9130,7 +9131,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
         request = self.assert_success(pending).get("pendingUserInputRequest")
         self.assertEqual([item["id"] for item in request["questions"]], ["color", "token"])
         self.assertTrue(request["questions"][1]["isSecret"])
-        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+        self.assertTrue(any(
+            message["role"] == "user" and message["text"] == "Ask a restart-safe structured question."
+            for message in self.assert_success(pending)["messages"]
+        ), "A send that failed after its turn started has still delivered its prompt to the conversation.")
+        waiting_record = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(waiting_record["status"], "Waiting Response")
+        self.assertFalse(waiting_record["hasUnsentDraft"], "A delivered prompt must not be kept as an unsent draft.")
         blocked_switch, _ = self.call_cli("conversation", "provider", task_id, "set", "claude", expected_status=1, extra_environment=env)
         self.assert_failure(blocked_switch, "invalid_transition")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "provider", task_id)[0])["provider"], "codex")
@@ -9774,7 +9781,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(inventory["unviewed"], [])
         self.assertEqual({entry["path"] for entry in inventory["viewed"]}, pending_paths)
 
-    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes.
+    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes. While a merge is still open in the task's worktree, its files are held back and the sidebar shows a 'Merge in progress' notice naming the repository instead of the files the merge staged; the CLI reports the repository under mergingRepositories with empty sections, and aborting the merge lists the task's changes again.
     def test_external_git_edits_and_commit_refresh_workspace_changes(self):
         repository = self.data_directory / "external-git"
         repository.mkdir()
@@ -9861,6 +9868,214 @@ class PlayhouseBridgeTests(unittest.TestCase):
         entries = {entry["path"]: entry for entry in self.assert_success(response)["unviewed"]}
         self.assertEqual(set(entries), {"post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"})
         self.assertNotIn("local-ahead.txt", entries)
+
+        # An open merge stages everything the merged branch brings in, so the repository's files are
+        # held back until the merge is concluded rather than listed as task changes.
+        task_repository = entries["tracked.txt"]["repository"]
+        (repository / "merging-in.txt").write_text("Merged with the merge still open.\n", encoding="utf-8")
+        self.run_git(repository, "add", "merging-in.txt")
+        self.run_git(repository, "commit", "-m", "Base commit merged without committing")
+        self.run_git(worktree, "merge", "--no-commit", "--no-ff", "main")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        merging = self.assert_success(response)
+        self.assertEqual(merging["unviewed"], [])
+        self.assertEqual(merging["viewed"], [])
+        self.assertEqual(merging["mergingRepositories"], [task_repository])
+        self.run_git(worktree, "merge", "--abort")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        aborted = self.assert_success(response)
+        self.assertEqual(aborted["mergingRepositories"], [])
+        self.assertEqual({entry["path"] for entry in aborted["unviewed"]}, {"post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"})
+
+    # case-contract: test_task_workspace_changes_over_limit_show_notice | A task whose worktree holds more than 1000 changed files still reports every one of them through fresh CLI connections, while the open task's Changes sidebar shows a 'Too many changes to list' notice naming the count instead of rendering the file list, so the window stays responsive. Bringing the count back under the limit lists the files again.
+    def test_task_workspace_changes_over_limit_show_notice(self):
+        repository = self.data_directory / "many-changes"
+        repository.mkdir()
+        (repository / "tracked.txt").write_text("Baseline.\n", encoding="utf-8")
+        self.run_git(repository, "init", "--initial-branch=main")
+        self.run_git(repository, "config", "user.name", "Playhouse Bridge Test")
+        self.run_git(repository, "config", "user.email", "playhouse-bridge-test@example.invalid")
+        self.run_git(repository, "add", "tracked.txt")
+        self.run_git(repository, "commit", "-m", "Baseline")
+        task_id = self.create_task(title="Many changes", roots=[])["id"]
+        added, _ = self.call_cli("task", "repository", "add", task_id, "--repo", str(repository))
+        record = next(item for item in self.assert_success(added)["repositoryWorktrees"] if item["repositoryPath"] == str(repository))
+        generated = Path(record["worktreePath"]) / "generated"
+        generated.mkdir()
+        for index in range(1001):
+            (generated / f"file-{index:04d}.txt").write_text(f"Generated {index}.\n", encoding="utf-8")
+
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        inventory = self.assert_success(response)
+        self.assertEqual(len(inventory["unviewed"]), 1001, "The limit only affects the sidebar; the CLI still reports every file.")
+        self.assertEqual(inventory["viewed"], [])
+
+        (generated / "file-1000.txt").unlink()
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        self.assertEqual(len(self.assert_success(response)["unviewed"]), 1000)
+
+    # case-contract: test_claude_nudged_turn_work_stays_in_conversation | A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt and every private placeholder stay hidden.
+    def test_claude_nudged_turn_work_stays_in_conversation(self):
+        env = self.install_claude_fixture("claude-fixture-nudged-work")
+        executable = Path(env["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
+        created, _ = self.call_cli(
+            "task", "create", "--title", "Claude nudged work", "--prompt", "Fixture task description.",
+            "--root", self.primary, "--provider", "claude",
+        )
+        task_id = self.assert_success(created)["id"]
+        steer_pause = Path(f"{executable}.nudged-steer-pause")
+        steer_ready = Path(f"{executable}.nudged-steer-ready")
+        steer_pause.write_text("Hold the nudged turn for a steer.\n", encoding="utf-8")
+        send_command = ("conversation", "send", task_id, "--message", "Wait for the pending UI review.")
+        process = self.start_cli(*send_command, extra_environment=env)
+        try:
+            deadline = time.monotonic() + 60
+            while not steer_ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(steer_ready.exists(), "The private nudge turn should start and wait for a steer.")
+            steered = self.assert_success(self.call_cli(
+                "conversation", "steer", task_id, "--message", "Also double check the docs.", extra_environment=env,
+            )[0])
+            self.assertTrue(steered["accepted"], "A user can steer the running nudge turn.")
+            response, events = self.finish_cli(process, send_command, timeout=60)
+        finally:
+            if process.poll() is None:
+                process.communicate(timeout=30)
+        self.assert_success(response)
+        self.assertIn("Also double check the docs.", [e["payload"].get("message") for e in events if e["type"] == "steered_message"],
+                      "The steered message should stream even though it joined a private nudge turn.")
+        stale_answer = "The task review is approved. Only the UI review is still pending."
+        final_report = "All checks passed and the screenshot is attached. The work is complete."
+        finals = [event["payload"]["text"] for event in events if event["type"] == "assistant_final"]
+        self.assertEqual(finals, [stale_answer, final_report],
+                         "Both the unreported turn's answer and the nudged turn's final report should stream.")
+        streamed_activities = [event["payload"]["activity"]["id"] for event in events if event["type"] == "activity"]
+        self.assertIn("toolu_nudged_check", streamed_activities, "The nudged turn's work should stream live.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Review",
+                         "The completed outcome reported inside the nudged turn moves the task to Review.")
+        turns = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+        nudges = [turn for turn in turns if "playhouse internal outcome nudge:" in turn.get("userText", "").lower()]
+        self.assertEqual(len(nudges), 1, "The turn that reported no outcome gets one private status nudge, which settles it.")
+        self.assertTrue(any(" conversation present-image " in command["command"] and '"ok":true' in command["output"]
+                            for command in nudges[0]["reportCommands"]),
+                        f"The nudged turn should present its screenshot: {nudges[0]['reportCommands']}")
+
+        race_report = ("subagent_report", "UI review approved.")
+        expected_tail = [
+            ("final_answer", stale_answer),
+            ("commentary", "Every review is approved. Running the final check."),
+            ("commentary", "STEERED NUDGE: Also double check the docs."),
+            ("commentary", "Starting the final suite in the background."),
+            ("subagent_report", "Final suite passed: all cases green."),
+            ("agent_image", "Nudged turn screenshot"),
+            ("final_answer", final_report),
+        ]
+
+        def assert_nudged_work(messages, label):
+            assistant = [(m.get("phase"), m["text"]) for m in messages if m["role"] == "assistant"]
+            self.assertIn(race_report, assistant, f"{label}: the report that arrived right after the answer should be kept.")
+            tail = [entry for entry in assistant if entry != race_report][-len(expected_tail):]
+            self.assertEqual(tail, expected_tail, f"{label}: the nudged turn's work should be in order.")
+            serialized = json.dumps(messages)
+            for hidden in ("Playhouse internal outcome nudge:", "ended without reporting a task outcome",
+                           "private outcome reminder hidden", "private outcome response hidden"):
+                self.assertNotIn(hidden, serialized, f"{label}: the private nudge prompt must stay hidden.")
+            self.assertIn("Also double check the docs.", [m["text"] for m in messages if m["role"] == "user"],
+                          f"{label}: the steered message that joined the nudge turn should stay in the conversation.")
+            image = next(m for m in messages if m.get("phase") == "agent_image")
+            final = next(m for m in reversed(messages) if m["text"] == final_report)
+            self.assertEqual(image["turnID"], final["turnID"], f"{label}: the screenshot belongs to the nudged turn.")
+
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        assert_nudged_work(history["messages"], "fresh history")
+        self.assertEqual(history["messages"][-1]["text"], final_report, "The nudged turn's final report is the latest message.")
+        timeline = [activity for activity in history.get("timelineActivities", []) if activity["id"] == "toolu_nudged_check"]
+        self.assertEqual(len(timeline), 1, "The nudged turn's shell call should be a timeline tool row.")
+        self.assertEqual(timeline[0]["input"], "echo NUDGED CHECK PASSED")
+        self.assertIn("NUDGED CHECK PASSED", timeline[0].get("output") or "")
+        suite = next(activity for activity in history["activities"] if activity["id"] == "toolu_nudged_suite")
+        self.assertEqual(suite["status"], "completed")
+        self.assertEqual(suite["backgroundTaskSummary"], "Final suite passed: all cases green.")
+
+        page = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "3", extra_environment=env)[0])
+        self.assertEqual([(m.get("phase"), m["text"]) for m in page["messages"]], expected_tail[-3:],
+                         "A paged read should end on the nudged turn's work.")
+        image_page = next(m for m in page["messages"] if m.get("phase") == "agent_image")
+        self.assertTrue(image_page["imageDataURLs"] and image_page["imageDataURLs"][0].startswith("data:image/png;base64,"))
+
+        response, _ = self.call_cli("conversation", "send", task_id, "--message", "Thanks, that's all.", extra_environment=env)
+        self.assert_success(response)
+        later = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        later_turn = [m for m in later["messages"] if m.get("turnID") == later["messages"][-1].get("turnID")]
+        self.assertEqual([m["text"] for m in later_turn], ["Thanks, that's all.", "OK."], "The later turn follows the nudged work.")
+        assert_nudged_work([m for m in later["messages"] if m not in later_turn], "after a later turn")
+
+    # case-contract: test_codex_nudged_turn_work_stays_in_conversation | A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. The nudge prompt and every private placeholder stay out of history, including after a later ordinary turn.
+    def test_codex_nudged_turn_work_stays_in_conversation(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-nudged-work-success"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        task_id = self.create_task("Codex nudged work", roots=[self.primary])["id"]
+        steer_pause = Path(f"{executable}.nudged-steer-pause")
+        steer_ready = Path(f"{executable}.nudged-steer-ready")
+        steer_pause.write_text("Hold the nudged turn for a steer.\n", encoding="utf-8")
+        send_command = ("conversation", "send", task_id, "--message", "Start the work.")
+        process = self.start_cli(*send_command, extra_environment=env)
+        try:
+            deadline = time.monotonic() + 60
+            while not steer_ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(steer_ready.exists(), "The private nudge turn should start and wait for a steer.")
+            steered = self.assert_success(self.call_cli(
+                "conversation", "steer", task_id, "--message", "Also double check the docs.", extra_environment=env,
+            )[0])
+            self.assertTrue(steered["accepted"], "A user can steer the running nudge turn.")
+            response, events = self.finish_cli(process, send_command, timeout=60)
+        finally:
+            if process.poll() is None:
+                process.communicate(timeout=30)
+        self.assert_success(response)
+        self.assertIn("Also double check the docs.", [e["payload"].get("message") for e in events if e["type"] == "steered_message"],
+                      "The steered message should stream even though it joined a private nudge turn.")
+        commentary = "Codex is finishing the remaining check after the nudge."
+        final_report = "Codex finished the remaining check after the nudge. Everything is done."
+        finals = [event["payload"]["text"] for event in events if event["type"] == "assistant_final"]
+        self.assertEqual(finals[-1:], [final_report], "The nudged turn's final answer should stream.")
+        self.assertIn("item_nudged_check_1", [event["payload"]["activity"]["id"] for event in events if event["type"] == "activity"],
+                      "The nudged turn's shell command should stream live.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Review",
+                         "The completed outcome reported inside the nudged turn moves the task to Review.")
+        saved = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        nudges = [turn for turn in saved["turns"] if "playhouse internal outcome nudge:" in (turn.get("userMessage") or "").lower()]
+        self.assertEqual(len(nudges), 1, "The completed outcome in the first nudge ends the private loop.")
+
+        def assert_nudged_work(history, label):
+            assistant = [(m.get("phase"), m["text"]) for m in history["messages"] if m["role"] == "assistant"]
+            self.assertIn("Also double check the docs.", [m["text"] for m in history["messages"] if m["role"] == "user"],
+                          f"{label}: the steered message that joined the nudge turn should stay in the conversation.")
+            self.assertGreater(len(assistant), 2, f"{label}: the earlier answer should stay ahead of the nudged work.")
+            self.assertNotIn(assistant[0], [("commentary", commentary), ("final_answer", final_report)])
+            self.assertEqual(assistant[1:3], [("commentary", commentary), ("final_answer", final_report)],
+                             f"{label}: the nudged work should follow the earlier answer in order.")
+            serialized = json.dumps(history["messages"])
+            for hidden in ("Playhouse internal outcome nudge:", "ended without reporting a task outcome",
+                           "private outcome reminder hidden", "private outcome response hidden"):
+                self.assertNotIn(hidden, serialized, f"{label}: the private nudge prompt must stay hidden.")
+            timeline = [activity for activity in history.get("timelineActivities", []) if activity["id"] == "item_nudged_check_1"]
+            self.assertEqual(len(timeline), 1, f"{label}: the nudged shell command should be a timeline tool row.")
+            self.assertEqual(timeline[0]["input"], "echo NUDGED CHECK PASSED")
+
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        assert_nudged_work(history, "fresh history")
+        self.assertEqual(history["messages"][-1]["text"], final_report, "The nudged turn's final answer is the latest message.")
+        response, _ = self.call_cli("conversation", "send", task_id, "--message", "Thanks, that's all.", extra_environment=env)
+        self.assert_success(response)
+        assert_nudged_work(self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0]), "later turn")
 
     def install_claude_fixture(self, name):
         """Installs the Claude Code protocol fixture and returns its turn environment."""
@@ -9952,7 +10167,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "terminal", chat_id, expected_status=3)
         self.assert_failure(response, "not_found")
 
-    # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and both the Token Stats context-menu item and a click on the counter itself, a button that highlights on hover, open a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
+    # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and both the Token Stats context-menu item and a click on the counter itself, a button that highlights on hover, open a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown. Excluding cache reads (uncached input + cache write + output, subagent included) is 855 per turn, doubling after a second turn, and also reaches the live stream when the session files cannot be read; an empty task reports it unavailable. A task saved before the cache split existed (call usage without the split, plus turn-level buckets) still loads, reports its call counts and total sent, omits the per-call excluding-cache figures, and falls back to the turn buckets minus cache reads (170 for 100 input, 50 output, 400 cache read and 20 cache write); its modal hides the Excluding cache reads headline. The modal also labels 'Excluding cache reads (incl. subagents)' with its main-agent and subagent split.
     def test_task_token_usage_records_claude_turn_breakdown(self):
         # Matches TURN_USAGE in scripts/fixtures/claude-code-fixture.py.
         expected_turn_usage = {
@@ -9965,6 +10180,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         call_usage_per_turn = {
             "totalCalls": 4, "totalSentTokens": 1840, "totalOutputTokens": 85, "finalTranscriptTokens": 650,
         }
+        # The same calls without their cache reads (input + cache write + output): main
+        # (100+50+20) + (120+30+40) = 360, subagent (200+20+10) + (240+10+15) = 495.
+        excluding_cache_per_turn = {"main": 360, "subagents": 495, "total": 855}
         environment = self.install_claude_fixture("claude-fixture-token-usage")
         # The session files the fixture writes live under Claude Code's config directory.
         session_files = self.data_directory / "claude-config"
@@ -9975,6 +10193,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
         empty = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
         self.assertFalse(empty["callUsage"]["available"], "A task with no turns has no call-level usage yet.")
+        self.assertIsNone(empty["callUsage"].get("totalTokensExcludingCacheReads"), "No calls means no cache-excluded call total.")
+        self.assertEqual(empty["tokensExcludingCacheReads"], 0, "An empty task falls back to the turn buckets, which are zero.")
         self.assertEqual(empty["callUsage"]["totalCalls"], 0)
         self.assertEqual(empty["totalTokens"], 0, "A task with no turns has recorded no tokens.")
         self.assertEqual(empty["turns"], [])
@@ -9995,8 +10215,18 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(calls["available"])
         for key, value in call_usage_per_turn.items():
             self.assertEqual(calls[key], value, f"callUsage.{key} should count each call once, subagent included.")
-        self.assertEqual(calls["mainAgent"], {"calls": 2, "sentTokens": 1200, "outputTokens": 60, "finalTranscriptTokens": 650})
-        self.assertEqual(calls["subagents"], {"count": 1, "calls": 2, "sentTokens": 640, "outputTokens": 25})
+        self.assertEqual(calls["mainAgent"], {
+            "calls": 2, "sentTokens": 1200, "outputTokens": 60, "finalTranscriptTokens": 650, "tokensExcludingCacheReads": excluding_cache_per_turn["main"],
+        })
+        self.assertEqual(calls["subagents"], {
+            "count": 1, "calls": 2, "sentTokens": 640, "outputTokens": 25, "tokensExcludingCacheReads": excluding_cache_per_turn["subagents"],
+        })
+        self.assertEqual(calls["mainAgent"]["tokensExcludingCacheReads"], excluding_cache_per_turn["main"])
+        self.assertEqual(
+            calls["totalTokensExcludingCacheReads"], excluding_cache_per_turn["total"],
+            "Excluding cache reads sums uncached input + cache write + output over the main agent and the subagent.",
+        )
+        self.assertEqual(first["tokensExcludingCacheReads"], excluding_cache_per_turn["total"])
         self.assertEqual(first["usage"], expected_turn_usage, "Claude's usage buckets should reach the task totals.")
         self.assertEqual(first["totalTokens"], turn_total)
         self.assertEqual(len(first["turns"]), 1, "The completed turn should be recorded once.")
@@ -10019,6 +10249,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         for key in ("totalCalls", "totalSentTokens", "totalOutputTokens"):
             self.assertEqual(second["callUsage"][key], call_usage_per_turn[key] * 2, f"A second turn adds to callUsage.{key}.")
         self.assertEqual(second["callUsage"]["finalTranscriptTokens"], 650)
+        self.assertEqual(second["callUsage"]["totalTokensExcludingCacheReads"], excluding_cache_per_turn["total"] * 2)
         self.assertEqual(second["callUsage"]["subagents"]["count"], 2, "Each turn's subagent has its own file.")
         self.assertEqual(second["totalTokens"], turn_total * 2, "A second turn adds to the running total.")
         self.assertEqual(second["usage"]["inputTokens"], expected_turn_usage["inputTokens"] * 2)
@@ -10040,8 +10271,36 @@ class PlayhouseBridgeTests(unittest.TestCase):
         live = self.assert_success(self.call_cli("task", "token-usage", live_id)[0])["callUsage"]
         for key, value in call_usage_per_turn.items():
             self.assertEqual(live[key], value, f"The live stream should reach callUsage.{key}.")
+        self.assertEqual(
+            live["totalTokensExcludingCacheReads"], excluding_cache_per_turn["total"],
+            "The live stream carries the cache split too, subagent calls included.",
+        )
+        self.assertEqual(live["subagents"]["tokensExcludingCacheReads"], excluding_cache_per_turn["subagents"])
 
-    # case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, Codex's input count includes its cached tokens, so the input bucket excludes them rather than counting them twice. Per-call usage notifications streamed before the turn ends, including those of a subagent thread that names its parent, reach the same call-level accounting once each (a repeated notification is ignored), and the Token Stats modal shows those Codex totals, call counts and final transcript size in the app.
+        # A task saved before the cache split existed: call usage without the split fields plus turn buckets.
+        legacy_title = "Claude legacy token usage"
+        legacy_id = self.create_task(title=legacy_title, provider="claude")["id"]
+        legacy_snapshots = '{"claude:legacy":{"provider":"claude","updatedAt":800000000,"main":{"calls":2,"sentTokens":1200,"outputTokens":60,"lastContextTokens":650},"subagents":{"old":{"calls":1,"sentTokens":300,"outputTokens":10,"lastContextTokens":300}}}}'.encode("utf-8")
+        with sqlite3.connect(self.data_directory / "Playhouse-v2.store") as database:
+            seeded = database.execute(
+                "UPDATE ZBOARDTASK SET ZCALLUSAGESNAPSHOTSDATA = ?, ZTOTALINPUTTOKENS = 100, ZTOTALOUTPUTTOKENS = 50, "
+                "ZTOTALCACHEREADTOKENS = 400, ZTOTALCACHECREATIONTOKENS = 20 WHERE ZTITLE = ?",
+                (legacy_snapshots, legacy_title),
+            )
+            self.assertEqual(seeded.rowcount, 1, "Seed the real SwiftData row with pre-split call usage.")
+        # The running daemon holds the task in memory; a fresh daemon (its own service name) reads the seeded row.
+        fresh_daemon = {
+            "PLAYHOUSE_BRIDGE_SERVICE_NAME": f"{arguments.service_name}.legacy-{uuid.uuid4().hex[:8]}",
+            "PLAYHOUSE_BRIDGE_IDLE_GRACE_SECONDS": "3",
+        }
+        legacy = self.assert_success(self.call_cli("task", "token-usage", legacy_id, extra_environment=fresh_daemon)[0])
+        self.assertTrue(legacy["callUsage"]["available"], "Old call usage still decodes.")
+        self.assertEqual((legacy["callUsage"]["totalCalls"], legacy["callUsage"]["totalSentTokens"]), (3, 1500))
+        self.assertIsNone(legacy["callUsage"].get("totalTokensExcludingCacheReads"), "Without the split there is no per-call figure.")
+        self.assertIsNone(legacy["callUsage"]["subagents"].get("tokensExcludingCacheReads"))
+        self.assertEqual(legacy["tokensExcludingCacheReads"], 170, "The fallback is the turn buckets minus cache reads.")
+
+    # case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, Codex's input count includes its cached tokens, so the input bucket excludes them rather than counting them twice. Per-call usage notifications streamed before the turn ends, including those of a subagent thread that names its parent, reach the same call-level accounting once each (a repeated notification is ignored), and the Token Stats modal shows those Codex totals, call counts and final transcript size in the app. Excluding cache reads, the figure counts each call's uncached input plus cache write plus output, main thread and subagent alike (780), and the modal shows it with its main-agent and subagent split.
     def test_task_token_usage_records_codex_turn_breakdown(self):
         # Matches TURN_USAGE in scripts/fixtures/codex-app-server-fixture.py.
         # The fixture reports 900 input tokens of which 250 were cached; Codex's input
@@ -10070,7 +10329,16 @@ class PlayhouseBridgeTests(unittest.TestCase):
             {key: calls[key] for key in ("totalCalls", "totalSentTokens", "totalOutputTokens", "finalTranscriptTokens")},
             {"totalCalls": 3, "totalSentTokens": 1900, "totalOutputTokens": 80, "finalTranscriptTokens": 900},
         )
-        self.assertEqual(calls["subagents"], {"count": 1, "calls": 1, "sentTokens": 300, "outputTokens": 10})
+        # Codex input includes cached tokens: main calls (700-500)+30 and (900-600)+40, subagent (300-100)+10.
+        self.assertEqual(calls["subagents"], {
+            "count": 1, "calls": 1, "sentTokens": 300, "outputTokens": 10, "tokensExcludingCacheReads": 210,
+        })
+        self.assertEqual(calls["mainAgent"]["tokensExcludingCacheReads"], 570)
+        self.assertEqual(
+            calls["totalTokensExcludingCacheReads"], 780,
+            "Excluding cache reads sums uncached input + cache write + output over the main thread and its subagent.",
+        )
+        self.assertEqual(summary["tokensExcludingCacheReads"], 780)
 
     def run_claude_token_waste_turn(self, title):
         """One Claude fixture turn whose session file logs every request; see
