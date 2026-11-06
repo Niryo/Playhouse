@@ -838,6 +838,13 @@ def main():
         elif "-goal" in mode and message.get("method") == "thread/goal/clear":
             goal_path.unlink(missing_ok=True)
             write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+        elif message.get("method") == "skills/extraRoots/set":
+            # Records the bridged skill folders Playhouse hands the shared app-server.
+            history = serial_history()
+            history["skillExtraRoots"] = message.get("params", {}).get("extraRoots", [])
+            history["skillExtraRootsCalls"] = history.get("skillExtraRootsCalls", 0) + 1
+            history_path.write_text(json.dumps(history), encoding="utf-8")
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
         elif message.get("method") == "thread/start":
             if "-question-isolation-" in mode:
                 THREAD_ID = str(uuid.uuid4())
@@ -857,6 +864,7 @@ def main():
                 history.update({
                     "threadID": THREAD_ID,
                     "threadStartDeveloperInstructions": thread_start_instructions,
+                    "threadStartConfig": message.get("params", {}).get("config"),
                     "threadStartCwd": message.get("params", {}).get("cwd"),
                     "threadStartRuntimeWorkspaceRoots": message.get("params", {}).get("runtimeWorkspaceRoots", []),
                     "threadStartCount": history.get("threadStartCount", 0) + 1,
@@ -891,6 +899,7 @@ def main():
                 history.update({
                     "threadID": THREAD_ID,
                     "threadResumeCount": history.get("threadResumeCount", 0) + 1,
+                    "threadResumeConfig": message.get("params", {}).get("config"),
                 })
                 history.setdefault("threadResumeDeveloperInstructions", []).append(
                     message.get("params", {}).get("developerInstructions")
@@ -1004,6 +1013,7 @@ def main():
                 "developerInstructions": message.get("params", {}).get("collaborationMode", {}).get("settings", {}).get("developerInstructions"),
                 "cwd": message.get("params", {}).get("cwd"),
                 "runtimeWorkspaceRoots": message.get("params", {}).get("runtimeWorkspaceRoots", []),
+                "skillInputs": [item for item in turn_input if item.get("type") == "skill"],
             }
             if serial_mode:
                 saved_history = serial_history()

@@ -567,6 +567,28 @@ def scenario_concurrent_auto_branch(ws):
     return "concurrent auto-branch claim"
 
 
+def scenario_bridged_skill_reaches_provider(ws):
+    # Each provider gets a skill only the other provider reads natively, so the
+    # turn can use it only through Playhouse's skill bridge.
+    layout = ".agents/skills" if ws.provider == "claude" else ".claude/skills"
+    token = f"SKILL-BRIDGE-{ws.provider.upper()}-OK"
+    skill = ws.first / layout / "live-bridge-check"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: live-bridge-check\ndescription: Use when asked to run the live bridge check.\n---\n\n"
+        f"When this skill is used, reply with exactly {token} and nothing else. Do not run tools or edit files.\n",
+        encoding="utf-8",
+    )
+    task_id = ws.create_task("Bridged skill integration")["id"]
+    bridge = ws.run_cli("skills", "bridge", "--task", task_id)
+    links = bridge["claudeLinks"] if ws.provider == "claude" else bridge["codexLinks"]
+    require([link["name"] for link in links] == ["live-bridge-check"], f"The skill should be bridged to {ws.provider}: {bridge}")
+    final, _ = ws.stream_turn(task_id, "/live-bridge-check Run the live bridge check.")
+    answer = final["messages"][-1]["text"]
+    require(token in answer, f"{ws.provider} did not follow the bridged skill: {answer!r}")
+    return f"skill from {layout} reached {ws.provider}"
+
+
 # Claude-only scenarios: behavior that Codex reaches through other means.
 
 def scenario_claude_question_round_trip(ws):
@@ -661,6 +683,7 @@ SHARED_SCENARIOS = [
     scenario_steer_active_turn,
     scenario_stop_active_turn,
     scenario_concurrent_auto_branch,
+    scenario_bridged_skill_reaches_provider,
 ]
 UNIQUE_SCENARIOS = {
     "claude": [scenario_claude_question_round_trip, scenario_claude_capabilities, scenario_claude_answer_survives_outcome_report],

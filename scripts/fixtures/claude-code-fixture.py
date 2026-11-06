@@ -1161,6 +1161,25 @@ def respond(user_text, instructions, preserve_no_outcome=False, previous_prompt=
     return commands
 
 
+def fixture_commands():
+    """Mirrors Claude Code's initialize commands: its built-ins, plus the skills it
+    finds in `.claude/skills` of the working folder and of each --add-dir folder,
+    leaving out any `--settings` skillOverrides turn off."""
+    commands = [
+        {"name": "simplify", "description": "Review the changed code for reuse.", "builtin": True},
+        {"name": "compact", "description": "Free up context by summarizing the conversation so far", "builtin": True},
+    ]
+    arguments = sys.argv[1:]
+    folders = [os.getcwd()] + [arguments[index + 1] for index, value in enumerate(arguments[:-1]) if value == "--add-dir"]
+    overrides = json.loads(argument("--settings") or "{}").get("skillOverrides", {})
+    for folder in folders:
+        skills = Path(folder) / ".claude" / "skills"
+        for entry in sorted(skills.iterdir()) if skills.is_dir() else []:
+            if (entry / "SKILL.md").is_file() and overrides.get(entry.name) != "off":
+                commands.append({"name": entry.name, "description": f"{entry.name} ({folder})"})
+    return commands
+
+
 def main():
     global background_result_sent, current_command_uuid
     history_path = Path(str(sys.argv[0]) + ".history")
@@ -1172,6 +1191,8 @@ def main():
         "cwd": os.getcwd(),
         "bridgeServiceName": os.environ.get("PLAYHOUSE_BRIDGE_SERVICE_NAME"),
         "effort": os.environ.get("CLAUDE_CODE_EFFORT_LEVEL"),
+        # The non-built-in skills this launch would load, after bridging and overrides.
+        "skills": [command["name"] for command in fixture_commands() if not command.get("builtin")],
     }
     for line in sys.stdin:
         if not line.strip():
@@ -1215,7 +1236,7 @@ def main():
                     time.sleep(8)
                 response = {"claude_code_version": "2.1.308 (Claude Code fixture)",
                             "models": models,
-                            "commands": [], "agents": []}
+                            "commands": fixture_commands(), "agents": []}
             elif request.get("subtype") == "mcp_status":
                 response = {"mcpServers": []}
             else:

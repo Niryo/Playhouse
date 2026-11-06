@@ -329,6 +329,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         if let developerInstructions {
             params["developerInstructions"] = developerInstructions
         }
+        try await applySkillBridge(workspace)
+        if let config = workspace.skillBridge?.codexThreadConfig { params["config"] = config }
         let response = try await request(method: "thread/start", params: params)
 
         guard let thread = response["thread"] as? [String: Any],
@@ -650,11 +652,15 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         activeConversationMode = mode
         isTurnActive = turnContexts.values.contains { $0.turnID != nil }
         wasLastTurnInterrupted = false
+        var input: [[String: Any]] = text.isEmpty ? [] : [["type": "text", "text": text]]
+        input += imageDataURLs.map { ["type": "image", "url": $0] }
+        // Codex has no slash commands, so a `/skill` the message names travels as a skill input.
+        input += (workspace.skillBridge?.invocations ?? []).map { ["type": "skill", "name": $0.name, "path": $0.path] }
         let response = try await request(
             method: "turn/start",
             params: [
                 "threadId": threadID,
-                "input": (text.isEmpty ? [] : [["type": "text", "text": text]]) + imageDataURLs.map { ["type": "image", "url": $0] },
+                "input": input,
                 "model": modelID,
                 "cwd": workspace.cwd.path,
                 "runtimeWorkspaceRoots": workspace.roots.map(\.path),
@@ -947,6 +953,24 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
     }
 
+    /// The extra skill roots this app-server was last given. One app-server
+    /// serves every task, so it gets the union of their bridge folders and each
+    /// thread's config hides the folders that are not its own.
+    private var appliedSkillExtraRoots: [String] = []
+
+    private func applySkillBridge(_ workspace: ConversationWorkspaceContext) async throws {
+        guard let roots = workspace.skillBridge?.codexExtraRoots, roots != appliedSkillExtraRoots else { return }
+        do {
+            _ = try await request(method: "skills/extraRoots/set", params: ["extraRoots": roots])
+            appliedSkillExtraRoots = roots
+        } catch {
+            // An older Codex without bridged skills still runs the turn.
+            PlayhouseDiagnostics.record("codex.skills.extra_roots_failed", fields: diagnosticFields([
+                "errorDescription": error.localizedDescription,
+            ]))
+        }
+    }
+
     private func ensureInitialized(workspace: ConversationWorkspaceContext) async throws {
         if initialized, process?.isRunning == true { return }
         if let initializationTask { return try await initializationTask.value }
@@ -984,6 +1008,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         guard let executablePath = Self.findCodexExecutable(override: codexExecutableOverride) else {
             throw ClientError.cliNotFound
         }
+        appliedSkillExtraRoots = []
 
         let child = Process()
         let stdin = Pipe()
@@ -1121,6 +1146,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             if let developerInstructions {
                 params["developerInstructions"] = developerInstructions
             }
+            try await applySkillBridge(workspace)
+            if let config = workspace.skillBridge?.codexThreadConfig { params["config"] = config }
             response = try await request(method: "thread/resume", params: params)
         } catch {
             var fields = sensitiveConversation

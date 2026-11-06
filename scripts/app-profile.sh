@@ -79,6 +79,28 @@ playhouse_resolve_launch_data_directory() {
   return 2
 }
 
+# Agent sessions also inherit the starting app's bridge daemon through
+# PLAYHOUSE_BRIDGE_SERVICE_NAME and PLAYHOUSE_BRIDGE_SOCKET_PATH, and `open -n`
+# hands the launched app the caller's whole environment. A window launched with
+# them would send this worktree's data directory to that other app's daemon, and
+# every bridge request would fail with "cannot open another app's task store".
+# Clear any bridge override that does not name this worktree's own bridge.
+playhouse_clear_inherited_bridge_overrides() {
+  local service="${PLAYHOUSE_BRIDGE_SERVICE_NAME:-}"
+  if [[ -n "${service}" && "${service}" != "${PLAYHOUSE_PROFILE_BRIDGE_ID}" ]]; then
+    printf 'Ignoring PLAYHOUSE_BRIDGE_SERVICE_NAME inherited from another Playhouse app (%s); using this worktree’s bridge.\n' \
+      "${service}" >&2
+    unset PLAYHOUSE_BRIDGE_SERVICE_NAME
+    service=""
+  fi
+  # A socket path only belongs with this worktree's own service name.
+  if [[ -n "${PLAYHOUSE_BRIDGE_SOCKET_PATH:-}" && -z "${service}" ]]; then
+    printf 'Ignoring PLAYHOUSE_BRIDGE_SOCKET_PATH inherited from another Playhouse app (%s).\n' \
+      "${PLAYHOUSE_BRIDGE_SOCKET_PATH}" >&2
+    unset PLAYHOUSE_BRIDGE_SOCKET_PATH
+  fi
+}
+
 # Return only GUI and bridge daemon processes launched from the selected worktree's app.
 playhouse_profile_processes() {
   local app_bundle="${PLAYHOUSE_PROFILE_DERIVED_DATA}/Build/Products/Debug/Playhouse.app"
