@@ -230,11 +230,10 @@ struct RemoteConversationManager {
             .decoded(SkillCatalog.self)
     }
 
-    /// The skill's SKILL.md split into its header fields and instructions.
-    func skillManifest(taskID: UUID, skillID: String) async throws -> SkillManifest? {
+    /// The skill's SKILL.md exactly as written, or nil for a skill without a folder.
+    func skillContent(taskID: UUID, skillID: String) async throws -> String? {
         let result = try await daemon.call("skills.get", ["taskID": id(taskID), "skillID": .string(skillID)])
-        guard let manifest = result.object?["manifest"], manifest != .null else { return nil }
-        return try manifest.decoded(SkillManifest.self)
+        return result.object?["content"]?.string
     }
 
     func createSkill(
@@ -249,11 +248,10 @@ struct RemoteConversationManager {
         return try await daemon.call("skills.create", arguments).decoded(SkillRecord.self)
     }
 
-    /// A structured edit; a field sent as an empty string is removed.
-    func updateSkill(taskID: UUID, skillID: String, description: String, body: String, fields: [String: String]) async throws -> SkillRecord {
+    /// Replaces the whole SKILL.md; the daemon rejects a renamed or description-less file.
+    func updateSkillContent(taskID: UUID, skillID: String, content: String) async throws -> SkillRecord {
         try await daemon.call("skills.update", [
-            "taskID": id(taskID), "skillID": .string(skillID), "description": .string(description),
-            "body": .string(body), "fields": .object(fields.mapValues(BridgeValue.string)),
+            "taskID": id(taskID), "skillID": .string(skillID), "content": .string(content),
         ]).decoded(SkillRecord.self)
     }
 

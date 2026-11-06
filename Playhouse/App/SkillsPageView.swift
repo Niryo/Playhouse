@@ -42,7 +42,8 @@ struct SkillsPageView: View {
 
     struct EditingSkill: Identifiable {
         let skill: SkillRecord
-        var manifest: SkillManifest
+        /// SKILL.md exactly as it is on disk.
+        let content: String
         var id: String { skill.id }
     }
 
@@ -63,7 +64,7 @@ struct SkillsPageView: View {
             }
             Text(isSelecting
                  ? "Click skills to select them. Built-in skills can't be selected."
-                 : "Click a skill to edit it, or press and hold to select several. Turning a skill on or off reaches Claude on its next turn, and a Codex conversation the next time its thread starts.")
+                 : "Click a skill to open it, or press and hold one to select several. Turning a skill on or off reaches Claude on its next turn, and a Codex conversation the next time its thread starts.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 20)
@@ -124,7 +125,7 @@ struct SkillsPageView: View {
 
     private var isPresentingPanel: Bool { panel != nil }
 
-    /// The editor and New Skill panels slide up over the gallery, like the gallery over the conversation.
+    /// The editor and New Skill panels slide up over the gallery as modals.
     private var panels: some View {
         ZStack {
             if isPresentingPanel {
@@ -136,11 +137,8 @@ struct SkillsPageView: View {
             }
             switch panel {
             case .editing(let editing):
-                SkillEditorPanel(editing: editing, onClose: closePanel) { manifest in
-                    let record = try await manager.updateSkill(
-                        taskID: task.id, skillID: editing.skill.id, description: manifest.description,
-                        body: manifest.body, fields: Self.editedFields(manifest.fields)
-                    )
+                SkillEditorPanel(editing: editing, onClose: closePanel) { content in
+                    let record = try await manager.updateSkillContent(taskID: task.id, skillID: editing.skill.id, content: content)
                     catalog = catalog?.replacing(record)
                     await reload()
                 }
@@ -153,8 +151,7 @@ struct SkillsPageView: View {
                 NewSkillPanel(roots: catalog?.repositories ?? [], onClose: closePanel) { manifest, scope, root in
                     let record = try await manager.createSkill(
                         taskID: task.id, name: manifest.name, description: manifest.description, body: manifest.body,
-                        fields: manifest.fields.filter { !$0.value.trimmingCharacters(in: .whitespaces).isEmpty },
-                        scope: scope, root: root
+                        fields: [:], scope: scope, root: root
                     )
                     tab = record.scope == .global ? .global : .repo
                     await reload()
@@ -169,11 +166,6 @@ struct SkillsPageView: View {
         }
     }
 
-    /// Every editable field is sent, so one the user cleared is removed from SKILL.md.
-    private static func editedFields(_ fields: [String: String]) -> [String: String] {
-        Dictionary(uniqueKeysWithValues: SkillManifest.optionalKeys.map { ($0, fields[$0] ?? "") })
-    }
-
     private func closePanel() {
         withAnimation(Self.panelAnimation) { panel = nil }
     }
@@ -181,16 +173,16 @@ struct SkillsPageView: View {
     private var header: some View {
         HStack(spacing: 12) {
             Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 24, height: 24)
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 26, height: 26)
                     .background(Color.primary.opacity(0.07), in: Circle())
             }
             .buttonStyle(.plain)
             .keyboardShortcut(isPresentingPanel || isSelecting ? nil : .cancelAction)
             .buttonHoverPointer()
-            .nativeHelp("Close Skills and return to the conversation")
-            .accessibilityLabel("Close Skills")
+            .nativeHelp("Back to the conversation")
+            .accessibilityLabel("Back to the conversation")
             .accessibilityIdentifier("skills-back-button")
 
             Text("Skills")
@@ -214,11 +206,6 @@ struct SkillsPageView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 200)
                     .accessibilityIdentifier("skills-search")
-
-                Button("Select") { withAnimation(.easeInOut(duration: 0.15)) { isSelecting = true } }
-                    .buttonHoverPointer()
-                    .nativeHelp("Select several skills to delete them or fix them with an agent")
-                    .accessibilityIdentifier("skills-select-button")
 
                 Button { withAnimation(Self.panelAnimation) { panel = .creating } } label: { Label("New Skill", systemImage: "plus") }
                     .buttonHoverPointer()
@@ -381,16 +368,16 @@ struct SkillsPageView: View {
                 }
                 Spacer(minLength: 8)
             }
-            .contentShape(Rectangle())
-            // A press and hold starts selecting; a click edits, or selects while selecting. Only
-            // the skill's own text takes them: a held click on a control, such as the actions
-            // menu while it tracks, must not start selecting.
-            .gesture(
-                LongPressGesture(minimumDuration: 0.45)
-                    .onEnded { _ in beginSelection(with: skill) }
-                    .exclusively(before: TapGesture().onEnded { click(skill) })
-            )
-            .hoverCursor(opensOnClick ? .pointingHand : .arrow)
+            // A press and hold starts selecting; a click opens the skill, or selects while
+            // selecting. Only the skill's own text takes them: a held click on a control, such
+            // as the actions menu while it tracks, must not start selecting.
+            .overlay {
+                SkillRowPressArea(
+                    showsPointingHand: opensOnClick,
+                    onClick: { click(skill) },
+                    onLongPress: { beginSelection(with: skill) }
+                )
+            }
             if !isSelecting {
                 if Self.isFixable(skill) {
                     Button { fix([skill]) } label: { Label("Fix with Agent", systemImage: "wand.and.stars") }
@@ -455,8 +442,8 @@ struct SkillsPageView: View {
 
     private func openEditor(_ skill: SkillRecord) {
         perform(reloading: false) {
-            guard let manifest = try await manager.skillManifest(taskID: task.id, skillID: skill.id) else { return }
-            withAnimation(Self.panelAnimation) { panel = .editing(EditingSkill(skill: skill, manifest: manifest)) }
+            guard let content = try await manager.skillContent(taskID: task.id, skillID: skill.id) else { return }
+            withAnimation(Self.panelAnimation) { panel = .editing(EditingSkill(skill: skill, content: content)) }
         }
     }
 
@@ -495,7 +482,7 @@ struct SkillsPageView: View {
             if skill.editable {
                 Button("Edit…") { openEditor(skill) }
                     .buttonHoverPointer()
-                    .help("Edit the skill's details and instructions")
+                    .help("Edit the skill's SKILL.md")
                     .accessibilityIdentifier("skill-edit-\(skill.name)")
             }
             if let folder = skill.folderPath {
@@ -539,10 +526,6 @@ struct SkillsPageView: View {
                         .accessibilityIdentifier("skill-link-\(skill.name)")
                 }
                 Divider()
-                Button("Select") { beginSelection(with: skill) }
-                    .buttonHoverPointer()
-                    .help("Select this skill and others to act on them together")
-                    .accessibilityIdentifier("skill-begin-select-\(skill.name)")
                 Button("Delete…", role: .destructive) { pendingDelete = [skill] }
                     .buttonHoverPointer()
                     .help("Delete the skill from disk")
@@ -626,106 +609,78 @@ private struct SkillPanel<Header: View, Content: View, Footer: View>: View {
     }
 }
 
-/// The parsed SKILL.md header: the skill's name, when to use it, and the
-/// optional Agent Skills fields both providers accept.
-private struct SkillHeaderForm: View {
-    @Binding var manifest: SkillManifest
-    let nameEditable: Bool
-    let readOnly: Bool
-    let location: String?
-    let identifierPrefix: String
+/// The two views of a skill's Markdown in its panel: the text to edit, and how it reads.
+private enum SkillDocumentTab: String, CaseIterable, Identifiable {
+    case edit = "Edit"
+    case preview = "Preview"
+    var id: String { rawValue }
+}
+
+private struct SkillDocumentTabPicker: View {
+    @Binding var tab: SkillDocumentTab
+    let identifier: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Image(systemName: "sparkles")
-                    .font(.title2)
-                    .foregroundStyle(.tint)
-                if nameEditable {
-                    TextField("skill-name", text: $manifest.name)
-                        .textFieldStyle(.plain)
-                        .font(.title2.weight(.semibold))
-                        .accessibilityLabel("Name")
-                        .accessibilityIdentifier("\(identifierPrefix)-name")
-                } else {
-                    Text(manifest.name)
-                        .font(.title2.weight(.semibold))
-                        .textSelection(.enabled)
-                        .accessibilityIdentifier("\(identifierPrefix)-name")
-                }
-                Spacer()
-            }
-            if let location {
-                Text(location)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .accessibilityIdentifier("\(identifierPrefix)-location")
-            }
-            labeled("Description") {
-                TextField("When should the agent use this skill?", text: $manifest.description, axis: .vertical)
-                    .lineLimit(2...5)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(readOnly)
-                    .accessibilityIdentifier("\(identifierPrefix)-description")
-            }
-            HStack(alignment: .top, spacing: 12) {
-                field("License", key: "license", placeholder: "For example, MIT")
-                field("Compatibility", key: "compatibility", placeholder: "For example, needs git and network access")
-                field("Allowed tools", key: "allowed-tools", placeholder: "For example, Bash(git:*) Read")
-            }
+        Picker("View", selection: $tab) {
+            ForEach(SkillDocumentTab.allCases) { tab in Text(tab.rawValue).tag(tab) }
         }
-    }
-
-    private func labeled<Field: View>(_ title: String, @ViewBuilder field: () -> Field) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.caption.weight(.medium)).foregroundStyle(.secondary)
-            field()
-        }
-    }
-
-    private func field(_ title: String, key: String, placeholder: String) -> some View {
-        labeled(title) {
-            TextField(placeholder, text: Binding(
-                get: { manifest.fields[key] ?? "" },
-                set: { manifest.fields[key] = $0 }
-            ))
-            .textFieldStyle(.roundedBorder)
-            .disabled(readOnly)
-            .accessibilityLabel(title)
-            .accessibilityIdentifier("\(identifierPrefix)-field-\(key)")
-        }
-        .frame(maxWidth: .infinity)
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+        .nativeHelp("Edit the Markdown, or preview how it reads")
+        .accessibilityIdentifier(identifier)
     }
 }
 
+/// Opens SKILL.md itself, frontmatter and all, for editing, with a tab that
+/// previews it as rendered Markdown.
 private struct SkillEditorPanel: View {
     let skill: SkillRecord
     let onClose: () -> Void
-    let onSave: (SkillManifest) async throws -> Void
-    @State private var manifest: SkillManifest
+    let onSave: (String) async throws -> Void
+    @State private var content: String
+    @State private var tab = SkillDocumentTab.edit
     @State private var errorMessage: String?
     @State private var isSaving = false
 
-    init(editing: SkillsPageView.EditingSkill, onClose: @escaping () -> Void, onSave: @escaping (SkillManifest) async throws -> Void) {
+    init(editing: SkillsPageView.EditingSkill, onClose: @escaping () -> Void, onSave: @escaping (String) async throws -> Void) {
         skill = editing.skill
         self.onClose = onClose
         self.onSave = onSave
-        _manifest = State(initialValue: editing.manifest)
+        _content = State(initialValue: editing.content)
     }
 
     private var readOnly: Bool { !skill.editable }
 
     var body: some View {
         SkillPanel(identifier: "skill-editor-panel") {
-            SkillHeaderForm(
-                manifest: $manifest, nameEditable: false, readOnly: readOnly,
-                location: skill.folderPath.map { $0 + "/SKILL.md" }, identifierPrefix: "skill-editor"
-            )
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: "sparkles")
+                    .font(.title2)
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(skill.name)
+                        .font(.title2.weight(.semibold))
+                        .accessibilityIdentifier("skill-editor-name")
+                    if let folder = skill.folderPath {
+                        Text(folder + "/SKILL.md")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("skill-editor-location")
+                    }
+                }
+                Spacer()
+                SkillDocumentTabPicker(tab: $tab, identifier: "skill-editor-tab-picker")
+            }
         } content: {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Instructions").font(.subheadline.weight(.semibold))
-                SkillTextEditor(text: $manifest.body, identifier: "skill-editor", isEditable: !readOnly)
+            switch tab {
+            case .edit:
+                SkillTextEditor(text: $content, identifier: "skill-editor", isEditable: !readOnly)
+            case .preview:
+                SkillMarkdownPreview(markdown: content, identifier: "skill-editor-preview")
             }
         } footer: {
             HStack {
@@ -758,7 +713,7 @@ private struct SkillEditorPanel: View {
         Task { @MainActor in
             defer { isSaving = false }
             do {
-                try await onSave(manifest)
+                try await onSave(content)
                 onClose()
             } catch {
                 errorMessage = error.localizedDescription
@@ -774,6 +729,7 @@ private struct NewSkillPanel: View {
     @State private var manifest = SkillManifest(name: "", description: "", body: "")
     /// "global", or the root path of one of the task's repositories.
     @State private var destination = "global"
+    @State private var tab = SkillDocumentTab.edit
     @State private var errorMessage: String?
     @State private var isSaving = false
 
@@ -792,12 +748,29 @@ private struct NewSkillPanel: View {
                 }
                 Text("Saved in the open Agent Skills layout (.agents/skills). Playhouse shares it with both Claude and Codex. The name uses lowercase letters, digits, and hyphens.")
                     .font(.callout).foregroundStyle(.secondary)
-                SkillHeaderForm(manifest: $manifest, nameEditable: true, readOnly: false, location: nil, identifierPrefix: "new-skill")
+                TextField("skill-name", text: $manifest.name)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Name")
+                    .accessibilityIdentifier("new-skill-name")
+                TextField("When should the agent use this skill?", text: $manifest.description, axis: .vertical)
+                    .lineLimit(1...3)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Description")
+                    .accessibilityIdentifier("new-skill-description")
             }
         } content: {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Instructions").font(.subheadline.weight(.semibold))
-                SkillTextEditor(text: $manifest.body, identifier: "new-skill-body", isEditable: true)
+                HStack {
+                    Text("Instructions").font(.subheadline.weight(.semibold))
+                    Spacer()
+                    SkillDocumentTabPicker(tab: $tab, identifier: "new-skill-tab-picker")
+                }
+                switch tab {
+                case .edit:
+                    SkillTextEditor(text: $manifest.body, identifier: "new-skill-body", isEditable: true)
+                case .preview:
+                    SkillMarkdownPreview(markdown: manifest.body, identifier: "new-skill-preview")
+                }
             }
         } footer: {
             HStack {
@@ -833,6 +806,207 @@ private struct NewSkillPanel: View {
                 onClose()
             } catch {
                 errorMessage = error.localizedDescription
+            }
+        }
+    }
+}
+
+/// A skill's Markdown as it reads: any frontmatter as a small table of its
+/// entries, then headings, lists, quotes, code, and paragraphs.
+private struct SkillMarkdownPreview: View {
+    let markdown: String
+    let identifier: String
+
+    private enum Block {
+        case heading(level: Int, text: String)
+        case paragraph(String)
+        case bullet(String)
+        case numbered(String, String)
+        case quote(String)
+        case code(String)
+        case rule
+    }
+
+    var body: some View {
+        let (frontmatter, blocks) = Self.parse(markdown)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                if !frontmatter.isEmpty {
+                    Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 4) {
+                        ForEach(Array(frontmatter.enumerated()), id: \.offset) { _, entry in
+                            GridRow {
+                                Text(entry.key).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                Text(entry.value).font(.callout).textSelection(.enabled)
+                            }
+                        }
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("\(identifier)-frontmatter")
+                }
+                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in view(for: block) }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 6))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(identifier)
+    }
+
+    @ViewBuilder
+    private func view(for block: Block) -> some View {
+        switch block {
+        case .heading(let level, let text):
+            Self.inline(text)
+                .font(level == 1 ? .title2.weight(.bold) : level == 2 ? .title3.weight(.semibold) : .headline)
+                .padding(.top, 4)
+        case .paragraph(let text):
+            Self.inline(text)
+        case .bullet(let text):
+            HStack(alignment: .firstTextBaseline, spacing: 6) { Text("•"); Self.inline(text) }
+                .padding(.leading, 8)
+        case .numbered(let number, let text):
+            HStack(alignment: .firstTextBaseline, spacing: 6) { Text(number).monospacedDigit(); Self.inline(text) }
+                .padding(.leading, 8)
+        case .quote(let text):
+            Self.inline(text)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 10)
+                .overlay(alignment: .leading) { Rectangle().fill(Color.secondary.opacity(0.4)).frame(width: 3) }
+        case .code(let text):
+            Text(text)
+                .font(.system(.callout, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+        case .rule:
+            Divider()
+        }
+    }
+
+    private static func inline(_ text: String) -> Text {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return Text((try? AttributedString(markdown: text, options: options)) ?? AttributedString(text))
+    }
+
+    private static func parse(_ markdown: String) -> (frontmatter: [(key: String, value: String)], blocks: [Block]) {
+        var frontmatter: [(key: String, value: String)] = []
+        var lines = markdown.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        if let split = SkillFrontmatter.split(markdown) {
+            frontmatter = SkillFrontmatter.entries(split.header).map { ($0.key, $0.value) }
+            lines = Array(split.lines[split.bodyStart...])
+        }
+        var blocks: [Block] = []
+        var paragraph: [String] = []
+        var code: [String]?
+        func flush() {
+            if !paragraph.isEmpty { blocks.append(.paragraph(paragraph.joined(separator: " "))) }
+            paragraph = []
+        }
+        for raw in lines {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("```") {
+                if let finished = code {
+                    blocks.append(.code(finished.joined(separator: "\n")))
+                    code = nil
+                } else {
+                    flush()
+                    code = []
+                }
+                continue
+            }
+            if code != nil {
+                code?.append(raw)
+                continue
+            }
+            if line.isEmpty {
+                flush()
+            } else if let hashes = line.firstIndex(where: { $0 != "#" }), hashes != line.startIndex,
+                      line.distance(from: line.startIndex, to: hashes) <= 6, line[hashes] == " " {
+                flush()
+                blocks.append(.heading(level: line.distance(from: line.startIndex, to: hashes),
+                                       text: line[hashes...].trimmingCharacters(in: .whitespaces)))
+            } else if ["---", "***", "___"].contains(line) {
+                flush()
+                blocks.append(.rule)
+            } else if let marker = ["- ", "* ", "+ "].first(where: line.hasPrefix) {
+                flush()
+                blocks.append(.bullet(String(line.dropFirst(marker.count))))
+            } else if let dot = line.firstIndex(of: "."), dot != line.startIndex,
+                      line[..<dot].allSatisfy(\.isNumber), line[line.index(after: dot)...].hasPrefix(" ") {
+                flush()
+                blocks.append(.numbered(String(line[...dot]), line[line.index(after: dot)...].trimmingCharacters(in: .whitespaces)))
+            } else if line.hasPrefix(">") {
+                flush()
+                blocks.append(.quote(line.dropFirst().trimmingCharacters(in: .whitespaces)))
+            } else {
+                paragraph.append(line)
+            }
+        }
+        flush()
+        if let unfinished = code { blocks.append(.code(unfinished.joined(separator: "\n"))) }
+        return (frontmatter, blocks)
+    }
+}
+
+/// A skill row's text area. AppKit's own mouse tracking tells a click from a
+/// press and hold: SwiftUI's long-press gesture raced against a tap could stay
+/// tracking after a click opened the editor, and the window then ignored every
+/// click until it was minimized.
+private struct SkillRowPressArea: NSViewRepresentable {
+    let showsPointingHand: Bool
+    let onClick: () -> Void
+    let onLongPress: () -> Void
+
+    func makeNSView(context: Context) -> PressView { PressView() }
+
+    func updateNSView(_ view: PressView, context: Context) {
+        view.onClick = onClick
+        view.onLongPress = onLongPress
+        if view.showsPointingHand != showsPointingHand {
+            view.showsPointingHand = showsPointingHand
+            view.window?.invalidateCursorRects(for: view)
+        }
+    }
+
+    final class PressView: NSView {
+        static let holdDuration: TimeInterval = 0.45
+        var onClick: () -> Void = {}
+        var onLongPress: () -> Void = {}
+        var showsPointingHand = false
+
+        override func isAccessibilityElement() -> Bool { false }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func resetCursorRects() {
+            if showsPointingHand { addCursorRect(bounds, cursor: .pointingHand) }
+        }
+
+        /// Tracks the press to its mouse-up here, so no gesture state outlives it.
+        override func mouseDown(with event: NSEvent) {
+            guard let window else { return }
+            let deadline = Date(timeIntervalSinceNow: Self.holdDuration)
+            var held = false
+            while true {
+                let next = window.nextEvent(
+                    matching: [.leftMouseUp, .leftMouseDragged],
+                    until: held ? .distantFuture : deadline,
+                    inMode: .eventTracking,
+                    dequeue: true
+                )
+                guard let next else {
+                    held = true
+                    onLongPress()
+                    continue
+                }
+                guard next.type == .leftMouseUp else { continue }
+                if !held, bounds.contains(convert(next.locationInWindow, from: nil)) { onClick() }
+                return
             }
         }
     }
