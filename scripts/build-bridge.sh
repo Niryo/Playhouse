@@ -52,6 +52,7 @@ shared_sources=(
   "${repository_root}/Playhouse/App/AgentUsageStore.swift"
   "${repository_root}/Playhouse/App/ConversationTranscriptStore.swift"
   "${repository_root}/Playhouse/App/StandaloneChatStore.swift"
+  "${repository_root}/Playhouse/App/SkillCatalog.swift"
   "${repository_root}/Playhouse/App/BridgeCore.swift"
   "${repository_root}/Playhouse/Bridge/BridgeContract.swift"
   "${repository_root}/Playhouse/Bridge/BridgeSocket.swift"

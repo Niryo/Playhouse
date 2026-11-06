@@ -106,7 +106,7 @@ final class ClaudeSessionRunner {
     private var pendingCommandUUIDs = Set<String>()
     /// What each model call (by message ID) has reported so far, so the live
     /// counter adds a call once and only its later growth after that.
-    private var liveCallUsage: [String: (sent: Int, output: Int)] = [:]
+    private var liveCallUsage: [String: (sent: Int, output: Int, usage: ConversationTokenUsage)] = [:]
     private var sawCommandLifecycle = false
     private var sessionWasMissing = false
     private var turnCompletion = TurnCompletion()
@@ -432,6 +432,13 @@ final class ClaudeSessionRunner {
         if modelID != ClaudeCodeClient.defaultModelID { arguments += ["--model", modelID] }
         if !persistsSessions { arguments.append("--no-session-persistence") }
         for root in workspace.roots.dropFirst() { arguments += ["--add-dir", root.path] }
+        // Skills from the Agent Skills folders reach Claude Code through a
+        // Playhouse wrapper laid out as `.claude/skills`, and disabled skills are
+        // turned off for this run only, so the user's settings stay untouched.
+        if let bridge = workspace.skillBridge {
+            for directory in bridge.claudeAddDirectories { arguments += ["--add-dir", directory] }
+            if let settings = bridge.claudeSettingsJSON { arguments += ["--settings", settings] }
+        }
         // Background Bash and Agent/Task calls report through Claude Code's task
         // events and keep the turn open, so Claude may end its response while
         // they run instead of blocking on a wait it cannot satisfy. Only a process
@@ -821,7 +828,7 @@ final class ClaudeSessionRunner {
         guard sent + usage.outputTokens > 0 else { return }
         let previous = liveCallUsage[id]
         guard previous?.sent != sent || previous?.output != usage.outputTokens else { return }
-        liveCallUsage[id] = (sent, usage.outputTokens)
+        liveCallUsage[id] = (sent, usage.outputTokens, usage)
         tokenUsageHandler?(ConversationTurnUsageReport(
             turnID: nil, usage: ConversationTokenUsage(), toolLabels: [],
             liveCall: ConversationLiveCall(
@@ -829,6 +836,9 @@ final class ClaudeSessionRunner {
                 calls: previous == nil ? 1 : 0,
                 sentTokens: sent - (previous?.sent ?? 0),
                 outputTokens: usage.outputTokens - (previous?.output ?? 0),
+                uncachedInputTokens: usage.inputTokens - (previous?.usage.inputTokens ?? 0),
+                cacheReadTokens: usage.cacheReadTokens - (previous?.usage.cacheReadTokens ?? 0),
+                cacheWriteTokens: usage.cacheCreationTokens - (previous?.usage.cacheCreationTokens ?? 0),
                 contextTokens: sent
             )
         ))
@@ -1419,6 +1429,16 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         return capabilities
     }
 
+    /// The skills and commands built into Claude Code itself, which have no
+    /// folder on disk, read without starting a model turn.
+    func bundledSkills(workspace: ConversationWorkspaceContext) async throws -> [(name: String, description: String)] {
+        let response = try await withMetadataSession(workspace: workspace) { _ in [:] }
+        return (response.initialize["commands"] as? [[String: Any]] ?? []).compactMap { command in
+            guard command["builtin"] as? Bool == true, let name = command["name"] as? String, !name.hasPrefix("_") else { return nil }
+            return (name, command["description"] as? String ?? "")
+        }
+    }
+
     func sendMessage(
         _ text: String,
         imageDataURLs: [String] = [],
@@ -1933,7 +1953,7 @@ enum ClaudeSessionUsageReader {
     private static func usage(in file: URL, include: ([String: Any]) -> Bool) -> ConversationCallUsage {
         guard let data = try? Data(contentsOf: file, options: .mappedIfSafe) else { return ConversationCallUsage() }
         var order: [String] = []
-        var calls: [String: (sent: Int, output: Int)] = [:]
+        var calls: [String: ConversationTokenUsage] = [:]
         for line in data.split(separator: UInt8(ascii: "\n")) {
             guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
                   object["type"] as? String == "assistant",
@@ -1946,12 +1966,12 @@ enum ClaudeSessionUsageReader {
             // Synthetic entries (local command output, interruptions) carry zeros.
             guard sent + tokens.outputTokens > 0 else { continue }
             if calls[id] == nil { order.append(id) }
-            calls[id] = (sent, tokens.outputTokens)
+            calls[id] = tokens
         }
         var result = ConversationCallUsage()
         for id in order {
             guard let call = calls[id] else { continue }
-            result.addCall(sentTokens: call.sent, outputTokens: call.output)
+            result.addCall(usage: call)
         }
         return result
     }

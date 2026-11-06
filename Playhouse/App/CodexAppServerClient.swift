@@ -329,6 +329,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         if let developerInstructions {
             params["developerInstructions"] = developerInstructions
         }
+        try await applySkillBridge(workspace)
+        if let config = workspace.skillBridge?.codexThreadConfig { params["config"] = config }
         let response = try await request(method: "thread/start", params: params)
 
         guard let thread = response["thread"] as? [String: Any],
@@ -706,11 +708,15 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         activeConversationMode = mode
         isTurnActive = turnContexts.values.contains { $0.turnID != nil }
         wasLastTurnInterrupted = false
+        var input: [[String: Any]] = text.isEmpty ? [] : [["type": "text", "text": text]]
+        input += imageDataURLs.map { ["type": "image", "url": $0] }
+        // Codex has no slash commands, so a `/skill` the message names travels as a skill input.
+        input += (workspace.skillBridge?.invocations ?? []).map { ["type": "skill", "name": $0.name, "path": $0.path] }
         let response = try await request(
             method: "turn/start",
             params: [
                 "threadId": threadID,
-                "input": (text.isEmpty ? [] : [["type": "text", "text": text]]) + imageDataURLs.map { ["type": "image", "url": $0] },
+                "input": input,
                 "model": modelID,
                 "cwd": workspace.cwd.path,
                 "runtimeWorkspaceRoots": workspace.roots.map(\.path),
@@ -1003,6 +1009,24 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
     }
 
+    /// The extra skill roots this app-server was last given. One app-server
+    /// serves every task, so it gets the union of their bridge folders and each
+    /// thread's config hides the folders that are not its own.
+    private var appliedSkillExtraRoots: [String] = []
+
+    private func applySkillBridge(_ workspace: ConversationWorkspaceContext) async throws {
+        guard let roots = workspace.skillBridge?.codexExtraRoots, roots != appliedSkillExtraRoots else { return }
+        do {
+            _ = try await request(method: "skills/extraRoots/set", params: ["extraRoots": roots])
+            appliedSkillExtraRoots = roots
+        } catch {
+            // An older Codex without bridged skills still runs the turn.
+            PlayhouseDiagnostics.record("codex.skills.extra_roots_failed", fields: diagnosticFields([
+                "errorDescription": error.localizedDescription,
+            ]))
+        }
+    }
+
     private func ensureInitialized(workspace: ConversationWorkspaceContext) async throws {
         if initialized, process?.isRunning == true { return }
         if let initializationTask { return try await initializationTask.value }
@@ -1040,6 +1064,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         guard let executablePath = Self.findCodexExecutable(override: codexExecutableOverride) else {
             throw ClientError.cliNotFound
         }
+        appliedSkillExtraRoots = []
 
         let child = Process()
         let stdin = Pipe()
@@ -1177,6 +1202,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             if let developerInstructions {
                 params["developerInstructions"] = developerInstructions
             }
+            try await applySkillBridge(workspace)
+            if let config = workspace.skillBridge?.codexThreadConfig { params["config"] = config }
             response = try await request(method: "thread/resume", params: params)
         } catch {
             var fields = sensitiveConversation
@@ -1204,12 +1231,12 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         var subagentIndexes: [String: Int] = [:]
         var lastAssistantTurnID: String?
         var lastAssistantPhase: String?
-        var privateOutcomeReminderTurnIDs = Set<String>()
         var cursor: String?
         var visitedCursors = Set<String>()
         var historyItemOrder = 0
         var timelineToolItems: [(item: [String: Any], anchor: String?)] = []
         var timelineToolItemIndexes: [String: Int] = [:]
+        var entries: [[String: Any]] = []
 
         repeat {
             var params: [String: Any] = [
@@ -1223,102 +1250,128 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
 
             let response = try await request(method: "thread/items/list", params: params)
             // The installed codex-cli 0.162.1 schema returns {data:[{threadId,turnId,item}],nextCursor}.
-            let data = response["data"] as? [[String: Any]] ?? []
-            for entry in data {
-                guard let item = entry["item"] as? [String: Any] else { continue }
-                let turnID = entry["turnId"] as? String
-                if item["type"] as? String == "userMessage",
-                   PrivateOutcomeNudgeMarker.matches(Self.chatMessage(from: entry)?.text ?? ""),
-                   let turnID {
-                    privateOutcomeReminderTurnIDs.insert(turnID)
-                }
-                if let turnID, privateOutcomeReminderTurnIDs.contains(turnID) {
-                    historyItemOrder += 1
-                    continue
-                }
-                if item["type"] as? String == "contextCompaction" {
-                    compactionHistory.append((item, entry["turnId"] as? String, historyItemOrder))
-                    // Preserve the event boundary between same-phase assistant
-                    // items so timeline ordering is not collapsed into one bubble.
-                    lastAssistantTurnID = nil
-                    lastAssistantPhase = nil
-                }
-                if ["mcpToolCall", "dynamicToolCall"].contains(item["type"] as? String ?? ""),
-                   let itemID = item["id"] as? String {
-                    var historicalItem = item
-                    historicalItem["_playhouseTurnID"] = entry["turnId"]
-                    if let index = toolItemIndexes[itemID] {
-                        historicalToolItems[index] = historicalItem
-                    } else {
-                        toolItemIndexes[itemID] = historicalToolItems.count
-                        historicalToolItems.append(historicalItem)
-                    }
-                }
-                var historicalSubagentItem = item
-                historicalSubagentItem["_playhouseTurnID"] = entry["turnId"]
-                if item["type"] as? String == "subAgentActivity",
-                   let activity = ConversationActivity.from(item: historicalSubagentItem),
-                   let childThreadID = activity.childThreadID {
-                    if let index = subagentIndexes[childThreadID] {
-                        var mergedItem = historicalSubagentItem
-                        for metadataKey in ["agentPath", "model", "reasoningEffort"]
-                        where mergedItem[metadataKey] == nil {
-                            mergedItem[metadataKey] = historicalSubagentItems[index][metadataKey]
-                        }
-                        historicalSubagentItems[index] = mergedItem
-                    } else {
-                        subagentIndexes[childThreadID] = historicalSubagentItems.count
-                        historicalSubagentItems.append(historicalSubagentItem)
-                    }
-                }
-                if item["type"] as? String == "userMessage" {
-                    latestTurnItems.removeAll()
-                    lastAssistantTurnID = nil
-                    lastAssistantPhase = nil
-                }
-                var latestTurnItem = item
-                latestTurnItem["_playhouseTurnID"] = entry["turnId"]
-                latestTurnItems.append(latestTurnItem)
-                if Self.timelineToolItemTypes.contains(item["type"] as? String ?? ""),
-                   let itemID = item["id"] as? String {
-                    // A repeated item updates the call but keeps the place it first took.
-                    let anchor = timelineToolItemIndexes[itemID].map { timelineToolItems[$0].anchor } ?? messages.last?.id
-                    let record = (item: latestTurnItem, anchor: anchor)
-                    if let index = timelineToolItemIndexes[itemID] {
-                        timelineToolItems[index] = record
-                    } else {
-                        timelineToolItemIndexes[itemID] = timelineToolItems.count
-                        timelineToolItems.append(record)
-                    }
-                    // Text after the call is a message of its own, below the call.
-                    lastAssistantTurnID = nil
-                    lastAssistantPhase = nil
-                }
-                if var message = Self.chatMessage(from: entry) {
-                    message.timelineOrder = historyItemOrder
-                    if message.role == .assistant,
-                       message.asyncQuestions == nil,
-                       let turnID = entry["turnId"] as? String,
-                       turnID == lastAssistantTurnID,
-                       message.phase == lastAssistantPhase,
-                       let lastIndex = messages.indices.last,
-                       messages[lastIndex].role == .assistant,
-                       messages[lastIndex].asyncQuestions == nil {
-                        messages[lastIndex].text += "\n\n" + message.text
-                    } else {
-                        messages.append(message)
-                    }
-                    lastAssistantTurnID = message.role == .assistant ? entry["turnId"] as? String : nil
-                    lastAssistantPhase = message.role == .assistant ? message.phase : nil
-                }
-                historyItemOrder += 1
-            }
+            entries += response["data"] as? [[String: Any]] ?? []
             cursor = response["nextCursor"] as? String
 
             if let cursor, !visitedCursors.insert(cursor).inserted {
                 throw ClientError.protocolFailure("Codex returned a repeated history cursor.")
             }
         } while cursor != nil
+
+        // A private status nudge turn stays out of history while it only reports
+        // status. The nudge tells the agent to keep working when work remains, so a
+        // nudge turn that did work is shown like any other turn, minus its prompt.
+        var privateOutcomeReminderTurnIDs = Set<String>()
+        var workingTurnIDs = Set<String>()
+        for entry in entries {
+            guard let item = entry["item"] as? [String: Any], let turnID = entry["turnId"] as? String else { continue }
+            if item["type"] as? String == "userMessage" {
+                // A message the user steered into a nudge turn shows it, as it does live.
+                if PrivateOutcomeNudgeMarker.matches(Self.chatMessage(from: entry)?.text ?? "") {
+                    privateOutcomeReminderTurnIDs.insert(turnID)
+                } else {
+                    workingTurnIDs.insert(turnID)
+                }
+            } else if ConversationActivity.from(item: item)?.isAgentWork == true {
+                workingTurnIDs.insert(turnID)
+            }
+        }
+
+        for entry in entries {
+            guard let item = entry["item"] as? [String: Any] else { continue }
+            let turnID = entry["turnId"] as? String
+            if let turnID, privateOutcomeReminderTurnIDs.contains(turnID) {
+                if !workingTurnIDs.contains(turnID) {
+                    historyItemOrder += 1
+                    continue
+                }
+                if item["type"] as? String == "userMessage",
+                   PrivateOutcomeNudgeMarker.matches(Self.chatMessage(from: entry)?.text ?? "") {
+                    // The prompt still starts the turn, but is never shown.
+                    latestTurnItems.removeAll()
+                    lastAssistantTurnID = nil
+                    lastAssistantPhase = nil
+                    historyItemOrder += 1
+                    continue
+                }
+            }
+            if item["type"] as? String == "contextCompaction" {
+                compactionHistory.append((item, entry["turnId"] as? String, historyItemOrder))
+                // Preserve the event boundary between same-phase assistant
+                // items so timeline ordering is not collapsed into one bubble.
+                lastAssistantTurnID = nil
+                lastAssistantPhase = nil
+            }
+            if ["mcpToolCall", "dynamicToolCall"].contains(item["type"] as? String ?? ""),
+               let itemID = item["id"] as? String {
+                var historicalItem = item
+                historicalItem["_playhouseTurnID"] = entry["turnId"]
+                if let index = toolItemIndexes[itemID] {
+                    historicalToolItems[index] = historicalItem
+                } else {
+                    toolItemIndexes[itemID] = historicalToolItems.count
+                    historicalToolItems.append(historicalItem)
+                }
+            }
+            var historicalSubagentItem = item
+            historicalSubagentItem["_playhouseTurnID"] = entry["turnId"]
+            if item["type"] as? String == "subAgentActivity",
+               let activity = ConversationActivity.from(item: historicalSubagentItem),
+               let childThreadID = activity.childThreadID {
+                if let index = subagentIndexes[childThreadID] {
+                    var mergedItem = historicalSubagentItem
+                    for metadataKey in ["agentPath", "model", "reasoningEffort"]
+                    where mergedItem[metadataKey] == nil {
+                        mergedItem[metadataKey] = historicalSubagentItems[index][metadataKey]
+                    }
+                    historicalSubagentItems[index] = mergedItem
+                } else {
+                    subagentIndexes[childThreadID] = historicalSubagentItems.count
+                    historicalSubagentItems.append(historicalSubagentItem)
+                }
+            }
+            if item["type"] as? String == "userMessage" {
+                latestTurnItems.removeAll()
+                lastAssistantTurnID = nil
+                lastAssistantPhase = nil
+            }
+            var latestTurnItem = item
+            latestTurnItem["_playhouseTurnID"] = entry["turnId"]
+            latestTurnItems.append(latestTurnItem)
+            if Self.timelineToolItemTypes.contains(item["type"] as? String ?? ""),
+               let itemID = item["id"] as? String {
+                // A repeated item updates the call but keeps the place it first took.
+                let anchor = timelineToolItemIndexes[itemID].map { timelineToolItems[$0].anchor } ?? messages.last?.id
+                let record = (item: latestTurnItem, anchor: anchor)
+                if let index = timelineToolItemIndexes[itemID] {
+                    timelineToolItems[index] = record
+                } else {
+                    timelineToolItemIndexes[itemID] = timelineToolItems.count
+                    timelineToolItems.append(record)
+                }
+                // Text after the call is a message of its own, below the call.
+                lastAssistantTurnID = nil
+                lastAssistantPhase = nil
+            }
+            if var message = Self.chatMessage(from: entry) {
+                message.timelineOrder = historyItemOrder
+                if message.role == .assistant,
+                   message.asyncQuestions == nil,
+                   let turnID = entry["turnId"] as? String,
+                   turnID == lastAssistantTurnID,
+                   message.phase == lastAssistantPhase,
+                   let lastIndex = messages.indices.last,
+                   messages[lastIndex].role == .assistant,
+                   messages[lastIndex].asyncQuestions == nil {
+                    messages[lastIndex].text += "\n\n" + message.text
+                } else {
+                    messages.append(message)
+                }
+                lastAssistantTurnID = message.role == .assistant ? entry["turnId"] as? String : nil
+                lastAssistantPhase = message.role == .assistant ? message.phase : nil
+            }
+            historyItemOrder += 1
+        }
 
         var activityIndexes: [String: Int] = [:]
         var activities: [ConversationActivity] = []
@@ -1593,7 +1646,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             turnID: nil, usage: ConversationTokenUsage(), toolLabels: [],
             liveCall: ConversationLiveCall(
                 agentID: rootID == threadID ? nil : threadID,
-                calls: 1, sentTokens: sent, outputTokens: call.outputTokens, contextTokens: sent
+                calls: 1, sentTokens: sent, outputTokens: call.outputTokens,
+                uncachedInputTokens: call.inputTokens, cacheReadTokens: call.cacheReadTokens, cacheWriteTokens: call.cacheCreationTokens,
+                contextTokens: sent
             )
         ))
     }

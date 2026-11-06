@@ -286,6 +286,23 @@ def answer_text(user_message):
     return "Answers received: Blue / fixture-secret."
 
 
+NUDGED_WORK_COMMENTARY = "Codex is finishing the remaining check after the nudge."
+NUDGED_WORK_ANSWER = "Codex finished the remaining check after the nudge. Everything is done."
+
+
+def nudged_work_items(turn_index):
+    """What a status nudge turn does when work remains: it keeps working."""
+    return [
+        {"id": f"item_nudged_commentary_{turn_index}", "type": "agentMessage", "phase": "commentary",
+         "text": NUDGED_WORK_COMMENTARY},
+        {"id": f"item_nudged_check_{turn_index}", "type": "commandExecution", "command": "echo NUDGED CHECK PASSED",
+         "cwd": "/tmp/playhouse-fixture", "status": "completed", "exitCode": 0, "durationMs": 7,
+         "aggregatedOutput": "NUDGED CHECK PASSED\n"},
+        {"id": f"item_nudged_final_{turn_index}", "type": "agentMessage", "phase": "final_answer",
+         "text": NUDGED_WORK_ANSWER},
+    ]
+
+
 def is_restart_question_mode(mode):
     return mode.endswith("-restart-question") or mode.endswith("-restart-question-no-secret")
 
@@ -865,6 +882,13 @@ def main():
         elif "-goal" in mode and message.get("method") == "thread/goal/clear":
             goal_path.unlink(missing_ok=True)
             write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+        elif message.get("method") == "skills/extraRoots/set":
+            # Records the bridged skill folders Playhouse hands the shared app-server.
+            history = serial_history()
+            history["skillExtraRoots"] = message.get("params", {}).get("extraRoots", [])
+            history["skillExtraRootsCalls"] = history.get("skillExtraRootsCalls", 0) + 1
+            history_path.write_text(json.dumps(history), encoding="utf-8")
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
         elif message.get("method") == "thread/start":
             if "-question-isolation-" in mode:
                 THREAD_ID = str(uuid.uuid4())
@@ -884,6 +908,7 @@ def main():
                 history.update({
                     "threadID": THREAD_ID,
                     "threadStartDeveloperInstructions": thread_start_instructions,
+                    "threadStartConfig": message.get("params", {}).get("config"),
                     "threadStartCwd": message.get("params", {}).get("cwd"),
                     "threadStartRuntimeWorkspaceRoots": message.get("params", {}).get("runtimeWorkspaceRoots", []),
                     "threadStartCount": history.get("threadStartCount", 0) + 1,
@@ -918,6 +943,7 @@ def main():
                 history.update({
                     "threadID": THREAD_ID,
                     "threadResumeCount": history.get("threadResumeCount", 0) + 1,
+                    "threadResumeConfig": message.get("params", {}).get("config"),
                 })
                 history.setdefault("threadResumeDeveloperInstructions", []).append(
                     message.get("params", {}).get("developerInstructions")
@@ -1031,6 +1057,7 @@ def main():
                 "developerInstructions": message.get("params", {}).get("collaborationMode", {}).get("settings", {}).get("developerInstructions"),
                 "cwd": message.get("params", {}).get("cwd"),
                 "runtimeWorkspaceRoots": message.get("params", {}).get("runtimeWorkspaceRoots", []),
+                "skillInputs": [item for item in turn_input if item.get("type") == "skill"],
             }
             if serial_mode:
                 saved_history = serial_history()
@@ -1051,6 +1078,63 @@ def main():
                 saved_history["turns"] = turns
                 history_path.write_text(json.dumps(saved_history), encoding="utf-8")
             preserve_no_outcome = any(marker in mode for marker in ("nonblocking-slow", "nonblocking-restart-question", "hold-release", "question-isolation"))
+            if is_outcome_reminder and "nudged-work" in mode:
+                # The nudge says to keep working when work remains, so this turn
+                # streams commentary and a shell check, answers, and only then
+                # reports completed, all inside the private status nudge.
+                saved = serial_history()
+                instructions = (
+                    turn_history.get("developerInstructions")
+                    or saved.get("threadStartDeveloperInstructions")
+                    or ((saved.get("threadResumeDeveloperInstructions") or [None])[-1])
+                    or ""
+                )
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
+                if Path(str(sys.argv[0]) + ".nudged-steer-pause").exists():
+                    # The test steers this running nudge turn, as a user can.
+                    Path(str(sys.argv[0]) + ".nudged-steer-ready").write_text("The nudged turn is waiting for a steer.\n", encoding="utf-8")
+                    steered_text = None
+                    steer_deadline = time.monotonic() + 60
+                    while steered_text is None and time.monotonic() < steer_deadline:
+                        readable, _, _ = select.select([sys.stdin], [], [], 0.02)
+                        if not readable:
+                            continue
+                        try:
+                            incoming = json.loads(sys.stdin.readline())
+                        except json.JSONDecodeError:
+                            continue
+                        if incoming.get("method") != "turn/steer":
+                            answer_read_while_held(incoming)
+                            continue
+                        steer_params = incoming.get("params", {})
+                        if steer_params.get("threadId") != THREAD_ID or steer_params.get("expectedTurnId") != TURN_ID:
+                            write({"jsonrpc": "2.0", "id": incoming["id"], "error": {"code": -32000, "message": "No matching active turn."}})
+                            continue
+                        steered_text = "\n".join(item.get("text", "") for item in steer_params.get("input", []) if item.get("type") == "text")
+                        write({"jsonrpc": "2.0", "id": incoming["id"], "result": {"turnId": TURN_ID}})
+                        steered_history = serial_history()
+                        steered_history["steerRequests"] = steered_history.get("steerRequests", []) + [steer_params]
+                        history_path.write_text(json.dumps(steered_history), encoding="utf-8")
+                    if steered_text is None:
+                        os._exit(3)
+                for item in nudged_work_items(len(saved.get("turns", [])) - 1):
+                    if item["type"] == "commandExecution":
+                        write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                            "threadId": THREAD_ID, "turnId": TURN_ID, "item": {**item, "status": "inProgress"},
+                        }})
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID, "item": item,
+                    }})
+                outcome_line = next((line.strip() for line in instructions.splitlines() if " task outcome " in line), None)
+                if outcome_line:
+                    completed = subprocess.run(
+                        shlex.split(outcome_line.replace("<completed|in-progress|waiting-response>", "completed")),
+                        capture_output=True, text=True, timeout=60,
+                    )
+                    if completed.returncode != 0:
+                        raise RuntimeError(f"Fixture task outcome command failed: {completed.stderr.strip()}")
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"}}})
+                return
             if is_outcome_reminder and not preserve_no_outcome:
                 # A fixture that only ever resumed an existing thread has no
                 # thread-start instructions of its own; its outcome command
@@ -2237,15 +2321,37 @@ def main():
                     "hold-release" in os.path.basename(sys.argv[0])
                     and "playhouse internal outcome nudge:" in (saved_turn.get("userMessage") or "").lower()
                 ):
+                    # A status-only nudge: its one call is Playhouse's own outcome
+                    # report, which is bookkeeping, so the whole turn stays private.
                     contents.append({
                         "id": f"item_private_reminder_activity_{turn_index}",
-                        "type": "mcpToolCall",
-                        "server": "private-reminder-fixture",
-                        "tool": "reminder-only-tool",
+                        "type": "commandExecution",
+                        "command": f"'/fixture/playhouse-cli' task outcome {turn_index} waiting-response",
+                        "cwd": "/tmp/playhouse-fixture",
                         "status": "completed",
+                        "exitCode": 0,
                         "durationMs": 11,
                         "_fixture_turn_index": turn_index - 1,
                     })
+            if "nudged-work" in mode:
+                # Each saved turn as its own thread items. A status nudge that went
+                # on to work holds commentary, a shell check, and its answer.
+                contents = []
+                for turn_index, saved_turn in enumerate(saved_turns):
+                    user_message = saved_turn.get("userMessage") or ""
+                    turn_items = [{"id": f"item_nudged_user_{turn_index}", "type": "userMessage",
+                                   "content": [{"type": "text", "text": user_message}]}]
+                    if "playhouse internal outcome nudge:" in user_message.lower():
+                        # A message the user steered into this nudge turn follows its prompt.
+                        for steer in saved_history.get("steerRequests", []):
+                            if steer.get("expectedTurnId") == saved_turn.get("turnID"):
+                                turn_items.append({"id": f"item_nudged_steer_{turn_index}", "type": "userMessage",
+                                                   "content": [item for item in steer.get("input", []) if item.get("type") == "text"]})
+                        turn_items += nudged_work_items(turn_index)
+                    else:
+                        turn_items.append({"id": f"item_nudged_answer_{turn_index}", "type": "agentMessage",
+                                           "phase": "final_answer", "text": answer_text(user_message)})
+                    contents += [{**item, "_fixture_turn_index": turn_index} for item in turn_items]
             unassociated_restart_question = os.path.basename(sys.argv[0]).endswith("-unassociated-restart-question")
             for index, item in enumerate(contents):
                 item_id = item.get("id", "")

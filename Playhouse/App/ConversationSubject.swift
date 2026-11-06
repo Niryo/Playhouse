@@ -73,24 +73,66 @@ struct ConversationCallUsage: Codable, Equatable, Sendable {
     var sentTokens = 0
     var outputTokens = 0
     var lastContextTokens = 0
+    /// What `sentTokens` is made of. Cache reads bill at a fraction of normal
+    /// input, so the split is what lets a total leave them out. Snapshots
+    /// recorded before the split existed decode these as zero.
+    var uncachedInputTokens = 0
+    var cacheReadTokens = 0
+    var cacheWriteTokens = 0
+
+    init(
+        calls: Int = 0, sentTokens: Int = 0, outputTokens: Int = 0, lastContextTokens: Int = 0,
+        uncachedInputTokens: Int = 0, cacheReadTokens: Int = 0, cacheWriteTokens: Int = 0
+    ) {
+        self.calls = calls
+        self.sentTokens = sentTokens
+        self.outputTokens = outputTokens
+        self.lastContextTokens = lastContextTokens
+        self.uncachedInputTokens = uncachedInputTokens
+        self.cacheReadTokens = cacheReadTokens
+        self.cacheWriteTokens = cacheWriteTokens
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        calls = try container.decodeIfPresent(Int.self, forKey: .calls) ?? 0
+        sentTokens = try container.decodeIfPresent(Int.self, forKey: .sentTokens) ?? 0
+        outputTokens = try container.decodeIfPresent(Int.self, forKey: .outputTokens) ?? 0
+        lastContextTokens = try container.decodeIfPresent(Int.self, forKey: .lastContextTokens) ?? 0
+        uncachedInputTokens = try container.decodeIfPresent(Int.self, forKey: .uncachedInputTokens) ?? 0
+        cacheReadTokens = try container.decodeIfPresent(Int.self, forKey: .cacheReadTokens) ?? 0
+        cacheWriteTokens = try container.decodeIfPresent(Int.self, forKey: .cacheWriteTokens) ?? 0
+    }
 
     var isEmpty: Bool { calls == 0 }
+    /// Whether the cache split accounts for everything sent; false for calls
+    /// recorded before the split was stored.
+    var hasCacheSplit: Bool { uncachedInputTokens + cacheReadTokens + cacheWriteTokens == sentTokens }
+    /// Everything but the cache reads: uncached input, cache writes and output.
+    var tokensExcludingCacheReads: Int { uncachedInputTokens + cacheWriteTokens + outputTokens }
 
     static func + (lhs: Self, rhs: Self) -> Self {
         Self(
             calls: lhs.calls + rhs.calls,
             sentTokens: lhs.sentTokens + rhs.sentTokens,
             outputTokens: lhs.outputTokens + rhs.outputTokens,
-            lastContextTokens: rhs.isEmpty ? lhs.lastContextTokens : rhs.lastContextTokens
+            lastContextTokens: rhs.isEmpty ? lhs.lastContextTokens : rhs.lastContextTokens,
+            uncachedInputTokens: lhs.uncachedInputTokens + rhs.uncachedInputTokens,
+            cacheReadTokens: lhs.cacheReadTokens + rhs.cacheReadTokens,
+            cacheWriteTokens: lhs.cacheWriteTokens + rhs.cacheWriteTokens
         )
     }
 
     /// Adds one model call.
-    mutating func addCall(sentTokens: Int, outputTokens: Int) {
+    mutating func addCall(usage: ConversationTokenUsage) {
+        let sent = usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens
         calls += 1
-        self.sentTokens += sentTokens
-        self.outputTokens += outputTokens
-        lastContextTokens = sentTokens
+        sentTokens += sent
+        outputTokens += usage.outputTokens
+        uncachedInputTokens += usage.inputTokens
+        cacheReadTokens += usage.cacheReadTokens
+        cacheWriteTokens += usage.cacheCreationTokens
+        lastContextTokens = sent
     }
 }
 
@@ -105,6 +147,11 @@ struct ConversationCallUsageSnapshot: Codable, Equatable, Sendable {
     var totalCalls: Int { main.calls + subagents.values.reduce(0) { $0 + $1.calls } }
     var totalSentTokens: Int { main.sentTokens + subagents.values.reduce(0) { $0 + $1.sentTokens } }
     var totalOutputTokens: Int { main.outputTokens + subagents.values.reduce(0) { $0 + $1.outputTokens } }
+    var hasCacheSplit: Bool { main.hasCacheSplit && subagents.values.allSatisfy(\.hasCacheSplit) }
+    /// Uncached input + cache writes + output over the main agent and every subagent.
+    var totalTokensExcludingCacheReads: Int {
+        main.tokensExcludingCacheReads + subagents.values.reduce(0) { $0 + $1.tokensExcludingCacheReads }
+    }
 }
 
 /// The state a conversation turn needs, independent of what owns the conversation.
@@ -279,6 +326,16 @@ extension ConversationSubject {
     /// turn totals for tasks recorded before call-level usage existed.
     var totalSentTokens: Int {
         hasCallUsage ? callUsageSnapshots.values.reduce(0) { $0 + $1.totalSentTokens } : tokenUsage.totalTokens - totalOutputTokens
+    }
+    /// Everything but cache reads (uncached input + cache writes + output),
+    /// subagents included. Tasks recorded before the cache split was stored
+    /// fall back to the turn-level buckets, which cover the main agent only.
+    var tokensExcludingCacheReads: Int {
+        let snapshots = callUsageSnapshots.values.filter { $0.totalCalls > 0 }
+        guard !snapshots.isEmpty, snapshots.allSatisfy(\.hasCacheSplit) else {
+            return tokenUsage.totalTokens - tokenUsage.cacheReadTokens
+        }
+        return snapshots.reduce(0) { $0 + $1.totalTokensExcludingCacheReads }
     }
     /// The size of the transcript at the most recent main-agent call.
     var finalTranscriptTokens: Int {

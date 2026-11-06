@@ -37,6 +37,8 @@ struct KanbanBoardView: View {
     @State private var mergedPullRequestCheckTimerScheduled = false
     @State private var lastMergedPullRequestCheckAt: Date?
     @State private var taskAwaitingUnmergedConfirmation: UUID?
+    @State private var taskAwaitingDiscardConfirmation: UUID?
+    @State private var discardConfirmationMessage = ""
     @State private var syncingReviewTaskIDs = Set<UUID>()
     @State private var attemptedReviewSyncSignatures: [UUID: String] = [:]
     /// Last probed check colour of each linked PR, keyed by task then PR number.
@@ -53,12 +55,18 @@ struct KanbanBoardView: View {
     @State private var boardSearchText = ""
     @FocusState private var isBoardSearchFocused: Bool
     @State private var isShowingChatSidebar = false
+    /// The thickness a legacy (always visible) scroller takes from the board's visible area.
+    @State private var boardScrollerInset = KanbanBoardView.legacyScrollerInset()
     @State private var chatTask: StandaloneChat?
     @State private var isOpeningChatSidebar = false
 
     /// Provider-owning operations run in the bridge daemon.
     private var remoteConversations: RemoteConversationManager {
         RemoteConversationManager(daemon: conversationRuntime.client, runtime: conversationRuntime, modelContext: modelContext)
+    }
+
+    private var isChatOverlayVisible: Bool {
+        isShowingChatSidebar && selectedTask == nil && chatTask != nil
     }
 
     var body: some View {
@@ -86,7 +94,9 @@ struct KanbanBoardView: View {
             }
         }
         .background(WorkspaceTheme.windowBackground)
-        .frame(minWidth: 980, minHeight: 640)
+        // The open chat adds its width to the board's minimum, so the content-sized window grows
+        // to keep the pushed columns visible, as it did when the chat sat beside the board.
+        .frame(minWidth: 980 + (isChatOverlayVisible ? chatSidebarWidth : 0), minHeight: 640)
         .onAppear {
             // The board renders from its own @Query, not the board.list path, so it has to
             // convert a chat still stored as a hidden task itself or that row shows as a card.
@@ -211,7 +221,30 @@ struct KanbanBoardView: View {
             .buttonHoverPointer()
             .nativeHelp("Cancel marking this task Done")
         } message: {
-            Text("The pull request hasn't been merged. Marking this task Done will keep its worktree and branch as they are.")
+            Text("The pull request hasn't been merged. Marking this task Done removes its worktree and keeps its branch.")
+        }
+        .confirmationDialog(
+            "Discard uncommitted changes?",
+            isPresented: Binding(
+                get: { taskAwaitingDiscardConfirmation != nil },
+                set: { if !$0 { taskAwaitingDiscardConfirmation = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Discard Changes and Mark Done", role: .destructive) {
+                guard let id = taskAwaitingDiscardConfirmation else { return }
+                taskAwaitingDiscardConfirmation = nil
+                moveTask(id: id, to: .done, allowUnmergedPullRequests: true, allowDiscardingUncommittedChanges: true)
+            }
+            .buttonHoverPointer()
+            .nativeHelp("Discard uncommitted changes and mark this task Done")
+            .accessibilityIdentifier("discard-changes-confirm-button")
+            Button("Cancel", role: .cancel) { taskAwaitingDiscardConfirmation = nil }
+            .buttonHoverPointer()
+            .nativeHelp("Keep the worktree and leave this task in Review")
+            .accessibilityIdentifier("discard-changes-cancel-button")
+        } message: {
+            Text(discardConfirmationMessage)
         }
         .alert("Some task worktrees were kept", isPresented: Binding(
             get: { lifecycleResetNotice != nil },
@@ -234,15 +267,23 @@ struct KanbanBoardView: View {
         }
     }
 
+    /// Before macOS 15 the board can't anchor smaller content top leading, so it fills the full
+    /// frame instead: a legacy scroller then gets a few points of needless travel, but the clip
+    /// origin never goes negative, which is what desynchronized hit testing.
+    private static func legacyScrollerInset() -> CGFloat {
+        guard #available(macOS 15.0, *), NSScroller.preferredScrollerStyle == .legacy else { return 0 }
+        return NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
+    }
+
     private var boardContent: some View {
-        VStack(spacing: 0) {
-            boardHeader
+        ZStack(alignment: .topLeading) {
+            VStack(spacing: 0) {
+                boardHeader
 
-            Rectangle()
-                .fill(Color.primary.opacity(0.07))
-                .frame(height: 1)
+                Rectangle()
+                    .fill(Color.primary.opacity(0.07))
+                    .frame(height: 1)
 
-            ZStack(alignment: .topLeading) {
                 HStack(spacing: 0) {
                     boardSidebar
 
@@ -250,7 +291,7 @@ struct KanbanBoardView: View {
                         .fill(Color.primary.opacity(0.07))
                         .frame(width: 1)
 
-                    if isShowingChatSidebar, selectedTask == nil, chatTask != nil {
+                    if isChatOverlayVisible {
                         Color.clear
                             .frame(width: max(0, chatSidebarWidth - boardSidebarWidth - 1))
                             .accessibilityHidden(true)
@@ -285,46 +326,65 @@ struct KanbanBoardView: View {
                         }
 
                         HStack(spacing: 0) {
-                            ScrollView([.horizontal, .vertical]) {
-                                HStack(alignment: .top, spacing: 16) {
-                                    ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
-                                        if status == .backlog {
-                                            let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
-                                            VStack(spacing: 12) {
-                                                if hasBlockedTasks {
-                                                    kanbanColumn(.blocked, minHeight: 220)
-                                                        .transition(.opacity.combined(with: .move(edge: .top)))
+                            // The board centers its columns with its own frame and keeps the scroll view's
+                            // clip origin at zero. Left to itself, the two-axis scroll view centers narrower
+                            // content by giving AppKit's clip view a negative bounds origin, and after a
+                            // horizontal scroll nudge followed by a content-height change, SwiftUI's hit
+                            // testing lost that offset: the board drew centered while clicks resolved as if
+                            // it were flush left, so buttons stopped responding until the window was resized.
+                            // The minimum size tracks the visible area, not the reader's frame: legacy
+                            // scrollers take their thickness out of the visible area, and content sized to the
+                            // full frame would show a needless scroll bar.
+                            GeometryReader { viewport in
+                                ScrollView([.horizontal, .vertical]) {
+                                    HStack(alignment: .top, spacing: 16) {
+                                        ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
+                                            if status == .backlog {
+                                                let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
+                                                VStack(spacing: 12) {
+                                                    if hasBlockedTasks {
+                                                        kanbanColumn(.blocked, minHeight: 220)
+                                                            .transition(.opacity.combined(with: .move(edge: .top)))
+                                                    }
+                                                    kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
                                                 }
-                                                kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
-                                            }
-                                            .frame(width: 264)
-                                            .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
-                                        } else if status == .inProgress {
-                                            let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
-                                            VStack(spacing: 12) {
-                                                if hasWaitingResponseTasks {
-                                                    kanbanColumn(.waitingResponse, minHeight: 220)
-                                                        .transition(.opacity.combined(with: .move(edge: .top)))
-                                                }
-                                                kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
-                                            }
-                                            .frame(width: 264)
-                                            .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
-                                        } else {
-                                            kanbanColumn(status)
                                                 .frame(width: 264)
+                                                .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
+                                            } else if status == .inProgress {
+                                                let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
+                                                VStack(spacing: 12) {
+                                                    if hasWaitingResponseTasks {
+                                                        kanbanColumn(.waitingResponse, minHeight: 220)
+                                                            .transition(.opacity.combined(with: .move(edge: .top)))
+                                                    }
+                                                    kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
+                                                }
+                                                .frame(width: 264)
+                                                .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
+                                            } else {
+                                                kanbanColumn(status)
+                                                    .frame(width: 264)
+                                            }
                                         }
                                     }
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .padding(.horizontal, 30)
+                                    .padding(.top, 22)
+                                    .padding(.bottom, 28)
+                                    .frame(
+                                        minWidth: max(0, viewport.size.width - boardScrollerInset),
+                                        minHeight: max(0, viewport.size.height - boardScrollerInset)
+                                    )
                                 }
-                                .fixedSize(horizontal: false, vertical: true)
-                                .padding(.horizontal, 30)
-                                .padding(.top, 22)
-                                .padding(.bottom, 28)
+                                .modifier(TopLeadingScrollAlignment())
+                                .scrollIndicators(.visible)
+                                .background(WorkspaceTheme.windowBackground)
+                                .scrollContentBackground(.hidden)
+                                .accessibilityIdentifier("board-columns-scroll-view")
                             }
-                            .scrollIndicators(.visible)
-                            .background(WorkspaceTheme.windowBackground)
-                            .scrollContentBackground(.hidden)
-                            .accessibilityIdentifier("board-columns-scroll-view")
+                            .onReceive(NotificationCenter.default.publisher(for: NSScroller.preferredScrollerStyleDidChangeNotification)) { _ in
+                                boardScrollerInset = Self.legacyScrollerInset()
+                            }
 
                             // A fixed gutter beside the scroll view rather than an overlay, so the opened
                             // drawer never covers a column and stays put while scrolling.
@@ -336,32 +396,12 @@ struct KanbanBoardView: View {
                         }
                     }
                 }
-
-                if isShowingChatSidebar, selectedTask == nil, let chatTask {
-                    TaskConversationView(
-                        task: chatTask, isNewTask: false, isReadOnly: false,
-                        conflictResolutionRequested: false,
-                        onConflictResolutionChecked: { _ in }
-                    ) {
-                        withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
-                    }
-                    .frame(width: chatSidebarWidth)
-                    .frame(maxHeight: .infinity, alignment: .topLeading)
-                    .overlay(alignment: .trailing) {
-                        Rectangle()
-                            .fill(Color.primary.opacity(0.07))
-                            .frame(width: 1)
-                    }
-                    .transition(.move(edge: .leading).combined(with: .opacity))
-                    .id(chatTask.id)
-                    // Without a container, this identifier replaces the conversation controls' own.
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("chat-sidebar")
-                }
             }
-            .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            standaloneChatOverlay
         }
+        .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task(id: draggedTaskID) {
             // SwiftUI reports no end for a drag that lands outside every drop target (for
             // example a card dropped back in place), and the drag session consumes the
@@ -385,7 +425,7 @@ struct KanbanBoardView: View {
         // resolved to the board's scroll view underneath: the rows still took mouse clicks, but
         // XCUITest (and so assistive clients) did not find them. A platform view here restores
         // it; that was found by bisecting and experiment, and the AppKit mechanism is not
-        // confirmed. Do not remove it without rerunning test_task_done_preserves_worktree_and_branch,
+        // confirmed. Do not remove it without rerunning test_task_done_removes_worktree_and_preserves_branch,
         // whose archive hittability check guards it.
         .background(BoardAccessibilityHitTestAnchor())
         .overlay(alignment: .topTrailing) {
@@ -430,6 +470,32 @@ struct KanbanBoardView: View {
             } catch {
                 presentSaveError(error.localizedDescription)
                 archiveSearchResults = []
+            }
+        }
+    }
+
+    private var standaloneChatOverlay: some View {
+        Group {
+            if isShowingChatSidebar, selectedTask == nil, let chatTask {
+                TaskConversationView(
+                    task: chatTask, isNewTask: false, isReadOnly: false,
+                    conflictResolutionRequested: false,
+                    onConflictResolutionChecked: { _ in }
+                ) {
+                    setChatSidebarVisible(false)
+                }
+                .frame(width: chatSidebarWidth)
+                .frame(maxHeight: .infinity, alignment: .topLeading)
+                .overlay(alignment: .trailing) {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.07))
+                        .frame(width: 1)
+                }
+                .transition(.move(edge: .leading).combined(with: .opacity))
+                .id(chatTask.id)
+                // Without a container, this identifier replaces the conversation controls' own.
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("chat-sidebar")
             }
         }
     }
@@ -552,7 +618,7 @@ struct KanbanBoardView: View {
         .background(WorkspaceTheme.panelBackground.opacity(0.62))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Kanban sidebar")
-        .accessibilityHidden(isShowingChatSidebar && selectedTask == nil && chatTask != nil)
+        .accessibilityHidden(isChatOverlayVisible)
     }
 
     private var boardHeader: some View {
@@ -573,6 +639,7 @@ struct KanbanBoardView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .accessibilityHidden(isChatOverlayVisible)
 
             Spacer(minLength: 20)
 
@@ -816,7 +883,7 @@ struct KanbanBoardView: View {
 
     private func openChatSidebar() {
         if isShowingChatSidebar {
-            withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
+            setChatSidebarVisible(false)
             return
         }
         guard !isOpeningChatSidebar else { return }
@@ -839,11 +906,15 @@ struct KanbanBoardView: View {
                     throw BridgeCommandError(code: "operation_failed", message: "The standalone chat could not be opened.")
                 }
                 chatTask = chat
-                withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = true }
+                setChatSidebarVisible(true)
             } catch {
                 saveError = error.localizedDescription
             }
         }
+    }
+
+    private func setChatSidebarVisible(_ visible: Bool) {
+        withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = visible }
     }
 
     private func openNewTask() {
@@ -894,7 +965,12 @@ struct KanbanBoardView: View {
         draggedTaskID.flatMap { id in tasks.first(where: { $0.id == id })?.status }
     }
 
-    private func moveTask(id: UUID, to status: TaskStatus, allowUnmergedPullRequests: Bool = false) {
+    private func moveTask(
+        id: UUID,
+        to status: TaskStatus,
+        allowUnmergedPullRequests: Bool = false,
+        allowDiscardingUncommittedChanges: Bool = false
+    ) {
         guard let task = tasks.first(where: { $0.id == id }), task.status != status else { return }
         if status == .review {
             guard task.status == .waitingResponse else { return }
@@ -915,10 +991,18 @@ struct KanbanBoardView: View {
                     id,
                     to: status.rawValue,
                     allowUnmergedPullRequests: allowUnmergedPullRequests,
+                    allowDiscardingUncommittedChanges: allowDiscardingUncommittedChanges,
                     skipMergeVerification: skipMergeVerification
                 )
             } catch PlayhouseManagerError.unmergedPullRequests {
                 taskAwaitingUnmergedConfirmation = id
+            } catch let error as PlayhouseManagerError {
+                if case .uncommittedChanges = error {
+                    discardConfirmationMessage = error.localizedDescription
+                    taskAwaitingDiscardConfirmation = id
+                } else {
+                    doneMoveError = error.localizedDescription
+                }
             } catch {
                 doneMoveError = error.localizedDescription
             }
@@ -1179,6 +1263,18 @@ struct KanbanBoardView: View {
         }
     }
 
+}
+
+/// Places scroll content smaller than its container at the top leading corner instead of
+/// centering it through a negative clip origin; the board centers its columns itself.
+private struct TopLeadingScrollAlignment: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.defaultScrollAnchor(.topLeading, for: .alignment)
+        } else {
+            content
+        }
+    }
 }
 
 /// An empty, zero-size AppKit view kept behind the board because, empirically, the Done
@@ -2405,6 +2501,15 @@ private struct TokenStatsSheet: View {
                 HStack(alignment: .top, spacing: 28) {
                     headline("Final transcript size", usage.finalTranscriptTokens, id: "token-stats-final-transcript")
                     headline("Total sent (incl. subagents)", usage.totalSentTokens, id: "token-stats-total-sent")
+                    if let excluding = usage.totalTokensExcludingCacheReads {
+                        headline("Excluding cache reads (incl. subagents)", excluding, id: "token-stats-excluding-cache")
+                    }
+                }
+                if let main = usage.mainAgent.tokensExcludingCacheReads, let subs = usage.subagents.tokensExcludingCacheReads {
+                    Text("Excluding cache reads: \(main.formatted(Self.number)) main agent · \(subs.formatted(Self.number)) subagents")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("token-stats-excluding-cache-split")
                 }
                 let subagents = usage.subagents
                 Text("\(usage.totalCalls) model \(usage.totalCalls == 1 ? "call" : "calls") · \(usage.mainAgent.calls) main, \(subagents.calls) across \(subagents.count) \(subagents.count == 1 ? "subagent" : "subagents")")
