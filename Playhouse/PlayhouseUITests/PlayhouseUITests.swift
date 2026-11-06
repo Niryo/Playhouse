@@ -14194,7 +14194,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(toggle.exists, "The standalone chat has no task sidebar, so no terminal button.")
     }
 
-    // case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and both the Token Stats context-menu item and a click on the counter itself, a button that highlights on hover, open a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
+    // case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and both the Token Stats context-menu item and a click on the counter itself, a button that highlights on hover, open a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown. Excluding cache reads (uncached input + cache write + output, subagent included) is 855 per turn, doubling after a second turn, and also reaches the live stream when the session files cannot be read; an empty task reports it unavailable. A task saved before the cache split existed (call usage without the split, plus turn-level buckets) still loads, reports its call counts and total sent, omits the per-call excluding-cache figures, and falls back to the turn buckets minus cache reads (170 for 100 input, 50 output, 400 cache read and 20 cache write); its modal hides the Excluding cache reads headline. The modal also labels 'Excluding cache reads (incl. subagents)' with its main-agent and subagent split.
     func test_task_token_usage_records_claude_turn_breakdown() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-usage")
         launchApp(defaultParent: fixture.parent.path)
@@ -14206,6 +14206,10 @@ final class PlayhouseUITests: XCTestCase {
         let counter = element("task-token-usage-counter-\(taskID)")
         XCTAssertFalse(counter.exists, "A task with no recorded tokens should hide its card counter.")
         attachScreenshot(named: "Task card hides its counter before any tokens are recorded")
+        let emptySummary = try XCTUnwrap(try runCLI(["task", "token-usage", taskID])["result"] as? [String: Any])
+        XCTAssertEqual((emptySummary["callUsage"] as? [String: Any])?["available"] as? Bool, false)
+        XCTAssertNil((emptySummary["callUsage"] as? [String: Any])?["totalTokensExcludingCacheReads"])
+        XCTAssertEqual(emptySummary["tokensExcludingCacheReads"] as? Int, 0)
 
         card.rightClick()
         element("token-stats-task-menu-item").click()
@@ -14251,6 +14255,9 @@ final class PlayhouseUITests: XCTestCase {
         assertText("token-stats-total", equals: "3,200")
         assertText("token-stats-final-transcript", equals: "650")
         assertText("token-stats-total-sent", equals: "3,680")
+        // Per turn, uncached input + cache write + output: 360 main + 495 subagent.
+        assertText("token-stats-excluding-cache", equals: "1,710")
+        assertText("token-stats-excluding-cache-split", equals: "Excluding cache reads: 720 main agent · 990 subagents")
         assertText("token-stats-total-calls", equals: "8 model calls · 4 main, 4 across 2 subagents")
         assertText("token-stats-output", equals: "Output 170")
         XCTAssertTrue(element("token-stats-tool-Bash").exists, "The rollup should name the tool the turns ran.")
@@ -14268,11 +14275,51 @@ final class PlayhouseUITests: XCTestCase {
         let calls = try XCTUnwrap(summary["callUsage"] as? [String: Any])
         XCTAssertEqual(calls["totalCalls"] as? Int, 8)
         XCTAssertEqual(calls["totalSentTokens"] as? Int, 3_680)
+        XCTAssertEqual(calls["totalTokensExcludingCacheReads"] as? Int, 1_710)
+        XCTAssertEqual(summary["tokensExcludingCacheReads"] as? Int, 1_710)
+
+        // A task saved before the cache split existed: call usage without the split plus turn buckets.
+        let legacyTitle = "Legacy token usage task"
+        let legacyID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", legacyTitle, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        let legacySnapshots = #"{"claude:legacy":{"provider":"claude","updatedAt":800000000,"main":{"calls":2,"sentTokens":1200,"outputTokens":60,"lastContextTokens":650},"subagents":{"old":{"calls":1,"sentTokens":300,"outputTokens":10,"lastContextTokens":300}}}}"#
+        // The app holds its container open, so close it before seeding the store.
+        app.terminate()
+        XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its SwiftData container before seeding the pre-split task.")
+        let seed = Process()
+        seed.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        seed.arguments = [
+            dataDirectory.appendingPathComponent("Playhouse-v2.store").path,
+            "UPDATE ZBOARDTASK SET ZCALLUSAGESNAPSHOTSDATA = CAST('\(legacySnapshots)' AS BLOB), ZTOTALINPUTTOKENS = 100, ZTOTALOUTPUTTOKENS = 50, ZTOTALCACHEREADTOKENS = 400, ZTOTALCACHECREATIONTOKENS = 20 WHERE ZTITLE = '\(legacyTitle)'",
+        ]
+        try seed.run()
+        seed.waitUntilExit()
+        XCTAssertEqual(seed.terminationStatus, 0, "Seeding the pre-split task should succeed.")
+        // A fresh bridge daemon (its own service name, started by the relaunched app) reads the seeded row instead of a cached task.
+        let freshDaemon = ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).legacy-\(UUID().uuidString.prefix(8))"]
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: freshDaemon)
+        let legacySummary = try XCTUnwrap(try runCLI(
+            ["task", "token-usage", legacyID], extraEnvironment: freshDaemon
+        )["result"] as? [String: Any])
+        let legacyCalls = try XCTUnwrap(legacySummary["callUsage"] as? [String: Any])
+        XCTAssertEqual(legacyCalls["available"] as? Bool, true)
+        XCTAssertEqual(legacyCalls["totalSentTokens"] as? Int, 1_500)
+        XCTAssertNil(legacyCalls["totalTokensExcludingCacheReads"], "Without the split there is no per-call figure.")
+        XCTAssertEqual(legacySummary["tokensExcludingCacheReads"] as? Int, 170, "The fallback is the turn buckets minus cache reads.")
+        let legacyCard = app.buttons[legacyTitle]
+        XCTAssertTrue(legacyCard.waitForExistence(timeout: 10))
+        legacyCard.rightClick()
+        element("token-stats-task-menu-item").click()
+        assertText("token-stats-total-sent", equals: "1,500")
+        XCTAssertFalse(element("token-stats-excluding-cache").exists, "A pre-split task hides the Excluding cache reads headline.")
+        attachScreenshot(named: "Token Stats modal for a task saved before the cache split")
+        element("close-token-stats-button").click()
         XCTAssertEqual(calls["finalTranscriptTokens"] as? Int, 650)
         XCTAssertEqual((calls["subagents"] as? [String: Any])?["count"] as? Int, 2)
     }
 
-    // case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, Codex's input count includes its cached tokens, so the input bucket excludes them rather than counting them twice. Per-call usage notifications streamed before the turn ends, including those of a subagent thread that names its parent, reach the same call-level accounting once each (a repeated notification is ignored), and the Token Stats modal shows those Codex totals, call counts and final transcript size in the app.
+    // case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, Codex's input count includes its cached tokens, so the input bucket excludes them rather than counting them twice. Per-call usage notifications streamed before the turn ends, including those of a subagent thread that names its parent, reach the same call-level accounting once each (a repeated notification is ignored), and the Token Stats modal shows those Codex totals, call counts and final transcript size in the app. Excluding cache reads, the figure counts each call's uncached input plus cache write plus output, main thread and subagent alike (780), and the modal shows it with its main-agent and subagent split.
     func test_task_token_usage_records_codex_turn_breakdown() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Codex token usage", roots: [fixture.primary.path])
@@ -14330,6 +14377,9 @@ final class PlayhouseUITests: XCTestCase {
         assertText("token-stats-total", equals: "1,050")
         assertText("token-stats-final-transcript", equals: "900")
         assertText("token-stats-total-sent", equals: "1,900")
+        // Codex's input includes cached tokens: main (200+30)+(300+40), subagent 200+10.
+        assertText("token-stats-excluding-cache", equals: "780")
+        assertText("token-stats-excluding-cache-split", equals: "Excluding cache reads: 570 main agent · 210 subagents")
         assertText("token-stats-total-calls", equals: "3 model calls · 2 main, 1 across 1 subagent")
         attachScreenshot(named: "Token Stats modal shows a Codex turn's usage")
         element("close-token-stats-button").click()
@@ -14343,6 +14393,8 @@ final class PlayhouseUITests: XCTestCase {
         let calls = try XCTUnwrap(summary["callUsage"] as? [String: Any])
         XCTAssertEqual(calls["totalCalls"] as? Int, 3)
         XCTAssertEqual(calls["totalSentTokens"] as? Int, 1_900)
+        XCTAssertEqual(calls["totalTokensExcludingCacheReads"] as? Int, 780)
+        XCTAssertEqual(summary["tokensExcludingCacheReads"] as? Int, 780)
         XCTAssertEqual(calls["totalOutputTokens"] as? Int, 80)
         XCTAssertEqual(calls["finalTranscriptTokens"] as? Int, 900)
         XCTAssertEqual((calls["subagents"] as? [String: Any])?["calls"] as? Int, 1)

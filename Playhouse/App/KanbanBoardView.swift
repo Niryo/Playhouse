@@ -2387,6 +2387,15 @@ private struct TokenStatsSheet: View {
                 HStack(alignment: .top, spacing: 28) {
                     headline("Final transcript size", usage.finalTranscriptTokens, id: "token-stats-final-transcript")
                     headline("Total sent (incl. subagents)", usage.totalSentTokens, id: "token-stats-total-sent")
+                    if let excluding = usage.totalTokensExcludingCacheReads {
+                        headline("Excluding cache reads (incl. subagents)", excluding, id: "token-stats-excluding-cache")
+                    }
+                }
+                if let main = usage.mainAgent.tokensExcludingCacheReads, let subs = usage.subagents.tokensExcludingCacheReads {
+                    Text("Excluding cache reads: \(main.formatted(Self.number)) main agent · \(subs.formatted(Self.number)) subagents")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("token-stats-excluding-cache-split")
                 }
                 let subagents = usage.subagents
                 Text("\(usage.totalCalls) model \(usage.totalCalls == 1 ? "call" : "calls") · \(usage.mainAgent.calls) main, \(subagents.calls) across \(subagents.count) \(subagents.count == 1 ? "subagent" : "subagents")")
