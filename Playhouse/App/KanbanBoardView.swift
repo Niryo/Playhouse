@@ -22,9 +22,11 @@ enum ChatSidebarLayout {
 /// The standalone chat's conversation. The board re-renders on every frame of a chat resize, and
 /// a conversation view rebuilt from it, closures and all, re-ran its whole transcript each time;
 /// compared by the chat it shows, it updates only from its own state and the chat's model. Any
-/// input added here that can change must also be compared in `==`, or its changes are ignored.
+/// input added here that can change must also be compared in `==`, or its changes are ignored. The
+/// closures only reach the board's state storage, so an older copy of them stays valid.
 private struct StandaloneChatPanel: View, Equatable {
     let chat: StandaloneChat
+    let onOpenTask: (UUID, String) -> Void
     let onClose: () -> Void
 
     static func == (lhs: StandaloneChatPanel, rhs: StandaloneChatPanel) -> Bool {
@@ -36,6 +38,7 @@ private struct StandaloneChatPanel: View, Equatable {
             task: chat, isNewTask: false, isReadOnly: false,
             conflictResolutionRequested: false,
             onConflictResolutionChecked: { _ in },
+            onOpenTask: onOpenTask,
             onBack: onClose
         )
     }
@@ -83,6 +86,8 @@ struct KanbanBoardView: View {
     @State private var mergedReviewTaskIDs = Set<UUID>()
     @State private var conflictedReviewTaskIDs = Set<UUID>()
     @State private var conflictResolutionTaskID: UUID?
+    /// Prompts that tasks opened by the Skills page's Fix with Agent send when they appear.
+    @State private var skillFixPrompts: [UUID: String] = [:]
     @State private var checkingMergedPullRequests = false
     @State private var mergedPullRequestCheckPending = false
     @State private var mergedPullRequestCheckTimerScheduled = false
@@ -133,8 +138,11 @@ struct KanbanBoardView: View {
                     onConflictResolutionChecked: { resolved in
                         if resolved { conflictedReviewTaskIDs.remove(selectedTask.id) }
                         else { conflictedReviewTaskIDs.insert(selectedTask.id) }
-                    }
+                    },
+                    skillFixPrompt: skillFixPrompts[selectedTask.id],
+                    onOpenTask: openTask(_:sending:)
                 ) {
+                    self.skillFixPrompts[selectedTask.id] = nil
                     self.selectedTask = nil
                     self.isSelectedTaskNew = false
                     self.conflictResolutionTaskID = nil
@@ -580,7 +588,7 @@ struct KanbanBoardView: View {
     private var standaloneChatOverlay: some View {
         Group {
             if isShowingChatSidebar, selectedTask == nil, let chatTask {
-                StandaloneChatPanel(chat: chatTask) {
+                StandaloneChatPanel(chat: chatTask, onOpenTask: openTask(_:sending:)) {
                     setChatSidebarVisible(false)
                 }
                 .equatable()
@@ -700,6 +708,10 @@ struct KanbanBoardView: View {
         .accessibilityIdentifier("board-search-bar")
     }
 
+    private var runningTaskCountByProvider: [ConversationProvider: Int] {
+        tasks.filter { $0.status == .inProgress }.reduce(into: [:]) { $0[$1.conversationProvider, default: 0] += 1 }
+    }
+
     private var boardSidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
             Button {} label: {
@@ -715,6 +727,8 @@ struct KanbanBoardView: View {
             .nativeHelp("Placeholder sidebar button")
 
             Spacer(minLength: 0)
+
+            AgentsInfoView(runningProviders: runningTaskCountByProvider)
         }
         .padding(12)
         .frame(width: boardSidebarWidth)
@@ -1019,6 +1033,30 @@ struct KanbanBoardView: View {
 
     private func setChatSidebarVisible(_ visible: Bool) {
         withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = visible }
+    }
+
+    /// Shows a task the daemon just created, such as one fixing skills, and
+    /// has its conversation send `prompt` once it opens.
+    private func openTask(_ id: UUID, sending prompt: String) {
+        let origin = selectedTask?.id
+        Task { @MainActor in
+            let manager = BoardTaskManager(modelContext: modelContext)
+            // The daemon wrote the task; give this window's store a moment to see it.
+            for _ in 0..<100 {
+                // The user moved on while the store caught up; leave their choice alone.
+                guard selectedTask?.id == origin else { return }
+                if let task = try? manager.taskModel(id) {
+                    skillFixPrompts[id] = prompt
+                    setChatSidebarVisible(false)
+                    isSelectedTaskNew = false
+                    conflictResolutionTaskID = nil
+                    selectedTask = task
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            saveError = "Playhouse created the task but couldn't open it. Find it in Backlog."
+        }
     }
 
     private func openNewTask() {

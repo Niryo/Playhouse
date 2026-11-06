@@ -969,6 +969,10 @@ struct TaskConversationView: View {
     var isReadOnly = false
     var conflictResolutionRequested = false
     var onConflictResolutionChecked: (Bool) -> Void = { _ in }
+    /// The prompt a task opened from the Skills page's Fix with Agent sends on arrival.
+    var skillFixPrompt: String? = nil
+    /// Shows another task's conversation, sending it the prompt once it opens.
+    var onOpenTask: (UUID, String) -> Void = { _, _ in }
     let onBack: () -> Void
 
     /// The draft lives in an observable model, so a keystroke re-renders only views that read it
@@ -1685,14 +1689,7 @@ struct TaskConversationView: View {
                 .frame(minWidth: 900, minHeight: 600)
             }
         }
-        .overlay {
-            if isShowingSkills {
-                SkillsPageView(task: task, manager: conversationManager, onUse: useSkill) {
-                    isShowingSkills = false
-                    composerDraft.focusRequest += 1
-                }
-            }
-        }
+        .overlay { skillsModal }
         .task {
             // Synchronous, so the picker shows the cached model name on the
             // first frame instead of "Default" while the conversation and a
@@ -1718,6 +1715,10 @@ struct TaskConversationView: View {
             if conflictResolutionRequested && !isReadOnly && !isResponding {
                 conflictResolutionAttempt = 1
                 sendMessage(overrideText: "The PR has conflicts. Fix them, commit, and push.")
+            } else if let skillFixPrompt, !isReadOnly, !isResponding, messages.isEmpty, task.pendingSubmittedPrompt == nil {
+                // Sent as the composer's own draft, so the composer clears as for any send.
+                draft = skillFixPrompt
+                sendMessage()
             }
         }
         .onChange(of: providerPendingUserInputRequest) { previous, request in
@@ -2857,9 +2858,9 @@ struct TaskConversationView: View {
             if !isReadOnly {
                 Button { removeConversationRepository(repository) } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 6.5, weight: .bold))
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 14, height: 14)
+                        .frame(width: 20, height: 20)
                         .background(WorkspaceTheme.panelBackground, in: Circle())
                         .overlay(Circle().strokeBorder(Color.primary.opacity(0.16), lineWidth: 1))
                         .contentShape(Circle())
@@ -2869,7 +2870,7 @@ struct TaskConversationView: View {
                 .nativeHelp("Remove \(name) from this task")
                 .accessibilityLabel("Remove \(name)")
                 .accessibilityIdentifier("remove-conversation-repository-\(name)")
-                .offset(x: 4, y: -4)
+                .offset(x: 6, y: -6)
             }
         }
     }
@@ -6728,6 +6729,43 @@ struct TaskConversationView: View {
         composerDraft.focusRequest += 1
     }
 
+    /// The skill gallery as a large modal that slides up from the bottom of
+    /// the window over a dimmed conversation.
+    private var skillsModal: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .bottom) {
+                if isShowingSkills {
+                    Color.black.opacity(0.28)
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture { isShowingSkills = false }
+                        .accessibilityHidden(true)
+                        .transition(.opacity)
+                    SkillsPageView(
+                        task: task, manager: conversationManager, onUse: useSkill,
+                        onFixTask: { taskID, prompt in
+                            isShowingSkills = false
+                            onOpenTask(taskID, prompt)
+                        }
+                    ) {
+                        isShowingSkills = false
+                        composerDraft.focusRequest += 1
+                    }
+                    .frame(
+                        width: max(geometry.size.width - 64, min(geometry.size.width, 720)),
+                        height: max(geometry.size.height - 40, min(geometry.size.height, 480))
+                    )
+                    .clipShape(UnevenRoundedRectangle(topLeadingRadius: 16, topTrailingRadius: 16))
+                    .shadow(color: .black.opacity(0.3), radius: 24, y: -4)
+                    .transition(.move(edge: .bottom))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        }
+        .allowsHitTesting(isShowingSkills)
+        .animation(.spring(response: 0.38, dampingFraction: 0.9), value: isShowingSkills)
+    }
+
     /// Summarizes how the selected provider's native configuration differs, so a
     /// switch doesn't silently change which skills or MCP servers are available.
     private func loadProviderNotice() async {
@@ -6897,6 +6935,10 @@ struct TaskConversationView: View {
                     .font(.system(size: 13))
                     .focused($focusedRepositoryField, equals: field)
                     .onSubmit { saveConversationRepository(repository, field: field) }
+                    .onKeyPress(.escape) {
+                        cancelRepositoryFieldEdit(repository)
+                        return .handled
+                    }
                     .accessibilityIdentifier(identifier)
                     .padding(.leading, 9).padding(.trailing, 34).padding(.vertical, 6)
                     .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))

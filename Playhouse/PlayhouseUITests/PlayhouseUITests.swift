@@ -490,6 +490,189 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Playhouse board opened with a healthy bridge")
     }
 
+    // case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude, which only reports usage while a task runs, starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the placeholder button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
+    func test_agents_info_shows_provider_usage_and_accounts() throws {
+        let codexExecutable = try makeCodexFixture(emptyQuestions: false)
+        let codexAccount = URL(fileURLWithPath: codexExecutable.path + ".account")
+        try? FileManager.default.removeItem(at: codexAccount)
+        defer { try? FileManager.default.removeItem(at: codexAccount) }
+        codexFixtureExecutable = codexExecutable.path
+        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-agents-info")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claudeExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8
+        )
+        claudeFixtureExecutable = claudeExecutable.path
+        launchApp(defaultParent: fixture.parent.path)
+
+        func text(_ identifier: String) -> String {
+            let match = element(identifier)
+            return match.exists ? accessibleLabelOrValue(of: match) : ""
+        }
+
+        // The section sits at the bottom of the sidebar, below the placeholder button, with one block per agent.
+        let sidebar = element(withAccessibilityLabel: "Kanban sidebar")
+        let section = element("agents-info")
+        XCTAssertTrue(section.waitForExistence(timeout: 30), "Agents info should appear once an agent CLI is installed.")
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label =[c] %@ OR value =[c] %@", "Agents info", "Agents info")).firstMatch.exists, "The section should be titled Agents info.")
+        XCTAssertTrue(sidebar.frame.contains(section.frame), "Agents info should be inside the left sidebar.")
+        XCTAssertLessThanOrEqual(app.buttons["Placeholder"].frame.maxY, section.frame.minY, "Agents info should sit below the placeholder button.")
+        XCTAssertLessThan(sidebar.frame.maxY - section.frame.maxY, 40, "Agents info should be pinned at the bottom of the sidebar.")
+        let claudeBlock = element("agents-info-claude")
+        let codexBlock = element("agents-info-codex")
+        XCTAssertTrue(claudeBlock.exists && codexBlock.exists, "Claude and Codex should each have their own block.")
+        XCTAssertLessThanOrEqual(claudeBlock.frame.maxY, codexBlock.frame.minY, "The blocks should be separate, Claude above Codex.")
+        XCTAssertLessThan(section.frame.height, 330, "The section should stay a compact sidebar footer.")
+        let toggle = element("agents-info-toggle")
+        XCTAssertEqual(toggle.value as? String, "Expanded", "The section should be open by default.")
+        let expandedTitleMinY = toggle.frame.minY
+
+        // Codex shows its account, both windows, and credits from the app-server; Claude has no usage until a task runs.
+        XCTAssertTrue(element("agents-info-codex-window-secondary").waitForExistence(timeout: 30), "Codex usage should show soon after launch.")
+        XCTAssertEqual(text("agents-info-codex-account"), "codex-fixture@example.com")
+        let primary = text("agents-info-codex-window-primary")
+        XCTAssertTrue(primary.contains("5h") && primary.contains("30%") && primary.contains("Resets in"), "Codex's 5h window should show its percent and reset time: \(primary)")
+        let secondary = text("agents-info-codex-window-secondary")
+        XCTAssertTrue(secondary.contains("Weekly") && secondary.contains("62%"), "Codex's weekly window should show its percent: \(secondary)")
+        XCTAssertEqual(text("agents-info-codex-credits"), "Credits: 12.50")
+        XCTAssertEqual(text("agents-info-claude-account"), "claude-fixture@example.com")
+        XCTAssertTrue(element("agents-info-claude-empty").exists, "Claude should say it has no data yet.")
+        XCTAssertTrue(element("agents-info-switch-claude").exists && element("agents-info-switch-codex").exists, "Each agent should offer a switch-account button.")
+        attachScreenshot(named: "Agents info with Codex usage and Claude awaiting data")
+
+        // A Claude turn's rate-limit event reaches the open window without a relaunch.
+        let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Claude usage UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"])["result"] as? [String: Any])
+        let claudeTaskID = try XCTUnwrap(created["id"] as? String)
+        let eventURL = URL(fileURLWithPath: claudeExecutable.path + ".rate-limit-event")
+        func claudeTurn(_ info: [String: Any]) throws {
+            let event = try JSONSerialization.data(withJSONObject: ["type": "rate_limit_event", "rate_limit_info": info])
+            try event.write(to: eventURL)
+            _ = try runCLI(["conversation", "send", claudeTaskID, "--message", "Say hello."])
+        }
+        let now = Int(Date().timeIntervalSince1970)
+        try claudeTurn([
+            "status": "allowed_warning", "rateLimitType": "five_hour", "utilization": 0.83, "resetsAt": now + 3600,
+            "unifiedWindows": [
+                "five_hour": ["utilization": 0.83, "resetsAt": now + 3600],
+                "seven_day": ["utilization": 0.41, "resetsAt": now + 3 * 86400],
+            ],
+        ])
+        XCTAssertTrue(waitUntil({ text("agents-info-claude-window-five_hour").contains("83%") }, timeout: 40), "Claude's 5h usage should update from its rate-limit event.")
+        XCTAssertTrue(text("agents-info-claude-window-seven_day").contains("41%"), "Claude's weekly usage should update too.")
+        XCTAssertEqual(text("agents-info-claude-status"), "Near limit", "A warning status should show on the block.")
+        XCTAssertFalse(element("agents-info-claude-empty").exists)
+        attachScreenshot(named: "Agents info with Claude usage near its limit")
+
+        // A window past its reset time reads as reset, and the limit lifts with it.
+        try claudeTurn(["status": "rejected", "rateLimitType": "five_hour", "utilization": 1.0, "resetsAt": now - 10])
+        XCTAssertTrue(waitUntil({ text("agents-info-claude-window-five_hour").contains("Reset") && text("agents-info-claude-window-five_hour").contains("0%") }, timeout: 40), "A window past its reset time should show as reset.")
+        XCTAssertFalse(element("agents-info-claude-status").exists, "The limit state should lift once its window has reset.")
+        XCTAssertTrue(text("agents-info-claude-window-seven_day").contains("41%"))
+
+        // While a Codex task runs, switching asks first, and cancelling keeps the account.
+        let holdMarker = URL(fileURLWithPath: codexExecutable.path + ".hold-release")
+        let turnActive = URL(fileURLWithPath: codexExecutable.path + ".turn-active")
+        let turnRelease = URL(fileURLWithPath: codexExecutable.path + ".turn-release")
+        for marker in [turnActive, turnRelease] { try? FileManager.default.removeItem(at: marker) }
+        try Data("hold\n".utf8).write(to: holdMarker)
+        defer { try? FileManager.default.removeItem(at: holdMarker) }
+        try createTaskFixture(title: "Running Codex task", roots: [fixture.primary.path])
+        let runningTaskID = try taskID(named: "Running Codex task")
+        openTask(named: "Running Codex task")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15), "The task should open its composer.")
+        composer.click()
+        composer.typeText("Hold this turn.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: turnActive.path) }, timeout: 30), "The Codex turn should be running.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: runningTaskID)?["status"] as? String) == "In Progress" }, timeout: 10))
+        // The confirmation counts the board's own tasks, so wait until the board shows it running.
+        XCTAssertTrue(element("column-in-progress").buttons["task-card-\(runningTaskID.uppercased())"].waitForExistence(timeout: 10), "The board should show the Codex task running.")
+        element("agents-info-switch-codex").click()
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 10), "Switching with a running Codex task should ask for confirmation.")
+        XCTAssertTrue(sheet.buttons["Switch Account"].exists)
+        XCTAssertTrue(sheet.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", "1 Codex task is running", "1 Codex task is running")).firstMatch.exists, "The confirmation should name the running task.")
+        attachScreenshot(named: "Switching the Codex account asks first while a Codex task runs")
+        sheet.buttons["Cancel"].click()
+        XCTAssertTrue(waitForDisappearance(sheet))
+        // A switch would sign out through the fixture, which records the change in its account file.
+        XCTAssertFalse(waitUntil({
+            FileManager.default.fileExists(atPath: codexAccount.path) || text("agents-info-codex-account") != "codex-fixture@example.com"
+        }, timeout: 5), "Cancelling must not sign the account out.")
+        try? FileManager.default.removeItem(at: holdMarker)
+        try Data("release\n".utf8).write(to: turnRelease)
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: runningTaskID)?["status"] as? String) != "In Progress" }, timeout: 60), "The held turn should finish.")
+
+        // With nothing running, switching signs out and in again, and the new account's usage replaces the old.
+        element("agents-info-switch-codex").click()
+        XCTAssertTrue(waitUntil({ text("agents-info-codex-account") == "codex-second@example.com" }, timeout: 40), "The switched Codex account should show.")
+        XCTAssertTrue(waitUntil({ text("agents-info-codex-window-primary").contains("7%") }, timeout: 20), "The new account's usage should replace the old.")
+        XCTAssertFalse(app.sheets.firstMatch.exists, "Switching with nothing running needs no confirmation.")
+        attachScreenshot(named: "Agents info after switching the Codex account")
+        element("agents-info-switch-claude").click()
+        XCTAssertTrue(waitUntil({ text("agents-info-claude-account") == "claude-second@example.com" }, timeout: 40), "The switched Claude account should show.")
+        XCTAssertTrue(element("agents-info-claude-empty").waitForExistence(timeout: 10), "The old Claude account's usage must not carry over.")
+
+        // A signed-out agent shows Log in instead of usage; logging in brings its usage back.
+        try JSONSerialization.data(withJSONObject: ["loggedIn": false, "email": NSNull(), "used": [0, 0]]).write(to: codexAccount)
+        try JSONSerialization.data(withJSONObject: ["loggedIn": false]).write(to: URL(fileURLWithPath: claudeExecutable.path + ".auth-state"))
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before the signed-out relaunch.")
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
+        XCTAssertTrue(element("agents-info-login-codex").waitForExistence(timeout: 40), "A signed-out Codex should offer Log in.")
+        XCTAssertTrue(element("agents-info-login-claude").exists, "A signed-out Claude should offer Log in.")
+        XCTAssertFalse(element("agents-info-codex-window-primary").exists, "A signed-out agent shows no usage.")
+        attachScreenshot(named: "Agents info with both agents signed out")
+        element("agents-info-login-claude").click()
+        XCTAssertTrue(waitUntil({ text("agents-info-claude-account") == "claude-second@example.com" }, timeout: 40), "Logging in to Claude should restore its account.")
+        XCTAssertFalse(element("agents-info-login-claude").exists)
+        element("agents-info-login-codex").click()
+        XCTAssertTrue(waitUntil({ text("agents-info-codex-account") == "codex-second@example.com" }, timeout: 40), "Logging in to Codex should restore its account.")
+        XCTAssertTrue(waitUntil({ text("agents-info-codex-window-primary").contains("7%") }, timeout: 20), "Logging in should bring Codex usage back.")
+        attachScreenshot(named: "Agents info after logging in again")
+
+        // Minimizing hides the blocks and rests the title at the bottom of the sidebar; the choice is sticky.
+        toggle.click()
+        XCTAssertTrue(waitUntil({ !self.element("agents-info-claude").exists && !self.element("agents-info-codex").exists }, timeout: 10), "Minimizing should hide the agent blocks.")
+        XCTAssertEqual(toggle.value as? String, "Collapsed")
+        XCTAssertGreaterThan(toggle.frame.minY, expandedTitleMinY, "The title should move down as the section collapses.")
+        XCTAssertLessThan(sidebar.frame.maxY - toggle.frame.maxY, 40, "The minimized title should rest at the bottom of the sidebar.")
+        attachScreenshot(named: "Agents info minimized at the bottom of the sidebar")
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before the minimized relaunch.")
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 40), "The minimized title should still show after a relaunch.")
+        XCTAssertEqual(toggle.value as? String, "Collapsed", "A minimized section should stay minimized after a relaunch.")
+        XCTAssertFalse(element("agents-info-claude").exists || element("agents-info-codex").exists)
+        attachScreenshot(named: "Agents info still minimized after relaunch")
+        toggle.click()
+        XCTAssertTrue(element("agents-info-claude").waitForExistence(timeout: 10), "Expanding should bring the agent blocks back.")
+        XCTAssertEqual(toggle.value as? String, "Expanded")
+
+        // An agent whose CLI is not installed has no block; with neither installed the section is gone.
+        // Without a fixture the harness passes `none`, so the real CLIs on the machine are never found.
+        claudeFixtureExecutable = nil
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before the Codex-only relaunch.")
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
+        XCTAssertTrue(element("agents-info-codex").waitForExistence(timeout: 40), "Codex, still installed, keeps its block.")
+        XCTAssertFalse(element("agents-info-claude").exists, "Claude, not installed, should have no block.")
+        attachScreenshot(named: "Agents info with only Codex installed")
+        codexFixtureExecutable = nil
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before the no-agents relaunch.")
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
+        let bare = try XCTUnwrap(try runCLI(["usage", "get"])["result"] as? [String: Any])
+        let installed = (bare["providers"] as? [[String: Any]] ?? []).map { $0["installed"] as? Bool }
+        XCTAssertEqual(installed, [false, false], "Neither CLI is installed without the fixtures.")
+        XCTAssertFalse(waitUntil({ self.element("agents-info").exists }, timeout: 15), "With neither CLI installed the section should not show.")
+        XCTAssertTrue(element(withAccessibilityLabel: "Kanban sidebar").exists)
+        attachScreenshot(named: "Sidebar without Agents info when no agent CLI is installed")
+    }
+
     // case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, test IDs that do not match the current worktree, and nonisolated test data before launching; the current app preserves a saved draft across restart.
     func test_app_override_rejects_incompatible_bundles() throws {
         let root = repositoryRoot.path
@@ -4266,7 +4449,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertLessThan(abs(badgeAfterSend.frame.midY - title.frame.midY), 8, "Repository badges should stay on the fixed title row after the timeline scrolls.")
     }
 
-    // case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field dismisses the edit without saving. The settings popover is wider than before with a larger title.
+    // case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field or pressing Escape dismisses the edit without saving. The settings popover is wider than before with a larger title, and the repository chip's remove button is a larger target.
     func test_task_repository_settings_validate_persist_and_lock_after_start() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -4279,6 +4462,10 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: title)
         let badge = element("conversation-repository-badge-primary")
         XCTAssertTrue(badge.waitForExistence(timeout: 5))
+        let removeBadgeButton = element("remove-conversation-repository-primary")
+        XCTAssertGreaterThanOrEqual(removeBadgeButton.frame.width, 20, "The repository chip's remove button should be an easy target.")
+        XCTAssertGreaterThanOrEqual(removeBadgeButton.frame.height, 20, "The repository chip's remove button should be an easy target.")
+        attachScreenshot(named: "Repository chip with enlarged remove button", fullScreen: true)
 
         let initial = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
         let initialBranch = try XCTUnwrap(initial["branch"] as? String)
@@ -4340,6 +4527,16 @@ final class PlayhouseUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.25)
         XCTAssertEqual(try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, initialBranchFrom, "A dismissed edit must not be saved.")
         attachScreenshot(named: "Clicking outside the field dismisses the edit unsaved", fullScreen: true)
+
+        element("conversation-repository-branch-from-edit").click()
+        XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
+        replaceText(branchFromField, with: "escaped-edit")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(branchFromField), "Escape should dismiss the edit.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("conversation-repository-branch-from-value")), initialBranchFrom, "An escaped edit must not change the shown value.")
+        Thread.sleep(forTimeInterval: 0.25)
+        XCTAssertEqual(try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, initialBranchFrom, "An escaped edit must not be saved.")
+        attachScreenshot(named: "Escape dismisses the edit unsaved", fullScreen: true)
 
         element("conversation-repository-branch-from-edit").click()
         XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
@@ -15429,7 +15626,7 @@ final class PlayhouseUITests: XCTestCase {
         return (toggle.value as? String) == "1"
     }
 
-    // case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page, opened from the composer's Skills button that replaced the paperclip, lists the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each user skill is shown as usable by both Claude and Codex; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
+    // case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page, opened from the composer's Skills button that replaced the paperclip as a large modal that slides up from the bottom over the dimmed conversation and whose close button returns to the conversation, lists the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each user skill is shown as usable by both Claude and Codex; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
     func test_skills_catalog_lists_repo_global_and_builtin_skills() throws {
         let repository = try makeSkillRepository("skills-catalog-repo", skills: [
             ".agents/skills/repo-agents/SKILL.md": skillManifest("repo-agents", "Agents layout repository skill"),
@@ -15452,6 +15649,12 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Skills catalog")
         XCTAssertFalse(element("attach-chat-image-button").exists, "The Skills button replaces the composer's paperclip.")
         openSkillsPage()
+        let window = app.windows.firstMatch.frame
+        XCTAssertTrue(waitUntil({
+            let page = self.element("skills-page").frame
+            return abs(page.maxY - window.maxY) < 2 && page.minY > window.minY + 20 && page.width < window.width
+        }, timeout: 5), "The Skills page is a large modal resting on the window's bottom edge, inset from its top and sides.")
+        XCTAssertGreaterThan(element("skills-page").frame.height, window.height * 0.75, "The Skills modal is big.")
 
         XCTAssertTrue(element("skills-repo-section-skills-catalog-repo").waitForExistence(timeout: 10))
         XCTAssertTrue(element("skills-repo-section-skills-empty-repo").exists)
@@ -15520,7 +15723,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("message-composer").waitForExistence(timeout: 5))
     }
 
-    // case-contract: test_skills_create_update_move_and_delete_on_disk | Creating a skill writes SKILL.md with name and description frontmatter into the open Agent Skills layout, ~/.agents/skills for a global skill or the chosen task worktree's .agents/skills for a repository skill; invalid names, a missing description, a duplicate name, and the built-in scope are rejected with nothing written. Editing saves the new SKILL.md and rejects a renamed or description-less frontmatter while keeping the file. Moving a skill between a repository and the global gallery moves its folder and rejects a move onto an existing name. Deleting removes the folder from disk, built-in skills are read-only, and every change is visible to a fresh CLI process and on the Skills page.
+    // case-contract: test_skills_create_update_move_and_delete_on_disk | Creating a skill writes SKILL.md with name and description frontmatter into the open Agent Skills layout, ~/.agents/skills for a global skill or the chosen task worktree's .agents/skills for a repository skill; invalid names, a missing description, a duplicate name, and the built-in scope are rejected with nothing written. Editing saves the new SKILL.md and rejects a renamed or description-less frontmatter while keeping the file. Clicking a skill row opens the editor panel, whose header is the parsed SKILL.md (the skill's name, its description, and the optional license, compatibility, and allowed-tools fields, with a YAML list read as one field) above its instructions; saving there rewrites the header, removes an emptied field, keeps frontmatter Playhouse does not edit, and rejects an unknown field or an empty description while keeping the file. Clicking a built-in skill with a folder opens it read-only, without Save. New Skill uses the same structured header, and a field set there is written into the new SKILL.md. Moving a skill between a repository and the global gallery moves its folder and rejects a move onto an existing name. Deleting removes the folder from disk, built-in skills are read-only, and every change is visible to a fresh CLI process and on the Skills page.
     func test_skills_create_update_move_and_delete_on_disk() throws {
         let repository = try makeSkillRepository("skills-manage-repo", skills: [:])
         // The Skills page reads Claude Code's built-ins from a provider session.
@@ -15557,35 +15760,76 @@ final class PlayhouseUITests: XCTestCase {
         assertCLIError(try runCLI(["skills", "create", "--task", taskID, "--scope", "global", "--name", "release-notes"], expectedStatus: 2), code: "invalid_argument")
         assertCLIError(try runCLI(["skills", "create", "--task", taskID, "--scope", "builtin", "--name", "other", "--description", "Built-in"], expectedStatus: 2), code: "invalid_argument")
 
-        clickSkillMenuItem(skill: "release-notes", item: "skill-edit-release-notes", title: "Edit…")
+        let row = element("skill-row-release-notes")
+        row.click()
         let editor = element("skill-editor")
-        XCTAssertTrue(editor.waitForExistence(timeout: 5), "Edit opens the SKILL.md editor.")
-        editor.click()
-        editor.typeKey("a", modifierFlags: .command)
-        editor.typeText(skillManifest("other-name", "Renamed"))
+        XCTAssertTrue(element("skill-editor-panel").waitForExistence(timeout: 5), "Clicking a skill opens its editor panel.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("skill-editor-name")), "release-notes", "The header shows the parsed name.")
+        let editorDescription = element("skill-editor-description")
+        XCTAssertEqual(editorDescription.value as? String, "Draft release notes", "The header shows the parsed description.")
+        XCTAssertEqual(editor.value as? String, "Summarize merged changes.", "The body is the skill's instructions alone.")
+        editorDescription.click()
+        editorDescription.typeKey("a", modifierFlags: .command)
+        editorDescription.typeKey(.delete, modifierFlags: [])
         element("skill-editor-save").click()
-        XCTAssertTrue(element("skill-editor-error").waitForExistence(timeout: 5), "Renaming in the editor is rejected.")
-        attachScreenshot(named: "The skill editor rejects a renamed skill")
+        XCTAssertTrue(element("skill-editor-error").waitForExistence(timeout: 5), "An empty description is rejected in the editor.")
+        attachScreenshot(named: "The skill editor rejects an empty description")
         XCTAssertTrue(try String(contentsOf: manifest, encoding: .utf8).contains("Draft release notes"), "A rejected edit keeps the file.")
+        editorDescription.click()
+        editorDescription.typeText("Draft concise release notes")
         editor.click()
         editor.typeKey("a", modifierFlags: .command)
-        let edited = skillManifest("release-notes", "Draft concise release notes", body: "Group changes by area.")
-        editor.typeText(edited)
-        attachScreenshot(named: "Editing a skill's SKILL.md")
+        editor.typeText("Group changes by area.")
+        attachScreenshot(named: "Editing a skill's parsed header and instructions")
         element("skill-editor-save").click()
-        XCTAssertTrue(waitUntil({ !self.element("skill-editor").exists }, timeout: 10), "Saving closes the editor.")
+        XCTAssertTrue(waitUntil({ !self.element("skill-editor-panel").exists }, timeout: 10), "Saving closes the editor.")
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("skill-description-release-notes")) == "Draft concise release notes" }, timeout: 10))
+        let edited = "---\nname: release-notes\ndescription: \"Draft concise release notes\"\n---\n\nGroup changes by area.\n"
         XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8), edited)
+        let renamed = dataDirectory.appendingPathComponent("skill-edit-renamed.md")
+        try skillManifest("other-name", "Renamed").write(to: renamed, atomically: true, encoding: .utf8)
+        assertCLIError(try runCLI(["skills", "update", "--task", taskID, "--skill", "global:release-notes", "--content-file", renamed.path], expectedStatus: 2), code: "invalid_argument")
         let descriptionless = dataDirectory.appendingPathComponent("skill-edit-descriptionless.md")
         try "---\nname: release-notes\n---\nNo description.\n".write(to: descriptionless, atomically: true, encoding: .utf8)
         let rejectedEdit = try runCLI(["skills", "update", "--task", taskID, "--skill", "global:release-notes", "--content-file", descriptionless.path], expectedStatus: 2)
         assertCLIError(rejectedEdit, code: "invalid_argument")
         XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8), edited, "A rejected edit keeps the file.")
 
+        // Optional Agent Skills fields are structured too, and other frontmatter survives an edit.
+        try "---\nname: release-notes\ndescription: Draft concise release notes\nallowed-tools:\n  - Read\n  - Bash\nmetadata:\n  owner: docs\n---\n\nGroup changes by area.\n"
+            .write(to: manifest, atomically: true, encoding: .utf8)
+        row.click()
+        XCTAssertTrue(element("skill-editor-panel").waitForExistence(timeout: 5))
+        let allowedTools = element("skill-editor-field-allowed-tools")
+        XCTAssertEqual(allowedTools.value as? String, "Read, Bash", "A YAML list reads as one editable field.")
+        attachScreenshot(named: "The skill editor shows the optional header fields")
+        allowedTools.click()
+        allowedTools.typeKey("a", modifierFlags: .command)
+        allowedTools.typeKey(.delete, modifierFlags: [])
+        typeIntoField(element("skill-editor-field-license"), text: "MIT")
+        let fieldDescription = element("skill-editor-description")
+        fieldDescription.click()
+        fieldDescription.typeKey("a", modifierFlags: .command)
+        fieldDescription.typeText("Draft release notes by area")
+        editor.click()
+        editor.typeKey("a", modifierFlags: .command)
+        editor.typeText("List each change under its area.")
+        element("skill-editor-save").click()
+        XCTAssertTrue(waitUntil({ !self.element("skill-editor-panel").exists }, timeout: 10))
+        XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8),
+                       "---\nname: release-notes\ndescription: \"Draft release notes by area\"\nlicense: \"MIT\"\nmetadata:\n  owner: docs\n---\n\nList each change under its area.\n",
+                       "Saving rewrites the header, removes an emptied field, and keeps unknown keys.")
+        let manifestDetail = try XCTUnwrap(try runCLI(["skills", "get", "--task", taskID, "--skill", "global:release-notes"])["result"] as? [String: Any])
+        XCTAssertEqual((manifestDetail["manifest"] as? [String: Any])?["fields"] as? [String: String], ["license": "MIT"])
+        assertCLIError(try runCLI(["skills", "update", "--task", taskID, "--skill", "global:release-notes", "--field", "model=opus"], expectedStatus: 2), code: "invalid_argument")
+        XCTAssertTrue(try String(contentsOf: manifest, encoding: .utf8).contains("List each change under its area."), "A rejected structured edit keeps the file.")
+
         element("new-skill-button").click()
         XCTAssertTrue(element("new-skill-name").waitForExistence(timeout: 5))
         typeIntoField(element("new-skill-name"), text: "repo-new")
         typeIntoField(element("new-skill-description"), text: "Repository only")
+        typeIntoField(element("new-skill-field-compatibility"), text: "Needs git")
+        attachScreenshot(named: "New Skill uses the structured header")
         let destination = element("new-skill-scope")
         destination.click()
         let repositoryOption = app.menuItems["skills-manage-repo"]
@@ -15596,6 +15840,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.appendingPathComponent(".agents/skills/repo-new/SKILL.md").path),
                       "A repository skill is written into the chosen task worktree.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: repository.appendingPathComponent(".agents").path), "The source checkout is left alone.")
+        XCTAssertEqual(try String(contentsOf: worktree.appendingPathComponent(".agents/skills/repo-new/SKILL.md"), encoding: .utf8),
+                       "---\nname: repo-new\ndescription: \"Repository only\"\ncompatibility: \"Needs git\"\n---\n\nDescribe when and how to use this skill.\n",
+                       "A header field set in New Skill is written into SKILL.md.")
         selectSkillsTab("Repo")
         XCTAssertTrue(element("skill-row-repo-new").waitForExistence(timeout: 10))
         clickSkillMenuItem(skill: "repo-new", item: "skill-move-global-repo-new", title: "Move to Global")
@@ -15626,7 +15873,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Global tab after deleting a skill")
         let fresh = try skillCatalog(taskID: taskID)
         XCTAssertEqual(skillsByName(fresh["global"]).keys.sorted(), ["release-notes"])
-        XCTAssertEqual(skillsByName(fresh["global"])["release-notes"]?["description"] as? String, "Draft concise release notes")
+        XCTAssertEqual(skillsByName(fresh["global"])["release-notes"]?["description"] as? String, "Draft release notes by area")
 
         selectSkillsTab("Built-in")
         XCTAssertTrue(element("skill-row-codex-system-skill").waitForExistence(timeout: 10))
@@ -15636,11 +15883,19 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertFalse(app.menuItems[title].exists, "A built-in skill is read-only, so its menu has no \(title).")
         }
         app.typeKey(.escape, modifierFlags: [])
+        element("skill-row-codex-system-skill").click()
+        XCTAssertTrue(element("skill-editor-panel").waitForExistence(timeout: 5), "Clicking a built-in skill shows it.")
+        XCTAssertEqual(element("skill-editor-description").value as? String, "Bundled with Codex")
+        XCTAssertFalse(element("skill-editor-description").isEnabled, "A built-in skill's header is read-only.")
+        XCTAssertFalse(element("skill-editor-save").exists, "A built-in skill cannot be saved.")
+        attachScreenshot(named: "A built-in skill opens read-only")
+        element("skill-editor-cancel").click()
+        XCTAssertTrue(waitUntil({ !self.element("skill-editor-panel").exists }, timeout: 5))
         assertCLIError(try runCLI(["skills", "delete", "--task", taskID, "--skill", "builtin:codex:codex-system-skill"], expectedStatus: 2), code: "invalid_argument")
         XCTAssertTrue(FileManager.default.fileExists(atPath: skillsCodexHome.appendingPathComponent("skills/.system/codex-system-skill").path))
     }
 
-    // case-contract: test_skills_enable_state_and_outside_links_persist | Turning a skill off is stored by Playhouse rather than in either provider's settings, survives fresh CLI processes and reopening the Skills page, and can be turned back on. Making a skill available outside Playhouse writes a real symlink into the other provider's layout (an absolute link in Claude's global skills folder, a relative link inside the repository), after which the skill shows as Linked; an existing file at the link path is left untouched and the request fails with already_exists, removing the outside link deletes only the symlink and keeps the skill, and a skill without a link cannot be unlinked.
+    // case-contract: test_skills_enable_state_and_outside_links_persist | Turning a skill off is stored by Playhouse rather than in either provider's settings, survives fresh CLI processes and reopening the Skills page, and can be turned back on. The small switch flips as soon as it is clicked, and turning a skill on disk on or off never starts a Claude Code session. Making a skill available outside Playhouse writes a real symlink into the other provider's layout (an absolute link in Claude's global skills folder, a relative link inside the repository), after which the skill shows as Linked; an existing file at the link path is left untouched and the request fails with already_exists, removing the outside link deletes only the symlink and keeps the skill, and a skill without a link cannot be unlinked.
     func test_skills_enable_state_and_outside_links_persist() throws {
         let repository = try makeSkillRepository("skills-link-repo", skills: [
             ".agents/skills/repo-agents/SKILL.md": skillManifest("repo-agents", "Repository agents skill"),
@@ -15648,7 +15903,9 @@ final class PlayhouseUITests: XCTestCase {
         try writeSkill(in: skillsHome.appendingPathComponent(".agents/skills"), "global-agents", "Global agents skill")
         try writeSkill(in: skillsHome.appendingPathComponent(".agents/skills"), "blocked", "Its link path is taken")
         // The Skills page reads Claude Code's built-ins from a provider session.
-        _ = try installSkillsClaudeFixture("claude-fixture-skills-link")
+        let claudeExecutable = try installSkillsClaudeFixture("claude-fixture-skills-link")
+        let sessionsURL = URL(fileURLWithPath: claudeExecutable.path + ".sessions")
+        func claudeSessions() -> Int { ((try? String(contentsOf: sessionsURL, encoding: .utf8)) ?? "").split(separator: "\n").count }
         let claudeSkills = skillsHome.appendingPathComponent(".claude/skills")
         try FileManager.default.createDirectory(at: claudeSkills, withIntermediateDirectories: true)
         try "Not a skill, just a file in the way.\n".write(to: claudeSkills.appendingPathComponent("blocked"), atomically: true, encoding: .utf8)
@@ -15664,9 +15921,15 @@ final class PlayhouseUITests: XCTestCase {
         let toggle = element("skill-toggle-global-agents")
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
         XCTAssertTrue(isOn(toggle))
+        // The page reads Claude Code's built-ins once when it opens.
+        XCTAssertTrue(waitUntil({ claudeSessions() >= 1 }, timeout: 20), "Opening the Skills page reads Claude Code's built-ins.")
+        let sessionsBeforeToggle = claudeSessions()
         toggle.click()
+        XCTAssertTrue(waitUntil({ !self.isOn(toggle) }, timeout: 0.75), "The switch flips as soon as it is clicked.")
         XCTAssertTrue(waitUntil({ ((try? globalSkill("global-agents"))??["enabled"] as? Bool) == false }, timeout: 10),
                       "Turning a skill off is saved where a fresh CLI process reads it.")
+        XCTAssertFalse(waitUntil({ claudeSessions() > sessionsBeforeToggle }, timeout: 3),
+                       "Turning a skill on disk off must not start a Claude Code session.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: skillsCodexHome.appendingPathComponent("config.toml").path), "Codex's config is not written.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: skillsHome.appendingPathComponent(".claude/settings.json").path), "Claude's settings are not written.")
         element("skills-back-button").click()
@@ -15675,8 +15938,12 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.element("skill-toggle-global-agents").exists && !self.isOn(self.element("skill-toggle-global-agents")) }, timeout: 10),
                       "The off state survives reopening the Skills page.")
         attachScreenshot(named: "A skill turned off on the Global tab")
+        let sessionsBeforeTurningOn = claudeSessions()
         element("skill-toggle-global-agents").click()
+        XCTAssertTrue(waitUntil({ self.isOn(self.element("skill-toggle-global-agents")) }, timeout: 0.75), "The switch flips back at once.")
         XCTAssertTrue(waitUntil({ ((try? globalSkill("global-agents"))??["enabled"] as? Bool) == true }, timeout: 10))
+        XCTAssertFalse(waitUntil({ claudeSessions() > sessionsBeforeTurningOn }, timeout: 3),
+                       "Turning a skill on disk back on must not start a Claude Code session.")
 
         clickSkillMenuItem(skill: "global-agents", item: "skill-link-global-agents", title: "Make Available Outside Playhouse…")
         XCTAssertTrue(waitUntil({ self.element("confirm-link-skill").exists || self.app.buttons["Create Link"].exists }, timeout: 5))
@@ -15709,6 +15976,193 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertNil(try? FileManager.default.destinationOfSymbolicLink(atPath: link.path), "Removing the outside link deletes only the symlink.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: skillsHome.appendingPathComponent(".agents/skills/global-agents/SKILL.md").path))
         assertCLIError(try runCLI(["skills", "unlink", "--task", taskID, "--skill", "global:global-agents"], expectedStatus: 2), code: "invalid_argument")
+    }
+
+    private func selectionCount() -> String { accessibleLabelOrValue(of: element("skills-selection-count")) }
+
+    private func boardTaskRecords() throws -> [[String: Any]] {
+        try XCTUnwrap((try runCLI(["board", "list"])["result"] as? [String: Any])?["tasks"] as? [[String: Any]])
+    }
+
+    // case-contract: test_skills_select_many_and_delete_together | Pressing and holding a skill row, or choosing Select, starts selecting skills: each editable row shows a checkbox that a click toggles, built-in skills show none and cannot be selected, and the header shows how many are selected with Fix with Agent, Delete, and Done. Deleting the selection after one confirmation removes every selected skill folder, repository and global alike, from disk, leaves unselected skills in place, forgets a deleted skill's off state, and ends selecting. A batch that includes a read-only or unknown skill deletes nothing and fails with invalid_argument or not_found.
+    func test_skills_select_many_and_delete_together() throws {
+        let repository = try makeSkillRepository("skills-select-repo", skills: [
+            ".agents/skills/repo-one/SKILL.md": skillManifest("repo-one", "First repository skill"),
+            ".agents/skills/repo-keep/SKILL.md": skillManifest("repo-keep", "Stays after the bulk delete"),
+        ])
+        let globalFolder = skillsHome.appendingPathComponent(".agents/skills")
+        for name in ["global-one", "global-two"] { try writeSkill(in: globalFolder, name, "Global skill \(name)") }
+        try writeSkill(in: skillsCodexHome.appendingPathComponent("skills/.system"), "codex-system-skill", "Bundled with Codex")
+        _ = try installSkillsClaudeFixture("claude-fixture-skills-select")
+        launchApp(defaultParent: fixture.parent.path)
+        let task = try createSkillsTask("Skills select", repositories: [repository])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String))
+        _ = try runCLI(["skills", "disable", "--task", taskID, "--skill", "global:global-two"])
+        openTask(named: "Skills select")
+        openSkillsPage()
+
+        // Select, then Done, leaves selecting without acting.
+        element("skills-select-button").click()
+        XCTAssertTrue(element("skill-select-repo-one").waitForExistence(timeout: 5), "Selecting shows a checkbox on each row.")
+        XCTAssertEqual(selectionCount(), "0 selected")
+        element("skills-selection-done").click()
+        XCTAssertTrue(waitUntil({ !self.element("skill-select-repo-one").exists }, timeout: 5), "Done stops selecting.")
+        XCTAssertTrue(element("skill-toggle-repo-one").exists, "Rows show their controls again.")
+
+        // Press and hold a row to start selecting with it.
+        element("skill-row-repo-one").press(forDuration: 1.0)
+        XCTAssertTrue(waitUntil({ self.element("skills-selection-count").exists }, timeout: 5), "Pressing and holding a skill starts selecting.")
+        XCTAssertEqual(selectionCount(), "1 selected", "The pressed skill is selected.")
+        XCTAssertEqual(element("skill-select-repo-one").label, "Selected", "The pressed skill's checkbox is checked.")
+        XCTAssertEqual(element("skill-select-repo-keep").label, "Not selected")
+        XCTAssertFalse(element("skill-toggle-repo-one").exists, "Selecting hides a row's own controls.")
+        selectSkillsTab("Global")
+        element("skill-row-global-one").click()
+        element("skill-row-global-two").click()
+        XCTAssertTrue(waitUntil({ self.selectionCount() == "3 selected" }, timeout: 5), "A click selects a skill, across tabs.")
+        attachScreenshot(named: "Several skills selected for one action")
+        selectSkillsTab("Built-in")
+        XCTAssertTrue(element("skill-row-codex-system-skill").waitForExistence(timeout: 10))
+        XCTAssertFalse(element("skill-select-codex-system-skill").exists, "A built-in skill shows no checkbox.")
+        element("skill-row-codex-system-skill").click()
+        XCTAssertEqual(selectionCount(), "3 selected", "A built-in skill cannot be selected.")
+        selectSkillsTab("Global")
+        element("skill-row-global-two").click()
+        XCTAssertTrue(waitUntil({ self.selectionCount() == "2 selected" }, timeout: 5), "Clicking a selected skill deselects it.")
+        XCTAssertEqual(element("skill-select-global-two").label, "Not selected")
+        element("skill-row-global-two").click()
+        XCTAssertTrue(waitUntil({ self.selectionCount() == "3 selected" }, timeout: 5))
+
+        assertCLIError(try runCLI(["skills", "delete", "--task", taskID, "--skill", "global:global-one", "--skill", "builtin:codex:codex-system-skill"], expectedStatus: 2), code: "invalid_argument")
+        assertCLIError(try runCLI(["skills", "delete", "--task", taskID, "--skill", "global:global-one", "--skill", "global:no-such-skill"], expectedStatus: 3), code: "not_found")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: globalFolder.appendingPathComponent("global-one").path), "A rejected batch deletes nothing.")
+
+        element("skills-delete-selected").click()
+        XCTAssertTrue(waitUntil({ self.element("confirm-delete-skill").exists || self.app.buttons["Delete"].exists }, timeout: 5))
+        attachScreenshot(named: "Delete several skills confirmation")
+        clickDialogButton("confirm-delete-skill", title: "Delete")
+        XCTAssertTrue(waitUntil({ !self.element("skill-row-global-one").exists && !self.element("skill-row-global-two").exists }, timeout: 10),
+                      "Deleted skills leave the page.")
+        XCTAssertTrue(element("skills-select-button").waitForExistence(timeout: 5), "Deleting the selection ends selecting.")
+        attachScreenshot(named: "Global tab after deleting several skills")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: globalFolder.appendingPathComponent("global-one").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: globalFolder.appendingPathComponent("global-two").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree.appendingPathComponent(".agents/skills/repo-one").path),
+                       "A repository skill in the selection is deleted from the worktree.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.appendingPathComponent(".agents/skills/repo-keep/SKILL.md").path), "Unselected skills stay.")
+        selectSkillsTab("Repo")
+        XCTAssertTrue(element("skill-row-repo-keep").waitForExistence(timeout: 5))
+        XCTAssertFalse(element("skill-row-repo-one").exists)
+        let fresh = try skillCatalog(taskID: taskID)
+        XCTAssertEqual((fresh["global"] as? [Any])?.count, 0)
+        XCTAssertEqual(skillsByName((fresh["repositories"] as? [[String: Any]])?.first?["skills"]).keys.sorted(), ["repo-keep"])
+        try writeSkill(in: globalFolder, "global-two", "Recreated with the same name")
+        XCTAssertEqual(skillsByName(try skillCatalog(taskID: taskID)["global"])["global-two"]?["enabled"] as? Bool, true,
+                       "Deleting a skill forgets that it was turned off.")
+    }
+
+    // case-contract: test_skills_fix_with_agent_starts_task_for_repo_and_global_skills | A conflicting or invalid skill offers Fix with Agent, and several selected skills can be fixed in one task. Fixing creates a task, on the source task's provider, whose saved prompt teaches the agent the skill format and lists each skill with its problem: repository skills by repository-relative path, to be fixed in the new task's own worktree of the source repository and committed and pushed like any code change, and global skills by absolute path, to be fixed in place with nothing to commit; the global skill folders are opened to the agent as context folders, and fixing only global skills needs no repository. The view switches to the new task's conversation, which sends that prompt as its own composer draft, leaving the composer empty and no unsent draft behind, so the turn runs in the new task's worktree with the global folders reachable. A skill with no problem, a built-in skill, an unknown skill, and a request without a task are rejected without opening a task.
+    func test_skills_fix_with_agent_starts_task_for_repo_and_global_skills() throws {
+        let repository = try makeSkillRepository("skills-fix-repo", skills: [
+            ".agents/skills/repo-dup/SKILL.md": skillManifest("repo-dup", "The agents copy"),
+            ".claude/skills/repo-dup/SKILL.md": skillManifest("repo-dup", "A different Claude copy"),
+            ".agents/skills/repo-ok/SKILL.md": skillManifest("repo-ok", "Nothing to fix"),
+        ])
+        try writeSkill(in: skillsHome.appendingPathComponent(".agents/skills"), "global-dup", "The global agents copy")
+        try writeSkill(in: skillsHome.appendingPathComponent(".claude/skills"), "global-dup", "The global Claude copy")
+        let broken = skillsHome.appendingPathComponent(".agents/skills/global-broken")
+        try FileManager.default.createDirectory(at: broken, withIntermediateDirectories: true)
+        try "No frontmatter here.\n".write(to: broken.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+        try writeSkill(in: skillsCodexHome.appendingPathComponent("skills/.system"), "codex-system-skill", "Bundled with Codex")
+        let executable = try installSkillsClaudeFixture("claude-fixture-skills-fix")
+        let historyURL = URL(fileURLWithPath: executable.path + ".history")
+        func turns() -> [[String: Any]] {
+            guard let data = try? Data(contentsOf: historyURL),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+            return (history["turns"] as? [[String: Any]] ?? []).filter { ($0["userText"] as? String)?.isEmpty == false }
+        }
+        launchApp(defaultParent: fixture.parent.path)
+        let source = try createSkillsTask("Skills fix source", repositories: [repository], provider: "claude")
+        let sourceID = try XCTUnwrap(source["id"] as? String)
+        let sourceWorktree = try XCTUnwrap((source["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String)
+        let tasksBefore = try boardTaskRecords().count
+        assertCLIError(try runCLI(["skills", "fix", "--task", sourceID, "--skill", "repo:\(repository.path)#repo-ok"], expectedStatus: 2), code: "invalid_argument")
+        assertCLIError(try runCLI(["skills", "fix", "--task", sourceID, "--skill", "builtin:codex:codex-system-skill"], expectedStatus: 2), code: "invalid_argument")
+        assertCLIError(try runCLI(["skills", "fix", "--task", sourceID, "--skill", "global:no-such-skill"], expectedStatus: 3), code: "not_found")
+        assertCLIError(try runCLI(["skills", "fix", "--skill", "global:global-dup"], expectedStatus: 2), code: "invalid_argument")
+        XCTAssertEqual(try boardTaskRecords().count, tasksBefore, "A rejected fix opens no task.")
+
+        openTask(named: "Skills fix source")
+        openSkillsPage()
+        XCTAssertTrue(element("skill-fix-repo-dup").waitForExistence(timeout: 10), "A conflicting skill offers Fix with Agent.")
+        XCTAssertFalse(element("skill-fix-repo-ok").exists, "A skill without a problem has nothing to fix.")
+        selectSkillsTab("Global")
+        XCTAssertTrue(element("skill-fix-global-dup").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("skill-fix-global-broken").exists, "An invalid skill offers Fix with Agent too.")
+        attachScreenshot(named: "Conflicting and invalid skills offer Fix with Agent")
+
+        // One skill, from its row: a global skill is fixed in place, with no repository.
+        element("skill-fix-global-dup").click()
+        XCTAssertTrue(waitUntil({ !self.element("skills-page").exists }, timeout: 10), "Fixing closes the Skills page.")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Fix skill global-dup" }, timeout: 15),
+                      "The view switches to the fixing task's conversation.")
+        let single = try XCTUnwrap(try boardTaskRecords().first { $0["title"] as? String == "Fix skill global-dup" })
+        XCTAssertEqual((single["repositoryWorktrees"] as? [Any])?.count, 0, "Fixing only global skills needs no repository.")
+        XCTAssertTrue(waitUntil({ turns().contains { ($0["userText"] as? String)?.contains("`global-dup`") == true } }, timeout: 20),
+                      "The fixing task sends its prompt as soon as it opens.")
+        XCTAssertFalse(try XCTUnwrap(single["savedPrompt"] as? String).contains("commit and push"))
+
+        // Several skills, selected across tabs, fixed in one task.
+        openTask(named: "Skills fix source")
+        openSkillsPage()
+        XCTAssertTrue(element("skill-row-repo-dup").waitForExistence(timeout: 10))
+        element("skill-row-repo-dup").press(forDuration: 1.0)
+        XCTAssertTrue(waitUntil({ self.selectionCount() == "1 selected" }, timeout: 5))
+        selectSkillsTab("Global")
+        element("skill-row-global-dup").click()
+        element("skill-row-global-broken").click()
+        XCTAssertTrue(waitUntil({ self.selectionCount() == "3 selected" }, timeout: 5))
+        attachScreenshot(named: "Several broken skills selected to fix in one task")
+        element("skills-fix-selected").click()
+        // The selection is sent in the gallery's order: repositories, then global skills by name.
+        let title = "Fix skills repo-dup, global-broken, global-dup"
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == title }, timeout: 15),
+                      "The view switches to the new task's conversation.")
+        let fixing = try XCTUnwrap(try boardTaskRecords().first { $0["title"] as? String == title })
+        let fixingID = try XCTUnwrap(fixing["id"] as? String)
+        let prompt = try XCTUnwrap(fixing["savedPrompt"] as? String)
+        XCTAssertEqual(fixing["conversationProvider"] as? String, "claude", "The fixing task uses the source task's provider.")
+        XCTAssertTrue(prompt.contains("commit and push"))
+        XCTAssertTrue(prompt.contains("`repo-dup` in skills-fix-repo: `.agents/skills/repo-dup`, `.claude/skills/repo-dup`"))
+        XCTAssertFalse(prompt.contains(sourceWorktree), "Repository paths are relative, so they point into the fixing task's worktree.")
+        XCTAssertTrue(prompt.contains("not tracked by Git: fix them directly in place"))
+        XCTAssertTrue(prompt.contains("`global-broken`"))
+        XCTAssertFalse(prompt.contains("repo-ok"))
+        XCTAssertEqual(Set(((fixing["contextFolders"] as? [String]) ?? []).map(realPath)),
+                       Set([".agents/skills", ".claude/skills"].map { realPath(skillsHome.appendingPathComponent($0).path) }),
+                       "Global skill folders are opened to the agent.")
+        XCTAssertTrue(waitUntil({ turns().contains { $0["userText"] as? String == prompt } }, timeout: 20), "The conversation sends the fixing prompt.")
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'user-message-'")).firstMatch.waitForExistence(timeout: 10),
+                      "The prompt shows in the new task's conversation.")
+        XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String ?? "").isEmpty }, timeout: 10),
+                      "The sent prompt leaves the composer, so it cannot be sent twice.")
+        attachScreenshot(named: "The fixing task's conversation after Fix with Agent")
+        let turn = try XCTUnwrap(turns().first { $0["userText"] as? String == prompt })
+        let started = try XCTUnwrap(try taskRecord(id: fixingID))
+        XCTAssertEqual(started["hasUnsentDraft"] as? Bool, false, "The sent prompt leaves no unsent draft behind.")
+        XCTAssertEqual(turns().filter { $0["userText"] as? String == prompt }.count, 1, "The fixing prompt is sent exactly once.")
+        let worktree = try XCTUnwrap((started["repositoryWorktrees"] as? [[String: Any]])?.first)
+        XCTAssertEqual(worktree["repositoryPath"] as? String, repository.path)
+        XCTAssertEqual(worktree["isPending"] as? Bool, false, "Starting the fix creates the task's own worktree.")
+        let worktreePath = try XCTUnwrap(worktree["worktreePath"] as? String)
+        XCTAssertNotEqual(realPath(worktreePath), realPath(sourceWorktree))
+        XCTAssertEqual(realPath(turn["cwd"] as? String ?? ""), realPath(worktreePath), "The turn runs in the fixing task's worktree.")
+        let arguments = try XCTUnwrap(turn["arguments"] as? [String])
+        let directories = Set(arguments.indices.filter { arguments[$0] == "--add-dir" }.map { realPath(arguments[$0 + 1]) })
+        for folder in [".agents/skills", ".claude/skills"] {
+            XCTAssertTrue(directories.contains(realPath(skillsHome.appendingPathComponent(folder).path)), "Claude Code can reach the global \(folder) folder.")
+        }
     }
 
     // case-contract: test_skills_bridge_claude_launch_sees_agents_skills | A Claude turn sees the skills Claude Code does not read natively: Playhouse passes a Playhouse-owned --add-dir wrapper whose .claude/skills links to the task worktree's and the global .agents/skills folders, leaves skills Claude already reads out of the wrapper, and turns disabled skills off for that run with --settings skillOverrides, without writing to the repository or Claude's settings. Using a skill from the Skills page puts /skill-name at the start of the composer and the message reaches Claude Code unchanged. The resumed second turn gets the same wrapper, and turning the skill back on drops the override.
@@ -15937,6 +16391,18 @@ final class PlayhouseUITests: XCTestCase {
     /// Live Codex cases use the guest's signed-in Codex home.
     private var isLiveCodexIntegration: Bool { liveProvider == "codex" }
 
+    /// Each provider runs the case's fixture, or nothing: without a fixture the
+    /// provider reads as not installed, so no default case reaches a real CLI
+    /// that happens to be on the machine. Live cases keep the real CLIs.
+    private var providerExecutableEnvironment: [String: String] {
+        var environment: [String: String] = [:]
+        if let codexFixtureExecutable { environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable }
+        else if !isLiveIntegration { environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = "none" }
+        if let claudeFixtureExecutable { environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = claudeFixtureExecutable }
+        else if !isLiveIntegration { environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = "none" }
+        return environment
+    }
+
     /// Points a live case's task at the selected real provider.
     private func useLiveProvider(taskID: String) throws {
         guard let liveProvider else { return }
@@ -15959,12 +16425,7 @@ final class PlayhouseUITests: XCTestCase {
         if let launchWindowTitle {
             app.launchEnvironment["PLAYHOUSE_WINDOW_TITLE"] = launchWindowTitle
         }
-        if let codexFixtureExecutable {
-            app.launchEnvironment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
-        }
-        if let claudeFixtureExecutable {
-            app.launchEnvironment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = claudeFixtureExecutable
-        }
+        app.launchEnvironment.merge(providerExecutableEnvironment, uniquingKeysWith: { _, new in new })
         if let codexFixtureStateDirectory {
             app.launchEnvironment["PLAYHOUSE_E2E_FIXTURE_STATE_DIRECTORY"] = codexFixtureStateDirectory.path
         }
@@ -16005,12 +16466,7 @@ final class PlayhouseUITests: XCTestCase {
         if let launchWindowTitle {
             environment["PLAYHOUSE_WINDOW_TITLE"] = launchWindowTitle
         }
-        if let codexFixtureExecutable {
-            environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
-        }
-        if let claudeFixtureExecutable {
-            environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = claudeFixtureExecutable
-        }
+        environment.merge(providerExecutableEnvironment, uniquingKeysWith: { _, new in new })
         if let codexFixtureStateDirectory {
             environment["PLAYHOUSE_E2E_FIXTURE_STATE_DIRECTORY"] = codexFixtureStateDirectory.path
         }
@@ -17216,12 +17672,7 @@ final class PlayhouseUITests: XCTestCase {
         environment["CODEX_HOME"] = usesLiveCodex ? liveCodexHome : dataDirectory.appendingPathComponent("codex-home").path
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = serviceName
-        if let codexFixtureExecutable {
-            environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
-        }
-        if let claudeFixtureExecutable {
-            environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = claudeFixtureExecutable
-        }
+        environment.merge(providerExecutableEnvironment, uniquingKeysWith: { _, new in new })
         if let codexFixtureStateDirectory {
             environment["PLAYHOUSE_E2E_FIXTURE_STATE_DIRECTORY"] = codexFixtureStateDirectory.path
         }

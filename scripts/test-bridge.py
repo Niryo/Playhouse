@@ -264,6 +264,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         environment["CODEX_HOME"] = str(self.data_directory / "codex-home")
         # The CLI forwards CLAUDE_CONFIG_DIR; a test sets its own rather than inherit the host's.
         environment.pop("CLAUDE_CONFIG_DIR", None)
+        # A provider without the case's fixture reads as not installed, never as the host's own CLI.
+        environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = "none"
+        environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = "none"
         environment.update(extra_environment or {})
         completed = subprocess.run(
             [str(self.cli), *map(str, command)],
@@ -296,6 +299,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         environment["CODEX_HOME"] = str(self.data_directory / "codex-home")
         # The CLI forwards CLAUDE_CONFIG_DIR; a test sets its own rather than inherit the host's.
         environment.pop("CLAUDE_CONFIG_DIR", None)
+        # A provider without the case's fixture reads as not installed, never as the host's own CLI.
+        environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = "none"
+        environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = "none"
         environment.update(extra_environment or {})
         return subprocess.Popen(
             [str(self.cli), *map(str, command)],
@@ -2043,7 +2049,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_success(self.call_cli("settings", "clear-parent")[0])
         response, _ = self.call_cli(
             "conversation", "send", no_root_task["id"], "--message", "This must be blocked",
-            expected_status=1,
+            expected_status=1, extra_environment=self.install_codex_fixture("codex-fixture-root-required"),
         )
         self.assert_failure(response, "settings_required")
         untouched = self.assert_success(self.call_cli("task", "get", no_root_task["id"])[0])
@@ -4507,7 +4513,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], replaced["repositoryWorktrees"])
 
 
-    # case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field dismisses the edit without saving. The settings popover is wider than before with a larger title.
+    # case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field or pressing Escape dismisses the edit without saving. The settings popover is wider than before with a larger title, and the repository chip's remove button is a larger target.
     def test_task_repository_settings_validate_persist_and_lock_after_start(self):
         task = self.create_repo_task("Repository settings", [self.primary])
         task_id = task["id"]
@@ -7903,7 +7909,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
     def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):
         title = "Conversation mode validation"
         task_id = self.create_task(title=title)["id"]
-        response, _ = self.call_cli("conversation", "models", task_id)
+        # The model list comes from the provider, so read it from the fixture, never the host's own Codex.
+        response, _ = self.call_cli("conversation", "models", task_id, extra_environment=self.install_codex_fixture("codex-fixture-models"))
         models = self.assert_success(response)["models"]
         self.assertTrue(models)
         self.assertTrue(all(model.get("id") and model.get("name") for model in models))
@@ -8349,7 +8356,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         probe = self.data_directory / "codex-question-ownership-probe"
         core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
-                "ConversationModel", "ClaudeCodeClient", "ProviderRequestLog", "ProcessCPUSampler", "ConversationTranscriptStore",
+                "ConversationModel", "ClaudeCodeClient", "ProviderRequestLog", "ProcessCPUSampler", "AgentUsage", "AgentUsageStore", "ConversationTranscriptStore",
                 "StandaloneChatStore", "SkillCatalog", "BridgeCore"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine"):
@@ -10140,6 +10147,165 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_success(response)
         assert_nudged_work(self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0]), "later turn")
 
+    # case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude, which only reports usage while a task runs, starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the placeholder button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
+    def test_agents_info_shows_provider_usage_and_accounts(self):
+        source = Path(__file__).resolve().parent / "fixtures"
+        codex = self.data_directory / "codex-fixture-agents-info"
+        claude = self.data_directory / "claude-fixture-agents-info"
+        shutil.copyfile(source / "codex-app-server-fixture.py", codex)
+        shutil.copyfile(source / "claude-code-fixture.py", claude)
+        codex.chmod(0o755)
+        claude.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(codex),
+            "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude),
+        }
+
+        def usage(*extra):
+            result = self.assert_success(self.call_cli("usage", "get", *extra, extra_environment=environment)[0])
+            return {entry["provider"]: entry for entry in result["providers"]}
+
+        def wait_for(provider, predicate, message, refresh=False):
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                state = usage(*(["--refresh"] if refresh else []))[provider]
+                if predicate(state):
+                    return state
+                time.sleep(0.2)
+            self.fail(message)
+
+        def windows(state):
+            return {window["id"]: window for window in (state.get("snapshot") or {}).get("windows", [])}
+
+        # Without a fixture a provider is not installed: it reports no account or usage,
+        # and nothing is launched for it, not even the machine's own CLI.
+        bare = {entry["provider"]: entry for entry in self.assert_success(self.call_cli("usage", "get", "--refresh")[0])["providers"]}
+        for provider in ("codex", "claude"):
+            self.assertIs(bare[provider]["installed"], False)
+            self.assertIsNone(bare[provider].get("account"))
+            self.assertIsNone(bare[provider].get("snapshot"))
+
+        # Validation: the provider must be one Playhouse knows.
+        unknown, _ = self.call_cli("usage", "login", "gemini", extra_environment=environment, expected_status=2)
+        self.assert_failure(unknown, "invalid_argument")
+
+        # A refresh reads both providers. Codex reports usage from its app-server;
+        # Claude only reports while a task runs, so it has an account and no usage yet.
+        providers = usage("--refresh")
+        codex_state, claude_state = providers["codex"], providers["claude"]
+        self.assertTrue(codex_state["installed"] and codex_state["loggedIn"])
+        self.assertEqual((codex_state["account"], codex_state["plan"]), ("codex-fixture@example.com", "Plus"))
+        codex_windows = windows(codex_state)
+        self.assertEqual([codex_windows[key]["label"] for key in ("primary", "secondary")], ["5h", "Weekly"])
+        self.assertEqual([codex_windows[key]["usedPercent"] for key in ("primary", "secondary")], [30, 62])
+        self.assertGreater(codex_windows["primary"]["resetsAt"], time.time())
+        self.assertEqual(codex_state["snapshot"]["credits"], {"hasCredits": True, "unlimited": False, "balance": "12.50"})
+        self.assertTrue(claude_state["installed"] and claude_state["loggedIn"])
+        self.assertEqual((claude_state["account"], claude_state["plan"]), ("claude-fixture@example.com", "Max"))
+        self.assertIsNone(claude_state.get("snapshot"), "Claude has no usage before a task reports it.")
+
+        # A Claude turn's rate_limit_event fills its windows from the stream.
+        task_id = self.create_task("Claude usage", provider="claude")["id"]
+        event_path = Path(str(claude) + ".rate-limit-event")
+
+        def claude_turn(info):
+            event_path.write_text(json.dumps({"type": "rate_limit_event", "rate_limit_info": info}), encoding="utf-8")
+            self.assert_success(self.call_cli(
+                "conversation", "send", task_id, "--message", "Say hello.", extra_environment=environment
+            )[0])
+
+        # A window follows the usage store's changes as providers push them.
+        watcher = self.start_cli("usage", "get", "--watch", extra_environment=environment, binary_output=True)
+        self.addCleanup(watcher.kill)
+        self.read_watcher_snapshot(watcher, lambda report: True, event_type="usage_state")
+        now = int(time.time())
+        claude_turn({
+            "status": "allowed_warning", "rateLimitType": "five_hour", "utilization": 0.83, "resetsAt": now + 3600,
+            "unifiedWindows": {
+                "five_hour": {"utilization": 0.83, "resetsAt": now + 3600},
+                "seven_day": {"utilization": 0.41, "resetsAt": now + 3 * 86400},
+            },
+        })
+        pushed = self.read_watcher_snapshot(
+            watcher,
+            lambda report: windows(next(entry for entry in report["providers"] if entry["provider"] == "claude")).get("five_hour", {}).get("usedPercent") == 83,
+            event_type="usage_state",
+        )
+        self.assertEqual(windows(next(entry for entry in pushed["providers"] if entry["provider"] == "claude"))["seven_day"]["usedPercent"], 41)
+        watcher.terminate()
+        watcher.wait(timeout=10)
+        claude_state = usage()["claude"]
+        claude_windows = windows(claude_state)
+        self.assertEqual([claude_windows[key]["label"] for key in ("five_hour", "seven_day")], ["5h", "Weekly"])
+        self.assertEqual([claude_windows[key]["usedPercent"] for key in ("five_hour", "seven_day")], [83, 41])
+        self.assertEqual(claude_state["snapshot"]["status"], "warning")
+        persisted = list(self.data_directory.rglob("agent-usage.json"))
+        self.assertTrue(persisted, "The last-known usage should be saved so it survives a restart.")
+        saved = json.loads(persisted[0].read_text(encoding="utf-8"))
+        self.assertEqual(saved["claude"]["snapshot"]["windows"][0]["usedPercent"], 83)
+
+        # A window whose reset time has passed reads as reset, with no provider call.
+        claude_turn({"status": "rejected", "rateLimitType": "five_hour", "utilization": 1.0, "resetsAt": now - 10})
+        claude_state = usage()["claude"]
+        expired = windows(claude_state)["five_hour"]
+        self.assertTrue(expired["isReset"])
+        self.assertEqual(expired["usedPercent"], 0)
+        self.assertIsNone(expired.get("resetsAt"))
+        self.assertEqual(claude_state["snapshot"]["status"], "allowed", "The limit lifts with the window that held it.")
+        self.assertEqual(windows(claude_state)["seven_day"]["usedPercent"], 41)
+
+        # Switching the Codex account signs out, clears usage, and signs in again;
+        # the new account's usage arrives with the login's own notifications.
+        switched = self.assert_success(self.call_cli("usage", "switch-account", "codex", extra_environment=environment)[0])
+        self.assertEqual(switched["loginURL"], "https://example.invalid/codex-login")
+        codex_state = wait_for(
+            "codex", lambda state: state.get("account") == "codex-second@example.com" and windows(state).get("primary", {}).get("usedPercent") == 7,
+            "Codex never showed the switched account's usage.",
+        )
+        self.assertEqual(windows(codex_state)["secondary"]["usedPercent"], 20)
+
+        # Switching the Claude account runs the CLI's logout and login and drops the old usage.
+        switched = self.assert_success(self.call_cli("usage", "switch-account", "claude", extra_environment=environment)[0])
+        self.assertIsNone(switched["loginURL"])
+        claude_state = wait_for(
+            "claude", lambda state: state.get("account") == "claude-second@example.com" and not state["loginInProgress"],
+            "Claude never showed the switched account.",
+        )
+        self.assertEqual(claude_state["plan"], "Pro")
+        self.assertIsNone(claude_state.get("snapshot"), "The old account's usage must not carry over.")
+
+        # A signed-out provider has no account or usage; logging in restores it.
+        Path(str(codex) + ".account").write_text(json.dumps({"loggedIn": False, "email": None, "used": [0, 0]}), encoding="utf-8")
+        Path(str(claude) + ".auth-state").write_text(json.dumps({"loggedIn": False}), encoding="utf-8")
+        providers = usage("--refresh")
+        for provider in ("codex", "claude"):
+            self.assertIs(providers[provider]["loggedIn"], False)
+            self.assertIsNone(providers[provider].get("account"))
+            self.assertIsNone(providers[provider].get("snapshot"))
+        self.assert_success(self.call_cli("usage", "login", "claude", extra_environment=environment)[0])
+        wait_for("claude", lambda state: state["loggedIn"] is True and state.get("account") == "claude-second@example.com",
+                 "A Claude login should restore the account.")
+        login = self.assert_success(self.call_cli("usage", "login", "codex", extra_environment=environment)[0])
+        self.assertEqual(login["loginURL"], "https://example.invalid/codex-login")
+        wait_for("codex", lambda state: state["loggedIn"] is True and state.get("account") == "codex-second@example.com",
+                 "A Codex login should restore the account.")
+
+    def install_codex_fixture(self, name):
+        """Installs the Codex app-server protocol fixture and returns its environment."""
+        executable = self.data_directory / name
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        return {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+
     def install_claude_fixture(self, name):
         """Installs the Claude Code protocol fixture and returns its turn environment."""
         source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
@@ -11030,7 +11196,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
     def assertSamePath(self, actual, expected, message=None):
         self.assertEqual(os.path.realpath(actual), os.path.realpath(expected), message)
 
-    # case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page, opened from the composer's Skills button that replaced the paperclip, lists the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each user skill is shown as usable by both Claude and Codex; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
+    # case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page, opened from the composer's Skills button that replaced the paperclip as a large modal that slides up from the bottom over the dimmed conversation and whose close button returns to the conversation, lists the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each user skill is shown as usable by both Claude and Codex; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
     def test_skills_catalog_lists_repo_global_and_builtin_skills(self):
         manifest = self.skill_manifest
         repository = self.make_skill_repository("skills-catalog-repo", {
@@ -11114,7 +11280,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         missing, _ = self.call_cli("skills", "get", "--task", task["id"], "--skill", "global:no-such-skill", expected_status=3)
         self.assert_failure(missing, "not_found")
 
-    # case-contract: test_skills_create_update_move_and_delete_on_disk | Creating a skill writes SKILL.md with name and description frontmatter into the open Agent Skills layout, ~/.agents/skills for a global skill or the chosen task worktree's .agents/skills for a repository skill; invalid names, a missing description, a duplicate name, and the built-in scope are rejected with nothing written. Editing saves the new SKILL.md and rejects a renamed or description-less frontmatter while keeping the file. Moving a skill between a repository and the global gallery moves its folder and rejects a move onto an existing name. Deleting removes the folder from disk, built-in skills are read-only, and every change is visible to a fresh CLI process and on the Skills page.
+    # case-contract: test_skills_create_update_move_and_delete_on_disk | Creating a skill writes SKILL.md with name and description frontmatter into the open Agent Skills layout, ~/.agents/skills for a global skill or the chosen task worktree's .agents/skills for a repository skill; invalid names, a missing description, a duplicate name, and the built-in scope are rejected with nothing written. Editing saves the new SKILL.md and rejects a renamed or description-less frontmatter while keeping the file. Clicking a skill row opens the editor panel, whose header is the parsed SKILL.md (the skill's name, its description, and the optional license, compatibility, and allowed-tools fields, with a YAML list read as one field) above its instructions; saving there rewrites the header, removes an emptied field, keeps frontmatter Playhouse does not edit, and rejects an unknown field or an empty description while keeping the file. Clicking a built-in skill with a folder opens it read-only, without Save. New Skill uses the same structured header, and a field set there is written into the new SKILL.md. Moving a skill between a repository and the global gallery moves its folder and rejects a move onto an existing name. Deleting removes the folder from disk, built-in skills are read-only, and every change is visible to a fresh CLI process and on the Skills page.
     def test_skills_create_update_move_and_delete_on_disk(self):
         repository = self.make_skill_repository("skills-manage-repo", {})
         task = self.create_skills_task("Skills manage", [repository])
@@ -11162,6 +11328,41 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(updated["description"], "Draft concise release notes")
         self.assertEqual(manifest_path.read_text(encoding="utf-8"), edited)
 
+        # The editor works on the parsed header: name, description, and the
+        # optional Agent Skills fields, with other frontmatter kept as written.
+        manifest_path.write_text(
+            "---\nname: release-notes\ndescription: Draft concise release notes\nallowed-tools:\n  - Read\n  - Bash\nmetadata:\n  owner: docs\n---\n\nGroup changes by area.\n",
+            encoding="utf-8",
+        )
+        detail = self.assert_success(self.call_cli("skills", "get", "--task", task["id"], "--skill", "global:release-notes")[0])
+        self.assertEqual(detail["manifest"]["name"], "release-notes")
+        self.assertEqual(detail["manifest"]["description"], "Draft concise release notes")
+        self.assertEqual(detail["manifest"]["fields"], {"allowed-tools": "Read, Bash"}, "A YAML list reads as one editable field.")
+        self.assertEqual(detail["manifest"]["body"], "Group changes by area.")
+        self.assertEqual(detail["manifest"]["preservedFrontmatter"], ["metadata:", "  owner: docs"])
+        structured = self.assert_success(self.call_cli(
+            "skills", "update", "--task", task["id"], "--skill", "global:release-notes",
+            "--description", "Draft release notes by area", "--field", "license=MIT", "--field", "allowed-tools=",
+            "--body", "List each change under its area.",
+        )[0])
+        self.assertEqual(structured["description"], "Draft release notes by area")
+        self.assertEqual(manifest_path.read_text(encoding="utf-8"),
+                         '---\nname: release-notes\ndescription: "Draft release notes by area"\nlicense: "MIT"\nmetadata:\n  owner: docs\n---\n\nList each change under its area.\n',
+                         "A structured edit rewrites the header, removes an emptied field, and keeps unknown keys.")
+        for arguments in [["--field", "model=opus"], ["--description", "  "]]:
+            self.assert_failure(self.call_cli("skills", "update", "--task", task["id"], "--skill", "global:release-notes",
+                                              *arguments, expected_status=2)[0], "invalid_argument")
+        self.assertIn("List each change under its area.", manifest_path.read_text(encoding="utf-8"), "A rejected structured edit keeps the file.")
+        self.assert_failure(self.call_cli("skills", "update", "--task", task["id"], "--skill", "global:release-notes", expected_status=2)[0], "invalid_argument")
+        fielded = self.assert_success(create("--scope", "global", "--name", "fielded", "--description", "Has header fields",
+                                             "--field", "compatibility=Needs git", "--body", "Steps."))
+        self.assertEqual(fielded["id"], "global:fielded")
+        self.assertEqual((global_folder / "fielded" / "SKILL.md").read_text(encoding="utf-8"),
+                         '---\nname: fielded\ndescription: "Has header fields"\ncompatibility: "Needs git"\n---\n\nSteps.\n')
+        self.assert_failure(create("--scope", "global", "--name", "bad-field", "--description", "Unknown field", "--field", "model=opus", expected_status=2), "invalid_argument")
+        self.assertFalse((global_folder / "bad-field").exists(), "A rejected field writes nothing.")
+        self.assert_success(self.call_cli("skills", "delete", "--task", task["id"], "--skill", "global:fielded")[0])
+
         moved = self.assert_success(self.call_cli("skills", "move", "--task", task["id"], "--skill", repo_skill["id"], "--scope", "global")[0])
         self.assertEqual(moved["id"], "global:repo-new")
         self.assertTrue((global_folder / "repo-new" / "SKILL.md").is_file())
@@ -11178,7 +11379,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
         fresh = self.skill_catalog(task_id=task["id"])
         self.assertEqual(sorted(skill["name"] for skill in fresh["global"]), ["release-notes", "repo-new"])
-        self.assertEqual(self.skills_by_name(fresh["global"])["release-notes"]["description"], "Draft concise release notes")
+        self.assertEqual(self.skills_by_name(fresh["global"])["release-notes"]["description"], "Draft release notes by area")
         self.assertEqual([skill["name"] for skill in fresh["repositories"][0]["skills"]], ["release-notes"])
 
         self.write_skill(self.skills_codex_home / "skills" / ".system", "codex-system-skill", "Bundled with Codex")
@@ -11188,7 +11389,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse((global_folder / "repo-new").exists(), "Deleting removes the skill folder from disk.")
         self.assert_failure(self.call_cli("skills", "get", "--skill", "global:repo-new", expected_status=3)[0], "not_found")
 
-    # case-contract: test_skills_enable_state_and_outside_links_persist | Turning a skill off is stored by Playhouse rather than in either provider's settings, survives fresh CLI processes and reopening the Skills page, and can be turned back on. Making a skill available outside Playhouse writes a real symlink into the other provider's layout (an absolute link in Claude's global skills folder, a relative link inside the repository), after which the skill shows as Linked; an existing file at the link path is left untouched and the request fails with already_exists, removing the outside link deletes only the symlink and keeps the skill, and a skill without a link cannot be unlinked.
+    # case-contract: test_skills_enable_state_and_outside_links_persist | Turning a skill off is stored by Playhouse rather than in either provider's settings, survives fresh CLI processes and reopening the Skills page, and can be turned back on. The small switch flips as soon as it is clicked, and turning a skill on disk on or off never starts a Claude Code session. Making a skill available outside Playhouse writes a real symlink into the other provider's layout (an absolute link in Claude's global skills folder, a relative link inside the repository), after which the skill shows as Linked; an existing file at the link path is left untouched and the request fails with already_exists, removing the outside link deletes only the symlink and keeps the skill, and a skill without a link cannot be unlinked.
     def test_skills_enable_state_and_outside_links_persist(self):
         repository = self.make_skill_repository("skills-link-repo", {
             ".agents/skills/repo-agents/SKILL.md": self.skill_manifest("repo-agents", "Repository agents skill"),
@@ -11206,8 +11407,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
             skills = catalog["global"] if scope == "global" else catalog["repositories"][0]["skills"]
             return self.skills_by_name(skills)[name]
 
-        disabled = self.assert_success(self.call_cli("skills", "disable", "--task", task["id"], "--skill", "global:global-agents")[0])
+        environment = self.install_claude_fixture("claude-fixture-skills-toggle")
+        sessions = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".sessions")
+        disabled = self.assert_success(self.call_cli("skills", "disable", "--task", task["id"], "--skill", "global:global-agents",
+                                                     "--include-bundled", "true", extra_environment=environment)[0])
         self.assertFalse(disabled["enabled"])
+        self.assertFalse(sessions.exists(), "Turning a skill on disk off must not start a Claude Code session.")
         self.assertFalse(skill("global-agents")["enabled"], "Turning a skill off survives a fresh CLI process.")
         self.assertFalse((self.skills_codex_home / "config.toml").exists(), "Codex's config is not written.")
         self.assertFalse((self.skills_home / ".claude" / "settings.json").exists(), "Claude's settings are not written.")
@@ -11236,6 +11441,120 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(link.exists() or link.is_symlink(), "Removing the outside link deletes only the symlink.")
         self.assertTrue((self.skills_home / ".agents" / "skills" / "global-agents" / "SKILL.md").is_file())
         self.assert_failure(self.call_cli("skills", "unlink", "--task", task["id"], "--skill", "global:global-agents", expected_status=2)[0], "invalid_argument")
+
+    # case-contract: test_skills_select_many_and_delete_together | Pressing and holding a skill row, or choosing Select, starts selecting skills: each editable row shows a checkbox that a click toggles, built-in skills show none and cannot be selected, and the header shows how many are selected with Fix with Agent, Delete, and Done. Deleting the selection after one confirmation removes every selected skill folder, repository and global alike, from disk, leaves unselected skills in place, forgets a deleted skill's off state, and ends selecting. A batch that includes a read-only or unknown skill deletes nothing and fails with invalid_argument or not_found.
+    def test_skills_select_many_and_delete_together(self):
+        repository = self.make_skill_repository("skills-select-repo", {
+            ".agents/skills/repo-one/SKILL.md": self.skill_manifest("repo-one", "First repository skill"),
+            ".agents/skills/repo-keep/SKILL.md": self.skill_manifest("repo-keep", "Stays after the bulk delete"),
+        })
+        task = self.create_skills_task("Skills select", [repository])
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        global_folder = self.skills_home / ".agents" / "skills"
+        for name in ["global-one", "global-two"]:
+            self.write_skill(global_folder, name, f"Global skill {name}")
+        self.write_skill(self.skills_codex_home / "skills" / ".system", "codex-system-skill", "Bundled with Codex")
+        self.assert_success(self.call_cli("skills", "disable", "--task", task["id"], "--skill", "global:global-two")[0])
+
+        rejected = self.call_cli("skills", "delete", "--task", task["id"], "--skill", "global:global-one",
+                                 "--skill", "builtin:codex:codex-system-skill", expected_status=2)[0]
+        self.assert_failure(rejected, "invalid_argument")
+        self.assertTrue((global_folder / "global-one").is_dir(), "One read-only skill in the batch deletes nothing.")
+        missing = self.call_cli("skills", "delete", "--task", task["id"], "--skill", "global:global-one",
+                                "--skill", "global:no-such-skill", expected_status=3)[0]
+        self.assert_failure(missing, "not_found")
+        self.assertTrue((global_folder / "global-one").is_dir(), "One unknown skill in the batch deletes nothing.")
+
+        deleted = self.assert_success(self.call_cli(
+            "skills", "delete", "--task", task["id"], "--skill", "global:global-one", "--skill", "global:global-two",
+            "--skill", f"repo:{repository}#repo-one",
+        )[0])
+        self.assertEqual(deleted, {"deleted": True})
+        self.assertFalse((global_folder / "global-one").exists())
+        self.assertFalse((global_folder / "global-two").exists())
+        self.assertFalse((worktree / ".agents" / "skills" / "repo-one").exists(), "A repository skill in the batch is deleted from the worktree.")
+        self.assertTrue((worktree / ".agents" / "skills" / "repo-keep" / "SKILL.md").is_file(), "Unselected skills stay.")
+        fresh = self.skill_catalog(task_id=task["id"])
+        self.assertEqual(fresh["global"], [])
+        self.assertEqual([skill["name"] for skill in fresh["repositories"][0]["skills"]], ["repo-keep"])
+        self.write_skill(global_folder, "global-two", "Recreated with the same name")
+        self.assertTrue(self.skills_by_name(self.skill_catalog(task_id=task["id"])["global"])["global-two"]["enabled"],
+                        "Deleting a skill forgets that it was turned off.")
+
+    # case-contract: test_skills_fix_with_agent_starts_task_for_repo_and_global_skills | A conflicting or invalid skill offers Fix with Agent, and several selected skills can be fixed in one task. Fixing creates a task, on the source task's provider, whose saved prompt teaches the agent the skill format and lists each skill with its problem: repository skills by repository-relative path, to be fixed in the new task's own worktree of the source repository and committed and pushed like any code change, and global skills by absolute path, to be fixed in place with nothing to commit; the global skill folders are opened to the agent as context folders, and fixing only global skills needs no repository. The view switches to the new task's conversation, which sends that prompt as its own composer draft, leaving the composer empty and no unsent draft behind, so the turn runs in the new task's worktree with the global folders reachable. A skill with no problem, a built-in skill, an unknown skill, and a request without a task are rejected without opening a task.
+    def test_skills_fix_with_agent_starts_task_for_repo_and_global_skills(self):
+        manifest = self.skill_manifest
+        repository = self.make_skill_repository("skills-fix-repo", {
+            ".agents/skills/repo-dup/SKILL.md": manifest("repo-dup", "The agents copy"),
+            ".claude/skills/repo-dup/SKILL.md": manifest("repo-dup", "A different Claude copy"),
+            ".agents/skills/repo-ok/SKILL.md": manifest("repo-ok", "Nothing to fix"),
+        })
+        self.write_skill(self.skills_home / ".agents" / "skills", "global-dup", "The global agents copy")
+        self.write_skill(self.skills_home / ".claude" / "skills", "global-dup", "The global Claude copy")
+        broken = self.skills_home / ".agents" / "skills" / "global-broken"
+        broken.mkdir(parents=True)
+        (broken / "SKILL.md").write_text("No frontmatter here.\n", encoding="utf-8")
+        self.write_skill(self.skills_codex_home / "skills" / ".system", "codex-system-skill", "Bundled with Codex")
+        environment = self.install_claude_fixture("claude-fixture-skills-fix")
+        history_path = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".history")
+        source = self.create_skills_task("Skills fix source", [repository], provider="claude")
+        source_worktree = Path(source["repositoryWorktrees"][0]["worktreePath"])
+        tasks_before = len(self.assert_success(self.call_cli("board", "list")[0])["tasks"])
+
+        def fix(*skills, expected_status=0, task_id=source["id"]):
+            arguments = [argument for skill in skills for argument in ("--skill", skill)]
+            return self.call_cli("skills", "fix", "--task", task_id, *arguments, expected_status=expected_status)[0]
+
+        self.assert_failure(fix(f"repo:{repository}#repo-ok", expected_status=2), "invalid_argument")
+        self.assert_failure(fix("builtin:codex:codex-system-skill", expected_status=2), "invalid_argument")
+        self.assert_failure(fix("global:no-such-skill", expected_status=3), "not_found")
+        self.assert_failure(self.call_cli("skills", "fix", "--skill", "global:global-dup", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(len(self.assert_success(self.call_cli("board", "list")[0])["tasks"]), tasks_before, "A rejected fix opens no task.")
+
+        created = self.assert_success(fix(f"repo:{repository}#repo-dup", "global:global-dup", "global:global-broken"))
+        task, prompt = created["task"], created["prompt"]
+        self.assertEqual(task["title"], "Fix skills repo-dup, global-dup, global-broken")
+        self.assertEqual(task["status"], "Backlog")
+        self.assertEqual(task["conversationProvider"], "claude", "The fixing task uses the source task's provider.")
+        self.assertEqual([record["repositoryPath"] for record in task["repositoryWorktrees"]], [str(repository)],
+                         "A repository skill is fixed in the new task's own worktree of its source repository.")
+        self.assertTrue(task["repositoryWorktrees"][0]["isPending"])
+        self.assertEqual(sorted(os.path.realpath(folder) for folder in task["contextFolders"]),
+                         sorted(os.path.realpath(self.skills_home / folder) for folder in [".agents/skills", ".claude/skills"]),
+                         "Global skill folders are opened to the agent so it can fix them in place.")
+        self.assertEqual(task["savedPrompt"], prompt)
+        self.assertIn("commit and push", prompt)
+        self.assertIn("`repo-dup` in skills-fix-repo: `.agents/skills/repo-dup`, `.claude/skills/repo-dup`", prompt)
+        self.assertNotIn(str(source_worktree), prompt, "Repository paths are relative, so they point into the fixing task's worktree.")
+        self.assertIn("not tracked by Git: fix them directly in place", prompt)
+        for folder in [".agents/skills/global-dup", ".claude/skills/global-dup"]:
+            path = self.skills_home / folder
+            self.assertTrue(str(path) in prompt or os.path.realpath(path) in prompt, f"The prompt names the global skill's absolute path {path}.")
+        self.assertIn("`global-broken`", prompt)
+        self.assertIn("frontmatter", prompt)
+        self.assertNotIn("repo-ok", prompt)
+        stored = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(stored["savedPrompt"], prompt, "The fixing task and its prompt are saved for a fresh CLI process.")
+
+        global_only = self.assert_success(fix("global:global-dup"))["task"]
+        self.assertEqual(global_only["title"], "Fix skill global-dup")
+        self.assertEqual(global_only["repositoryWorktrees"], [], "Fixing only global skills needs no repository.")
+        self.assertNotIn("commit and push", self.assert_success(self.call_cli("task", "get", global_only["id"])[0])["savedPrompt"])
+
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", prompt, extra_environment=environment)[0])
+        turn = next(turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText") == prompt)
+        started = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        worktree = started["repositoryWorktrees"][0]
+        self.assertFalse(worktree["isPending"], "Starting the fix creates the task's worktree.")
+        self.assertNotEqual(os.path.realpath(worktree["worktreePath"]), os.path.realpath(source_worktree))
+        self.assertSamePath(turn["cwd"], worktree["worktreePath"])
+        self.assertIsNone(started.get("pendingSubmittedPrompt"), "The sent prompt is no longer pending.")
+        self.assertFalse(started["hasUnsentDraft"], "The sent prompt leaves no unsent draft behind.")
+        self.assertTrue((Path(worktree["worktreePath"]) / ".claude" / "skills" / "repo-dup" / "SKILL.md").is_file(),
+                        "The fixing task's worktree holds the committed skills to fix.")
+        directories = [os.path.realpath(turn["arguments"][index + 1]) for index, value in enumerate(turn["arguments"]) if value == "--add-dir"]
+        for folder in [".agents/skills", ".claude/skills"]:
+            self.assertIn(os.path.realpath(self.skills_home / folder), directories, f"Claude Code can reach the global {folder} folder.")
 
     # case-contract: test_skills_bridge_claude_launch_sees_agents_skills | A Claude turn sees the skills Claude Code does not read natively: Playhouse passes a Playhouse-owned --add-dir wrapper whose .claude/skills links to the task worktree's and the global .agents/skills folders, leaves skills Claude already reads out of the wrapper, and turns disabled skills off for that run with --settings skillOverrides, without writing to the repository or Claude's settings. Using a skill from the Skills page puts /skill-name at the start of the composer and the message reaches Claude Code unchanged. The resumed second turn gets the same wrapper, and turning the skill back on drops the override.
     def test_skills_bridge_claude_launch_sees_agents_skills(self):
