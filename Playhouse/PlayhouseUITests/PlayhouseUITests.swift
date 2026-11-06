@@ -5899,6 +5899,94 @@ final class PlayhouseUITests: XCTestCase {
                        "A close-turn signal that really ran must satisfy the page signal instead of falling back to the classifier.")
     }
 
+    // case-contract: test_standalone_chat_recalls_loaded_pages | When a standalone chat's agent loads an earlier page into its context with `chat page read`, the conversation renders one deterministic "Recalling <page title>" line per loaded page, titled from the page archive rather than from anything the agent wrote, in the order the pages were read. The lines are visible in the turn that read them without opening the Worked for disclosure, stay once the turn settles and after a later turn and a reopen, and the read commands really run and succeed so the history carries each call and the page's own title. The line is derived from Playhouse's own provider-neutral command activity (a shell call titled "Running <command>" for both Claude and Codex) and the page store, so provider selection cannot change it; one representative provider (Claude) covers the shared path.
+    func test_standalone_chat_recalls_loaded_pages() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-recall")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
+        )
+        claudeFixtureExecutable = executable.path
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        _ = try runCLI(["chat", "open"])
+        let titles = ["Volcano research", "Saturn notes"]
+        var pageIDs: [String] = []
+        for title in titles {
+            let page = try XCTUnwrap(
+                (try runCLI(["chat", "page", "new", "--title", title])["result"] as? [String: Any])?["page"] as? [String: Any]
+            )
+            pageIDs.append(try XCTUnwrap(page["id"] as? String))
+        }
+        _ = try runCLI(["chat", "page", "new", "--title", "Current topic"])
+
+        func recallRow(_ index: Int) -> XCUIElement { element("conversation-chat-page-recall-toolu_recall_\(index)") }
+        func send(_ prompt: String) {
+            let composer = element("message-composer")
+            XCTAssertTrue(composer.waitForExistence(timeout: 10))
+            composer.click()
+            composer.typeText(prompt)
+            element("send-message-button").click()
+        }
+
+        func waitForRecallLabel(_ index: Int, _ title: String) -> Bool {
+            waitUntil({ recallRow(index).exists && recallRow(index).label == "Recalling \(title)" }, timeout: 10)
+        }
+        let hold = URL(fileURLWithPath: executable.path + ".recall-hold")
+        let ready = URL(fileURLWithPath: executable.path + ".recall-ready")
+        let release = URL(fileURLWithPath: executable.path + ".recall-release")
+        try Data().write(to: hold)
+        let prompt = "recall-earlier-pages " + pageIDs.map { "page-id:\($0)" }.joined(separator: " ")
+        send(prompt)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 30),
+                      "The recalling turn should be held open after its reads.")
+        XCTAssertFalse(self.noTurnIsRunning(), "The turn is still running while the lines are checked.")
+        for (index, title) in titles.enumerated() {
+            XCTAssertTrue(waitForRecallLabel(index, title), "A Recalling line for \(title) should render the moment its read is seen, while the turn runs.")
+        }
+        XCTAssertLessThan(recallRow(0).frame.minY, recallRow(1).frame.minY, "Lines render in the order the pages were read.")
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "conversation-chat-page-recall-toolu_recall_0").count, 1,
+                       "A live page read renders as one Recalling line, not again as a command row in the work list.")
+        XCTAssertEqual(element("codex-activity-details").descendants(matching: .any)
+            .matching(identifier: "conversation-chat-page-recall-toolu_recall_0").count, 0,
+                       "The line stands on its own rather than inside the work disclosure.")
+        attachScreenshot(named: "standalone-chat-recalling-lines-live")
+        try Data().write(to: release)
+        XCTAssertTrue(waitUntil({
+            self.fixtureTurnCount(executable, containing: "recall-earlier-pages") > 0 && self.noTurnIsRunning()
+        }, timeout: 30), "The recalling turn should finish.")
+        for (index, title) in titles.enumerated() {
+            XCTAssertTrue(waitForRecallLabel(index, title), "The line for \(title) stays once the turn settles.")
+        }
+        let disclosure = element("codex-activity-disclosure")
+        XCTAssertTrue(disclosure.waitForExistence(timeout: 20), "The settled turn shows its Worked for summary.")
+        XCTAssertTrue((disclosure.value as? String ?? "").hasPrefix("Collapsed"), "Worked for stays collapsed while the lines are visible.")
+        attachScreenshot(named: "standalone-chat-recalling-lines")
+
+        send("recall-earlier-pages")
+        XCTAssertTrue(waitUntil({
+            self.fixtureTurnCount(executable, containing: "recall-earlier-pages") > 1 && self.noTurnIsRunning()
+        }, timeout: 30), "A later turn should finish.")
+        XCTAssertTrue(revealWholeTranscript(), "The earlier turn should load as the reader scrolls up.")
+        for (index, title) in titles.enumerated() {
+            XCTAssertTrue(waitForRecallLabel(index, title), "The Recalling line for \(title) should stay after a later turn.")
+        }
+        attachScreenshot(named: "standalone-chat-recalling-lines-after-later-turn")
+
+        refreshStandaloneChatSidebar()
+        XCTAssertTrue(revealWholeTranscript(), "The reopened chat should load its earlier turn as the reader scrolls up.")
+        for (index, title) in titles.enumerated() {
+            XCTAssertTrue(waitForRecallLabel(index, title), "The Recalling line for \(title) should survive reopening the chat.")
+        }
+    }
+
     // case-contract: test_standalone_chat_claude_fallback_classifier | When a standalone chat uses Claude, a missed page signal invokes the Haiku helper at low effort; a malformed result is rejected and retried, an unrelated later question and its assistant reply move to a new titled page, the UI keeps page evaluation visually quiet without blocking the primary answer, updates the transcript separator when classification completes, and holds a following send until the decision resolves, and appends the related follow-up in chronological order. The Claude-specific model and effort arguments are verified through the real CLI/XPC path. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes.
     func test_standalone_chat_claude_fallback_classifier() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-fallback")

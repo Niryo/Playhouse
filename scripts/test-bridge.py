@@ -1587,6 +1587,56 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(status["missedPreviousPageSignal"],
                          "A close-turn signal that really ran must satisfy the page signal instead of falling back to the classifier.")
 
+    # case-contract: test_standalone_chat_recalls_loaded_pages | When a standalone chat's agent loads an earlier page into its context with `chat page read`, the conversation renders one deterministic "Recalling <page title>" line per loaded page, titled from the page archive rather than from anything the agent wrote, in the order the pages were read. The lines are visible in the turn that read them without opening the Worked for disclosure, stay once the turn settles and after a later turn and a reopen, and the read commands really run and succeed so the history carries each call and the page's own title. The line is derived from Playhouse's own provider-neutral command activity (a shell call titled "Running <command>" for both Claude and Codex) and the page store, so provider selection cannot change it; one representative provider (Claude) covers the shared path.
+    def test_standalone_chat_recalls_loaded_pages(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-recall"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+        titles = ["Volcano research", "Saturn notes"]
+        pages = [
+            self.assert_success(self.call_cli("chat", "page", "new", "--title", title, extra_environment=environment)[0])["page"]
+            for title in titles
+        ]
+        self.assert_success(self.call_cli("chat", "page", "new", "--title", "Current topic", extra_environment=environment)[0])
+
+        message = "recall-earlier-pages " + " ".join(f"page-id:{page['id']}" for page in pages)
+        self.assert_success(self.call_cli("conversation", "send", chat_id, "--message", message, extra_environment=environment)[0])
+
+        turns = [
+            turn for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+            if not (turn.get("userText") or "").startswith("Classify the latest user message")
+        ]
+        reads = [item for item in turns[-1]["reportCommands"] if " chat page read " in item["command"]]
+        self.assertEqual(len(reads), 2, "The fixture should really run one chat page read per earlier page.")
+        for page, title, read in zip(pages, titles, reads):
+            self.assertTrue(read["command"].endswith(page["id"]), read)
+            self.assertEqual(json.loads(read["output"])["result"]["page"]["title"], title, "Each read should load the page's own title.")
+
+        history = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        recalls = [row for row in history["activities"] if row["id"].startswith("toolu_recall_")]
+        self.assertEqual([row["id"] for row in recalls], ["toolu_recall_0", "toolu_recall_1"],
+                         "Each page read should be recorded in order for the conversation to render as a Recalling line.")
+        for page, row in zip(pages, recalls):
+            self.assertIn(f"chat page read {page['id']}", row["title"])
+            self.assertEqual(row["status"], "completed")
+
+        self.assert_success(self.call_cli("conversation", "send", chat_id, "--message", "recall-earlier-pages", extra_environment=environment)[0])
+        later = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        message_ids = {message["id"] for message in later["messages"]}
+        placed = [row for row in later["timelineActivities"] if row["id"].startswith("toolu_recall_")]
+        self.assertEqual([row["id"] for row in placed], ["toolu_recall_0", "toolu_recall_1"],
+                         "The earlier turn's reads stay placed in the timeline after a later turn.")
+        self.assertTrue(all(row.get("afterMessageID") in message_ids for row in placed),
+                        "Each placed read follows a message the conversation still shows.")
+        self.assert_failure(self.call_cli("chat", "page", "read", "no-such-page", expected_status=1, extra_environment=environment)[0], "operation_failed")
+
     # case-contract: test_standalone_chat_claude_fallback_classifier | When a standalone chat uses Claude, a missed page signal invokes the Haiku helper at low effort; a malformed result is rejected and retried, an unrelated later question and its assistant reply move to a new titled page, the UI keeps page evaluation visually quiet without blocking the primary answer, updates the transcript separator when classification completes, and holds a following send until the decision resolves, and appends the related follow-up in chronological order. The Claude-specific model and effort arguments are verified through the real CLI/XPC path. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes.
     def test_standalone_chat_claude_fallback_classifier(self):
         self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])

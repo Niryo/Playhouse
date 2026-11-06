@@ -407,6 +407,40 @@ private struct CodeBlockTextView: NSViewRepresentable {
     }
 }
 
+/// A deterministic "Recalling <page title>" line for a standalone chat page the agent loaded into
+/// its context with `chat page read`. The title comes from the page archive, not the agent.
+private struct ChatPageRecallRow: View {
+    let activityID: String
+    let pageID: String
+
+    @State private var title: String?
+
+    var body: some View {
+        let label = "Recalling \(title ?? "an earlier page")"
+        HStack(spacing: 8) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text(label)
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier("conversation-chat-page-recall-\(activityID)")
+        .task(id: pageID) {
+            let directory = ProcessInfo.processInfo.environment["PLAYHOUSE_DATA_DIRECTORY"]
+            title = (try? StandaloneChatManager(dataDirectory: directory).page(id: pageID))?.title
+        }
+    }
+}
+
 /// One tool call in the conversation timeline: the tool's name and what the call was for, then
 /// what it was given (IN) and what it returned (OUT), clipped to a few lines until expanded.
 private struct ToolCallTimelineRow: View {
@@ -3043,7 +3077,11 @@ struct TaskConversationView: View {
                 .id(entry.id)
         }
         ForEach(inlineTools[message.id] ?? []) { activity in
-            ToolCallTimelineRow(activity: activity)
+            if let pageID = activity.recalledChatPageID {
+                ChatPageRecallRow(activityID: activity.id, pageID: pageID)
+            } else {
+                ToolCallTimelineRow(activity: activity)
+            }
         }
         let nextOrder = conversationMessages.first(where: {
             guard let current = message.timelineOrder, let candidate = $0.timelineOrder else { return false }
@@ -3165,6 +3203,11 @@ struct TaskConversationView: View {
                         }
                         ForEach(renderedConversationMessages) { message in
                             transcriptRows(for: message, inlineTools: inlineTools)
+                        }
+                        ForEach(liveChatPageRecalls) { activity in
+                            if let pageID = activity.recalledChatPageID {
+                                ChatPageRecallRow(activityID: activity.id, pageID: pageID)
+                            }
                         }
                         if shouldShowActivityDisclosure, activityDisclosureAnchorID == nil {
                             activityList
@@ -3396,11 +3439,19 @@ struct TaskConversationView: View {
         return (byMessageID, ids)
     }
 
+    /// The standalone chat's page recalls in the latest turn. They render as their own lines the
+    /// moment the call is seen instead of waiting inside the collapsed work disclosure.
+    private var liveChatPageRecalls: [ConversationActivity] {
+        guard task.isStandaloneChat else { return [] }
+        let inlineIDs = inlineToolCalls.ids
+        return activities.filter { $0.recalledChatPageID != nil && !inlineIDs.contains($0.id) }
+    }
+
     /// Keep the latest live non-agent operation in the conversation timeline.
     /// Earlier live operations remain available in the expanded activity list.
     private var activeProcess: ConversationActivity? {
         activities
-            .filter { !$0.isSubagent && !$0.isContextCompaction && $0.isActive }
+            .filter { !$0.isSubagent && !$0.isContextCompaction && $0.isActive && $0.recalledChatPageID == nil }
             .enumerated()
             .max { left, right in
                 let leftOrder = left.element.timelineOrder ?? left.offset
@@ -3454,6 +3505,7 @@ struct TaskConversationView: View {
                         .union(inlineToolCalls.ids)
                     ForEach(activities.filter {
                         !$0.isSubagent && !$0.isContextCompaction && !activeIDsOutside.contains($0.id)
+                            && !(task.isStandaloneChat && $0.recalledChatPageID != nil)
                     }) { activity in
                         activityRow(activity)
                     }

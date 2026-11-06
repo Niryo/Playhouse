@@ -526,5 +526,9 @@
   {
     "id": "test_settings_cpu_usage_color_max_round_trip",
     "expectation": "The CPU usage color maximum defaults to one fully busy core per logical CPU, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting."
+  },
+  {
+    "id": "test_standalone_chat_recalls_loaded_pages",
+    "expectation": "When a standalone chat's agent loads an earlier page into its context with `chat page read`, the conversation renders one deterministic \"Recalling <page title>\" line per loaded page, titled from the page archive rather than from anything the agent wrote, in the order the pages were read. The lines are visible in the turn that read them without opening the Worked for disclosure, stay once the turn settles and after a later turn and a reopen, and the read commands really run and succeed so the history carries each call and the page's own title. The line is derived from Playhouse's own provider-neutral command activity (a shell call titled \"Running <command>\" for both Claude and Codex) and the page store, so provider selection cannot change it; one representative provider (Claude) covers the shared path."
   }
 ]
