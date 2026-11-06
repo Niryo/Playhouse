@@ -1,0 +1,14 @@
+{
+  "id": "alignment",
+  "name": "Alignment and spacing",
+  "version": "1.0.0",
+  "description": "alignment and spacing control how a stack places its children.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Alignment and spacing"
+      }
+    ]
+  }
+}

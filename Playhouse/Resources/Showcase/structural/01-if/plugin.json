@@ -1,0 +1,14 @@
+{
+  "id": "if",
+  "name": "Conditional content",
+  "version": "1.0.0",
+  "description": "if shows its children only while its cond is truthy; ! negates a binding.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Conditional content"
+      }
+    ]
+  }
+}

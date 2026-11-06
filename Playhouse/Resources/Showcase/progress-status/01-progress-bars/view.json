@@ -1,0 +1,33 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 14,
+      "width": 360
+    },
+    "children": [
+      {
+        "type": "progress-bar",
+        "props": {
+          "value": 25,
+          "label": "25 of 100"
+        }
+      },
+      {
+        "type": "progress-bar",
+        "props": {
+          "value": 3,
+          "total": 4,
+          "label": "3 of 4 steps",
+          "showValue": true
+        }
+      },
+      {
+        "type": "progress-bar",
+        "props": {
+          "label": "Indeterminate"
+        }
+      }
+    ]
+  }
+}

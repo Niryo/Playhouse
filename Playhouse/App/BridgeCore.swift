@@ -8727,6 +8727,26 @@ final class PlayhouseBridgeRuntime {
                     taskID: request.requiredUUID("taskID"),
                     provider: ConversationProvider.parse(request.requiredString("provider"))
                 ))
+            // Plugin operations validate logic.js in short-lived child processes;
+            // they run off the main actor so a slow check never holds up other requests.
+            case "plugin.list":
+                let manager = PluginManager(storeDirectory: storeDirectory)
+                result = await Task.detached { manager.list() }.value
+            case "plugin.validate":
+                let manager = PluginManager(storeDirectory: storeDirectory)
+                let path = request.arguments["path"]?.string, id = request.arguments["id"]?.string
+                result = try await Task.detached { try manager.validate(path: path, id: id) }.value
+            case "plugin.components":
+                result = try PluginManager.components(type: request.arguments["type"]?.string)
+            case "plugin.check-showcases":
+                let path = request.arguments["path"]?.string
+                result = try await Task.detached { try PluginManager.checkShowcases(path: path) }.value
+            case "plugin.new":
+                let manager = PluginManager(storeDirectory: storeDirectory)
+                let id = try request.requiredString("id")
+                let template = request.arguments["template"]?.string ?? "view"
+                let section = request.arguments["section"]?.string, path = request.arguments["path"]?.string
+                result = try await Task.detached { try manager.create(id: id, template: template, section: section, path: path) }.value
             case "skills.list":
                 let roots = try skillRoots()
                 result = try Self.value(skills.catalog(roots: roots, bundledClaudeSkills: await bundledClaudeSkills(roots)))
@@ -9153,6 +9173,139 @@ final class PlayhouseBridgeRuntime {
         return try JSONDecoder().decode(BridgeValue.self, from: data)
     }
 
+}
+
+/// Plugin folders and the Component Catalog's showcases. The `plugin` CLI commands
+/// and the app's Plugins menu both list and validate plugins here, through the
+/// plugin core (Plugins/Core). logic.js is evaluated only in a short-lived
+/// `playhouse-plugin-dev` process, never inside the daemon or the app window.
+struct PluginManager {
+    struct Entry {
+        var directory: URL
+        var manifest: PluginManifest?
+        var issues: [PluginIssue]
+
+        var id: String { manifest?.id ?? directory.lastPathComponent }
+        var name: String { manifest.map { $0.name.isEmpty ? directory.lastPathComponent : $0.name } ?? directory.lastPathComponent }
+        var views: [PluginManifest.ViewContribution] { manifest?.views ?? [] }
+    }
+
+    /// `<data directory>/Plugins`, beside the store this request (or window) opened.
+    let pluginsDirectory: URL
+
+    init(storeDirectory: String?) {
+        let base = storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? (try? PlayhouseAppIdentity.defaultDataDirectory())
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        pluginsDirectory = base.appendingPathComponent("Plugins", isDirectory: true)
+    }
+
+    /// The installed plugins with their validation issues; may take a few seconds per broken plugin.
+    func entries() -> [Entry] {
+        PluginLoader.discover(root: pluginsDirectory).map { entry in
+            switch entry.result {
+            case .success(let bundle):
+                return Entry(directory: entry.directory, manifest: bundle.manifest, issues: PluginValidator.validate(bundle, logic: .bundledRunner))
+            case .failure(let error):
+                return Entry(directory: entry.directory, manifest: nil, issues: [PluginIssue(file: PluginBundle.manifestFile, path: nil, message: error.localizedDescription)])
+            }
+        }
+    }
+
+    func list() -> BridgeValue {
+        let plugins = entries().map { entry -> BridgeValue in
+            .object([
+                "id": .string(entry.id),
+                "name": .string(entry.name),
+                "version": entry.manifest.map { .string($0.version) } ?? .null,
+                "description": entry.manifest?.description.map(BridgeValue.string) ?? .null,
+                "directory": .string(entry.directory.path),
+                "views": .array(entry.views.map { .object(["id": .string($0.id), "title": .string($0.title)]) }),
+                "valid": .boolean(entry.issues.isEmpty),
+                "issues": Self.issuesValue(entry.issues),
+            ])
+        }
+        return .object(["pluginsDirectory": .string(pluginsDirectory.path), "plugins": .array(plugins)])
+    }
+
+    func validate(path: String?, id: String?) throws -> BridgeValue {
+        let directory: URL
+        if let path, !path.isEmpty {
+            directory = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        } else if let id, !id.isEmpty {
+            let match = PluginLoader.discover(root: pluginsDirectory).first { entry in
+                entry.directory.lastPathComponent == id || (try? entry.result.get())?.manifest.id == id
+            }
+            guard let match else { throw BridgeCommandError(code: "not_found", message: "No installed plugin is named \(id).") }
+            directory = match.directory
+        } else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Pass --path <plugin-dir> or --id <plugin-id>.")
+        }
+        guard FileManager.default.fileExists(atPath: directory.path) else {
+            throw BridgeCommandError(code: "not_found", message: "\(directory.path) doesn't exist.")
+        }
+        let issues = PluginValidator.validate(directory: directory, logic: .bundledRunner)
+        return .object(["directory": .string(directory.path), "valid": .boolean(issues.isEmpty), "issues": Self.issuesValue(issues)])
+    }
+
+    static func components(type: String?) throws -> BridgeValue {
+        if let type, PluginComponentCatalog.spec(type) == nil {
+            throw BridgeCommandError(code: "not_found", message: "There is no component named \(type).")
+        }
+        return PluginComponentCatalog.catalogValue(type: type)
+    }
+
+    /// Checks the showcases at `path`, or the ones bundled with this app.
+    static func checkShowcases(path: String?) throws -> BridgeValue {
+        let root: URL
+        if let path, !path.isEmpty {
+            root = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        } else if let bundled = Bundle.main.resourceURL?.appendingPathComponent("Showcase", isDirectory: true) {
+            root = bundled
+        } else {
+            throw BridgeCommandError(code: "not_found", message: "This build has no bundled showcases; pass --path.")
+        }
+        var value = PluginShowcaseLibrary.check(root: root, logic: .bundledRunner).value
+        if case .object(var object) = value {
+            object["root"] = .string(root.path)
+            value = .object(object)
+        }
+        return value
+    }
+
+    func create(id: String, template: String, section: String?, path: String?) throws -> BridgeValue {
+        guard let template = PluginScaffold.Template(rawValue: template) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Templates: \(PluginScaffold.Template.allCases.map(\.rawValue).joined(separator: ", ")).")
+        }
+        let parent: URL
+        if let path, !path.isEmpty {
+            parent = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        } else if template == .showcase {
+            throw BridgeCommandError(code: "invalid_argument", message: "A showcase needs --path <showcase-root>, for example Playhouse/Resources/Showcase.")
+        } else {
+            parent = pluginsDirectory
+        }
+        let directory: URL
+        do {
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+            directory = try PluginScaffold.create(id: id, template: template, parent: parent, section: section)
+        } catch let error as PluginLoadError {
+            let code = error.message.contains("already") ? "already_exists" : "invalid_argument"
+            throw BridgeCommandError(code: code, message: error.message)
+        }
+        let issues = PluginValidator.validate(directory: directory, logic: .bundledRunner)
+        return .object(["directory": .string(directory.path), "valid": .boolean(issues.isEmpty), "issues": Self.issuesValue(issues)])
+    }
+
+    private static func issuesValue(_ issues: [PluginIssue]) -> BridgeValue {
+        .array(issues.map { issue in
+            .object([
+                "file": .string(issue.file),
+                "path": issue.path.map(BridgeValue.string) ?? .null,
+                "message": .string(issue.message),
+            ])
+        })
+    }
 }
 
 private extension JSONEncoder {

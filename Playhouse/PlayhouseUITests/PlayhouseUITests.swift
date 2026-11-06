@@ -16442,6 +16442,367 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(switched["conversationProvider"] as? String, liveProvider)
     }
 
+    // case-contract: test_plugin_catalog_showcases_cover_every_component | The Plugins menu opens the Component Catalog, whose sidebar lists every bundled showcase section; each section page renders all of its showcases live through the real renderer with no unknown-component or error placeholders and lists its components' props reference. The progress-bar showcase's bar itself advances to 100% when Start is clicked, both in the Catalog and through playhouse-plugin-dev with no app running, where `tap` returns after the async action settles and `state` shows pct 100; the stage's Reset restarts it from initialState, Show Source shows its view.json and logic.js, and Show Node IDs overlays each element's number, matching the runner's numbering. Typing into the text-field showcase sends each edit's value to its action and shows it, removing the first row of the list showcase leaves the others in place with their element numbers, and an if shows its content only while its condition holds. `plugin components` lists every section and component spec with typed props and events and rejects an unknown component, and `plugin check-showcases` passes for the bundled showcases while a copy with a component used by no showcase, an empty section, an event-bearing component left without an interactive showcase, or an unknown component fails with issues naming them.
+    func test_plugin_catalog_showcases_cover_every_component() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Component Catalog…")
+        XCTAssertTrue(element("catalog-sidebar").waitForExistence(timeout: 15), "Plugins ▸ Component Catalog… opens the Catalog window.")
+
+        let showcaseRoot = appBundle.appendingPathComponent("Contents/Resources/Showcase", isDirectory: true)
+        let sections = try pluginSubdirectories(of: showcaseRoot)
+        XCTAssertTrue(sections.contains("progress-status") && sections.contains("foundations"), "The app bundles the showcases: \(sections)")
+        for section in sections {
+            let row = element("catalog-section-\(section)")
+            XCTAssertTrue(row.waitForExistence(timeout: 10), "The sidebar lists the \(section) section.")
+            row.click()
+            XCTAssertTrue(element("catalog-page-\(section)").waitForExistence(timeout: 10), "Selecting \(section) shows its page.")
+            for showcase in try pluginSubdirectories(of: showcaseRoot.appendingPathComponent(section)) {
+                let stage = element("catalog-stage-\(section)-\(showcase)")
+                XCTAssertTrue(stage.waitForExistence(timeout: 10), "The \(section) page shows the \(showcase) showcase.")
+                let rendered = stage.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "plugin-node-")).firstMatch
+                XCTAssertTrue(rendered.waitForExistence(timeout: 10), "\(section)/\(showcase) renders live elements.")
+            }
+            // Scoped to the page: windows restored from an earlier launch may hold their own placeholders.
+            let page = element("catalog-page-\(section)")
+            XCTAssertFalse(page.descendants(matching: .any).matching(identifier: "plugin-unknown-component").firstMatch.exists, "Every component on the \(section) page has a renderer.")
+            XCTAssertFalse(page.descendants(matching: .any).matching(identifier: "plugin-error").firstMatch.exists, "No showcase on the \(section) page fails to load or render.")
+            attachScreenshot(named: "Component Catalog — \(section)")
+        }
+
+        element("catalog-section-text-input").click()
+        let textStage = element("catalog-stage-text-input-01-textfield")
+        XCTAssertTrue(textStage.waitForExistence(timeout: 10))
+        let field = textStage.textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        typeIntoField(field, text: "hello")
+        let echoed = textStage.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", "5 characters: \"hello\"", "5 characters: \"hello\"")).firstMatch
+        XCTAssertTrue(echoed.waitForExistence(timeout: 10), "Typing sends each edit's value to the showcase's action.")
+        textStage.buttons["Add"].click()
+        XCTAssertTrue(textStage.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", "• hello", "• hello")).firstMatch.waitForExistence(timeout: 10))
+        attachScreenshot(named: "Text field showcase after typing")
+
+        element("catalog-section-structural").click()
+        let listStage = element("catalog-stage-structural-02-list")
+        XCTAssertTrue(listStage.waitForExistence(timeout: 10))
+        func listText(_ value: String) -> XCUIElement {
+            listStage.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", value, value)).firstMatch
+        }
+        XCTAssertTrue(listText("First item").waitForExistence(timeout: 10))
+        XCTAssertTrue(listText("row 1").exists, "Second item starts as row 1.")
+        let secondID = listText("Second item").identifier
+        XCTAssertTrue(secondID.hasPrefix("plugin-node-") && secondID.count > "plugin-node-".count, "Each row element carries its number: \(secondID)")
+        listStage.buttons["Remove first"].click()
+        XCTAssertTrue(listText("First item").waitForNonExistence(timeout: 10), "Removing the first row takes it out of the list.")
+        XCTAssertTrue(listText("row 0").waitForExistence(timeout: 10), "The remaining row re-renders as row 0.")
+        XCTAssertEqual(listText("Second item").identifier, secondID, "The remaining row keeps its element number.")
+        let ifStage = element("catalog-stage-structural-01-if")
+        func ifText(_ value: String) -> XCUIElement {
+            ifStage.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", value, value)).firstMatch
+        }
+        XCTAssertTrue(ifText("The details are hidden.").waitForExistence(timeout: 10))
+        XCTAssertFalse(ifText("The details are visible.").exists, "An if leaves its content out while its condition is false.")
+        ifStage.buttons["Show details"].click()
+        XCTAssertTrue(ifText("The details are visible.").waitForExistence(timeout: 10), "An if shows its content once its condition holds.")
+        XCTAssertTrue(ifText("The details are hidden.").waitForNonExistence(timeout: 10), "The negated if drops its content.")
+        ifStage.buttons["Hide details"].click()
+        XCTAssertTrue(ifText("The details are visible.").waitForNonExistence(timeout: 10), "Turning the condition off again removes the content.")
+        XCTAssertTrue(ifText("The details are hidden.").waitForExistence(timeout: 10))
+        attachScreenshot(named: "Structural showcases after interaction")
+
+        element("catalog-section-progress-status").click()
+        let stageID = "catalog-stage-progress-status-02-progress-simulate"
+        let simulate = element(stageID)
+        XCTAssertTrue(simulate.waitForExistence(timeout: 10))
+        XCTAssertTrue(element("catalog-reference-progress-bar").exists, "The page lists the progress-bar props reference.")
+        XCTAssertTrue(element("catalog-reference-spinner").exists, "The page lists the spinner props reference.")
+        func stageText(_ value: String) -> XCUIElement {
+            simulate.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", value, value)).firstMatch
+        }
+        let bar = simulate.progressIndicators.firstMatch
+        // The indicator reports its value as a number (0...100 here, or a 0...1 fraction) or as "N%".
+        func barShows(_ percent: Double) -> Bool {
+            guard bar.exists else { return false }
+            if let text = bar.value as? String { return text == "\(Int(percent))%" || Double(text) == percent }
+            guard let number = (bar.value as? NSNumber)?.doubleValue else { return false }
+            return abs(number - percent) < 0.5 || abs(number - percent / 100) < 0.005
+        }
+        func waitForBar(_ value: String, timeout: TimeInterval) -> Bool {
+            let percent = Double(value.dropLast()) ?? -1
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if barShows(percent) { return true }
+                usleep(100_000)
+            }
+            return false
+        }
+        XCTAssertTrue(stageText("0% ready").waitForExistence(timeout: 10), "The simulated upload starts at 0%.")
+        XCTAssertTrue(waitForBar("0%", timeout: 5), "The progress bar renders its bound value: \(String(describing: bar.value))")
+        let start = simulate.buttons["Start"]
+        XCTAssertTrue(start.waitForExistence(timeout: 5))
+        start.click()
+        XCTAssertTrue(waitForBar("100%", timeout: 15), "Clicking Start advances the progress bar itself to 100%: \(String(describing: bar.value))")
+        XCTAssertTrue(stageText("100% done").exists)
+        attachScreenshot(named: "Progress showcase after Start")
+
+        element("\(stageID)-reset").click()
+        XCTAssertTrue(stageText("0% ready").waitForExistence(timeout: 10), "The stage's Reset reloads the showcase from initialState.")
+        XCTAssertTrue(waitForBar("0%", timeout: 5), "Reset returns the progress bar to 0%.")
+
+        element("\(stageID)-source").click()
+        let source = simulate.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", "\"action\": \"start\"", "\"action\": \"start\"")).firstMatch
+        XCTAssertTrue(source.waitForExistence(timeout: 5), "Show Source shows the showcase's view.json.")
+        let logic = simulate.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", "async start(state)", "async start(state)")).firstMatch
+        XCTAssertTrue(logic.exists, "Show Source shows the showcase's logic.js.")
+        attachScreenshot(named: "Progress showcase source")
+
+        let badges = simulate.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "plugin-node-badge-"))
+        XCTAssertEqual(badges.count, 0, "Element numbers are hidden until asked for.")
+        element("\(stageID)-node-ids").click()
+        let badge = badges.firstMatch
+        XCTAssertTrue(badge.waitForExistence(timeout: 5), "Show Node IDs overlays each element's number.")
+        let number = String(badge.identifier.dropFirst("plugin-node-badge-".count))
+        XCTAssertEqual(badge.label.isEmpty ? (badge.value as? String ?? "") : badge.label, number, "Each badge shows the element's number, as playhouse-plugin-dev prints it.")
+        XCTAssertTrue(simulate.descendants(matching: .any).matching(identifier: "plugin-node-\(number)").firstMatch.exists)
+        attachScreenshot(named: "Progress showcase with node IDs")
+    }
+
+    // case-contract: test_plugin_installed_plugin_loads_validates_and_runs | A plugin folder in the data directory's Plugins folder appears in the Plugins menu with one Open item per view, and each view opens in its own window; clicking its button runs the logic.js action and updates the bound text, an action's api.call reaches the real daemon and shows its result while a call to an unknown command rejects with the daemon's error, the plugin's Reload item restarts the open window from initialState, and editing view.json reloads it. A plugin with problems shows its first problem in its submenu; the menu and `plugin list` validate through the same manager. `plugin new` scaffolds a valid plugin there and refuses an existing id, `plugin list` reports each installed plugin with its views and validation issues, and `plugin validate` reports unknown components, missing actions and reserved button contributions with their file and JSON path and exits non-zero. A showcase scaffold needs a showcase root and lands in its section as NN-<id> with a section.json. Through playhouse-plugin-dev the same plugin's button updates state, its api.call actions resolve and reject the same way and appear in its log, a disabled button refuses taps, and editing view.json reloads it.
+    func test_plugin_installed_plugin_loads_validates_and_runs() throws {
+        let created = try XCTUnwrap(try runCLI(["plugin", "new", "--id", "hello-world"])["result"] as? [String: Any])
+        XCTAssertEqual(created["valid"] as? Bool, true)
+        let hello = URL(fileURLWithPath: try XCTUnwrap(created["directory"] as? String), isDirectory: true)
+        try #"{"id": "hello-world", "name": "Hello World", "version": "0.1.0", "contributes": {"views": [{"id": "main", "title": "Hello World"}, {"id": "details", "title": "Details"}]}}"#
+            .write(to: hello.appendingPathComponent("plugin.json"), atomically: true, encoding: .utf8)
+        try #"{"main": {"type": "vstack", "props": {"spacing": 12, "padding": 16}, "children": [{"type": "heading", "props": {"text": "Hello World"}}, {"type": "text", "props": {"text": "Clicked {{count}} times"}}, {"type": "button", "props": {"title": "Click me", "onTap": {"action": "increment"}}}, {"type": "button", "props": {"title": "Check daemon", "onTap": {"action": "checkDaemon"}}}, {"type": "button", "props": {"title": "Call missing", "onTap": {"action": "callMissing"}}}, {"type": "text", "props": {"text": "Daemon: {{daemon}}"}}, {"type": "text", "props": {"text": "API error: {{apiError}}"}}]}, "details": {"type": "text", "props": {"text": "Details view: {{count}}"}}}"#
+            .write(to: hello.appendingPathComponent("view.json"), atomically: true, encoding: .utf8)
+        try Self.helloPluginLogic.write(to: hello.appendingPathComponent("logic.js"), atomically: true, encoding: .utf8)
+        let broken = dataDirectory.appendingPathComponent("Plugins/broken", isDirectory: true)
+        try FileManager.default.createDirectory(at: broken, withIntermediateDirectories: true)
+        try #"{"id": "broken", "name": "Broken", "version": "1.0.0", "contributes": {"views": [{"id": "main", "title": "Broken"}], "buttons": [{"id": "x"}]}}"#
+            .write(to: broken.appendingPathComponent("plugin.json"), atomically: true, encoding: .utf8)
+        try #"{"main": {"type": "vstack", "children": [{"type": "fancy-widget"}]}}"#
+            .write(to: broken.appendingPathComponent("view.json"), atomically: true, encoding: .utf8)
+        let listed = try XCTUnwrap((try runCLI(["plugin", "list"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+        XCTAssertEqual(listed.compactMap { $0["id"] as? String }.sorted(), ["broken", "hello-world"])
+
+        launchApp(defaultParent: fixture.parent.path)
+        let brokenMenu = openPluginsSubmenu("Broken")
+        let problem = brokenMenu.menuItems.matching(NSPredicate(format: "title CONTAINS %@", "reserved")).firstMatch
+        XCTAssertTrue(problem.waitForExistence(timeout: 5), "A plugin with problems shows its first problem in its submenu.")
+        XCTAssertFalse(problem.isEnabled)
+        attachScreenshot(named: "Plugins menu with a plugin problem", fullScreen: true)
+        // Close the menu with the pointer; typed keys don't reach an open menu here.
+        app.menuBars.menuBarItems["Plugins"].click()
+
+        let helloMenu = openPluginsSubmenu("Hello World")
+        XCTAssertTrue(helloMenu.menuItems["Open \"Hello World\""].waitForExistence(timeout: 5), "Each plugin view has an Open item.")
+        XCTAssertTrue(helloMenu.menuItems["Open \"Details\""].exists, "The second view has its own Open item.")
+        attachScreenshot(named: "Plugins menu for an installed plugin", fullScreen: true)
+        clickMenuItem(helloMenu.menuItems["Open \"Hello World\""], in: helloMenu)
+        let window = element("plugin-window-hello-world-main")
+        XCTAssertTrue(window.waitForExistence(timeout: 15), "Open shows the plugin's view in its own window.")
+        func text(_ value: String) -> XCUIElement {
+            window.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", value, value)).firstMatch
+        }
+        XCTAssertTrue(text("Clicked 0 times").waitForExistence(timeout: 10))
+        let button = window.buttons["Click me"]
+        XCTAssertTrue(button.waitForExistence(timeout: 5))
+        button.click()
+        XCTAssertTrue(text("Clicked 1 times").waitForExistence(timeout: 10), "Clicking the button runs the logic.js action and updates the bound text.")
+        attachScreenshot(named: "Installed plugin after a click")
+
+        window.buttons["Check daemon"].click()
+        XCTAssertTrue(text("Daemon: bridge v1").waitForExistence(timeout: 15), "An action's api.call reaches the real daemon and shows its result.")
+        window.buttons["Call missing"].click()
+        let rejected = window.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", "Unknown command 'no.such.command'", "Unknown command 'no.such.command'")).firstMatch
+        XCTAssertTrue(rejected.waitForExistence(timeout: 15), "A call to an unknown command rejects with the daemon's error.")
+        attachScreenshot(named: "Installed plugin api.call results")
+
+        choosePluginsSubmenuItem("Hello World", "Reload")
+        XCTAssertTrue(text("Clicked 0 times").waitForExistence(timeout: 10), "The plugin's Reload item restarts its open window from initialState.")
+
+        choosePluginsSubmenuItem("Hello World", "Open \"Details\"")
+        let details = element("plugin-window-hello-world-details")
+        XCTAssertTrue(details.waitForExistence(timeout: 15), "The second view opens in its own window.")
+        XCTAssertTrue(details.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", "Details view: 0", "Details view: 0")).firstMatch.waitForExistence(timeout: 10))
+        attachScreenshot(named: "Installed plugin second view")
+
+        // Close Details (it covers the main view's button), then leave the count at 1 so
+        // the edit's reload has state to reset.
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertTrue(details.waitForNonExistence(timeout: 10))
+        button.click()
+        XCTAssertTrue(text("Clicked 1 times").waitForExistence(timeout: 10))
+        try #"{"main": {"type": "vstack", "props": {"spacing": 12, "padding": 16}, "children": [{"type": "heading", "props": {"text": "Edited live"}}, {"type": "text", "props": {"text": "Clicked {{count}} times"}}]}, "details": {"type": "text", "props": {"text": "Details view: {{count}}"}}}"#
+            .write(to: hello.appendingPathComponent("view.json"), atomically: true, encoding: .utf8)
+        // The edited view's heading carries the header trait, so match any element type.
+        let editedHeading = window.descendants(matching: .any).matching(NSPredicate(format: "label == %@ OR value == %@", "Edited live", "Edited live")).firstMatch
+        XCTAssertTrue(editedHeading.waitForExistence(timeout: 20), "Editing view.json reloads the open plugin window.")
+        XCTAssertTrue(text("Clicked 0 times").waitForExistence(timeout: 10), "A reload starts again from initialState.")
+        XCTAssertFalse(text("Clicked 1 times").exists)
+        attachScreenshot(named: "Installed plugin after editing view.json")
+    }
+
+    // case-contract: test_plugin_failures_show_errors_and_recover | A plugin action that throws reports its error: playhouse-plugin-dev's tap fails with it and logs the exception, and the plugin window shows it inline until an action succeeds, with the plugin still usable. An action that runs for about 10 seconds without yielding marks the plugin hung: the runner emits a hung event and refuses later taps, the window shows the hang, and reloading starts a fresh working copy. A logic.js that fails to load shows its error in the window and in the runner's loaded event, `plugin validate` reports it, and a logic.js whose top level never finishes is reported after 5 seconds by a short-lived check process that is killed, leaving the daemon responsive.
+    func test_plugin_failures_show_errors_and_recover() throws {
+        func install(_ id: String, _ name: String, view: String, logic: String) throws {
+            let directory = dataDirectory.appendingPathComponent("Plugins/\(id)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try #"{"id": "\#(id)", "name": "\#(name)", "version": "1.0.0", "contributes": {"views": [{"id": "main", "title": "\#(name)"}]}}"#
+                .write(to: directory.appendingPathComponent("plugin.json"), atomically: true, encoding: .utf8)
+            try view.write(to: directory.appendingPathComponent("view.json"), atomically: true, encoding: .utf8)
+            try logic.write(to: directory.appendingPathComponent("logic.js"), atomically: true, encoding: .utf8)
+        }
+        try install("fragile", "Fragile", view: Self.fragilePluginView, logic: Self.fragilePluginLogic)
+        try install("unparsable", "Unparsable", view: #"{"main": {"type": "text", "props": {"text": "Never shown"}}}"#, logic: "export const actions = {\n")
+
+        launchApp(defaultParent: fixture.parent.path)
+        choosePluginsSubmenuItem("Fragile", "Open \"Fragile\"")
+        let window = element("plugin-window-fragile-main")
+        XCTAssertTrue(window.waitForExistence(timeout: 15))
+        func text(_ value: String) -> XCUIElement {
+            window.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", value, value)).firstMatch
+        }
+        XCTAssertTrue(text("Ready 0").waitForExistence(timeout: 10))
+
+        window.buttons["Explode"].click()
+        let actionError = window.descendants(matching: .any).matching(identifier: "plugin-action-error").firstMatch
+        XCTAssertTrue(actionError.waitForExistence(timeout: 10), "A throwing action shows its error inline.")
+        XCTAssertTrue(accessibilityText(actionError).contains("Kaboom"), accessibilityText(actionError))
+        attachScreenshot(named: "Plugin action error")
+        window.buttons["Increment"].click()
+        XCTAssertTrue(text("Ready 1").waitForExistence(timeout: 10), "The plugin stays usable after a failed action.")
+        XCTAssertTrue(actionError.waitForNonExistence(timeout: 10), "The inline error clears once an action succeeds.")
+
+        window.buttons["Spin"].click()
+        let hung = window.descendants(matching: .any).matching(identifier: "plugin-error").firstMatch
+        XCTAssertTrue(hung.waitForExistence(timeout: 30), "An action that never yields marks the plugin hung.")
+        XCTAssertTrue(accessibilityText(hung).contains("hung"), accessibilityText(hung))
+        attachScreenshot(named: "Hung plugin")
+        choosePluginsSubmenuItem("Fragile", "Reload")
+        XCTAssertTrue(hung.waitForNonExistence(timeout: 15), "Reloading starts a fresh copy.")
+        XCTAssertTrue(text("Ready 0").waitForExistence(timeout: 10))
+        window.buttons["Increment"].click()
+        XCTAssertTrue(text("Ready 1").waitForExistence(timeout: 10), "The reloaded copy works.")
+
+        choosePluginsSubmenuItem("Unparsable", "Open \"Unparsable\"")
+        let broken = element("plugin-window-unparsable-main")
+        XCTAssertTrue(broken.waitForExistence(timeout: 15))
+        let loadError = broken.descendants(matching: .any).matching(identifier: "plugin-error").firstMatch
+        XCTAssertTrue(loadError.waitForExistence(timeout: 10), "A logic.js that fails to load shows its error.")
+        XCTAssertTrue(accessibilityText(loadError).contains("logic.js failed to load"), accessibilityText(loadError))
+        attachScreenshot(named: "Plugin load error")
+    }
+
+    private static let helloPluginLogic = """
+    export const initialState = { count: 0, daemon: "unknown", apiError: "none" };
+
+    export const actions = {
+      increment(state) {
+        state.count += 1;
+      },
+      async checkDaemon(state, payload, api) {
+        const status = await api.call("status");
+        state.daemon = "bridge v" + status.bridgeVersion;
+      },
+      async callMissing(state, payload, api) {
+        try {
+          await api.call("no.such.command");
+          state.apiError = "none";
+        } catch (error) {
+          state.apiError = error.message;
+        }
+      }
+    };
+
+    """
+
+    private static let fragilePluginLogic = """
+    export const initialState = { count: 0 };
+
+    export const actions = {
+      increment(state) {
+        state.count += 1;
+      },
+      explode() {
+        throw new Error("Kaboom");
+      },
+      spin() {
+        while (true) {}
+      }
+    };
+
+    """
+
+    private static let fragilePluginView = #"{"main": {"type": "vstack", "props": {"spacing": 10, "padding": 16}, "children": [{"type": "text", "props": {"text": "Ready {{count}}"}}, {"type": "button", "props": {"title": "Increment", "onTap": {"action": "increment"}}}, {"type": "button", "props": {"title": "Explode", "onTap": {"action": "explode"}}}, {"type": "button", "props": {"title": "Spin", "onTap": {"action": "spin"}}}]}}"#
+
+    private func clickPluginsMenuItem(_ title: String) {
+        let menu = app.menuBars.menuBarItems["Plugins"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 10), "The app menu has a Plugins menu.")
+        menu.click()
+        let item = app.menuItems[title]
+        XCTAssertTrue(item.waitForExistence(timeout: 5), "The Plugins menu has \(title).")
+        item.click()
+    }
+
+    /// Opens Plugins ▸ <plugin> and returns that plugin's submenu entry. The pointer
+    /// ends on the entry's trailing edge, where its submenu begins, so the next move
+    /// into the submenu never crosses another plugin's entry (which would switch to
+    /// that plugin's submenu).
+    @discardableResult
+    private func openPluginsSubmenu(_ title: String) -> XCUIElement {
+        let menu = app.menuBars.menuBarItems["Plugins"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 10), "The app menu has a Plugins menu.")
+        menu.click()
+        let submenu = menu.menuItems[title]
+        XCTAssertTrue(submenu.waitForExistence(timeout: 5), "The Plugins menu lists the installed plugin \(title).")
+        submenu.click()
+        submenu.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.5)).hover()
+        return submenu
+    }
+
+    /// Chooses Plugins ▸ <plugin> ▸ <item>, matched by title within that plugin's submenu.
+    private func choosePluginsSubmenuItem(_ plugin: String, _ item: String) {
+        let submenu = openPluginsSubmenu(plugin)
+        let entry = submenu.menuItems.matching(NSPredicate(format: "title == %@", item)).firstMatch
+        XCTAssertTrue(entry.waitForExistence(timeout: 5), "Plugins ▸ \(plugin) has \(item).")
+        clickMenuItem(entry, in: submenu)
+    }
+
+    /// Chooses a submenu item at its on-screen position. XCUITest re-resolves a clicked
+    /// element by accessibility identifier, and SwiftUI gives every menu button the
+    /// same one ("menuAction:"), so a plain `click()` can land on an off-screen item.
+    /// The submenu entry it belongs to resolves correctly, so the click is placed
+    /// relative to that entry.
+    private func clickMenuItem(_ item: XCUIElement, in submenu: XCUIElement) {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, !item.isHittable { usleep(100_000) }
+        XCTAssertTrue(item.isHittable, "\(item.title) is on screen.")
+        let target = item.frame
+        let anchor = submenu.frame
+        XCTAssertTrue(target.minX.isFinite && target.minY.isFinite && anchor.minX.isFinite, "\(item.title) has a position.")
+        let point = submenu.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: target.midX - anchor.minX, dy: target.midY - anchor.minY))
+        // Hovering highlights the item (the screen recording shows it), but a following
+        // synthesized click re-reads its anchor and lands elsewhere. Return chooses the
+        // highlighted menu item, exactly as it does for a user.
+        point.hover()
+        usleep(400_000)
+        app.typeKey(.return, modifierFlags: [])
+    }
+
+    /// A placeholder's message: SwiftUI exposes it as the label or, for a combined text, as the value.
+    private func accessibilityText(_ element: XCUIElement) -> String {
+        element.label.isEmpty ? (element.value as? String ?? "") : element.label
+    }
+
+    private func pluginSubdirectories(of directory: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .map(\.lastPathComponent)
+            .sorted()
+    }
+
     private func launchApp(defaultParent: String?, environmentOverrides: [String: String] = [:]) {
         clearSavedWindowFrames()
         launchDefaultParent = defaultParent

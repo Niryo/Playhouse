@@ -19,38 +19,7 @@ enum PlayhouseCLI {
             exit(2)
         }
 
-        let dataDirectory = ProcessInfo.processInfo.environment["PLAYHOUSE_DATA_DIRECTORY"]
-        let defaultsSuite = ProcessInfo.processInfo.environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"]
-        var configuredRequest = request
-        configuredRequest.dataDirectory = dataDirectory
-        configuredRequest.defaultsSuite = defaultsSuite
-        configuredRequest.worktreeDirectory = ProcessInfo.processInfo.environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"]
-        // Same identity lookup as BridgeClient.applicationIdentifier(): this CLI
-        // lives at `<App>.app/Contents/MacOS/playhouse-cli`, so `Bundle.main`
-        // already resolves to the app's own Info.plist.
-        let applicationIdentifier = Bundle.main.infoDictionary?["PlayhouseApplicationBundleIdentifier"] as? String
-            ?? Bundle.main.bundleIdentifier ?? ""
-        let forwardableNames = BridgeContract.environmentNamesToForward(
-            applicationIdentifier: applicationIdentifier,
-            from: ProcessInfo.processInfo.environment
-        )
-        configuredRequest.environment = ProcessInfo.processInfo.environment
-            .filter { forwardableNames.contains($0.key) }
-        if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] {
-            configuredRequest.arguments["__codexHome"] = .string(codexHome)
-        }
-        if let fixtureExecutable = ProcessInfo.processInfo.environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] {
-            configuredRequest.arguments["__codexExecutable"] = .string(fixtureExecutable)
-        }
-        if let fixtureExecutable = ProcessInfo.processInfo.environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] {
-            configuredRequest.arguments["__claudeExecutable"] = .string(fixtureExecutable)
-        }
-        // The daemon is started by launchd and never sees the caller's environment,
-        // so a caller's own Claude config directory travels with the request, as
-        // CODEX_HOME does: its turns and its session-file reads then use it.
-        if let claudeConfig = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"], !claudeConfig.isEmpty {
-            configuredRequest.arguments["__claudeConfigDirectory"] = .string(claudeConfig)
-        }
+        let configuredRequest = request.configuredForCaller()
 
         do {
             let response = try BridgeClient().send(configuredRequest) { event in
@@ -58,6 +27,11 @@ enum PlayhouseCLI {
             }
             printResponse(response)
             guard response.ok else { exit(exitStatus(for: response.error?.code)) }
+            // Checks that find problems still answer with the full report, but fail the process.
+            if configuredRequest.command == "plugin.validate" || configuredRequest.command == "plugin.check-showcases",
+               response.result?.object?["valid"]?.bool == false {
+                exit(1)
+            }
         } catch {
             let unavailable = BridgeResponse.failure(
                 configuredRequest,
@@ -429,6 +403,41 @@ enum PlayhouseCLI {
             return BridgeRequest(command: "workspace.suggest", arguments: [
                 "parent": .string(try requiredFlag("--parent", flags: flags).first!)
             ])
+        case "plugin":
+            guard let operation = rest.first else { throw CLIError.usage("Missing plugin operation.") }
+            let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--path", "--id", "--type", "--template", "--section"])
+            // The daemon resolves paths from its own working directory, so send absolute ones.
+            func absolutePath() -> BridgeValue? {
+                flags["--path"]?.first.map { path in
+                    .string(URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)).standardizedFileURL.path)
+                }
+            }
+            switch operation {
+            case "list":
+                return BridgeRequest(command: "plugin.list")
+            case "validate":
+                var arguments: [String: BridgeValue] = [:]
+                arguments["path"] = absolutePath()
+                arguments["id"] = flags["--id"]?.first.map(BridgeValue.string)
+                guard !arguments.isEmpty else { throw CLIError.usage("Use: playhouse plugin validate --path <plugin-dir> | --id <plugin-id>") }
+                return BridgeRequest(command: "plugin.validate", arguments: arguments)
+            case "components":
+                var arguments: [String: BridgeValue] = [:]
+                arguments["type"] = flags["--type"]?.first.map(BridgeValue.string)
+                return BridgeRequest(command: "plugin.components", arguments: arguments)
+            case "check-showcases":
+                var arguments: [String: BridgeValue] = [:]
+                arguments["path"] = absolutePath()
+                return BridgeRequest(command: "plugin.check-showcases", arguments: arguments)
+            case "new":
+                var arguments: [String: BridgeValue] = ["id": .string(try requiredFlag("--id", flags: flags).first!)]
+                arguments["template"] = flags["--template"]?.first.map(BridgeValue.string)
+                arguments["section"] = flags["--section"]?.first.map(BridgeValue.string)
+                arguments["path"] = absolutePath()
+                return BridgeRequest(command: "plugin.new", arguments: arguments)
+            default:
+                throw CLIError.usage("Unknown plugin operation: \(operation)")
+            }
         case "usage":
             switch rest.first {
             case "get":
@@ -862,6 +871,12 @@ enum PlayhouseCLI {
       playhouse chat page close-turn <chat-id> --continues <true|false> [--new-title <title>] [--summary-hint <text>]
       playhouse workspace suggest --parent <path>
       playhouse workspace repos list
+      playhouse plugin list
+      playhouse plugin validate --path <plugin-dir> | --id <plugin-id>
+      playhouse plugin components [--type <component>]
+      playhouse plugin check-showcases [--path <showcase-root>]
+      playhouse plugin new --id <id> [--template view|showcase] [--section <section-id>] [--path <parent-dir>]
+      playhouse-plugin-dev <plugin-dir> [--json]   (run a plugin live without the app; see its help)
       playhouse usage get [--refresh|--watch]|login <codex|claude>|switch-account <codex|claude>
       playhouse skills list [--task <task-id>] [--include-bundled true]
       playhouse skills get --skill <skill-id> [--task <task-id>]

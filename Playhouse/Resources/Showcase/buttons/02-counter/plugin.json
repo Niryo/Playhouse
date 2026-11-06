@@ -1,0 +1,14 @@
+{
+  "id": "counter",
+  "name": "Counter",
+  "version": "1.0.0",
+  "description": "A small counter: actions change state, and bindings disable a button when it can't be used.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Counter"
+      }
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "id": "headings",
+  "name": "Headings",
+  "version": "1.0.0",
+  "description": "heading has four levels; 1 is the largest.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Headings"
+      }
+    ]
+  }
+}

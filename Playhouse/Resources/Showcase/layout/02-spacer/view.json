@@ -1,0 +1,75 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 10,
+      "grow": true
+    },
+    "children": [
+      {
+        "type": "hstack",
+        "props": {
+          "padding": 10,
+          "border": "secondary",
+          "radius": 6,
+          "grow": true
+        },
+        "children": [
+          {
+            "type": "text",
+            "props": {
+              "text": "Leading"
+            }
+          },
+          {
+            "type": "spacer",
+            "props": {}
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "Trailing"
+            }
+          }
+        ]
+      },
+      {
+        "type": "hstack",
+        "props": {
+          "padding": 10,
+          "border": "secondary",
+          "radius": 6,
+          "grow": true
+        },
+        "children": [
+          {
+            "type": "text",
+            "props": {
+              "text": "Left"
+            }
+          },
+          {
+            "type": "spacer",
+            "props": {}
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "Middle"
+            }
+          },
+          {
+            "type": "spacer",
+            "props": {}
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "Right"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

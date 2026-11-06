@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 60;
+	objectVersion = 77;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -35,6 +35,7 @@
 		A1000000000000000000000E /* MonacoDiffEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* MonacoDiffEditor.swift */; };
 		A10000000000000000000015 /* CodeSyntaxHighlighter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000015 /* CodeSyntaxHighlighter.swift */; };
 		A1000000000000000000000F /* Monaco in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* Monaco */; };
+		A100000000000000000000F2 /* Showcase in Resources */ = {isa = PBXBuildFile; fileRef = A200000000000000000000F2 /* Showcase */; };
 		A10000000000000000000011 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000011 /* Assets.xcassets */; };
 		B4144B03272C978E6BEE8876 /* PlayhouseBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7A603F3AB342E594B68ED99 /* PlayhouseBridgeTests.swift */; };
 		D564A1A1B70481ED860871B3 /* PlayhouseUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60C95D59E3D25AB8C146839F /* PlayhouseUITests.swift */; };
@@ -85,6 +86,7 @@
 		A2000000000000000000000E /* MonacoDiffEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonacoDiffEditor.swift; sourceTree = "<group>"; };
 		A20000000000000000000015 /* CodeSyntaxHighlighter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeSyntaxHighlighter.swift; sourceTree = "<group>"; };
 		A2000000000000000000000F /* Monaco */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Monaco; sourceTree = "<group>"; };
+		A200000000000000000000F2 /* Showcase */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Showcase; sourceTree = "<group>"; };
 		A20000000000000000000011 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		C7A603F3AB342E594B68ED99 /* PlayhouseBridgeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlayhouseBridgeTests.swift; sourceTree = "<group>"; };
 		C9A25888C010E63EF23C9AA7 /* PlayhouseBridgeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PlayhouseBridgeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -97,6 +99,14 @@
 		A2000000000000000000001B /* ProcessCPUSampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessCPUSampler.swift; sourceTree = "<group>"; };
 		A200000000000000000000DB /* DebugConversationImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugConversationImport/DebugConversationImport.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		A200000000000000000000F1 /* Plugins */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Plugins;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		896489310BBF73850255D743 /* Frameworks */ = {
@@ -190,6 +200,7 @@
 				A20000000000000000000016 /* DaemonClient.swift */,
 				A2000000000000000000001B /* ProcessCPUSampler.swift */,
 				A200000000000000000000DB /* DebugConversationImport.swift */,
+				A200000000000000000000F1 /* Plugins */,
 			);
 			path = Playhouse/App;
 			sourceTree = "<group>";
@@ -198,6 +209,7 @@
 			isa = PBXGroup;
 			children = (
 				A2000000000000000000000F /* Monaco */,
+				A200000000000000000000F2 /* Showcase */,
 			);
 			path = Playhouse/Resources;
 			sourceTree = "<group>";
@@ -289,6 +301,9 @@
 			);
 			dependencies = (
 			);
+			fileSystemSynchronizedGroups = (
+				A200000000000000000000F1 /* Plugins */,
+			);
 			name = Playhouse;
 			packageProductDependencies = (
 				A90000000000000000000002 /* GRDB */,
@@ -317,7 +332,7 @@
 				};
 			};
 			buildConfigurationList = A80000000000000000000003 /* Build configuration list for PBXProject "Playhouse" */;
-			compatibilityVersion = "Xcode 15.0";
+			preferredProjectObjectVersion = 77;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -346,6 +361,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1000000000000000000000F /* Monaco in Resources */,
+				A100000000000000000000F2 /* Showcase in Resources */,
 				A10000000000000000000011 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -369,6 +385,7 @@
 /* Begin PBXShellScriptBuildPhase section */
 		A60000000000000000000007 /* Build CLI and bridge daemon */ = {
 			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);
@@ -384,6 +401,7 @@
 				"$(SRCROOT)/Playhouse/Bridge/DaemonMain.swift",
 				"$(SRCROOT)/Playhouse/CLI/BridgeClient.swift",
 				"$(SRCROOT)/Playhouse/CLI/PlayhouseCLI.swift",
+				"$(SRCROOT)/Playhouse/PluginDev/PluginDevMain.swift",
 				"$(SRCROOT)/Playhouse/App/BridgeCore.swift",
 				"$(SRCROOT)/Playhouse/App/BoardTask.swift",
 				"$(SRCROOT)/Playhouse/App/WorkspaceSupport.swift",
@@ -404,6 +422,7 @@
 			outputPaths = (
 				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/playhouse-cli",
 				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/playhouse-daemon",
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/playhouse-plugin-dev",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/bash;
