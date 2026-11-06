@@ -432,12 +432,17 @@ enum PlayhouseCLI {
         case "usage":
             switch rest.first {
             case "get":
-                return BridgeRequest(command: "usage.get", arguments: ["refresh": .boolean(rest.dropFirst().contains("--refresh"))])
+                let flags = Array(rest.dropFirst())
+                guard flags.allSatisfy({ $0 == "--refresh" || $0 == "--watch" }), !(flags.contains("--refresh") && flags.contains("--watch")) else {
+                    throw CLIError.usage("Use: playhouse usage get [--refresh|--watch]")
+                }
+                if flags.contains("--watch") { return BridgeRequest(command: "usage.subscribe") }
+                return BridgeRequest(command: "usage.get", arguments: ["refresh": .boolean(flags.contains("--refresh"))])
             case "login", "switch-account":
                 guard rest.count == 2 else { throw CLIError.usage("Use: playhouse usage \(rest[0]) <codex|claude>") }
                 return BridgeRequest(command: "usage.\(rest[0])", arguments: ["provider": .string(rest[1])])
             default:
-                throw CLIError.usage("Use: playhouse usage get [--refresh]|login <codex|claude>|switch-account <codex|claude>")
+                throw CLIError.usage("Use: playhouse usage get [--refresh|--watch]|login <codex|claude>|switch-account <codex|claude>")
             }
         case "skills":
             guard let operation = rest.first else { throw CLIError.usage("Missing skills operation.") }
@@ -828,7 +833,7 @@ enum PlayhouseCLI {
       playhouse chat page close-turn <chat-id> --continues <true|false> [--new-title <title>] [--summary-hint <text>]
       playhouse workspace suggest --parent <path>
       playhouse workspace repos list
-      playhouse usage get [--refresh]|login <codex|claude>|switch-account <codex|claude>
+      playhouse usage get [--refresh|--watch]|login <codex|claude>|switch-account <codex|claude>
       playhouse skills list [--task <task-id>] [--include-bundled true]
       playhouse skills get --skill <skill-id> [--task <task-id>]
       playhouse skills create --scope <repo|global> --name <name> --description <text> [--body <text>] [--task <task-id>] [--root <repo-path>]

@@ -5762,7 +5762,7 @@ final class ConversationManager {
         let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
         let codex = ConversationProviderCapabilities(
             provider: .codex,
-            isAvailable: CodexAppServerClient.isInstalled,
+            isAvailable: clients.codex.isInstalled,
             supportsGoals: true,
             notes: ["Playhouse runs Codex without MCP servers, apps, or hooks.", "Goals are available."]
         )
@@ -8088,6 +8088,27 @@ final class PlayhouseBridgeRuntime {
                 }
                 await PlayhouseDiagnostics.endBatch()
                 return .success(request, result: result)
+            } catch {
+                await PlayhouseDiagnostics.endBatch()
+                return .failure(request, code: "operation_failed", message: error.localizedDescription)
+            }
+        }
+
+        // Usage state lives in this process's memory too; a window follows its changes.
+        if request.command == "usage.subscribe" {
+            let runtimeScope: String?
+            #if DEBUG
+            runtimeScope = request.dataDirectory
+            #else
+            runtimeScope = nil
+            #endif
+            do {
+                for await report in AgentUsageStore.shared(scope: runtimeScope).changes() {
+                    if Task.isCancelled { break }
+                    eventHandler(BridgeEvent(requestID: request.id, type: "usage_state", payload: try Self.value(report)))
+                }
+                await PlayhouseDiagnostics.endBatch()
+                return .success(request, result: .object(["subscribed": .boolean(false)]))
             } catch {
                 await PlayhouseDiagnostics.endBatch()
                 return .failure(request, code: "operation_failed", message: error.localizedDescription)

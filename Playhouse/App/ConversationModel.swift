@@ -1066,7 +1066,14 @@ enum ConversationProviderFixture {
         return (interpreter, Array(shebang.dropFirst()) + [executable] + arguments)
     }
 
+    /// The override value that means this CLI is not installed: no fixture, and
+    /// no fallback to the machine's own CLI. The test harness passes it for every
+    /// provider a case does not install a fixture for, so no default test reaches
+    /// a real CLI that happens to be on the machine.
+    static let notInstalledOverride = "none"
+
     static func ownedExecutable(_ path: String?, providerMarker: (name: String, value: String)) -> String? {
+        if path == notInstalledOverride { return notInstalledOverride }
         guard let path, FileManager.default.isExecutableFile(atPath: path) else { return nil }
         let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
         let markers = [providerMarker, (".playhouse-bridge-fixture", "Playhouse bridge tests own this deterministic fixture (v1).\n")]

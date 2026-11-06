@@ -1804,7 +1804,10 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
 
     fileprivate var loginProcess: Process?
 
-    fileprivate var executablePath: String? { executableOverride ?? Self.findExecutable() }
+    fileprivate var executablePath: String? {
+        if executableOverride == ConversationProviderFixture.notInstalledOverride { return nil }
+        return executableOverride ?? Self.findExecutable()
+    }
 
     static func findExecutable() -> String? {
         let home = NSHomeDirectory()

@@ -4,8 +4,8 @@ import SwiftUI
 /// The window's view of the daemon's usage store. The daemon owns the
 /// providers and receives their pushes, so this reads its state over the bridge:
 /// once with a refresh at launch and after a login (Codex's snapshot and both
-/// accounts' sign-in state), then cheap local reads that pick up what the
-/// providers have pushed since. Nothing here asks a provider for usage on a timer.
+/// accounts' sign-in state), then follows the store's changes as the providers
+/// push them. Nothing here asks a provider, or the daemon, on a timer.
 @MainActor
 final class AgentUsageModel: ObservableObject {
     @Published private(set) var report: AgentUsageReport?
@@ -17,28 +17,44 @@ final class AgentUsageModel: ObservableObject {
         self.client = client
     }
 
-    /// The test harness build only reads usage when a case opts in, so the
-    /// provider fixtures of every other case are not launched at app start.
-    private static var isEnabled: Bool {
-        !BridgeContract.isTestBundle(PlayhouseAppIdentity.applicationIdentifier)
-            || ProcessInfo.processInfo.environment["PLAYHOUSE_E2E_AGENTS_INFO"] == "1"
-    }
-
+    /// Reads once with a refresh, then follows the daemon's changes; reconnects
+    /// if the daemon goes away. Nothing is asked of the providers after that.
     func start() {
-        guard loop == nil, Self.isEnabled else { return }
+        guard loop == nil else { return }
         loop = Task { [weak self] in
             await self?.load(refresh: true)
+            var reconnecting = false
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(10))
-                await self?.load(refresh: false)
+                guard let self else { return }
+                // A daemon that restarted knows nothing until a read loads its
+                // saved state, so read once before following it again.
+                if reconnecting { await self.load(refresh: false) }
+                reconnecting = true
+                do {
+                    try await self.client.call("usage.subscribe") { event in
+                        guard event.type == "usage_state",
+                              let next = try? event.payload.decoded(AgentUsageReport.self) else { return }
+                        self.apply(next)
+                    }
+                } catch {
+                    PlayhouseDiagnostics.record("usage.subscription_failed", fields: PlayhouseDiagnostics.errorFields(error))
+                }
+                try? await Task.sleep(for: .seconds(1))
             }
         }
+    }
+
+    /// Only a changed report re-renders the section.
+    private func apply(_ next: AgentUsageReport) {
+        var comparable = next
+        comparable.generatedAt = report?.generatedAt ?? next.generatedAt
+        if comparable != report { report = next }
     }
 
     func load(refresh: Bool) async {
         guard let value = try? await client.call("usage.get", ["refresh": .boolean(refresh)]),
               let next = try? value.decoded(AgentUsageReport.self) else { return }
-        report = next
+        apply(next)
     }
 
     func login(_ provider: ConversationProvider) async {
@@ -68,15 +84,15 @@ final class AgentUsageModel: ObservableObject {
 }
 
 struct AgentsInfoView: View {
-    @StateObject private var model: AgentUsageModel
+    /// App-wide, so returning to the board shows what is known instead of reading again.
+    @EnvironmentObject private var model: AgentUsageModel
     /// Providers that have a task running, which a sign-out would affect.
     let runningProviders: [ConversationProvider: Int]
     @State private var providerAwaitingSwitch: ConversationProvider?
     /// Whether the user minimized the section; one value kept across launches, open by default.
     @AppStorage(WorkspaceSettings.agentsInfoSectionCollapsedKey, store: WorkspaceSettings.preferencesStore) private var isCollapsed = false
 
-    init(client: DaemonClient, runningProviders: [ConversationProvider: Int]) {
-        _model = StateObject(wrappedValue: AgentUsageModel(client: client))
+    init(runningProviders: [ConversationProvider: Int]) {
         self.runningProviders = runningProviders
     }
 
@@ -320,10 +336,16 @@ private struct WindowRow: View {
                     .font(.system(size: 10, weight: .medium).monospacedDigit())
                     .foregroundStyle(percent >= 100 ? Color.red : percent >= AgentUsageSnapshot.warningPercent ? Color.orange : Color.primary)
             }
-            ProgressView(value: percent, total: 100)
-                .progressViewStyle(.linear)
-                .controlSize(.mini)
-                .tint(tint)
+            // Drawn rather than a ProgressView: an AppKit progress indicator per row
+            // makes every accessibility query of the window slow.
+            Capsule()
+                .fill(Color.primary.opacity(0.12))
+                .frame(height: 3)
+                .overlay(alignment: .leading) {
+                    GeometryReader { proxy in
+                        Capsule().fill(tint).frame(width: proxy.size.width * percent / 100)
+                    }
+                }
                 .accessibilityHidden(true)
             Text(resetText)
                 .font(.system(size: 9))

@@ -18,6 +18,20 @@ final class AgentUsageStore {
 
     private var states: [String: AgentProviderUsage] = [:]
     private var persistenceURL: URL?
+    private var subscribers: [UUID: AsyncStream<AgentUsageReport>.Continuation] = [:]
+
+    /// The current report, then a new one each time a provider's state changes,
+    /// so a window follows pushes without asking again.
+    func changes() -> AsyncStream<AgentUsageReport> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<AgentUsageReport>.makeStream()
+        subscribers[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { @MainActor in self?.subscribers[id] = nil }
+        }
+        continuation.yield(report())
+        return stream
+    }
 
     /// Loads the last-known values saved under `directory`, once. Claude only
     /// reports while a task runs, so these are what an idle app shows.
@@ -28,6 +42,9 @@ final class AgentUsageStore {
         guard let data = try? Data(contentsOf: url),
               let saved = try? JSONDecoder().decode([String: AgentProviderUsage].self, from: data) else { return }
         for (provider, state) in saved where states[provider] == nil { states[provider] = state }
+        // A window that subscribed before this load sees the saved state too.
+        let current = report()
+        for subscriber in subscribers.values { subscriber.yield(current) }
     }
 
     func state(_ provider: ConversationProvider) -> AgentProviderUsage {
@@ -41,6 +58,9 @@ final class AgentUsageStore {
         guard state != before else { return }
         states[provider.rawValue] = state
         persist()
+        guard !subscribers.isEmpty else { return }
+        let current = report()
+        for subscriber in subscribers.values { subscriber.yield(current) }
     }
 
     private func persist() {
@@ -152,6 +172,9 @@ final class AgentUsageStore {
 enum AgentUsageService {
     static func report(clients: ConversationClients, refresh: Bool) async -> AgentUsageReport {
         let store = AgentUsageStore.shared(scope: clients.codex.runtimeScope)
+        // A file check, so every read reflects whether each CLI can be found now.
+        store.setInstalled(.codex, clients.codex.isInstalled)
+        store.setInstalled(.claude, clients.claude.isInstalled)
         if refresh {
             async let codex: Void = clients.codex.refreshAgentUsage()
             async let claude: Void = clients.claude.refreshAgentUsage()

@@ -541,7 +541,9 @@ def run_cpu_attribution_server():
         if "id" not in message:
             return
         reply = lambda result: write({"jsonrpc": "2.0", "id": message["id"], "result": result})
-        if method == "initialize":
+        if method in ACCOUNT_METHODS:
+            handle_account_request(message)
+        elif method == "initialize":
             reply({"serverInfo": {"name": "playhouse-cpu-fixture", "version": "1"}})
         elif method == "model/list":
             reply({"data": [{"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True,
@@ -2389,7 +2391,7 @@ def main():
     # is in progress. Anything else that arrives during a held turn is
     # deferred and handled after it, in arrival order, as before.
     answer_while_held = {"thread/items/list", "thread/turns/list", "thread/read",
-                         "thread/resume", "model/list", "thread/goal/get"}
+                         "thread/resume", "model/list", "thread/goal/get", *ACCOUNT_METHODS}
     deferred = []
 
     def snapshot_state():

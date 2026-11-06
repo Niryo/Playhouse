@@ -610,7 +610,7 @@ struct KanbanBoardView: View {
 
             Spacer(minLength: 0)
 
-            AgentsInfoView(client: conversationRuntime.client, runningProviders: runningTaskCountByProvider)
+            AgentsInfoView(runningProviders: runningTaskCountByProvider)
         }
         .padding(12)
         .frame(width: boardSidebarWidth)
