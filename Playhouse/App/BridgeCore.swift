@@ -1284,6 +1284,7 @@ enum PlayhouseManagerError: LocalizedError {
     case repositoryAssigned(String)
     case invalidTransition(String)
     case unmergedPullRequests([Int])
+    case uncommittedChanges([String])
 
     var errorDescription: String? {
         switch self {
@@ -1307,6 +1308,8 @@ enum PlayhouseManagerError: LocalizedError {
             message
         case .unmergedPullRequests(let numbers):
             "Pull request(s) \(numbers.map { "#\($0)" }.joined(separator: ", ")) haven't been merged. Confirm that you want to mark this task Done."
+        case .uncommittedChanges(let paths):
+            "Marking this task Done removes its worktree and discards the uncommitted changes in \(paths.joined(separator: ", ")). Confirm that you want to discard them."
         }
     }
 }
@@ -2286,12 +2289,14 @@ final class BoardTaskManager {
         _ id: UUID,
         to statusName: String,
         allowUnmergedPullRequests: Bool = false,
+        allowDiscardingUncommittedChanges: Bool = false,
         skipMergeVerification: Bool = false
     ) async throws -> BoardTaskRecord {
         PlayhouseDiagnostics.record("task.move.started", fields: [
             "taskID": id.uuidString,
             "requestedStatus": statusName,
             "allowUnmergedPullRequests": String(allowUnmergedPullRequests),
+            "allowDiscardingUncommittedChanges": String(allowDiscardingUncommittedChanges),
             "skipMergeVerification": String(skipMergeVerification)
         ])
         guard let status = TaskStatus(rawValue: statusName) else {
@@ -2328,6 +2333,21 @@ final class BoardTaskManager {
             }
             guard task.repositoryWorktrees == originalRepositories else {
                 throw BridgeCommandError(code: "invalid_transition", message: "The task's pull request links changed while they were being checked. Try again.")
+            }
+            let removable = originalRepositories.filter { !$0.isPending && $0.createdByPlayhouse }
+            if !allowDiscardingUncommittedChanges {
+                // Removing a worktree deletes whatever was never committed, so the
+                // caller must confirm before that happens.
+                var dirty: [String] = []
+                for record in removable where FileManager.default.fileExists(atPath: record.worktreePath) {
+                    if try await worktreeService.hasChanges(record) { dirty.append(record.worktreePath) }
+                }
+                if !dirty.isEmpty { throw PlayhouseManagerError.uncommittedChanges(dirty) }
+            }
+            try await withRepositoryAllocationLocks(originalRepositories.map(\.repositoryPath)) {
+                for record in removable {
+                    try await worktreeService.removeAfterConfirmation(record)
+                }
             }
             task.status = .done
             task.statusMessage = nil
@@ -3124,6 +3144,9 @@ final class BoardTaskManager {
             agent.calls += call.calls
             agent.sentTokens += call.sentTokens
             agent.outputTokens += call.outputTokens
+            agent.uncachedInputTokens += call.uncachedInputTokens
+            agent.cacheReadTokens += call.cacheReadTokens
+            agent.cacheWriteTokens += call.cacheWriteTokens
             if call.calls > 0 { agent.lastContextTokens = call.contextTokens }
             if let agentID = call.agentID { snapshot.subagents[agentID] = agent } else { snapshot.main = agent }
             snapshot.updatedAt = .now
@@ -4705,8 +4728,26 @@ final class ConversationManager {
         clients.client(for: task.conversationProvider)
     }
 
+    /// The workspace a provider launch for `task` runs in, carrying the skill
+    /// bridge so the provider sees the whole gallery. Every path that can start
+    /// or load the task's own provider session (send, history, goals) uses this:
+    /// Codex keeps a loaded thread's skill config, so the first load decides it.
+    private func launchWorkspace(for task: any ConversationSubject, roots: [URL], message: String = "") throws -> ConversationWorkspaceContext {
+        var workspace = try ConversationWorkspaceContext(roots: roots)
+        if let skills = clients.skills {
+            let skillRoots = SkillRoot.roots(for: task)
+            var bridge = skills.bridge(roots: skillRoots)
+            bridge.invocations = skills.invocations(in: message, roots: skillRoots)
+            workspace.skillBridge = bridge
+        }
+        return workspace
+    }
+
     private static func historyRoots(_ task: any ConversationSubject) -> [String] {
-        task.workspaceRootPaths.isEmpty && task.status == .done
+        // Moving a task to Done removes its managed worktrees, so a finished task
+        // reads its history from the repositories once any worktree folder is gone.
+        let worktreesGone = task.workspaceRootPaths.contains { !FileManager.default.fileExists(atPath: $0) }
+        return (task.workspaceRootPaths.isEmpty || worktreesGone) && task.status == .done
             ? task.repositoryWorktrees.map { $0.repositoryPath }
             : task.workspaceRootPaths
     }
@@ -5229,6 +5270,9 @@ final class ConversationManager {
                 var attributed = message
                 attributed.turnID = transcript.turns[index].id
                 transcript.turns[index].messages.append(attributed)
+                // Presenting an image is work the user must see, even from a
+                // private status nudge turn.
+                Self.dropPrivateReminderPrompt(from: &transcript.turns[index])
             } else {
                 transcript.turns.append(.init(id: "agent-image-\(message.id)", segmentID: segment.id, messages: [message]))
             }
@@ -5254,7 +5298,9 @@ final class ConversationManager {
             || recoveryTranscript?.pendingSensitiveUserInputRedaction == true
             || !(recoveryTranscript?.sensitiveTurnIDs ?? []).isEmpty
             || !(recoveryTranscript?.sensitiveCodexTurnIDs ?? []).isEmpty
-        let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map {
+        // Reading history can load the thread, which a later send then reuses,
+        // so it carries the same skill bridge a send would.
+        let workspace = try launchWorkspace(for: task, roots: Self.historyRoots(task).map {
             URL(fileURLWithPath: $0, isDirectory: true)
         })
         let settings = settingsManager
@@ -5846,7 +5892,8 @@ final class ConversationManager {
         if task.codexThreadID == nil {
             guard action == "set" else { return nil }
             let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
-            let workspace = try ConversationWorkspaceContext(roots: roots)
+            // A goal starts its own thread, so it needs the skill bridge a send would add.
+            let workspace = try launchWorkspace(for: task, roots: roots)
             let id = try await client.startThread(
                 workspace: workspace,
                 developerInstructions: TaskThreadDeveloperInstructions.make(
@@ -5863,7 +5910,8 @@ final class ConversationManager {
             task = try tasks.conversationSubject(taskID)
         }
         guard let threadID = task.codexThreadID else { return nil }
-        let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
+        // Any goal call can load the thread, which then needs the skill bridge.
+        let workspace = try launchWorkspace(for: task, roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
         switch action {
         case "get": return try await client.getGoal(threadID: threadID, workspace: workspace)
         case "set":
@@ -6652,6 +6700,29 @@ final class ConversationManager {
         }
     }
 
+    /// Shows a private status nudge turn that went on to do work. Every history
+    /// path hides a turn by its private prompt, so dropping that prompt row
+    /// leaves the rest of the turn as an ordinary one, prompt still unseen.
+    private func revealPrivateReminderTurn(taskID: UUID, turnID: String) {
+        do {
+            try transcripts.mutate(taskID, turns: .turn(turnID)) { transcript in
+                guard let index = transcript.turns.lastIndex(where: { $0.id == turnID }) else { return }
+                Self.dropPrivateReminderPrompt(from: &transcript.turns[index])
+            }
+            PlayhouseDiagnostics.record("conversation.private_reminder.revealed", fields: [
+                "taskID": taskID.uuidString, "turnID": turnID
+            ])
+        } catch {
+            var fields = PlayhouseDiagnostics.errorFields(error)
+            fields["taskID"] = taskID.uuidString
+            PlayhouseDiagnostics.record("conversation.transcript.write_failed", fields: fields)
+        }
+    }
+
+    private static func dropPrivateReminderPrompt(from turn: inout ConversationTranscript.Turn) {
+        turn.messages.removeAll { $0.role == .user && isPrivateOutcomeReminderPrompt($0.text) }
+    }
+
     private func recordClaudeActivity(taskID: UUID, turnID: String, _ activity: ConversationActivity) {
         // Loads only the turns this update can touch: its own turn, wherever an
         // activity with the same background task lives, and wherever that
@@ -6948,7 +7019,7 @@ final class ConversationManager {
                 _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
             }
             let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
-            workspace = try ConversationWorkspaceContext(roots: roots)
+            workspace = try launchWorkspace(for: task, roots: roots, message: normalizedText)
             _ = try await tasks.clearProgressReport(taskID)
             if shouldGenerateTitle && !resolveTitleBeforeWorktree {
                 let latest = try tasks.conversationSubject(taskID)
@@ -7073,10 +7144,16 @@ final class ConversationManager {
                 persistedThreadID = threadID
             }
             let claudeTurnID = provider == .claude ? UUID().uuidString.lowercased() : nil
+            // A status nudge passes `hideSensitiveRecoveryPrompt` only to store its
+            // prompt as a placeholder; it carries no secret, so its output follows
+            // the reminder rule below rather than being hidden as a private answer's.
+            let hidesRecoveryOutput = hideSensitiveRecoveryPrompt && !hideInternalOutcomeReminder
             if let claudeTurnID, let segment {
                 try transcripts.mutate(taskID, turns: .none) { transcript in
                     if hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty {
-                        transcript.sensitiveTurnIDs = Array(Set(transcript.sensitiveTurnIDs ?? []).union([claudeTurnID])).sorted()
+                        if hidesRecoveryOutput || !sensitiveUserInputAnswerValues.isEmpty {
+                            transcript.sensitiveTurnIDs = Array(Set(transcript.sensitiveTurnIDs ?? []).union([claudeTurnID])).sorted()
+                        }
                         // Claude messages are persisted locally from sanitized
                         // callbacks, so the prompt is already safe to retain.
                         transcript.pendingSensitiveUserInputRedaction = false
@@ -7090,6 +7167,25 @@ final class ConversationManager {
             var finalMessageCount = 0
             var leakedOutcome: String?
             var pendingQuestionLifecycleRevision: Int?
+            // A private status nudge keeps its prompt private, and so does a reply
+            // that only reports status. The nudge also tells the agent to keep
+            // working when work remains, and Claude delivers every background
+            // result inside the turn that is running, so once this turn does work
+            // (a tool call, a subagent, a steered message) it is shown like any
+            // other turn. Until then its output is recorded but not streamed.
+            var reminderTurnRevealed = !hideInternalOutcomeReminder
+            var withheldReminderUpdates: [ConversationUpdate] = []
+            let streamTurnUpdate: (ConversationUpdate) -> Void = { update in
+                if reminderTurnRevealed { onUpdate(update) } else { withheldReminderUpdates.append(update) }
+            }
+            let revealReminderTurn: () -> Void = {
+                guard !reminderTurnRevealed else { return }
+                reminderTurnRevealed = true
+                if let claudeTurnID { self.revealPrivateReminderTurn(taskID: taskID, turnID: claudeTurnID) }
+                let withheld = withheldReminderUpdates
+                withheldReminderUpdates = []
+                withheld.forEach(onUpdate)
+            }
             if onTurnStarting != nil {
                 client.markTurnStarting(threadID: threadID)
                 onTurnStarting?()
@@ -7129,13 +7225,14 @@ final class ConversationManager {
                     missedPreviousPageSignal: task.isStandaloneChat ? ((try? tasks.standaloneChatManager().lastTurnMissedSignal()) ?? false) : false
                 ),
                 onDelta: { delta in
-                    guard !hideSensitiveRecoveryPrompt, !hideInternalOutcomeReminder else { return }
+                    // Deltas are many and superseded by the recorded message, so a
+                    // turn not shown yet drops them instead of withholding them.
+                    guard !hidesRecoveryOutput, reminderTurnRevealed else { return }
                     onUpdate(ConversationUpdate(type: "text_delta", text: delta))
                 },
                 onFinalMessage: { answer in
                     let split = LeakedTurnOutcome.split(answer)
                     if split.taskID == taskID { leakedOutcome = split.outcome }
-                    guard !hideInternalOutcomeReminder else { return }
                     let message = Self.redactingSensitiveText(split.text, values: sensitiveUserInputAnswerValues)
                     // An answer that was only the echo still replaces the streamed text.
                     if let claudeTurnID, !message.isEmpty {
@@ -7144,11 +7241,12 @@ final class ConversationManager {
                             id: "\(claudeTurnID)-final-\(finalMessageCount)", role: .assistant, text: message, phase: "final_answer"
                         ))
                     }
-                    onUpdate(ConversationUpdate(type: "assistant_final", text: message))
+                    streamTurnUpdate(ConversationUpdate(type: "assistant_final", text: message))
                 },
                 onActivity: { activity in
-                    guard !hideSensitiveRecoveryPrompt, !hideInternalOutcomeReminder else { return }
+                    guard !hidesRecoveryOutput else { return }
                     if let claudeTurnID { self.recordClaudeActivity(taskID: taskID, turnID: claudeTurnID, activity) }
+                    if activity.isAgentWork { revealReminderTurn() }
                     if let durationMs = activity.durationMs {
                         Task { @MainActor in
                             try? await self.tasks.recordConversationActivityDuration(
@@ -7158,11 +7256,11 @@ final class ConversationManager {
                             )
                         }
                     }
-                    onUpdate(ConversationUpdate(type: "activity", activity: activity))
+                    streamTurnUpdate(ConversationUpdate(type: "activity", activity: activity))
                 },
                 onDiff: { diff in
-                    guard !hideSensitiveRecoveryPrompt, !hideInternalOutcomeReminder else { return }
-                    onUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff))
+                    guard !hidesRecoveryOutput else { return }
+                    streamTurnUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff))
                 },
                 onHistory: { history in
                     if provider == .codex, let segment { self.claimCodexTurns(taskID: taskID, segmentID: segment.segmentID, history.messages) }
@@ -7266,7 +7364,7 @@ final class ConversationManager {
                             redactAllMessages: currentTranscript?.pendingSensitiveUserInputRedaction == true
                         )[0]
                     }
-                    let hideProviderDetails = hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder
+                    let hideProviderDetails = hidesRecoveryOutput || !reminderTurnRevealed
                         || currentTranscript?.pendingSensitiveUserInputRedaction == true
                     let modelIDs = currentTranscript?.segments.reduce(into: [String: String]()) { result, segment in
                         result.merge(segment.codexTurnModelIDs) { existing, _ in existing }
@@ -7349,16 +7447,16 @@ final class ConversationManager {
                     await onUserInput(request)
                 },
                 onSteerMessage: { message, images in
-                    guard !hideInternalOutcomeReminder else { return }
                     if claudeTurnID != nil {
                         self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, ConversationMessage(
                             id: UUID().uuidString.lowercased(), role: .user, text: message, imageDataURLs: images
                         ))
                     }
+                    // The user wrote this, so the turn it joined can't stay private.
+                    revealReminderTurn()
                     onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
                 },
                 onProgressMessage: { message in
-                    guard !hideInternalOutcomeReminder else { return }
                     var safeMessage = message
                     safeMessage.text = Self.redactingSensitiveText(message.text, values: sensitiveUserInputAnswerValues)
                     safeMessage.asyncQuestions = message.asyncQuestions?.map { question in
@@ -7370,7 +7468,7 @@ final class ConversationManager {
                     if let claudeTurnID {
                         self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, safeMessage)
                     }
-                    onUpdate(ConversationUpdate(
+                    streamTurnUpdate(ConversationUpdate(
                         type: "assistant_progress",
                         text: safeMessage.text,
                         itemID: safeMessage.id,
@@ -7387,7 +7485,7 @@ final class ConversationManager {
                     // A private recovery turn still costs tokens, so the task's
                     // totals include it, but its per-turn row is withheld for the
                     // same reason its activity and messages are.
-                    let isHidden = hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder
+                    let isHidden = hidesRecoveryOutput || !reminderTurnRevealed
                     let attributed = ConversationTurnUsageReport(
                         turnID: isHidden ? nil : (provider == .claude ? claudeTurnID : report.turnID),
                         usage: report.usage,
@@ -8069,11 +8167,57 @@ final class PlayhouseBridgeRuntime {
             let guiRuntime = request.arguments["__guiRuntime"]?.bool == true
             // The caller's Codex home, so a window and the CLI read the same threads.
             let callerCodexHome = request.arguments["__codexHome"]?.string
+            let skillsHome: String?
+            #if DEBUG
+            // A test bundle's data directory gets its own skill homes, so bridge
+            // tests never read or bridge the host's own skills. Development
+            // builds still use the user's real skills.
+            skillsHome = PlayhouseAppIdentity.isTestBundle && dataDirectory != nil
+                ? storeDirectory.map { $0 + "/skills-home" }
+                : nil
+            #else
+            skillsHome = nil
+            #endif
+            let skills = SkillCatalogManager(
+                environment: SkillEnvironment.resolve(
+                    homeOverride: skillsHome,
+                    claudeConfigOverride: claudeConfigDirectory,
+                    codexHomeOverride: callerCodexHome,
+                    storeDirectory: storeDirectory
+                ),
+                preferences: preferences
+            )
             func conversationClients(codexHome: String? = nil, goalFeatureEnabled: Bool = false) -> ConversationClients {
                 ConversationClients(
                     codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: codexHome ?? callerCodexHome, goalFeatureEnabled: goalFeatureEnabled, goalRuntimeEnabled: guiRuntime, dataDirectory: dataDirectory),
-                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, configDirectoryOverride: claudeConfigDirectory, dataDirectory: dataDirectory)
+                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, configDirectoryOverride: claudeConfigDirectory, dataDirectory: dataDirectory),
+                    skills: skills
                 )
+            }
+            func skillRoots() throws -> [SkillRoot] {
+                guard request.arguments["taskID"]?.string?.isEmpty == false else { return [] }
+                return SkillRoot.roots(for: try taskManager.conversationSubject(request.requiredUUID("taskID")))
+            }
+            func skillRoot(in roots: [SkillRoot]) throws -> SkillRoot? {
+                guard let value = request.arguments["root"]?.string, !value.isEmpty else { return roots.count == 1 ? roots[0] : nil }
+                let path = URL(fileURLWithPath: value).standardizedFileURL.path
+                guard let root = roots.first(where: { $0.path == path || $0.repositoryPath == path }) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "\(value) is not one of the task's repositories.")
+                }
+                return root
+            }
+            func skillScope() throws -> SkillScope {
+                guard let scope = SkillScope(rawValue: try request.requiredString("scope")), scope != .builtin else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Scope must be 'repo' or 'global'.")
+                }
+                return scope
+            }
+            func bundledClaudeSkills(_ roots: [SkillRoot]) async -> [(name: String, description: String)] {
+                guard request.arguments["includeBundled"]?.bool == true || request.arguments["includeBundled"]?.string == "true" else { return [] }
+                let workspace = (try? ConversationWorkspaceContext(roots: roots.map { URL(fileURLWithPath: $0.path, isDirectory: true) }))
+                    ?? (try? ConversationWorkspaceContext(roots: []))
+                guard let workspace else { return [] }
+                return (try? await conversationClients().claude.bundledSkills(workspace: workspace)) ?? []
             }
 
             let result: BridgeValue
@@ -8165,7 +8309,8 @@ final class PlayhouseBridgeRuntime {
                     result = try Self.value(await taskManager.move(
                         taskID,
                         to: status,
-                        allowUnmergedPullRequests: request.arguments["allowUnmergedPullRequests"]?.bool ?? false
+                        allowUnmergedPullRequests: request.arguments["allowUnmergedPullRequests"]?.bool ?? false,
+                        allowDiscardingUncommittedChanges: request.arguments["allowDiscardingUncommittedChanges"]?.bool ?? false
                     ))
                 }
             case "task.pr.auto":
@@ -8525,6 +8670,64 @@ final class PlayhouseBridgeRuntime {
                     taskID: request.requiredUUID("taskID"),
                     provider: ConversationProvider.parse(request.requiredString("provider"))
                 ))
+            case "skills.list":
+                let roots = try skillRoots()
+                result = try Self.value(skills.catalog(roots: roots, bundledClaudeSkills: await bundledClaudeSkills(roots)))
+            case "skills.get":
+                let roots = try skillRoots()
+                let catalog = skills.catalog(roots: roots, bundledClaudeSkills: await bundledClaudeSkills(roots))
+                let skillID = try request.requiredString("skillID")
+                guard let record = catalog.skill(id: skillID) else {
+                    throw BridgeCommandError(code: "not_found", message: "No skill matches \(skillID).")
+                }
+                result = .object([
+                    "skill": try Self.value(record),
+                    "content": record.folderPath == nil ? .null : .string(try skills.content(id: skillID, roots: roots)),
+                ])
+            case "skills.create":
+                let roots = try skillRoots()
+                let scope = try skillScope()
+                result = try Self.value(skills.create(
+                    name: request.requiredString("name"),
+                    description: request.arguments["description"]?.string ?? "",
+                    body: request.arguments["body"]?.string ?? "",
+                    scope: scope,
+                    root: scope == .repo ? try skillRoot(in: roots) : nil,
+                    roots: roots
+                ))
+            case "skills.update":
+                result = try Self.value(skills.update(
+                    id: request.requiredString("skillID"), content: request.requiredString("content"), roots: skillRoots()
+                ))
+            case "skills.delete":
+                try skills.delete(id: request.requiredString("skillID"), roots: skillRoots())
+                result = .object(["deleted": .boolean(true)])
+            case "skills.move":
+                let roots = try skillRoots()
+                let scope = try skillScope()
+                result = try Self.value(skills.move(
+                    id: request.requiredString("skillID"), to: scope,
+                    root: scope == .repo ? try skillRoot(in: roots) : nil, roots: roots
+                ))
+            case "skills.enable":
+                let roots = try skillRoots()
+                let value = request.arguments["enabled"]
+                guard let enabled = value?.bool ?? value?.string.flatMap({ ["true": true, "false": false][$0] }) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Enabled must be true or false.")
+                }
+                result = try Self.value(skills.setEnabled(
+                    id: request.requiredString("skillID"), enabled: enabled, roots: roots,
+                    bundledClaudeSkills: await bundledClaudeSkills(roots)
+                ))
+            case "skills.link":
+                result = try Self.value(skills.link(id: request.requiredString("skillID"), roots: skillRoots()))
+            case "skills.unlink":
+                result = try Self.value(skills.unlink(id: request.requiredString("skillID"), roots: skillRoots()))
+            case "skills.bridge":
+                let roots = try skillRoots()
+                var bridge = skills.bridge(roots: roots)
+                bridge.invocations = skills.invocations(in: request.arguments["message"]?.string ?? "", roots: roots)
+                result = try Self.value(bridge)
             case "conversation.provider.capabilities":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .array(try await conversations.providerCapabilities(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })
@@ -8534,7 +8737,7 @@ final class PlayhouseBridgeRuntime {
                 var ownsClient = !guiRuntime
                 if let threadID = try? taskManager.taskModel(request.requiredUUID("taskID")).codexThreadID,
                    let owner = CodexAppServerClient.sharedClient(loading: threadID, compatibleWith: clients.codex), owner !== clients.codex {
-                    clients = ConversationClients(codex: owner, claude: clients.claude)
+                    clients = ConversationClients(codex: owner, claude: clients.claude, skills: clients.skills)
                     ownsClient = false
                 }
                 defer { if ownsClient { clients.codex.shutdown() } }
@@ -8718,7 +8921,7 @@ final class PlayhouseBridgeRuntime {
             case .taskNotFound: code = "not_found"
             case .invalidTitle, .invalidStatus, .noWorkspaceRoots, .unavailableWorkspaceRoot, .invalidParentFolder, .invalidMessage, .repositoryAssigned: code = "invalid_argument"
             case .invalidTransition: code = "invalid_argument"
-            case .unmergedPullRequests: code = "invalid_transition"
+            case .unmergedPullRequests, .uncommittedChanges: code = "invalid_transition"
             }
             PlayhouseDiagnostics.record("bridge.request.failed", fields: requestFields.merging([
                 "errorCode": code,

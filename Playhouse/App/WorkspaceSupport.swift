@@ -156,6 +156,9 @@ enum WorkspaceTheme {
 struct ConversationWorkspaceContext {
     let roots: [URL]
     let cwd: URL
+    /// The skill folders each provider needs passed so it sees the whole
+    /// gallery. Only a turn's own launch sets it.
+    var skillBridge: SkillBridgeLaunch?
 
     init(roots: [URL]) throws {
         let normalized = roots.map(\.standardizedFileURL)
@@ -308,6 +311,11 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         !isSubagent && !isContextCompaction
             && input.map { TaskProgressReportInstructions.reportCommand(in: $0) == nil } != false
     }
+
+    /// Whether this call is the agent doing work: a tool call or a subagent,
+    /// not Playhouse's own progress and outcome bookkeeping. A private status
+    /// nudge turn that does work is shown like any other turn.
+    var isAgentWork: Bool { isSubagent || isTimelineToolCall }
 
     /// The longest command text the timeline's IN block keeps.
     static let timelineInputLimit = 4_000
