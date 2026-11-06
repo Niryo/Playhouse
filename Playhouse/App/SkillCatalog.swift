@@ -84,6 +84,28 @@ struct SkillCatalog: Codable, Equatable, Sendable {
 
     var allSkills: [SkillRecord] { repositories.flatMap(\.skills) + global + builtin }
     func skill(id: String) -> SkillRecord? { allSkills.first { $0.id == id } }
+
+    /// The same catalog with one skill's record swapped for a newer one.
+    func replacing(_ record: SkillRecord) -> SkillCatalog {
+        func swap(_ skills: [SkillRecord]) -> [SkillRecord] { skills.map { $0.id == record.id ? record : $0 } }
+        return SkillCatalog(
+            repositories: repositories.map {
+                SkillRepositorySection(repositoryPath: $0.repositoryPath, rootPath: $0.rootPath, name: $0.name, skills: swap($0.skills))
+            },
+            global: swap(global),
+            builtin: swap(builtin)
+        )
+    }
+}
+
+/// The task Playhouse opens so an agent can repair broken skills.
+struct SkillFixPlan: Equatable, Sendable {
+    let title: String
+    let prompt: String
+    /// Source repositories whose skills the task fixes in its own worktrees.
+    let repositoryPaths: [String]
+    /// Global skill folders the agent edits in place.
+    let contextFolders: [String]
 }
 
 /// A skill a message invokes, so a provider without slash commands can be
@@ -365,15 +387,15 @@ final class SkillCatalogManager {
         }
     }
 
-    static func manifest(name: String, description: String, body: String) -> String {
-        let summary = description.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+    static func manifest(name: String, description: String, body: String, fields: [String: String] = [:]) -> String {
         let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        return "---\nname: \(name)\ndescription: \(SkillFrontmatter.quoted(summary))\n---\n\n\(trimmedBody.isEmpty ? "Describe when and how to use this skill." : trimmedBody)\n"
+        return SkillManifest(
+            name: name, description: description, fields: fields,
+            body: trimmedBody.isEmpty ? "Describe when and how to use this skill." : trimmedBody
+        ).contents
     }
 
-    /// Writes a new skill in the open Agent Skills layout, which both providers then see.
-    func create(name: String, description: String, body: String, scope: SkillScope, root: SkillRoot?, roots: [SkillRoot]) throws -> SkillRecord {
-        try Self.validate(name: name)
+    private static func validate(description: String) throws {
         let summary = description.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !summary.isEmpty else {
             throw BridgeCommandError(code: "invalid_argument", message: "Describe when the skill should be used.")
@@ -381,6 +403,23 @@ final class SkillCatalogManager {
         guard summary.count <= 1024 else {
             throw BridgeCommandError(code: "invalid_argument", message: "A skill description is at most 1024 characters.")
         }
+    }
+
+    private static func validate(fields: [String: String]) throws {
+        if let unknown = fields.keys.sorted().first(where: { !SkillManifest.optionalKeys.contains($0) }) {
+            throw BridgeCommandError(
+                code: "invalid_argument",
+                message: "\(unknown) is not a skill field Playhouse edits. Use \(SkillManifest.optionalKeys.joined(separator: ", "))."
+            )
+        }
+    }
+
+    /// Writes a new skill in the open Agent Skills layout, which both providers then see.
+    func create(name: String, description: String, body: String, fields: [String: String] = [:], scope: SkillScope, root: SkillRoot?, roots: [SkillRoot]) throws -> SkillRecord {
+        try Self.validate(name: name)
+        try Self.validate(description: description)
+        try Self.validate(fields: fields)
+        let summary = description.trimmingCharacters(in: .whitespacesAndNewlines)
         let base = try agentsFolder(scope: scope, root: root)
         let current = catalog(roots: roots)
         let taken = scope == .global ? current.global : current.repositories.first { $0.rootPath == root?.path }?.skills ?? []
@@ -388,7 +427,7 @@ final class SkillCatalogManager {
             throw BridgeCommandError(code: "already_exists", message: "A skill named \(name) already exists here.")
         }
         try fileManager.createDirectory(atPath: base + "/" + name, withIntermediateDirectories: true)
-        try Data(Self.manifest(name: name, description: summary, body: body).utf8)
+        try Data(Self.manifest(name: name, description: summary, body: body, fields: fields).utf8)
             .write(to: URL(fileURLWithPath: base + "/" + name + "/SKILL.md"), options: .atomic)
         PlayhouseDiagnostics.record("skills.created", fields: ["scope": scope.rawValue, "name": name])
         return try existing(id: scope == .global ? Self.globalID(name: name) : Self.repoID(repositoryPath: root?.repositoryPath ?? "", name: name), roots: roots)
@@ -414,16 +453,130 @@ final class SkillCatalogManager {
         return try existing(id: id, roots: roots)
     }
 
-    /// Removes the skill folder and every link to it that Playhouse can verify.
-    func delete(id: String, roots: [SkillRoot]) throws {
-        let record = try editable(id: id, roots: roots)
-        for location in record.locations where location.isSymlink {
-            try removeVerifiedLink(location.path, to: record.folderPath!)
+    /// The skill's SKILL.md split into its header fields and its instructions.
+    /// A file without frontmatter keeps its whole text as the instructions, so
+    /// saving it from the editor writes the frontmatter it was missing.
+    func manifest(id: String, roots: [SkillRoot]) throws -> SkillManifest {
+        let record = try existing(id: id, roots: roots)
+        return SkillManifest(parsing: try content(id: id, roots: roots), fallbackName: record.name)
+    }
+
+    /// Edits a skill's description, header fields, or instructions while
+    /// keeping its name and any frontmatter Playhouse does not edit.
+    /// A field set to an empty string is removed.
+    func update(id: String, description: String?, body: String?, fields: [String: String], roots: [SkillRoot]) throws -> SkillRecord {
+        try Self.validate(fields: fields)
+        var manifest = try manifest(id: id, roots: roots)
+        if let description {
+            try Self.validate(description: description)
+            manifest.description = description.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        try fileManager.removeItem(atPath: record.folderPath!)
+        if let body { manifest.body = body }
+        for (key, value) in fields {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            manifest.fields[key] = trimmed.isEmpty ? nil : trimmed
+        }
+        return try update(id: id, content: manifest.contents, roots: roots)
+    }
+
+    /// Removes each skill folder and every link to it that Playhouse can verify.
+    /// Every skill is checked before any is removed, so one read-only or
+    /// missing skill deletes nothing.
+    func delete(ids: [String], roots: [SkillRoot]) throws {
+        guard !ids.isEmpty else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Choose at least one skill to delete.")
+        }
+        let records = try Array(Set(ids)).sorted().map { try editable(id: $0, roots: roots) }
         var disabled = disabledSkillIDs
-        if disabled.remove(id) != nil { preferences.set(Array(disabled).sorted(), forKey: Self.disabledSkillsKey) }
-        PlayhouseDiagnostics.record("skills.deleted", fields: ["name": record.name])
+        // Forget the off state of every skill removed, even if a later one fails.
+        defer { preferences.set(Array(disabled).sorted(), forKey: Self.disabledSkillsKey) }
+        for record in records {
+            for location in record.locations where location.isSymlink {
+                try removeVerifiedLink(location.path, to: record.folderPath!)
+            }
+            try fileManager.removeItem(atPath: record.folderPath!)
+            disabled.remove(record.id)
+            PlayhouseDiagnostics.record("skills.deleted", fields: ["name": record.name])
+        }
+    }
+
+    /// What a task needs so an agent can repair conflicting or invalid skills:
+    /// repository skills are fixed in the new task's own worktree and go through
+    /// its commit, push, and review like any code change; global skills are not
+    /// tracked by Git, so the agent edits them in place.
+    func fixPlan(ids: [String], roots: [SkillRoot]) throws -> SkillFixPlan {
+        guard !ids.isEmpty else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Choose at least one skill to fix.")
+        }
+        var seen = Set<String>()
+        let records = try ids.filter { seen.insert($0).inserted }.map { id in
+            let record = try editable(id: id, roots: roots)
+            guard record.conflict || record.issue != nil else {
+                throw BridgeCommandError(code: "invalid_argument", message: "\(record.name) has no conflict or problem to fix.")
+            }
+            return record
+        }
+        let repoSkills = records.filter { $0.scope == .repo }
+        let globalSkills = records.filter { $0.scope == .global }
+        func problem(_ record: SkillRecord) -> String { record.issue ?? "The skill is not valid." }
+
+        var lines = [
+            "Fix the following agent skills so each one is valid and has exactly one definition that both Claude Code and Codex use.",
+            "",
+            "How skills work:",
+            "- A skill is a folder named after the skill that holds a SKILL.md file.",
+            "- SKILL.md starts with YAML frontmatter between --- lines. It sets `name` (lowercase letters, digits, and single hyphens, matching the folder name) and `description` (when an agent should use the skill), followed by the skill's instructions.",
+            "- Codex reads `.agents/skills` and Claude Code reads `.claude/skills`, in a repository and in the home folder. A skill for both lives in `.agents/skills`; `.claude/skills` may hold a relative symlink to it.",
+            "- A conflict means two different folders define a skill with the same name. Compare them and merge them into one skill in `.agents/skills`, keeping the most complete instructions, then remove the other copy or replace it with a symlink to the merged one. If they are really different skills, rename one of them (its folder and its `name`).",
+            "- An invalid skill is missing its frontmatter, `name`, or `description`, or its `name` does not match its folder. Fix the SKILL.md so it is valid.",
+        ]
+        if !repoSkills.isEmpty {
+            lines += [
+                "",
+                "Repository skills. These are committed to Git: fix them in this task's worktree like any other code change, then commit and push so the fix goes through review. Paths are relative to the repository root.",
+            ]
+            for record in repoSkills {
+                let repository = URL(fileURLWithPath: record.repositoryPath ?? "").lastPathComponent
+                let paths = record.locations.map { Self.relativePath(of: $0.path, inside: record.rootPath ?? "") }
+                lines.append("- `\(record.name)` in \(repository): \(paths.map { "`\($0)`" }.joined(separator: ", ")). Problem: \(problem(record))")
+            }
+        }
+        if !globalSkills.isEmpty {
+            lines += [
+                "",
+                "Global skills. These live in the user's home folder and are not tracked by Git: fix them directly in place. There is nothing to commit or push for them, and the fix takes effect immediately.",
+            ]
+            for record in globalSkills {
+                lines.append("- `\(record.name)`: \(record.locations.map { "`\($0.path)`" }.joined(separator: ", ")). Problem: \(problem(record))")
+            }
+        }
+        lines += ["", "When you are done, list each skill and what you changed."]
+
+        let names = records.map(\.name)
+        let title = names.count == 1 ? "Fix skill \(names[0])" : names.count <= 3
+            ? "Fix skills \(names.joined(separator: ", "))"
+            : "Fix \(names.count) skills"
+        var repositories: [String] = []
+        for record in repoSkills {
+            if let path = record.repositoryPath, !repositories.contains(path) { repositories.append(path) }
+        }
+        var folders: [String] = []
+        for record in globalSkills {
+            for location in record.locations {
+                let folder = (location.path as NSString).deletingLastPathComponent
+                if !folders.contains(folder) { folders.append(folder) }
+            }
+        }
+        PlayhouseDiagnostics.record("skills.fix.planned", fields: [
+            "skillCount": String(records.count), "repositoryCount": String(repositories.count), "globalCount": String(globalSkills.count),
+        ])
+        return SkillFixPlan(title: title, prompt: lines.joined(separator: "\n"), repositoryPaths: repositories, contextFolders: folders)
+    }
+
+    private static func relativePath(of path: String, inside root: String) -> String {
+        let prefix = URL(fileURLWithPath: root).standardizedFileURL.path + "/"
+        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+        return standardized.hasPrefix(prefix) ? String(standardized.dropFirst(prefix.count)) : standardized
     }
 
     /// Moves a skill between a repository and the global gallery, into the
@@ -458,15 +611,25 @@ final class SkillCatalogManager {
         return try existing(id: newID, roots: roots)
     }
 
-    func setEnabled(id: String, enabled: Bool, roots: [SkillRoot], bundledClaudeSkills: [(name: String, description: String)] = []) throws -> SkillRecord {
-        guard catalog(roots: roots, bundledClaudeSkills: bundledClaudeSkills).skill(id: id) != nil else {
+    /// Claude Code's own built-ins are known only from a provider session, so
+    /// `bundledClaudeSkills` is asked for only when the ID names one of them.
+    /// Every other skill is found on disk, which keeps a toggle instant.
+    func setEnabled(
+        id: String, enabled: Bool, roots: [SkillRoot],
+        bundledClaudeSkills: () async -> [(name: String, description: String)] = { [] }
+    ) async throws -> SkillRecord {
+        var bundled: [(name: String, description: String)] = []
+        if catalog(roots: roots).skill(id: id) == nil, id.hasPrefix(Self.builtinID(provider: .claude, name: "")) {
+            bundled = await bundledClaudeSkills()
+        }
+        guard catalog(roots: roots, bundledClaudeSkills: bundled).skill(id: id) != nil else {
             throw BridgeCommandError(code: "not_found", message: "No skill matches \(id).")
         }
         var disabled = disabledSkillIDs
         if enabled { disabled.remove(id) } else { disabled.insert(id) }
         preferences.set(Array(disabled).sorted(), forKey: Self.disabledSkillsKey)
         PlayhouseDiagnostics.record("skills.enabled.changed", fields: ["id": id, "enabled": String(enabled)])
-        return catalog(roots: roots, bundledClaudeSkills: bundledClaudeSkills).skill(id: id)!
+        return catalog(roots: roots, bundledClaudeSkills: bundled).skill(id: id)!
     }
 
     /// Writes a real symlink so the provider that does not read the skill's
@@ -721,14 +884,24 @@ struct SkillFrontmatter {
     var description: String?
     var issue: String?
 
-    init(_ contents: String) {
+    /// One top-level frontmatter key, its value, and the lines it was read from.
+    struct Entry {
+        let key: String
+        let value: String
+        let lines: [String]
+    }
+
+    /// The lines between the opening and closing `---`, and the line index
+    /// where the instructions start, or nil when there is no frontmatter.
+    static func split(_ contents: String) -> (header: [String], bodyStart: Int, lines: [String])? {
         let lines = contents.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
         guard lines.first?.trimmingCharacters(in: .whitespaces) == "---",
-              let end = lines.dropFirst().firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "---" }) else {
-            issue = "SKILL.md must start with frontmatter between --- lines that sets name and description."
-            return
-        }
-        let header = Array(lines[1..<end])
+              let end = lines.dropFirst().firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "---" }) else { return nil }
+        return (Array(lines[1..<end]), end + 1, lines)
+    }
+
+    static func entries(_ header: [String]) -> [Entry] {
+        var entries: [Entry] = []
         var index = 0
         while index < header.count {
             let line = header[index]
@@ -736,20 +909,38 @@ struct SkillFrontmatter {
             guard !line.hasPrefix(" "), !line.hasPrefix("\t"), let colon = line.firstIndex(of: ":") else { continue }
             let key = line[..<colon].trimmingCharacters(in: .whitespaces)
             var value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            var raw = [line]
             if [">", "|", ">-", "|-", ">+", "|+", ""].contains(value) {
                 var parts: [String] = []
                 while index < header.count, header[index].hasPrefix(" ") || header[index].hasPrefix("\t") || header[index].isEmpty {
                     let part = header[index].trimmingCharacters(in: .whitespaces)
                     if !part.isEmpty { parts.append(part) }
+                    raw.append(header[index])
                     index += 1
                 }
-                value = parts.joined(separator: value.hasPrefix("|") ? "\n" : " ")
+                // A YAML list, such as allowed-tools given one tool per line.
+                if value.isEmpty, !parts.isEmpty, parts.allSatisfy({ $0.hasPrefix("- ") }) {
+                    value = parts.map { unquoted(String($0.dropFirst(2)).trimmingCharacters(in: .whitespaces)) }.joined(separator: ", ")
+                } else {
+                    value = parts.joined(separator: value.hasPrefix("|") ? "\n" : " ")
+                }
             } else {
                 value = Self.unquoted(value)
             }
-            switch key {
-            case "name": name = value
-            case "description": description = value
+            entries.append(Entry(key: key, value: value, lines: raw))
+        }
+        return entries
+    }
+
+    init(_ contents: String) {
+        guard let header = Self.split(contents)?.header else {
+            issue = "SKILL.md must start with frontmatter between --- lines that sets name and description."
+            return
+        }
+        for entry in Self.entries(header) {
+            switch entry.key {
+            case "name": name = entry.value
+            case "description": description = entry.value
             default: break
             }
         }
@@ -760,7 +951,7 @@ struct SkillFrontmatter {
         }
     }
 
-    private static func unquoted(_ value: String) -> String {
+    static func unquoted(_ value: String) -> String {
         guard value.count >= 2, let first = value.first, first == value.last, first == "\"" || first == "'" else { return value }
         let inner = String(value.dropFirst().dropLast())
         return first == "'"
@@ -770,5 +961,66 @@ struct SkillFrontmatter {
 
     static func quoted(_ value: String) -> String {
         "\"" + value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+}
+
+// MARK: - Structured SKILL.md
+
+/// A SKILL.md split into the header fields the Skills page edits and the
+/// instructions below them. Frontmatter Playhouse does not edit is kept as
+/// written, so a structured edit never drops a provider's own keys.
+struct SkillManifest: Codable, Equatable, Sendable {
+    /// Optional fields of the open Agent Skills format. Both Claude Code and
+    /// Codex accept them, and each ignores the ones it does not use.
+    static let optionalKeys = ["license", "compatibility", "allowed-tools"]
+
+    var name: String
+    var description: String
+    var fields: [String: String]
+    var body: String
+    /// Other frontmatter entries, verbatim and in order.
+    var preservedFrontmatter: [String] = []
+
+    init(name: String, description: String, fields: [String: String] = [:], body: String, preservedFrontmatter: [String] = []) {
+        self.name = name
+        self.description = description
+        self.fields = fields
+        self.body = body
+        self.preservedFrontmatter = preservedFrontmatter
+    }
+
+    /// A file without frontmatter is all instructions, named after its folder.
+    init(parsing contents: String, fallbackName: String) {
+        guard let split = SkillFrontmatter.split(contents) else {
+            self.init(name: fallbackName, description: "", body: contents.trimmingCharacters(in: .whitespacesAndNewlines))
+            return
+        }
+        var name: String?
+        var description = ""
+        var fields: [String: String] = [:]
+        var preserved: [String] = []
+        for entry in SkillFrontmatter.entries(split.header) {
+            switch entry.key {
+            case "name": name = entry.value
+            case "description": description = entry.value
+            case let key where Self.optionalKeys.contains(key): fields[key] = entry.value
+            default: preserved += entry.lines
+            }
+        }
+        let body = split.lines[split.bodyStart...].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.init(name: name.flatMap { $0.isEmpty ? nil : $0 } ?? fallbackName, description: description,
+                  fields: fields, body: body, preservedFrontmatter: preserved)
+    }
+
+    var contents: String {
+        let summary = description.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+        var lines = ["---", "name: \(name)", "description: \(SkillFrontmatter.quoted(summary))"]
+        for key in Self.optionalKeys {
+            let value = fields[key]?.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces) ?? ""
+            if !value.isEmpty { lines.append("\(key): \(SkillFrontmatter.quoted(value))") }
+        }
+        lines += preservedFrontmatter
+        lines.append("---")
+        return lines.joined(separator: "\n") + "\n\n" + body.trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
     }
 }

@@ -954,6 +954,10 @@ struct TaskConversationView: View {
     var isReadOnly = false
     var conflictResolutionRequested = false
     var onConflictResolutionChecked: (Bool) -> Void = { _ in }
+    /// The prompt a task opened from the Skills page's Fix with Agent sends on arrival.
+    var skillFixPrompt: String? = nil
+    /// Shows another task's conversation, sending it the prompt once it opens.
+    var onOpenTask: (UUID, String) -> Void = { _, _ in }
     let onBack: () -> Void
 
     /// The draft lives in an observable model, so a keystroke re-renders only views that read it
@@ -1667,14 +1671,7 @@ struct TaskConversationView: View {
                 .frame(minWidth: 900, minHeight: 600)
             }
         }
-        .overlay {
-            if isShowingSkills {
-                SkillsPageView(task: task, manager: conversationManager, onUse: useSkill) {
-                    isShowingSkills = false
-                    composerDraft.focusRequest += 1
-                }
-            }
-        }
+        .overlay { skillsModal }
         .task {
             // Synchronous, so the picker shows the cached model name on the
             // first frame instead of "Default" while the conversation and a
@@ -1700,6 +1697,10 @@ struct TaskConversationView: View {
             if conflictResolutionRequested && !isReadOnly && !isResponding {
                 conflictResolutionAttempt = 1
                 sendMessage(overrideText: "The PR has conflicts. Fix them, commit, and push.")
+            } else if let skillFixPrompt, !isReadOnly, !isResponding, messages.isEmpty, task.pendingSubmittedPrompt == nil {
+                // Sent as the composer's own draft, so the composer clears as for any send.
+                draft = skillFixPrompt
+                sendMessage()
             }
         }
         .onChange(of: providerPendingUserInputRequest) { previous, request in
@@ -6692,6 +6693,43 @@ struct TaskConversationView: View {
         }
         isShowingSkills = false
         composerDraft.focusRequest += 1
+    }
+
+    /// The skill gallery as a large modal that slides up from the bottom of
+    /// the window over a dimmed conversation.
+    private var skillsModal: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .bottom) {
+                if isShowingSkills {
+                    Color.black.opacity(0.28)
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture { isShowingSkills = false }
+                        .accessibilityHidden(true)
+                        .transition(.opacity)
+                    SkillsPageView(
+                        task: task, manager: conversationManager, onUse: useSkill,
+                        onFixTask: { taskID, prompt in
+                            isShowingSkills = false
+                            onOpenTask(taskID, prompt)
+                        }
+                    ) {
+                        isShowingSkills = false
+                        composerDraft.focusRequest += 1
+                    }
+                    .frame(
+                        width: max(geometry.size.width - 64, min(geometry.size.width, 720)),
+                        height: max(geometry.size.height - 40, min(geometry.size.height, 480))
+                    )
+                    .clipShape(UnevenRoundedRectangle(topLeadingRadius: 16, topTrailingRadius: 16))
+                    .shadow(color: .black.opacity(0.3), radius: 24, y: -4)
+                    .transition(.move(edge: .bottom))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        }
+        .allowsHitTesting(isShowingSkills)
+        .animation(.spring(response: 0.38, dampingFraction: 0.9), value: isShowingSkills)
     }
 
     /// Summarizes how the selected provider's native configuration differs, so a

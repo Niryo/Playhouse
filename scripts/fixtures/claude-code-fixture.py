@@ -1201,6 +1201,9 @@ def main():
         if message.get("type") == "control_request":
             request = message.get("request", {})
             if request.get("subtype") == "initialize":
+                # One line per Claude Code session started, including metadata-only ones.
+                with open(str(sys.argv[0]) + ".sessions", "a", encoding="utf-8") as sessions:
+                    sessions.write("initialize\n")
                 missing_resume = Path(str(sys.argv[0]) + ".missing-resume")
                 if "--resume" in sys.argv and missing_resume.exists():
                     missing_resume.unlink()
