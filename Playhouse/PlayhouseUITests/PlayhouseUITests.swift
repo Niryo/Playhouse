@@ -5347,7 +5347,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("chat-sidebar-button").exists, "The board header should offer a Chat button next to New Task.")
         XCTAssertFalse(element("chat-sidebar").exists, "The chat sidebar should be closed by default.")
 
-        let boardHeader = element(containingAccessibilityText: "Kanban header")
+        let boardHeader = element(withAccessibilityLabel: "Kanban header")
         let boardSidebar = element(withAccessibilityLabel: "Kanban sidebar")
         let backlogColumn = element("column-backlog")
         let reviewColumn = element("column-review")
