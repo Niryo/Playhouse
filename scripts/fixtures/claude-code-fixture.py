@@ -776,6 +776,35 @@ def respond(user_text, instructions, preserve_no_outcome=False, previous_prompt=
         text("msg_comments", answer)
     elif user_text.rstrip().endswith("What happened earlier?"):
         text("msg_recovered", SIMPLE_ANSWER)
+    elif "recall-earlier-pages" in user_text.lower():
+        # A standalone chat looking back: it reads each earlier page named in the
+        # message ("page-id:<id>") with the real `chat page read` command, then answers.
+        close_turn = report_command(instructions, " chat page close-turn ")
+        cli = close_turn.split(" chat page close-turn ")[0] if close_turn else None
+        turn_key = hashlib.md5(user_text.encode()).hexdigest()[:8]
+        text(f"msg_recall_intro_{turn_key}", "Let me look back at those pages.")
+        for index, page_id in enumerate(re.findall(r"page-id:([A-Za-z0-9-]+)", user_text)):
+            command = f"{cli} chat page read {page_id}"
+            commands.append({"command": command,
+                             "output": run_tool(f"toolu_recall_{index}", "Bash", {"command": command}, command)})
+        hold = Path(str(sys.argv[0]) + ".recall-hold")
+        if hold.exists():
+            # Holds the turn open after the reads so a test can look at the live turn.
+            ready = Path(str(sys.argv[0]) + ".recall-ready")
+            release = Path(str(sys.argv[0]) + ".recall-release")
+            ready.write_text("The recalling turn is active.\n", encoding="utf-8")
+            deadline = time.monotonic() + 60
+            while not release.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            ready.unlink(missing_ok=True)
+            if not release.exists():
+                raise TimeoutError("Timed out waiting for the recall hold release.")
+            hold.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+        text(f"msg_recall_answer_{turn_key}", "I recalled both pages.")
+        if close_turn:
+            commands.append({"command": close_turn,
+                             "output": run_tool("toolu_close_turn", "Bash", {"command": close_turn}, close_turn)})
     elif "release notes" in user_text.lower():
         # A standalone chat has no outcome to report, so it ends every turn with
         # its page signal instead. That signal runs in the same place a task

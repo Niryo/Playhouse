@@ -20,6 +20,15 @@ enum ChatSidebarLayout {
 }
 
 struct KanbanBoardView: View {
+    private let boardSidebarWidth: CGFloat = 184
+    @AppStorage(ChatSidebarLayout.widthKey, store: WorkspaceSettings.preferencesStore)
+    private var storedChatSidebarWidth = Double(ChatSidebarLayout.defaultWidth)
+    @State private var chatSidebarResizeStartWidth: CGFloat?
+
+    private var chatSidebarWidth: CGFloat {
+        ChatSidebarLayout.clampedWidth(CGFloat(storedChatSidebarWidth))
+    }
+
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
     @Query(filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" }, sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
@@ -73,78 +82,18 @@ struct KanbanBoardView: View {
     @State private var boardScrollerInset = KanbanBoardView.legacyScrollerInset()
     @State private var chatTask: StandaloneChat?
     @State private var isOpeningChatSidebar = false
-    @AppStorage(ChatSidebarLayout.widthKey, store: WorkspaceSettings.preferencesStore)
-    private var chatSidebarWidth = Double(ChatSidebarLayout.defaultWidth)
-    @State private var chatSidebarResizeStartWidth: CGFloat?
 
     /// Provider-owning operations run in the bridge daemon.
     private var remoteConversations: RemoteConversationManager {
         RemoteConversationManager(daemon: conversationRuntime.client, runtime: conversationRuntime, modelContext: modelContext)
     }
 
-    var body: some View {
-        let sidebarWidth = ChatSidebarLayout.clampedWidth(CGFloat(chatSidebarWidth))
-        return HStack(spacing: 0) {
-            if isShowingChatSidebar, selectedTask == nil, let chatTask {
-                TaskConversationView(
-                    task: chatTask, isNewTask: false, isReadOnly: false,
-                    conflictResolutionRequested: false,
-                    onConflictResolutionChecked: { _ in }
-                ) {
-                    withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
-                }
-                .frame(width: sidebarWidth)
-                .transition(.move(edge: .leading).combined(with: .opacity))
-                .id(chatTask.id)
-                // Without a container, this identifier replaces the conversation controls' own.
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("chat-sidebar")
-                chatSidebarResizeHandle(width: sidebarWidth)
-            }
-            mainContent
-        }
-        .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
+    private var isChatOverlayVisible: Bool {
+        isShowingChatSidebar && selectedTask == nil && chatTask != nil
     }
 
-    /// The chat sidebar's right border; dragging it right widens the chat and left narrows it.
-    private func chatSidebarResizeHandle(width: CGFloat) -> some View {
-        Divider()
-            .overlay {
-                // A wide invisible strip makes the 1pt border easy to grab.
-                Color.clear
-                    .frame(width: 17)
-                    .contentShape(Rectangle())
-                    .hoverCursor(.resizeLeftRight)
-                    .gesture(
-                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                            .onChanged { value in
-                                if chatSidebarResizeStartWidth == nil {
-                                    // Held for the whole drag, so the pointer can leave the thin border.
-                                    NSCursor.resizeLeftRight.push()
-                                }
-                                let start = chatSidebarResizeStartWidth ?? width
-                                chatSidebarResizeStartWidth = start
-                                chatSidebarWidth = Double(ChatSidebarLayout.clampedWidth(
-                                    start + value.translation.width
-                                ))
-                            }
-                            .onEnded { _ in
-                                if chatSidebarResizeStartWidth != nil { NSCursor.pop() }
-                                chatSidebarResizeStartWidth = nil
-                            }
-                    )
-                    .onDisappear {
-                        // A sidebar closed mid-drag may never end the gesture.
-                        if chatSidebarResizeStartWidth != nil {
-                            NSCursor.pop()
-                            chatSidebarResizeStartWidth = nil
-                        }
-                    }
-                    .accessibilityElement()
-                    .accessibilityLabel("Resize chat")
-                    .accessibilityValue("\(Int(width.rounded())) points")
-                    .accessibilityIdentifier("chat-sidebar-resize-handle")
-            }
+    var body: some View {
+        mainContent
     }
 
     private var mainContent: some View {
@@ -168,7 +117,9 @@ struct KanbanBoardView: View {
             }
         }
         .background(WorkspaceTheme.windowBackground)
-        .frame(minWidth: ChatSidebarLayout.minimumBoardWidth, minHeight: 640)
+        // The open chat adds its width to the board's minimum, so the content-sized window grows
+        // to keep the pushed columns visible, as it did when the chat sat beside the board.
+        .frame(minWidth: ChatSidebarLayout.minimumBoardWidth + (isChatOverlayVisible ? chatSidebarWidth : 0), minHeight: 640)
         .onAppear {
             // The board renders from its own @Query, not the board.list path, so it has to
             // convert a chat still stored as a hidden task itself or that row shows as a card.
@@ -348,110 +299,132 @@ struct KanbanBoardView: View {
     }
 
     private var boardContent: some View {
-        VStack(spacing: 0) {
-            boardHeader
+        ZStack(alignment: .topLeading) {
+            VStack(spacing: 0) {
+                boardHeader
 
-            Rectangle()
-                .fill(Color.primary.opacity(0.07))
-                .frame(height: 1)
+                Rectangle()
+                    .fill(Color.primary.opacity(0.07))
+                    .frame(height: 1)
 
-            if let lifecycleResetNotice {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Some task worktrees were kept")
-                            .font(.system(size: 12, weight: .semibold))
-                            .accessibilityIdentifier("task-lifecycle-reset-title")
-                        Text(lifecycleResetNotice)
-                            .font(.system(size: 11))
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityIdentifier("task-lifecycle-reset-details")
+                HStack(spacing: 0) {
+                    boardSidebar
+
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.07))
+                        .frame(width: 1)
+
+                    if isChatOverlayVisible {
+                        Color.clear
+                            .frame(width: max(0, chatSidebarWidth - boardSidebarWidth - 1))
+                            .accessibilityHidden(true)
                     }
-                    Spacer(minLength: 8)
-                    Button("OK") { self.lifecycleResetNotice = nil }
-                        .buttonHoverPointer()
-                        .nativeHelp("Dismiss worktree notice")
-                        .accessibilityIdentifier("dismiss-task-lifecycle-reset-notice")
-                }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(WorkspaceTheme.panelBackground)
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("task-lifecycle-reset-notice")
-            }
 
-            HStack(spacing: 0) {
-                // The board centers its columns with its own frame and keeps the scroll view's
-                // clip origin at zero. Left to itself, the two-axis scroll view centers narrower
-                // content by giving AppKit's clip view a negative bounds origin, and after a
-                // horizontal scroll nudge followed by a content-height change, SwiftUI's hit
-                // testing lost that offset: the board drew centered while clicks resolved as if
-                // it were flush left, so buttons stopped responding until the window was resized.
-                // The minimum size tracks the visible area, not the reader's frame: legacy
-                // scrollers take their thickness out of the visible area, and content sized to the
-                // full frame would show a needless scroll bar.
-                GeometryReader { viewport in
-                    ScrollView([.horizontal, .vertical]) {
-                        HStack(alignment: .top, spacing: 16) {
-                            ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
-                                if status == .backlog {
-                                    let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
-                                    VStack(spacing: 12) {
-                                        if hasBlockedTasks {
-                                            kanbanColumn(.blocked, minHeight: 220)
-                                                .transition(.opacity.combined(with: .move(edge: .top)))
-                                        }
-                                        kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
-                                    }
-                                    .frame(width: 264)
-                                    .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
-                                } else if status == .inProgress {
-                                    let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
-                                    VStack(spacing: 12) {
-                                        if hasWaitingResponseTasks {
-                                            kanbanColumn(.waitingResponse, minHeight: 220)
-                                                .transition(.opacity.combined(with: .move(edge: .top)))
-                                        }
-                                        kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
-                                    }
-                                    .frame(width: 264)
-                                    .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
-                                } else {
-                                    kanbanColumn(status)
-                                        .frame(width: 264)
+                    VStack(spacing: 0) {
+                        if let lifecycleResetNotice {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Some task worktrees were kept")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .accessibilityIdentifier("task-lifecycle-reset-title")
+                                    Text(lifecycleResetNotice)
+                                        .font(.system(size: 11))
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .accessibilityIdentifier("task-lifecycle-reset-details")
                                 }
+                                Spacer(minLength: 8)
+                                Button("OK") { self.lifecycleResetNotice = nil }
+                                    .buttonHoverPointer()
+                                    .nativeHelp("Dismiss worktree notice")
+                                    .accessibilityIdentifier("dismiss-task-lifecycle-reset-notice")
                             }
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(WorkspaceTheme.panelBackground)
+                            .accessibilityElement(children: .contain)
+                            .accessibilityIdentifier("task-lifecycle-reset-notice")
                         }
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.horizontal, 30)
-                        .padding(.top, 22)
-                        .padding(.bottom, 28)
-                        .frame(
-                            minWidth: max(0, viewport.size.width - boardScrollerInset),
-                            minHeight: max(0, viewport.size.height - boardScrollerInset)
-                        )
-                    }
-                    .modifier(TopLeadingScrollAlignment())
-                    .scrollIndicators(.visible)
-                    .background(WorkspaceTheme.windowBackground)
-                    .scrollContentBackground(.hidden)
-                    .accessibilityIdentifier("board-columns-scroll-view")
-                }
-                .onReceive(NotificationCenter.default.publisher(for: NSScroller.preferredScrollerStyleDidChangeNotification)) { _ in
-                    boardScrollerInset = Self.legacyScrollerInset()
-                }
 
-                // A fixed gutter beside the scroll view rather than an overlay, so the opened
-                // drawer never covers a column and stays put while scrolling.
-                DoneDropDrawer(
-                    isOpen: draggedTaskStatus == .review,
-                    isActive: $isDoneTargetActive,
-                    onDrop: { moveTask(id: $0, to: .done) }
-                )
+                        HStack(spacing: 0) {
+                            // The board centers its columns with its own frame and keeps the scroll view's
+                            // clip origin at zero. Left to itself, the two-axis scroll view centers narrower
+                            // content by giving AppKit's clip view a negative bounds origin, and after a
+                            // horizontal scroll nudge followed by a content-height change, SwiftUI's hit
+                            // testing lost that offset: the board drew centered while clicks resolved as if
+                            // it were flush left, so buttons stopped responding until the window was resized.
+                            // The minimum size tracks the visible area, not the reader's frame: legacy
+                            // scrollers take their thickness out of the visible area, and content sized to the
+                            // full frame would show a needless scroll bar.
+                            GeometryReader { viewport in
+                                ScrollView([.horizontal, .vertical]) {
+                                    HStack(alignment: .top, spacing: 16) {
+                                        ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
+                                            if status == .backlog {
+                                                let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
+                                                VStack(spacing: 12) {
+                                                    if hasBlockedTasks {
+                                                        kanbanColumn(.blocked, minHeight: 220)
+                                                            .transition(.opacity.combined(with: .move(edge: .top)))
+                                                    }
+                                                    kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
+                                                }
+                                                .frame(width: 264)
+                                                .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
+                                            } else if status == .inProgress {
+                                                let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
+                                                VStack(spacing: 12) {
+                                                    if hasWaitingResponseTasks {
+                                                        kanbanColumn(.waitingResponse, minHeight: 220)
+                                                            .transition(.opacity.combined(with: .move(edge: .top)))
+                                                    }
+                                                    kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
+                                                }
+                                                .frame(width: 264)
+                                                .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
+                                            } else {
+                                                kanbanColumn(status)
+                                                    .frame(width: 264)
+                                            }
+                                        }
+                                    }
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .padding(.horizontal, 30)
+                                    .padding(.top, 22)
+                                    .padding(.bottom, 28)
+                                    .frame(
+                                        minWidth: max(0, viewport.size.width - boardScrollerInset),
+                                        minHeight: max(0, viewport.size.height - boardScrollerInset)
+                                    )
+                                }
+                                .modifier(TopLeadingScrollAlignment())
+                                .scrollIndicators(.visible)
+                                .background(WorkspaceTheme.windowBackground)
+                                .scrollContentBackground(.hidden)
+                                .accessibilityIdentifier("board-columns-scroll-view")
+                            }
+                            .onReceive(NotificationCenter.default.publisher(for: NSScroller.preferredScrollerStyleDidChangeNotification)) { _ in
+                                boardScrollerInset = Self.legacyScrollerInset()
+                            }
+
+                            // A fixed gutter beside the scroll view rather than an overlay, so the opened
+                            // drawer never covers a column and stays put while scrolling.
+                            DoneDropDrawer(
+                                isOpen: draggedTaskStatus == .review,
+                                isActive: $isDoneTargetActive,
+                                onDrop: { moveTask(id: $0, to: .done) }
+                            )
+                        }
+                    }
+                }
             }
+
+            standaloneChatOverlay
         }
+        .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task(id: draggedTaskID) {
             // SwiftUI reports no end for a drag that lands outside every drop target (for
             // example a card dropped back in place), and the drag session consumes the
@@ -520,6 +493,74 @@ struct KanbanBoardView: View {
             } catch {
                 presentSaveError(error.localizedDescription)
                 archiveSearchResults = []
+            }
+        }
+    }
+
+    /// The chat sidebar's right border; dragging it right widens the chat and left narrows it.
+    private func chatSidebarResizeHandle(width: CGFloat) -> some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.07))
+            .frame(width: 1)
+            .frame(maxHeight: .infinity)
+            .overlay {
+                // A wide invisible strip makes the 1pt border easy to grab.
+                Color.clear
+                    .frame(width: 17)
+                    .contentShape(Rectangle())
+                    .hoverCursor(.resizeLeftRight)
+                    .gesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                            .onChanged { value in
+                                if chatSidebarResizeStartWidth == nil {
+                                    // Held for the whole drag, so the pointer can leave the thin border.
+                                    NSCursor.resizeLeftRight.push()
+                                }
+                                let start = chatSidebarResizeStartWidth ?? width
+                                chatSidebarResizeStartWidth = start
+                                storedChatSidebarWidth = Double(ChatSidebarLayout.clampedWidth(
+                                    start + value.translation.width
+                                ))
+                            }
+                            .onEnded { _ in
+                                if chatSidebarResizeStartWidth != nil { NSCursor.pop() }
+                                chatSidebarResizeStartWidth = nil
+                            }
+                    )
+                    .onDisappear {
+                        // A sidebar closed mid-drag may never end the gesture.
+                        if chatSidebarResizeStartWidth != nil {
+                            NSCursor.pop()
+                            chatSidebarResizeStartWidth = nil
+                        }
+                    }
+                    .accessibilityElement()
+                    .accessibilityLabel("Resize chat")
+                    .accessibilityValue("\(Int(width.rounded())) points")
+                    .accessibilityIdentifier("chat-sidebar-resize-handle")
+            }
+    }
+
+    private var standaloneChatOverlay: some View {
+        Group {
+            if isShowingChatSidebar, selectedTask == nil, let chatTask {
+                TaskConversationView(
+                    task: chatTask, isNewTask: false, isReadOnly: false,
+                    conflictResolutionRequested: false,
+                    onConflictResolutionChecked: { _ in }
+                ) {
+                    setChatSidebarVisible(false)
+                }
+                .frame(width: chatSidebarWidth)
+                .frame(maxHeight: .infinity, alignment: .topLeading)
+                .overlay(alignment: .trailing) {
+                    chatSidebarResizeHandle(width: chatSidebarWidth)
+                }
+                .transition(.move(edge: .leading).combined(with: .opacity))
+                .id(chatTask.id)
+                // Without a container, this identifier replaces the conversation controls' own.
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("chat-sidebar")
             }
         }
     }
@@ -614,6 +655,31 @@ struct KanbanBoardView: View {
         .accessibilityIdentifier("board-search-bar")
     }
 
+    private var boardSidebar: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {} label: {
+                Label("Placeholder", systemImage: "square.dashed")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .buttonHoverPointer()
+            .nativeHelp("Placeholder sidebar button")
+
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(width: boardSidebarWidth)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(WorkspaceTheme.panelBackground.opacity(0.62))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Kanban sidebar")
+        .accessibilityHidden(isChatOverlayVisible)
+    }
+
     private var boardHeader: some View {
         HStack(alignment: .center, spacing: 24) {
             HStack(spacing: 14) {
@@ -632,6 +698,7 @@ struct KanbanBoardView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .accessibilityHidden(isChatOverlayVisible)
 
             Spacer(minLength: 20)
 
@@ -682,6 +749,8 @@ struct KanbanBoardView: View {
         .padding(.horizontal, 30)
         .padding(.top, 24)
         .padding(.bottom, 21)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Kanban header")
     }
 
     private var doneArchivePanel: some View {
@@ -873,7 +942,7 @@ struct KanbanBoardView: View {
 
     private func openChatSidebar() {
         if isShowingChatSidebar {
-            withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
+            setChatSidebarVisible(false)
             return
         }
         guard !isOpeningChatSidebar else { return }
@@ -896,11 +965,15 @@ struct KanbanBoardView: View {
                     throw BridgeCommandError(code: "operation_failed", message: "The standalone chat could not be opened.")
                 }
                 chatTask = chat
-                withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = true }
+                setChatSidebarVisible(true)
             } catch {
                 saveError = error.localizedDescription
             }
         }
+    }
+
+    private func setChatSidebarVisible(_ visible: Bool) {
+        withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = visible }
     }
 
     private func openNewTask() {

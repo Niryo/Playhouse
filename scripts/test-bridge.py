@@ -1044,7 +1044,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         reopened = self.assert_success(self.call_cli("chat", "open")[0])
         self.assertEqual(reopened["id"], legacy_id, "Migration must run once, not create a second chat.")
 
-    # case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, the Changes sidebar, and the no-repository-selected banner. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn never triggers the private task-outcome reminders, because the chat is told not to report an outcome; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer. Opening a board task while the chat sidebar is showing replaces it with that task's conversation view instead of showing both at once, and returning to the board reveals the chat sidebar again, with the chat's own model left untouched by the unrelated task. Dragging the chat sidebar's right border resizes it, between a 320-point minimum and the larger of its default width and the screen width the board's minimum width leaves free, and reopening the sidebar, even after an app relaunch, keeps the dragged width.
+    # case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, the Changes sidebar, and the no-repository-selected banner. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn never triggers the private task-outcome reminders, because the chat is told not to report an outcome; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer. Opening a board task while the chat sidebar is showing replaces it with that task's conversation view instead of showing both at once, and returning to the board reveals the chat sidebar again, with the chat's own model left untouched by the unrelated task. The visible chat panel opens at full board-content height, overlaps the logo header and narrow board sidebar, and hides the covered branding and sidebar controls from accessibility navigation while open; it raises the board's minimum width by the chat panel width, so the window grows to keep the shifted columns visible; it pushes the columns to the panel’s right edge; closing chat reveals the sidebar and moves the columns back beside it while the window keeps its grown width. Dragging the chat sidebar's right border resizes it, between a 320-point minimum and the larger of its default width and the screen width the board's minimum width leaves free, and reopening the sidebar, even after an app relaunch, keeps the dragged width.
     def test_standalone_chat_separate_model_and_pages_round_trip(self):
         opened = self.assert_success(self.call_cli("chat", "open")[0])
         self.assertEqual(opened["title"], "Chat")
@@ -1587,6 +1587,56 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(status["missedPreviousPageSignal"],
                          "A close-turn signal that really ran must satisfy the page signal instead of falling back to the classifier.")
 
+    # case-contract: test_standalone_chat_recalls_loaded_pages | When a standalone chat's agent loads an earlier page into its context with `chat page read`, the conversation renders one deterministic "Recalling <page title>" line per loaded page, titled from the page archive rather than from anything the agent wrote, in the order the pages were read. The lines are visible in the turn that read them without opening the Worked for disclosure, stay once the turn settles and after a later turn and a reopen, and the read commands really run and succeed so the history carries each call and the page's own title. The line is derived from Playhouse's own provider-neutral command activity (a shell call titled "Running <command>" for both Claude and Codex) and the page store, so provider selection cannot change it; one representative provider (Claude) covers the shared path.
+    def test_standalone_chat_recalls_loaded_pages(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-recall"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+        titles = ["Volcano research", "Saturn notes"]
+        pages = [
+            self.assert_success(self.call_cli("chat", "page", "new", "--title", title, extra_environment=environment)[0])["page"]
+            for title in titles
+        ]
+        self.assert_success(self.call_cli("chat", "page", "new", "--title", "Current topic", extra_environment=environment)[0])
+
+        message = "recall-earlier-pages " + " ".join(f"page-id:{page['id']}" for page in pages)
+        self.assert_success(self.call_cli("conversation", "send", chat_id, "--message", message, extra_environment=environment)[0])
+
+        turns = [
+            turn for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+            if not (turn.get("userText") or "").startswith("Classify the latest user message")
+        ]
+        reads = [item for item in turns[-1]["reportCommands"] if " chat page read " in item["command"]]
+        self.assertEqual(len(reads), 2, "The fixture should really run one chat page read per earlier page.")
+        for page, title, read in zip(pages, titles, reads):
+            self.assertTrue(read["command"].endswith(page["id"]), read)
+            self.assertEqual(json.loads(read["output"])["result"]["page"]["title"], title, "Each read should load the page's own title.")
+
+        history = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        recalls = [row for row in history["activities"] if row["id"].startswith("toolu_recall_")]
+        self.assertEqual([row["id"] for row in recalls], ["toolu_recall_0", "toolu_recall_1"],
+                         "Each page read should be recorded in order for the conversation to render as a Recalling line.")
+        for page, row in zip(pages, recalls):
+            self.assertIn(f"chat page read {page['id']}", row["title"])
+            self.assertEqual(row["status"], "completed")
+
+        self.assert_success(self.call_cli("conversation", "send", chat_id, "--message", "recall-earlier-pages", extra_environment=environment)[0])
+        later = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        message_ids = {message["id"] for message in later["messages"]}
+        placed = [row for row in later["timelineActivities"] if row["id"].startswith("toolu_recall_")]
+        self.assertEqual([row["id"] for row in placed], ["toolu_recall_0", "toolu_recall_1"],
+                         "The earlier turn's reads stay placed in the timeline after a later turn.")
+        self.assertTrue(all(row.get("afterMessageID") in message_ids for row in placed),
+                        "Each placed read follows a message the conversation still shows.")
+        self.assert_failure(self.call_cli("chat", "page", "read", "no-such-page", expected_status=1, extra_environment=environment)[0], "operation_failed")
+
     # case-contract: test_standalone_chat_claude_fallback_classifier | When a standalone chat uses Claude, a missed page signal invokes the Haiku helper at low effort; a malformed result is rejected and retried, an unrelated later question and its assistant reply move to a new titled page, the UI keeps page evaluation visually quiet without blocking the primary answer, updates the transcript separator when classification completes, and holds a following send until the decision resolves, and appends the related follow-up in chronological order. The Claude-specific model and effort arguments are verified through the real CLI/XPC path. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes.
     def test_standalone_chat_claude_fallback_classifier(self):
         self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
@@ -1724,7 +1774,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(any(message["text"] == "Do not overtake Mars" for message in recovered_messages))
         self.assertIn("Another thought about Mars", [message["text"] for message in recovered_messages])
 
-    # case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, uses the same foreground artwork for the Dock AppIcon on a solid #2C2F36 background, and the bridge reports API version 1.
+    # case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a compact fixed Kanban sidebar under 200 points wide and left of the columns while they scroll, and places its placeholder button inside the sidebar below the full logo header. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):
         response, _ = self.call_cli("status")
         status = self.assert_success(response)
