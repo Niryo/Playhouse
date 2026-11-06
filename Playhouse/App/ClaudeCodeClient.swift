@@ -1286,6 +1286,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     private var activityDurationsByThread: [String: [String: Int]] = [:]
     private var lastFinishedThreadID: String?
     private var conversationOperationsInFlight = 0
+    private static let bundledSkillsLifetime: TimeInterval = 10 * 60
+    private var bundledSkillsCache: (readAt: Date, skills: [(name: String, description: String)])?
 
     /// `dataDirectory` only ever varies across calls in debug/test builds (via
     /// `BridgeRequest.dataDirectory`); production always passes `nil`, so one
@@ -1428,12 +1430,20 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
 
     /// The skills and commands built into Claude Code itself, which have no
     /// folder on disk, read without starting a model turn.
+    /// Claude Code's built-in skills and commands. They come with the binary
+    /// rather than the workspace, so one metadata session's answer is reused
+    /// for a while instead of starting a session on every Skills page read.
     func bundledSkills(workspace: ConversationWorkspaceContext) async throws -> [(name: String, description: String)] {
+        if let cached = bundledSkillsCache, Date().timeIntervalSince(cached.readAt) < Self.bundledSkillsLifetime {
+            return cached.skills
+        }
         let response = try await withMetadataSession(workspace: workspace) { _ in [:] }
-        return (response.initialize["commands"] as? [[String: Any]] ?? []).compactMap { command in
+        let skills: [(name: String, description: String)] = (response.initialize["commands"] as? [[String: Any]] ?? []).compactMap { command in
             guard command["builtin"] as? Bool == true, let name = command["name"] as? String, !name.hasPrefix("_") else { return nil }
             return (name, command["description"] as? String ?? "")
         }
+        bundledSkillsCache = (Date(), skills)
+        return skills
     }
 
     func sendMessage(

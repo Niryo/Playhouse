@@ -55,6 +55,8 @@ struct KanbanBoardView: View {
     @State private var mergedReviewTaskIDs = Set<UUID>()
     @State private var conflictedReviewTaskIDs = Set<UUID>()
     @State private var conflictResolutionTaskID: UUID?
+    /// Prompts that tasks opened by the Skills page's Fix with Agent send when they appear.
+    @State private var skillFixPrompts: [UUID: String] = [:]
     @State private var checkingMergedPullRequests = false
     @State private var mergedPullRequestCheckPending = false
     @State private var mergedPullRequestCheckTimerScheduled = false
@@ -105,8 +107,11 @@ struct KanbanBoardView: View {
                     onConflictResolutionChecked: { resolved in
                         if resolved { conflictedReviewTaskIDs.remove(selectedTask.id) }
                         else { conflictedReviewTaskIDs.insert(selectedTask.id) }
-                    }
+                    },
+                    skillFixPrompt: skillFixPrompts[selectedTask.id],
+                    onOpenTask: openTask(_:sending:)
                 ) {
+                    self.skillFixPrompts[selectedTask.id] = nil
                     self.selectedTask = nil
                     self.isSelectedTaskNew = false
                     self.conflictResolutionTaskID = nil
@@ -547,7 +552,8 @@ struct KanbanBoardView: View {
                 TaskConversationView(
                     task: chatTask, isNewTask: false, isReadOnly: false,
                     conflictResolutionRequested: false,
-                    onConflictResolutionChecked: { _ in }
+                    onConflictResolutionChecked: { _ in },
+                    onOpenTask: openTask(_:sending:)
                 ) {
                     setChatSidebarVisible(false)
                 }
@@ -974,6 +980,30 @@ struct KanbanBoardView: View {
 
     private func setChatSidebarVisible(_ visible: Bool) {
         withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = visible }
+    }
+
+    /// Shows a task the daemon just created, such as one fixing skills, and
+    /// has its conversation send `prompt` once it opens.
+    private func openTask(_ id: UUID, sending prompt: String) {
+        let origin = selectedTask?.id
+        Task { @MainActor in
+            let manager = BoardTaskManager(modelContext: modelContext)
+            // The daemon wrote the task; give this window's store a moment to see it.
+            for _ in 0..<100 {
+                // The user moved on while the store caught up; leave their choice alone.
+                guard selectedTask?.id == origin else { return }
+                if let task = try? manager.taskModel(id) {
+                    skillFixPrompts[id] = prompt
+                    setChatSidebarVisible(false)
+                    isSelectedTaskNew = false
+                    conflictResolutionTaskID = nil
+                    selectedTask = task
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            saveError = "Playhouse created the task but couldn't open it. Find it in Backlog."
+        }
     }
 
     private func openNewTask() {

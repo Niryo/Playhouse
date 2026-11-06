@@ -11030,7 +11030,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
     def assertSamePath(self, actual, expected, message=None):
         self.assertEqual(os.path.realpath(actual), os.path.realpath(expected), message)
 
-    # case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page, opened from the composer's Skills button that replaced the paperclip, lists the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each user skill is shown as usable by both Claude and Codex; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
+    # case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page, opened from the composer's Skills button that replaced the paperclip as a large modal that slides up from the bottom over the dimmed conversation and whose close button returns to the conversation, lists the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each user skill is shown as usable by both Claude and Codex; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
     def test_skills_catalog_lists_repo_global_and_builtin_skills(self):
         manifest = self.skill_manifest
         repository = self.make_skill_repository("skills-catalog-repo", {
@@ -11114,7 +11114,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         missing, _ = self.call_cli("skills", "get", "--task", task["id"], "--skill", "global:no-such-skill", expected_status=3)
         self.assert_failure(missing, "not_found")
 
-    # case-contract: test_skills_create_update_move_and_delete_on_disk | Creating a skill writes SKILL.md with name and description frontmatter into the open Agent Skills layout, ~/.agents/skills for a global skill or the chosen task worktree's .agents/skills for a repository skill; invalid names, a missing description, a duplicate name, and the built-in scope are rejected with nothing written. Editing saves the new SKILL.md and rejects a renamed or description-less frontmatter while keeping the file. Moving a skill between a repository and the global gallery moves its folder and rejects a move onto an existing name. Deleting removes the folder from disk, built-in skills are read-only, and every change is visible to a fresh CLI process and on the Skills page.
+    # case-contract: test_skills_create_update_move_and_delete_on_disk | Creating a skill writes SKILL.md with name and description frontmatter into the open Agent Skills layout, ~/.agents/skills for a global skill or the chosen task worktree's .agents/skills for a repository skill; invalid names, a missing description, a duplicate name, and the built-in scope are rejected with nothing written. Editing saves the new SKILL.md and rejects a renamed or description-less frontmatter while keeping the file. Clicking a skill row opens the editor panel, whose header is the parsed SKILL.md (the skill's name, its description, and the optional license, compatibility, and allowed-tools fields, with a YAML list read as one field) above its instructions; saving there rewrites the header, removes an emptied field, keeps frontmatter Playhouse does not edit, and rejects an unknown field or an empty description while keeping the file. Clicking a built-in skill with a folder opens it read-only, without Save. New Skill uses the same structured header, and a field set there is written into the new SKILL.md. Moving a skill between a repository and the global gallery moves its folder and rejects a move onto an existing name. Deleting removes the folder from disk, built-in skills are read-only, and every change is visible to a fresh CLI process and on the Skills page.
     def test_skills_create_update_move_and_delete_on_disk(self):
         repository = self.make_skill_repository("skills-manage-repo", {})
         task = self.create_skills_task("Skills manage", [repository])
@@ -11162,6 +11162,41 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(updated["description"], "Draft concise release notes")
         self.assertEqual(manifest_path.read_text(encoding="utf-8"), edited)
 
+        # The editor works on the parsed header: name, description, and the
+        # optional Agent Skills fields, with other frontmatter kept as written.
+        manifest_path.write_text(
+            "---\nname: release-notes\ndescription: Draft concise release notes\nallowed-tools:\n  - Read\n  - Bash\nmetadata:\n  owner: docs\n---\n\nGroup changes by area.\n",
+            encoding="utf-8",
+        )
+        detail = self.assert_success(self.call_cli("skills", "get", "--task", task["id"], "--skill", "global:release-notes")[0])
+        self.assertEqual(detail["manifest"]["name"], "release-notes")
+        self.assertEqual(detail["manifest"]["description"], "Draft concise release notes")
+        self.assertEqual(detail["manifest"]["fields"], {"allowed-tools": "Read, Bash"}, "A YAML list reads as one editable field.")
+        self.assertEqual(detail["manifest"]["body"], "Group changes by area.")
+        self.assertEqual(detail["manifest"]["preservedFrontmatter"], ["metadata:", "  owner: docs"])
+        structured = self.assert_success(self.call_cli(
+            "skills", "update", "--task", task["id"], "--skill", "global:release-notes",
+            "--description", "Draft release notes by area", "--field", "license=MIT", "--field", "allowed-tools=",
+            "--body", "List each change under its area.",
+        )[0])
+        self.assertEqual(structured["description"], "Draft release notes by area")
+        self.assertEqual(manifest_path.read_text(encoding="utf-8"),
+                         '---\nname: release-notes\ndescription: "Draft release notes by area"\nlicense: "MIT"\nmetadata:\n  owner: docs\n---\n\nList each change under its area.\n',
+                         "A structured edit rewrites the header, removes an emptied field, and keeps unknown keys.")
+        for arguments in [["--field", "model=opus"], ["--description", "  "]]:
+            self.assert_failure(self.call_cli("skills", "update", "--task", task["id"], "--skill", "global:release-notes",
+                                              *arguments, expected_status=2)[0], "invalid_argument")
+        self.assertIn("List each change under its area.", manifest_path.read_text(encoding="utf-8"), "A rejected structured edit keeps the file.")
+        self.assert_failure(self.call_cli("skills", "update", "--task", task["id"], "--skill", "global:release-notes", expected_status=2)[0], "invalid_argument")
+        fielded = self.assert_success(create("--scope", "global", "--name", "fielded", "--description", "Has header fields",
+                                             "--field", "compatibility=Needs git", "--body", "Steps."))
+        self.assertEqual(fielded["id"], "global:fielded")
+        self.assertEqual((global_folder / "fielded" / "SKILL.md").read_text(encoding="utf-8"),
+                         '---\nname: fielded\ndescription: "Has header fields"\ncompatibility: "Needs git"\n---\n\nSteps.\n')
+        self.assert_failure(create("--scope", "global", "--name", "bad-field", "--description", "Unknown field", "--field", "model=opus", expected_status=2), "invalid_argument")
+        self.assertFalse((global_folder / "bad-field").exists(), "A rejected field writes nothing.")
+        self.assert_success(self.call_cli("skills", "delete", "--task", task["id"], "--skill", "global:fielded")[0])
+
         moved = self.assert_success(self.call_cli("skills", "move", "--task", task["id"], "--skill", repo_skill["id"], "--scope", "global")[0])
         self.assertEqual(moved["id"], "global:repo-new")
         self.assertTrue((global_folder / "repo-new" / "SKILL.md").is_file())
@@ -11178,7 +11213,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
         fresh = self.skill_catalog(task_id=task["id"])
         self.assertEqual(sorted(skill["name"] for skill in fresh["global"]), ["release-notes", "repo-new"])
-        self.assertEqual(self.skills_by_name(fresh["global"])["release-notes"]["description"], "Draft concise release notes")
+        self.assertEqual(self.skills_by_name(fresh["global"])["release-notes"]["description"], "Draft release notes by area")
         self.assertEqual([skill["name"] for skill in fresh["repositories"][0]["skills"]], ["release-notes"])
 
         self.write_skill(self.skills_codex_home / "skills" / ".system", "codex-system-skill", "Bundled with Codex")
@@ -11188,7 +11223,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse((global_folder / "repo-new").exists(), "Deleting removes the skill folder from disk.")
         self.assert_failure(self.call_cli("skills", "get", "--skill", "global:repo-new", expected_status=3)[0], "not_found")
 
-    # case-contract: test_skills_enable_state_and_outside_links_persist | Turning a skill off is stored by Playhouse rather than in either provider's settings, survives fresh CLI processes and reopening the Skills page, and can be turned back on. Making a skill available outside Playhouse writes a real symlink into the other provider's layout (an absolute link in Claude's global skills folder, a relative link inside the repository), after which the skill shows as Linked; an existing file at the link path is left untouched and the request fails with already_exists, removing the outside link deletes only the symlink and keeps the skill, and a skill without a link cannot be unlinked.
+    # case-contract: test_skills_enable_state_and_outside_links_persist | Turning a skill off is stored by Playhouse rather than in either provider's settings, survives fresh CLI processes and reopening the Skills page, and can be turned back on. The small switch flips as soon as it is clicked, and turning a skill on disk on or off never starts a Claude Code session. Making a skill available outside Playhouse writes a real symlink into the other provider's layout (an absolute link in Claude's global skills folder, a relative link inside the repository), after which the skill shows as Linked; an existing file at the link path is left untouched and the request fails with already_exists, removing the outside link deletes only the symlink and keeps the skill, and a skill without a link cannot be unlinked.
     def test_skills_enable_state_and_outside_links_persist(self):
         repository = self.make_skill_repository("skills-link-repo", {
             ".agents/skills/repo-agents/SKILL.md": self.skill_manifest("repo-agents", "Repository agents skill"),
@@ -11206,8 +11241,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
             skills = catalog["global"] if scope == "global" else catalog["repositories"][0]["skills"]
             return self.skills_by_name(skills)[name]
 
-        disabled = self.assert_success(self.call_cli("skills", "disable", "--task", task["id"], "--skill", "global:global-agents")[0])
+        environment = self.install_claude_fixture("claude-fixture-skills-toggle")
+        sessions = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".sessions")
+        disabled = self.assert_success(self.call_cli("skills", "disable", "--task", task["id"], "--skill", "global:global-agents",
+                                                     "--include-bundled", "true", extra_environment=environment)[0])
         self.assertFalse(disabled["enabled"])
+        self.assertFalse(sessions.exists(), "Turning a skill on disk off must not start a Claude Code session.")
         self.assertFalse(skill("global-agents")["enabled"], "Turning a skill off survives a fresh CLI process.")
         self.assertFalse((self.skills_codex_home / "config.toml").exists(), "Codex's config is not written.")
         self.assertFalse((self.skills_home / ".claude" / "settings.json").exists(), "Claude's settings are not written.")
@@ -11236,6 +11275,120 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(link.exists() or link.is_symlink(), "Removing the outside link deletes only the symlink.")
         self.assertTrue((self.skills_home / ".agents" / "skills" / "global-agents" / "SKILL.md").is_file())
         self.assert_failure(self.call_cli("skills", "unlink", "--task", task["id"], "--skill", "global:global-agents", expected_status=2)[0], "invalid_argument")
+
+    # case-contract: test_skills_select_many_and_delete_together | Pressing and holding a skill row, or choosing Select, starts selecting skills: each editable row shows a checkbox that a click toggles, built-in skills show none and cannot be selected, and the header shows how many are selected with Fix with Agent, Delete, and Done. Deleting the selection after one confirmation removes every selected skill folder, repository and global alike, from disk, leaves unselected skills in place, forgets a deleted skill's off state, and ends selecting. A batch that includes a read-only or unknown skill deletes nothing and fails with invalid_argument or not_found.
+    def test_skills_select_many_and_delete_together(self):
+        repository = self.make_skill_repository("skills-select-repo", {
+            ".agents/skills/repo-one/SKILL.md": self.skill_manifest("repo-one", "First repository skill"),
+            ".agents/skills/repo-keep/SKILL.md": self.skill_manifest("repo-keep", "Stays after the bulk delete"),
+        })
+        task = self.create_skills_task("Skills select", [repository])
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        global_folder = self.skills_home / ".agents" / "skills"
+        for name in ["global-one", "global-two"]:
+            self.write_skill(global_folder, name, f"Global skill {name}")
+        self.write_skill(self.skills_codex_home / "skills" / ".system", "codex-system-skill", "Bundled with Codex")
+        self.assert_success(self.call_cli("skills", "disable", "--task", task["id"], "--skill", "global:global-two")[0])
+
+        rejected = self.call_cli("skills", "delete", "--task", task["id"], "--skill", "global:global-one",
+                                 "--skill", "builtin:codex:codex-system-skill", expected_status=2)[0]
+        self.assert_failure(rejected, "invalid_argument")
+        self.assertTrue((global_folder / "global-one").is_dir(), "One read-only skill in the batch deletes nothing.")
+        missing = self.call_cli("skills", "delete", "--task", task["id"], "--skill", "global:global-one",
+                                "--skill", "global:no-such-skill", expected_status=3)[0]
+        self.assert_failure(missing, "not_found")
+        self.assertTrue((global_folder / "global-one").is_dir(), "One unknown skill in the batch deletes nothing.")
+
+        deleted = self.assert_success(self.call_cli(
+            "skills", "delete", "--task", task["id"], "--skill", "global:global-one", "--skill", "global:global-two",
+            "--skill", f"repo:{repository}#repo-one",
+        )[0])
+        self.assertEqual(deleted, {"deleted": True})
+        self.assertFalse((global_folder / "global-one").exists())
+        self.assertFalse((global_folder / "global-two").exists())
+        self.assertFalse((worktree / ".agents" / "skills" / "repo-one").exists(), "A repository skill in the batch is deleted from the worktree.")
+        self.assertTrue((worktree / ".agents" / "skills" / "repo-keep" / "SKILL.md").is_file(), "Unselected skills stay.")
+        fresh = self.skill_catalog(task_id=task["id"])
+        self.assertEqual(fresh["global"], [])
+        self.assertEqual([skill["name"] for skill in fresh["repositories"][0]["skills"]], ["repo-keep"])
+        self.write_skill(global_folder, "global-two", "Recreated with the same name")
+        self.assertTrue(self.skills_by_name(self.skill_catalog(task_id=task["id"])["global"])["global-two"]["enabled"],
+                        "Deleting a skill forgets that it was turned off.")
+
+    # case-contract: test_skills_fix_with_agent_starts_task_for_repo_and_global_skills | A conflicting or invalid skill offers Fix with Agent, and several selected skills can be fixed in one task. Fixing creates a task, on the source task's provider, whose saved prompt teaches the agent the skill format and lists each skill with its problem: repository skills by repository-relative path, to be fixed in the new task's own worktree of the source repository and committed and pushed like any code change, and global skills by absolute path, to be fixed in place with nothing to commit; the global skill folders are opened to the agent as context folders, and fixing only global skills needs no repository. The view switches to the new task's conversation, which sends that prompt as its own composer draft, leaving the composer empty and no unsent draft behind, so the turn runs in the new task's worktree with the global folders reachable. A skill with no problem, a built-in skill, an unknown skill, and a request without a task are rejected without opening a task.
+    def test_skills_fix_with_agent_starts_task_for_repo_and_global_skills(self):
+        manifest = self.skill_manifest
+        repository = self.make_skill_repository("skills-fix-repo", {
+            ".agents/skills/repo-dup/SKILL.md": manifest("repo-dup", "The agents copy"),
+            ".claude/skills/repo-dup/SKILL.md": manifest("repo-dup", "A different Claude copy"),
+            ".agents/skills/repo-ok/SKILL.md": manifest("repo-ok", "Nothing to fix"),
+        })
+        self.write_skill(self.skills_home / ".agents" / "skills", "global-dup", "The global agents copy")
+        self.write_skill(self.skills_home / ".claude" / "skills", "global-dup", "The global Claude copy")
+        broken = self.skills_home / ".agents" / "skills" / "global-broken"
+        broken.mkdir(parents=True)
+        (broken / "SKILL.md").write_text("No frontmatter here.\n", encoding="utf-8")
+        self.write_skill(self.skills_codex_home / "skills" / ".system", "codex-system-skill", "Bundled with Codex")
+        environment = self.install_claude_fixture("claude-fixture-skills-fix")
+        history_path = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".history")
+        source = self.create_skills_task("Skills fix source", [repository], provider="claude")
+        source_worktree = Path(source["repositoryWorktrees"][0]["worktreePath"])
+        tasks_before = len(self.assert_success(self.call_cli("board", "list")[0])["tasks"])
+
+        def fix(*skills, expected_status=0, task_id=source["id"]):
+            arguments = [argument for skill in skills for argument in ("--skill", skill)]
+            return self.call_cli("skills", "fix", "--task", task_id, *arguments, expected_status=expected_status)[0]
+
+        self.assert_failure(fix(f"repo:{repository}#repo-ok", expected_status=2), "invalid_argument")
+        self.assert_failure(fix("builtin:codex:codex-system-skill", expected_status=2), "invalid_argument")
+        self.assert_failure(fix("global:no-such-skill", expected_status=3), "not_found")
+        self.assert_failure(self.call_cli("skills", "fix", "--skill", "global:global-dup", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(len(self.assert_success(self.call_cli("board", "list")[0])["tasks"]), tasks_before, "A rejected fix opens no task.")
+
+        created = self.assert_success(fix(f"repo:{repository}#repo-dup", "global:global-dup", "global:global-broken"))
+        task, prompt = created["task"], created["prompt"]
+        self.assertEqual(task["title"], "Fix skills repo-dup, global-dup, global-broken")
+        self.assertEqual(task["status"], "Backlog")
+        self.assertEqual(task["conversationProvider"], "claude", "The fixing task uses the source task's provider.")
+        self.assertEqual([record["repositoryPath"] for record in task["repositoryWorktrees"]], [str(repository)],
+                         "A repository skill is fixed in the new task's own worktree of its source repository.")
+        self.assertTrue(task["repositoryWorktrees"][0]["isPending"])
+        self.assertEqual(sorted(os.path.realpath(folder) for folder in task["contextFolders"]),
+                         sorted(os.path.realpath(self.skills_home / folder) for folder in [".agents/skills", ".claude/skills"]),
+                         "Global skill folders are opened to the agent so it can fix them in place.")
+        self.assertEqual(task["savedPrompt"], prompt)
+        self.assertIn("commit and push", prompt)
+        self.assertIn("`repo-dup` in skills-fix-repo: `.agents/skills/repo-dup`, `.claude/skills/repo-dup`", prompt)
+        self.assertNotIn(str(source_worktree), prompt, "Repository paths are relative, so they point into the fixing task's worktree.")
+        self.assertIn("not tracked by Git: fix them directly in place", prompt)
+        for folder in [".agents/skills/global-dup", ".claude/skills/global-dup"]:
+            path = self.skills_home / folder
+            self.assertTrue(str(path) in prompt or os.path.realpath(path) in prompt, f"The prompt names the global skill's absolute path {path}.")
+        self.assertIn("`global-broken`", prompt)
+        self.assertIn("frontmatter", prompt)
+        self.assertNotIn("repo-ok", prompt)
+        stored = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(stored["savedPrompt"], prompt, "The fixing task and its prompt are saved for a fresh CLI process.")
+
+        global_only = self.assert_success(fix("global:global-dup"))["task"]
+        self.assertEqual(global_only["title"], "Fix skill global-dup")
+        self.assertEqual(global_only["repositoryWorktrees"], [], "Fixing only global skills needs no repository.")
+        self.assertNotIn("commit and push", self.assert_success(self.call_cli("task", "get", global_only["id"])[0])["savedPrompt"])
+
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", prompt, extra_environment=environment)[0])
+        turn = next(turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText") == prompt)
+        started = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        worktree = started["repositoryWorktrees"][0]
+        self.assertFalse(worktree["isPending"], "Starting the fix creates the task's worktree.")
+        self.assertNotEqual(os.path.realpath(worktree["worktreePath"]), os.path.realpath(source_worktree))
+        self.assertSamePath(turn["cwd"], worktree["worktreePath"])
+        self.assertIsNone(started.get("pendingSubmittedPrompt"), "The sent prompt is no longer pending.")
+        self.assertFalse(started["hasUnsentDraft"], "The sent prompt leaves no unsent draft behind.")
+        self.assertTrue((Path(worktree["worktreePath"]) / ".claude" / "skills" / "repo-dup" / "SKILL.md").is_file(),
+                        "The fixing task's worktree holds the committed skills to fix.")
+        directories = [os.path.realpath(turn["arguments"][index + 1]) for index, value in enumerate(turn["arguments"]) if value == "--add-dir"]
+        for folder in [".agents/skills", ".claude/skills"]:
+            self.assertIn(os.path.realpath(self.skills_home / folder), directories, f"Claude Code can reach the global {folder} folder.")
 
     # case-contract: test_skills_bridge_claude_launch_sees_agents_skills | A Claude turn sees the skills Claude Code does not read natively: Playhouse passes a Playhouse-owned --add-dir wrapper whose .claude/skills links to the task worktree's and the global .agents/skills folders, leaves skills Claude already reads out of the wrapper, and turns disabled skills off for that run with --settings skillOverrides, without writing to the repository or Claude's settings. Using a skill from the Skills page puts /skill-name at the start of the composer and the message reaches Claude Code unchanged. The resumed second turn gets the same wrapper, and turning the skill back on drops the override.
     def test_skills_bridge_claude_launch_sees_agents_skills(self):
