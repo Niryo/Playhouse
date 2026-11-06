@@ -1671,7 +1671,7 @@ struct TaskConversationView: View {
                 .frame(minWidth: 900, minHeight: 600)
             }
         }
-        .overlay { skillsModal }
+        .overlay { skillsPage }
         .task {
             // Synchronous, so the picker shows the cached model name on the
             // first frame instead of "Default" while the conversation and a
@@ -6695,41 +6695,30 @@ struct TaskConversationView: View {
         composerDraft.focusRequest += 1
     }
 
-    /// The skill gallery as a large modal that slides up from the bottom of
-    /// the window over a dimmed conversation.
-    private var skillsModal: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .bottom) {
-                if isShowingSkills {
-                    Color.black.opacity(0.28)
-                        .ignoresSafeArea()
-                        .contentShape(Rectangle())
-                        .onTapGesture { isShowingSkills = false }
-                        .accessibilityHidden(true)
-                        .transition(.opacity)
-                    SkillsPageView(
-                        task: task, manager: conversationManager, onUse: useSkill,
-                        onFixTask: { taskID, prompt in
-                            isShowingSkills = false
-                            onOpenTask(taskID, prompt)
-                        }
-                    ) {
+    /// The skill gallery as a full page that slides in from the trailing side
+    /// over the task, and back out when it closes.
+    private var skillsPage: some View {
+        ZStack {
+            if isShowingSkills {
+                SkillsPageView(
+                    task: task, manager: conversationManager, onUse: useSkill,
+                    onFixTask: { taskID, prompt in
                         isShowingSkills = false
-                        composerDraft.focusRequest += 1
+                        onOpenTask(taskID, prompt)
                     }
-                    .frame(
-                        width: max(geometry.size.width - 64, min(geometry.size.width, 720)),
-                        height: max(geometry.size.height - 40, min(geometry.size.height, 480))
-                    )
-                    .clipShape(UnevenRoundedRectangle(topLeadingRadius: 16, topTrailingRadius: 16))
-                    .shadow(color: .black.opacity(0.3), radius: 24, y: -4)
-                    .transition(.move(edge: .bottom))
+                ) {
+                    isShowingSkills = false
+                    composerDraft.focusRequest += 1
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .shadow(color: .black.opacity(0.25), radius: 16, x: -4)
+                .transition(.move(edge: .trailing))
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
         .allowsHitTesting(isShowingSkills)
-        .animation(.spring(response: 0.38, dampingFraction: 0.9), value: isShowingSkills)
+        .animation(.spring(response: 0.34, dampingFraction: 0.92), value: isShowingSkills)
     }
 
     /// Summarizes how the selected provider's native configuration differs, so a

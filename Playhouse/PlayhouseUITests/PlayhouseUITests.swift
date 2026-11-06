@@ -15575,12 +15575,12 @@ final class PlayhouseUITests: XCTestCase {
                        "The Skills page should finish loading.", file: file, line: line)
     }
 
-    private func selectSkillsTab(_ label: String, file: StaticString = #filePath, line: UInt = #line) {
-        let picker = element("skills-tab-picker")
+    private func selectSkillsTab(_ label: String, picker identifier: String = "skills-tab-picker", file: StaticString = #filePath, line: UInt = #line) {
+        let picker = element(identifier)
         XCTAssertTrue(picker.waitForExistence(timeout: 5), file: file, line: line)
-        let candidates = [picker.radioButtons[label], picker.buttons[label], app.radioButtons[label]]
+        let candidates = [picker.radioButtons[label], picker.buttons[label], picker.descendants(matching: .any)[label]]
         guard let segment = candidates.first(where: { $0.exists }) else {
-            XCTFail("The Skills page has no \(label) tab.", file: file, line: line)
+            XCTFail("\(identifier) has no \(label) tab.", file: file, line: line)
             return
         }
         segment.click()
@@ -15608,7 +15608,7 @@ final class PlayhouseUITests: XCTestCase {
         return (toggle.value as? String) == "1"
     }
 
-    // case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page, opened from the composer's Skills button that replaced the paperclip as a large modal that slides up from the bottom over the dimmed conversation and whose close button returns to the conversation, lists the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each user skill is shown as usable by both Claude and Codex; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
+    // case-contract: test_skills_catalog_lists_repo_global_and_builtin_skills | The Skills page, opened from the composer's Skills button that replaced the paperclip, is a full page that slides in from the side over the task and fills the window, and its back button returns to the conversation. It lists the task's repository skills per repository (from each worktree's .agents/skills and .claude/skills, keyed by the source repository), the user's global skills (~/.agents/skills, Claude's skills folder, and Codex's legacy skills folder), and built-in skills (Codex's bundled .system skills, claude.ai-synced skills, and Claude Code's built-ins read from a provider session). Each user skill is shown as usable by both Claude and Codex; a skill linked into both layouts is one Linked entry, two different skills with the same name in one repository are flagged as a conflict, a SKILL.md without valid frontmatter is flagged invalid and usable by neither provider, a repository without skills shows an empty state, and built-ins name only the provider they ship with. Reading a skill returns its SKILL.md, and an unknown skill is not_found.
     func test_skills_catalog_lists_repo_global_and_builtin_skills() throws {
         let repository = try makeSkillRepository("skills-catalog-repo", skills: [
             ".agents/skills/repo-agents/SKILL.md": skillManifest("repo-agents", "Agents layout repository skill"),
@@ -15634,9 +15634,9 @@ final class PlayhouseUITests: XCTestCase {
         let window = app.windows.firstMatch.frame
         XCTAssertTrue(waitUntil({
             let page = self.element("skills-page").frame
-            return abs(page.maxY - window.maxY) < 2 && page.minY > window.minY + 20 && page.width < window.width
-        }, timeout: 5), "The Skills page is a large modal resting on the window's bottom edge, inset from its top and sides.")
-        XCTAssertGreaterThan(element("skills-page").frame.height, window.height * 0.75, "The Skills modal is big.")
+            return abs(page.minX - window.minX) < 2 && abs(page.maxX - window.maxX) < 2 && abs(page.maxY - window.maxY) < 2
+        }, timeout: 5), "The Skills page settles as a full page spanning the window's width down to its bottom edge, not an inset modal.")
+        XCTAssertGreaterThan(element("skills-page").frame.height, window.height * 0.85, "The Skills page fills the window.")
 
         XCTAssertTrue(element("skills-repo-section-skills-catalog-repo").waitForExistence(timeout: 10))
         XCTAssertTrue(element("skills-repo-section-skills-empty-repo").exists)
@@ -15705,7 +15705,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("message-composer").waitForExistence(timeout: 5))
     }
 
-    // case-contract: test_skills_create_update_move_and_delete_on_disk | Creating a skill writes SKILL.md with name and description frontmatter into the open Agent Skills layout, ~/.agents/skills for a global skill or the chosen task worktree's .agents/skills for a repository skill; invalid names, a missing description, a duplicate name, and the built-in scope are rejected with nothing written. Editing saves the new SKILL.md and rejects a renamed or description-less frontmatter while keeping the file. Clicking a skill row opens the editor panel, whose header is the parsed SKILL.md (the skill's name, its description, and the optional license, compatibility, and allowed-tools fields, with a YAML list read as one field) above its instructions; saving there rewrites the header, removes an emptied field, keeps frontmatter Playhouse does not edit, and rejects an unknown field or an empty description while keeping the file. Clicking a built-in skill with a folder opens it read-only, without Save. New Skill uses the same structured header, and a field set there is written into the new SKILL.md. Moving a skill between a repository and the global gallery moves its folder and rejects a move onto an existing name. Deleting removes the folder from disk, built-in skills are read-only, and every change is visible to a fresh CLI process and on the Skills page.
+    // case-contract: test_skills_create_update_move_and_delete_on_disk | Creating a skill writes SKILL.md with name and description frontmatter into the open Agent Skills layout, ~/.agents/skills for a global skill or the chosen task worktree's .agents/skills for a repository skill; invalid names, a missing description, a duplicate name, and the built-in scope are rejected with nothing written. Editing saves the new SKILL.md exactly as written, keeping frontmatter Playhouse does not parse, and rejects a renamed or description-less frontmatter while keeping the file. Clicking a skill row opens the editor modal straight on its whole SKILL.md, frontmatter included, with no structured header form, and its Preview tab shows that Markdown rendered with the frontmatter as a table; saving there writes the edited file, a description-less edit is rejected in the editor while keeping the file, and after the editor closes the page still answers clicks. A structured CLI edit rewrites the header (reading a YAML list as one field), removes an emptied field, keeps frontmatter Playhouse does not edit, and rejects an unknown field or an empty description while keeping the file. Clicking a built-in skill with a folder opens it read-only, without Save. New Skill asks only for a name, a description, and instructions it can preview, and a header field given to the CLI's create is written into the new SKILL.md. Moving a skill between a repository and the global gallery moves its folder and rejects a move onto an existing name. Deleting removes the folder from disk, built-in skills are read-only, and every change is visible to a fresh CLI process and on the Skills page.
     func test_skills_create_update_move_and_delete_on_disk() throws {
         let repository = try makeSkillRepository("skills-manage-repo", skills: [:])
         // The Skills page reads Claude Code's built-ins from a provider session.
@@ -15745,73 +15745,96 @@ final class PlayhouseUITests: XCTestCase {
         let row = element("skill-row-release-notes")
         row.click()
         let editor = element("skill-editor")
-        XCTAssertTrue(element("skill-editor-panel").waitForExistence(timeout: 5), "Clicking a skill opens its editor panel.")
-        XCTAssertEqual(accessibleLabelOrValue(of: element("skill-editor-name")), "release-notes", "The header shows the parsed name.")
-        let editorDescription = element("skill-editor-description")
-        XCTAssertEqual(editorDescription.value as? String, "Draft release notes", "The header shows the parsed description.")
-        XCTAssertEqual(editor.value as? String, "Summarize merged changes.", "The body is the skill's instructions alone.")
-        editorDescription.click()
-        editorDescription.typeKey("a", modifierFlags: .command)
-        editorDescription.typeKey(.delete, modifierFlags: [])
-        element("skill-editor-save").click()
-        XCTAssertTrue(element("skill-editor-error").waitForExistence(timeout: 5), "An empty description is rejected in the editor.")
-        attachScreenshot(named: "The skill editor rejects an empty description")
-        XCTAssertTrue(try String(contentsOf: manifest, encoding: .utf8).contains("Draft release notes"), "A rejected edit keeps the file.")
-        editorDescription.click()
-        editorDescription.typeText("Draft concise release notes")
+        XCTAssertTrue(element("skill-editor-panel").waitForExistence(timeout: 5), "Clicking a skill opens its editor modal.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("skill-editor-name")), "release-notes", "The editor is titled with the skill's name.")
+        let created = "---\nname: release-notes\ndescription: \"Draft release notes\"\n---\n\nSummarize merged changes.\n"
+        XCTAssertEqual(editor.value as? String, created, "The editor opens the whole SKILL.md, frontmatter included.")
+        for structured in ["skill-editor-description", "skill-editor-field-license", "skill-editor-field-compatibility", "skill-editor-field-allowed-tools"] {
+            XCTAssertFalse(element(structured).exists, "The editor has no structured header field \(structured).")
+        }
+        attachScreenshot(named: "The skill editor opens SKILL.md for editing")
+        selectSkillsTab("Preview", picker: "skill-editor-tab-picker")
+        let preview = element("skill-editor-preview")
+        XCTAssertTrue(preview.waitForExistence(timeout: 5), "The Preview tab shows the Markdown rendered.")
+        XCTAssertFalse(editor.exists, "The Preview tab replaces the text editor.")
+        XCTAssertTrue(element("skill-editor-preview-frontmatter").staticTexts["release-notes"].exists, "The preview shows the frontmatter as a table of its entries.")
+        XCTAssertTrue(preview.staticTexts["Summarize merged changes."].exists, "The preview renders the instructions.")
+        XCTAssertFalse(preview.staticTexts["---"].exists, "The preview does not show the raw frontmatter fences.")
+        attachScreenshot(named: "The skill editor's Preview tab renders the Markdown")
+        selectSkillsTab("Edit", picker: "skill-editor-tab-picker")
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
         editor.click()
         editor.typeKey("a", modifierFlags: .command)
-        editor.typeText("Group changes by area.")
-        attachScreenshot(named: "Editing a skill's parsed header and instructions")
+        editor.typeText("---\nname: release-notes\n---\n\nNo description.\n")
+        element("skill-editor-save").click()
+        XCTAssertTrue(element("skill-editor-error").waitForExistence(timeout: 5), "A description-less SKILL.md is rejected in the editor.")
+        attachScreenshot(named: "The skill editor rejects a SKILL.md without a description")
+        XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8), created, "A rejected edit keeps the file.")
+
+        // Cancel discards the edit, and the page still answers clicks once the editor is gone.
+        element("skill-editor-cancel").click()
+        XCTAssertTrue(waitUntil({ !self.element("skill-editor-panel").exists }, timeout: 5), "Cancel closes the editor.")
+        selectSkillsTab("Repo")
+        XCTAssertTrue(element("skills-empty-skills-manage-repo").waitForExistence(timeout: 5), "After the editor closes, a click on the Repo tab still switches tabs.")
+        selectSkillsTab("Global")
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "A click on the Global tab switches back.")
+        XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8), created, "Cancel discards the edit.")
+        row.click()
+        XCTAssertTrue(element("skill-editor-panel").waitForExistence(timeout: 5), "A click on the skill row opens the editor again after it was closed.")
+        XCTAssertEqual(editor.value as? String, created, "The reopened editor shows the file, not the discarded edit.")
+        let edited = "---\nname: release-notes\ndescription: Draft concise release notes\nmetadata:\n  owner: docs\n---\n\n# Release notes\n\n- Group changes by area.\n"
+        editor.click()
+        editor.typeKey("a", modifierFlags: .command)
+        editor.typeText(edited)
+        selectSkillsTab("Preview", picker: "skill-editor-tab-picker")
+        XCTAssertTrue(waitUntil({ self.element("skill-editor-preview").staticTexts["Release notes"].exists }, timeout: 5), "The preview renders a heading.")
+        XCTAssertTrue(element("skill-editor-preview").staticTexts["Group changes by area."].exists, "The preview renders a list item.")
+        attachScreenshot(named: "Previewing an edited skill before saving")
         element("skill-editor-save").click()
         XCTAssertTrue(waitUntil({ !self.element("skill-editor-panel").exists }, timeout: 10), "Saving closes the editor.")
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("skill-description-release-notes")) == "Draft concise release notes" }, timeout: 10))
-        let edited = "---\nname: release-notes\ndescription: \"Draft concise release notes\"\n---\n\nGroup changes by area.\n"
-        XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8), edited)
+        XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8), edited, "Saving writes the file exactly as edited, keeping frontmatter Playhouse does not parse.")
         let renamed = dataDirectory.appendingPathComponent("skill-edit-renamed.md")
         try skillManifest("other-name", "Renamed").write(to: renamed, atomically: true, encoding: .utf8)
         assertCLIError(try runCLI(["skills", "update", "--task", taskID, "--skill", "global:release-notes", "--content-file", renamed.path], expectedStatus: 2), code: "invalid_argument")
-        let descriptionless = dataDirectory.appendingPathComponent("skill-edit-descriptionless.md")
-        try "---\nname: release-notes\n---\nNo description.\n".write(to: descriptionless, atomically: true, encoding: .utf8)
-        let rejectedEdit = try runCLI(["skills", "update", "--task", taskID, "--skill", "global:release-notes", "--content-file", descriptionless.path], expectedStatus: 2)
-        assertCLIError(rejectedEdit, code: "invalid_argument")
         XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8), edited, "A rejected edit keeps the file.")
 
-        // Optional Agent Skills fields are structured too, and other frontmatter survives an edit.
+        // The CLI's structured edit still reads and rewrites the header fields.
         try "---\nname: release-notes\ndescription: Draft concise release notes\nallowed-tools:\n  - Read\n  - Bash\nmetadata:\n  owner: docs\n---\n\nGroup changes by area.\n"
             .write(to: manifest, atomically: true, encoding: .utf8)
-        row.click()
-        XCTAssertTrue(element("skill-editor-panel").waitForExistence(timeout: 5))
-        let allowedTools = element("skill-editor-field-allowed-tools")
-        XCTAssertEqual(allowedTools.value as? String, "Read, Bash", "A YAML list reads as one editable field.")
-        attachScreenshot(named: "The skill editor shows the optional header fields")
-        allowedTools.click()
-        allowedTools.typeKey("a", modifierFlags: .command)
-        allowedTools.typeKey(.delete, modifierFlags: [])
-        typeIntoField(element("skill-editor-field-license"), text: "MIT")
-        let fieldDescription = element("skill-editor-description")
-        fieldDescription.click()
-        fieldDescription.typeKey("a", modifierFlags: .command)
-        fieldDescription.typeText("Draft release notes by area")
-        editor.click()
-        editor.typeKey("a", modifierFlags: .command)
-        editor.typeText("List each change under its area.")
-        element("skill-editor-save").click()
-        XCTAssertTrue(waitUntil({ !self.element("skill-editor-panel").exists }, timeout: 10))
+        let parsed = try XCTUnwrap(try runCLI(["skills", "get", "--task", taskID, "--skill", "global:release-notes"])["result"] as? [String: Any])
+        XCTAssertEqual((parsed["manifest"] as? [String: Any])?["fields"] as? [String: String], ["allowed-tools": "Read, Bash"], "A YAML list reads as one field.")
+        _ = try runCLI(["skills", "update", "--task", taskID, "--skill", "global:release-notes", "--description", "Draft release notes by area",
+                        "--field", "license=MIT", "--field", "allowed-tools=", "--body", "List each change under its area."])
         XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8),
                        "---\nname: release-notes\ndescription: \"Draft release notes by area\"\nlicense: \"MIT\"\nmetadata:\n  owner: docs\n---\n\nList each change under its area.\n",
-                       "Saving rewrites the header, removes an emptied field, and keeps unknown keys.")
-        let manifestDetail = try XCTUnwrap(try runCLI(["skills", "get", "--task", taskID, "--skill", "global:release-notes"])["result"] as? [String: Any])
-        XCTAssertEqual((manifestDetail["manifest"] as? [String: Any])?["fields"] as? [String: String], ["license": "MIT"])
+                       "A structured edit rewrites the header, removes an emptied field, and keeps unknown keys.")
         assertCLIError(try runCLI(["skills", "update", "--task", taskID, "--skill", "global:release-notes", "--field", "model=opus"], expectedStatus: 2), code: "invalid_argument")
+        assertCLIError(try runCLI(["skills", "update", "--task", taskID, "--skill", "global:release-notes", "--description", "  "], expectedStatus: 2), code: "invalid_argument")
         XCTAssertTrue(try String(contentsOf: manifest, encoding: .utf8).contains("List each change under its area."), "A rejected structured edit keeps the file.")
+        _ = try runCLI(["skills", "create", "--task", taskID, "--scope", "global", "--name", "fielded", "--description", "Has header fields",
+                        "--field", "compatibility=Needs git", "--body", "Steps."])
+        XCTAssertEqual(try String(contentsOf: globalFolder.appendingPathComponent("fielded/SKILL.md"), encoding: .utf8),
+                       "---\nname: fielded\ndescription: \"Has header fields\"\ncompatibility: \"Needs git\"\n---\n\nSteps.\n",
+                       "A header field given to the CLI's create is written into SKILL.md.")
+        _ = try runCLI(["skills", "delete", "--task", taskID, "--skill", "global:fielded"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: globalFolder.appendingPathComponent("fielded").path))
+        row.click()
+        XCTAssertTrue(waitUntil({ (self.element("skill-editor").value as? String)?.contains("license: \"MIT\"") == true }, timeout: 5),
+                      "The editor shows a CLI edit as it is on disk.")
+        element("skill-editor-cancel").click()
+        XCTAssertTrue(waitUntil({ !self.element("skill-editor-panel").exists }, timeout: 5))
 
         element("new-skill-button").click()
         XCTAssertTrue(element("new-skill-name").waitForExistence(timeout: 5))
         typeIntoField(element("new-skill-name"), text: "repo-new")
         typeIntoField(element("new-skill-description"), text: "Repository only")
-        typeIntoField(element("new-skill-field-compatibility"), text: "Needs git")
-        attachScreenshot(named: "New Skill uses the structured header")
+        XCTAssertFalse(element("new-skill-field-compatibility").exists || element("new-skill-field-license").exists,
+                       "New Skill has no structured header fields.")
+        typeIntoField(element("new-skill-body"), text: "## Steps\n\n1. Check the repository.")
+        selectSkillsTab("Preview", picker: "new-skill-tab-picker")
+        XCTAssertTrue(waitUntil({ self.element("new-skill-preview").staticTexts["Steps"].exists }, timeout: 5), "New Skill previews its instructions as Markdown.")
+        attachScreenshot(named: "New Skill asks for a name, a description, and instructions")
         let destination = element("new-skill-scope")
         destination.click()
         let repositoryOption = app.menuItems["skills-manage-repo"]
@@ -15823,8 +15846,8 @@ final class PlayhouseUITests: XCTestCase {
                       "A repository skill is written into the chosen task worktree.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: repository.appendingPathComponent(".agents").path), "The source checkout is left alone.")
         XCTAssertEqual(try String(contentsOf: worktree.appendingPathComponent(".agents/skills/repo-new/SKILL.md"), encoding: .utf8),
-                       "---\nname: repo-new\ndescription: \"Repository only\"\ncompatibility: \"Needs git\"\n---\n\nDescribe when and how to use this skill.\n",
-                       "A header field set in New Skill is written into SKILL.md.")
+                       "---\nname: repo-new\ndescription: \"Repository only\"\n---\n\n## Steps\n\n1. Check the repository.\n",
+                       "New Skill writes the name, description, and instructions into SKILL.md.")
         selectSkillsTab("Repo")
         XCTAssertTrue(element("skill-row-repo-new").waitForExistence(timeout: 10))
         clickSkillMenuItem(skill: "repo-new", item: "skill-move-global-repo-new", title: "Move to Global")
@@ -15867,8 +15890,11 @@ final class PlayhouseUITests: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
         element("skill-row-codex-system-skill").click()
         XCTAssertTrue(element("skill-editor-panel").waitForExistence(timeout: 5), "Clicking a built-in skill shows it.")
-        XCTAssertEqual(element("skill-editor-description").value as? String, "Bundled with Codex")
-        XCTAssertFalse(element("skill-editor-description").isEnabled, "A built-in skill's header is read-only.")
+        let builtinText = element("skill-editor").value as? String
+        XCTAssertTrue(builtinText?.contains("Bundled with Codex") == true, "A built-in skill shows its SKILL.md.")
+        element("skill-editor").click()
+        element("skill-editor").typeText("typed")
+        XCTAssertEqual(element("skill-editor").value as? String, builtinText, "A built-in skill's SKILL.md cannot be edited.")
         XCTAssertFalse(element("skill-editor-save").exists, "A built-in skill cannot be saved.")
         attachScreenshot(named: "A built-in skill opens read-only")
         element("skill-editor-cancel").click()
@@ -15966,7 +15992,7 @@ final class PlayhouseUITests: XCTestCase {
         try XCTUnwrap((try runCLI(["board", "list"])["result"] as? [String: Any])?["tasks"] as? [[String: Any]])
     }
 
-    // case-contract: test_skills_select_many_and_delete_together | Pressing and holding a skill row, or choosing Select, starts selecting skills: each editable row shows a checkbox that a click toggles, built-in skills show none and cannot be selected, and the header shows how many are selected with Fix with Agent, Delete, and Done. Deleting the selection after one confirmation removes every selected skill folder, repository and global alike, from disk, leaves unselected skills in place, forgets a deleted skill's off state, and ends selecting. A batch that includes a read-only or unknown skill deletes nothing and fails with invalid_argument or not_found.
+    // case-contract: test_skills_select_many_and_delete_together | Pressing and holding a skill row starts selecting skills, with no separate Select button: each editable row shows a checkbox that a click toggles, built-in skills show none and cannot be selected, and the header shows how many are selected with Fix with Agent, Delete, and Done. Deleting the selection after one confirmation removes every selected skill folder, repository and global alike, from disk, leaves unselected skills in place, forgets a deleted skill's off state, and ends selecting. A batch that includes a read-only or unknown skill deletes nothing and fails with invalid_argument or not_found.
     func test_skills_select_many_and_delete_together() throws {
         let repository = try makeSkillRepository("skills-select-repo", skills: [
             ".agents/skills/repo-one/SKILL.md": skillManifest("repo-one", "First repository skill"),
@@ -15984,10 +16010,16 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Skills select")
         openSkillsPage()
 
-        // Select, then Done, leaves selecting without acting.
-        element("skills-select-button").click()
+        // There is no Select button: a press and hold is how selecting starts, and Done leaves it.
+        XCTAssertTrue(element("new-skill-button").waitForExistence(timeout: 5))
+        XCTAssertFalse(element("skills-select-button").exists, "The header has no Select button.")
+        element("skill-actions-repo-one").click()
+        XCTAssertTrue(app.menuItems["Delete…"].waitForExistence(timeout: 5), "The actions menu should open.")
+        XCTAssertFalse(app.menuItems["Select"].exists, "The actions menu has no Select item.")
+        app.typeKey(.escape, modifierFlags: [])
+        element("skill-row-repo-one").press(forDuration: 1.0)
         XCTAssertTrue(element("skill-select-repo-one").waitForExistence(timeout: 5), "Selecting shows a checkbox on each row.")
-        XCTAssertEqual(selectionCount(), "0 selected")
+        XCTAssertFalse(element("skill-editor-panel").exists, "A press and hold selects rather than opening the editor.")
         element("skills-selection-done").click()
         XCTAssertTrue(waitUntil({ !self.element("skill-select-repo-one").exists }, timeout: 5), "Done stops selecting.")
         XCTAssertTrue(element("skill-toggle-repo-one").exists, "Rows show their controls again.")
@@ -16026,7 +16058,7 @@ final class PlayhouseUITests: XCTestCase {
         clickDialogButton("confirm-delete-skill", title: "Delete")
         XCTAssertTrue(waitUntil({ !self.element("skill-row-global-one").exists && !self.element("skill-row-global-two").exists }, timeout: 10),
                       "Deleted skills leave the page.")
-        XCTAssertTrue(element("skills-select-button").waitForExistence(timeout: 5), "Deleting the selection ends selecting.")
+        XCTAssertTrue(element("new-skill-button").waitForExistence(timeout: 5), "Deleting the selection ends selecting.")
         attachScreenshot(named: "Global tab after deleting several skills")
         XCTAssertFalse(FileManager.default.fileExists(atPath: globalFolder.appendingPathComponent("global-one").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: globalFolder.appendingPathComponent("global-two").path))
