@@ -2839,9 +2839,9 @@ struct TaskConversationView: View {
             if !isReadOnly {
                 Button { removeConversationRepository(repository) } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 6.5, weight: .bold))
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 14, height: 14)
+                        .frame(width: 20, height: 20)
                         .background(WorkspaceTheme.panelBackground, in: Circle())
                         .overlay(Circle().strokeBorder(Color.primary.opacity(0.16), lineWidth: 1))
                         .contentShape(Circle())
@@ -2851,7 +2851,7 @@ struct TaskConversationView: View {
                 .nativeHelp("Remove \(name) from this task")
                 .accessibilityLabel("Remove \(name)")
                 .accessibilityIdentifier("remove-conversation-repository-\(name)")
-                .offset(x: 4, y: -4)
+                .offset(x: 6, y: -6)
             }
         }
     }
@@ -6863,6 +6863,10 @@ struct TaskConversationView: View {
                     .font(.system(size: 13))
                     .focused($focusedRepositoryField, equals: field)
                     .onSubmit { saveConversationRepository(repository, field: field) }
+                    .onKeyPress(.escape) {
+                        cancelRepositoryFieldEdit(repository)
+                        return .handled
+                    }
                     .accessibilityIdentifier(identifier)
                     .padding(.leading, 9).padding(.trailing, 34).padding(.vertical, 6)
                     .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))

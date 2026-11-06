@@ -4266,7 +4266,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertLessThan(abs(badgeAfterSend.frame.midY - title.frame.midY), 8, "Repository badges should stay on the fixed title row after the timeline scrolls.")
     }
 
-    // case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field dismisses the edit without saving. The settings popover is wider than before with a larger title.
+    // case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field or pressing Escape dismisses the edit without saving. The settings popover is wider than before with a larger title, and the repository chip's remove button is a larger target.
     func test_task_repository_settings_validate_persist_and_lock_after_start() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -4279,6 +4279,10 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: title)
         let badge = element("conversation-repository-badge-primary")
         XCTAssertTrue(badge.waitForExistence(timeout: 5))
+        let removeBadgeButton = element("remove-conversation-repository-primary")
+        XCTAssertGreaterThanOrEqual(removeBadgeButton.frame.width, 20, "The repository chip's remove button should be an easy target.")
+        XCTAssertGreaterThanOrEqual(removeBadgeButton.frame.height, 20, "The repository chip's remove button should be an easy target.")
+        attachScreenshot(named: "Repository chip with enlarged remove button", fullScreen: true)
 
         let initial = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
         let initialBranch = try XCTUnwrap(initial["branch"] as? String)
@@ -4340,6 +4344,16 @@ final class PlayhouseUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.25)
         XCTAssertEqual(try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, initialBranchFrom, "A dismissed edit must not be saved.")
         attachScreenshot(named: "Clicking outside the field dismisses the edit unsaved", fullScreen: true)
+
+        element("conversation-repository-branch-from-edit").click()
+        XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
+        replaceText(branchFromField, with: "escaped-edit")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(branchFromField), "Escape should dismiss the edit.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("conversation-repository-branch-from-value")), initialBranchFrom, "An escaped edit must not change the shown value.")
+        Thread.sleep(forTimeInterval: 0.25)
+        XCTAssertEqual(try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, initialBranchFrom, "An escaped edit must not be saved.")
+        attachScreenshot(named: "Escape dismisses the edit unsaved", fullScreen: true)
 
         element("conversation-repository-branch-from-edit").click()
         XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
