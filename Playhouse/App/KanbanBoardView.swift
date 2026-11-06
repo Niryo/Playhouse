@@ -2,6 +2,23 @@ import AppKit
 import SwiftData
 import SwiftUI
 
+/// The standalone chat sidebar's width, which the user sets by dragging its right border.
+enum ChatSidebarLayout {
+    static let widthKey = "chatSidebarWidth"
+    static let defaultWidth: CGFloat = 460
+    static let minimumWidth: CGFloat = 320
+    /// The board's own minimum width (see the board's `minWidth`).
+    static let minimumBoardWidth: CGFloat = 980
+
+    /// The window grows to fit the sidebar and the board's minimum width, so the sidebar can
+    /// widen only until that total reaches the screen, and never below its default width.
+    static func clampedWidth(_ width: CGFloat) -> CGFloat {
+        let screenWidth = (NSApp.keyWindow?.screen ?? NSScreen.main)?.visibleFrame.width ?? 0
+        let maximum = max(defaultWidth, screenWidth - minimumBoardWidth)
+        return min(max(width, minimumWidth), maximum)
+    }
+}
+
 struct KanbanBoardView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
@@ -56,6 +73,9 @@ struct KanbanBoardView: View {
     @State private var boardScrollerInset = KanbanBoardView.legacyScrollerInset()
     @State private var chatTask: StandaloneChat?
     @State private var isOpeningChatSidebar = false
+    @AppStorage(ChatSidebarLayout.widthKey, store: WorkspaceSettings.preferencesStore)
+    private var chatSidebarWidth = Double(ChatSidebarLayout.defaultWidth)
+    @State private var chatSidebarResizeStartWidth: CGFloat?
 
     /// Provider-owning operations run in the bridge daemon.
     private var remoteConversations: RemoteConversationManager {
@@ -63,7 +83,8 @@ struct KanbanBoardView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
+        let sidebarWidth = ChatSidebarLayout.clampedWidth(CGFloat(chatSidebarWidth))
+        return HStack(spacing: 0) {
             if isShowingChatSidebar, selectedTask == nil, let chatTask {
                 TaskConversationView(
                     task: chatTask, isNewTask: false, isReadOnly: false,
@@ -72,17 +93,58 @@ struct KanbanBoardView: View {
                 ) {
                     withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
                 }
-                .frame(width: 460)
+                .frame(width: sidebarWidth)
                 .transition(.move(edge: .leading).combined(with: .opacity))
                 .id(chatTask.id)
                 // Without a container, this identifier replaces the conversation controls' own.
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("chat-sidebar")
-                Divider()
+                chatSidebarResizeHandle(width: sidebarWidth)
             }
             mainContent
         }
         .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
+    }
+
+    /// The chat sidebar's right border; dragging it right widens the chat and left narrows it.
+    private func chatSidebarResizeHandle(width: CGFloat) -> some View {
+        Divider()
+            .overlay {
+                // A wide invisible strip makes the 1pt border easy to grab.
+                Color.clear
+                    .frame(width: 17)
+                    .contentShape(Rectangle())
+                    .hoverCursor(.resizeLeftRight)
+                    .gesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                            .onChanged { value in
+                                if chatSidebarResizeStartWidth == nil {
+                                    // Held for the whole drag, so the pointer can leave the thin border.
+                                    NSCursor.resizeLeftRight.push()
+                                }
+                                let start = chatSidebarResizeStartWidth ?? width
+                                chatSidebarResizeStartWidth = start
+                                chatSidebarWidth = Double(ChatSidebarLayout.clampedWidth(
+                                    start + value.translation.width
+                                ))
+                            }
+                            .onEnded { _ in
+                                if chatSidebarResizeStartWidth != nil { NSCursor.pop() }
+                                chatSidebarResizeStartWidth = nil
+                            }
+                    )
+                    .onDisappear {
+                        // A sidebar closed mid-drag may never end the gesture.
+                        if chatSidebarResizeStartWidth != nil {
+                            NSCursor.pop()
+                            chatSidebarResizeStartWidth = nil
+                        }
+                    }
+                    .accessibilityElement()
+                    .accessibilityLabel("Resize chat")
+                    .accessibilityValue("\(Int(width.rounded())) points")
+                    .accessibilityIdentifier("chat-sidebar-resize-handle")
+            }
     }
 
     private var mainContent: some View {
@@ -106,7 +168,7 @@ struct KanbanBoardView: View {
             }
         }
         .background(WorkspaceTheme.windowBackground)
-        .frame(minWidth: 980, minHeight: 640)
+        .frame(minWidth: ChatSidebarLayout.minimumBoardWidth, minHeight: 640)
         .onAppear {
             // The board renders from its own @Query, not the board.list path, so it has to
             // convert a chat still stored as a hidden task itself or that row shows as a card.
