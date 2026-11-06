@@ -61,6 +61,10 @@ struct KanbanBoardView: View {
         RemoteConversationManager(daemon: conversationRuntime.client, runtime: conversationRuntime, modelContext: modelContext)
     }
 
+    private var isChatOverlayVisible: Bool {
+        isShowingChatSidebar && selectedTask == nil && chatTask != nil
+    }
+
     var body: some View {
         mainContent
     }
@@ -86,7 +90,9 @@ struct KanbanBoardView: View {
             }
         }
         .background(WorkspaceTheme.windowBackground)
-        .frame(minWidth: 980, minHeight: 640)
+        // The open chat adds its width to the board's minimum, so the content-sized window grows
+        // to keep the pushed columns visible, as it did when the chat sat beside the board.
+        .frame(minWidth: 980 + (isChatOverlayVisible ? chatSidebarWidth : 0), minHeight: 640)
         .onAppear {
             // The board renders from its own @Query, not the board.list path, so it has to
             // convert a chat still stored as a hidden task itself or that row shows as a card.
@@ -235,14 +241,14 @@ struct KanbanBoardView: View {
     }
 
     private var boardContent: some View {
-        VStack(spacing: 0) {
-            boardHeader
+        ZStack(alignment: .topLeading) {
+            VStack(spacing: 0) {
+                boardHeader
 
-            Rectangle()
-                .fill(Color.primary.opacity(0.07))
-                .frame(height: 1)
+                Rectangle()
+                    .fill(Color.primary.opacity(0.07))
+                    .frame(height: 1)
 
-            ZStack(alignment: .topLeading) {
                 HStack(spacing: 0) {
                     boardSidebar
 
@@ -250,7 +256,7 @@ struct KanbanBoardView: View {
                         .fill(Color.primary.opacity(0.07))
                         .frame(width: 1)
 
-                    if isShowingChatSidebar, selectedTask == nil, chatTask != nil {
+                    if isChatOverlayVisible {
                         Color.clear
                             .frame(width: max(0, chatSidebarWidth - boardSidebarWidth - 1))
                             .accessibilityHidden(true)
@@ -336,32 +342,12 @@ struct KanbanBoardView: View {
                         }
                     }
                 }
-
-                if isShowingChatSidebar, selectedTask == nil, let chatTask {
-                    TaskConversationView(
-                        task: chatTask, isNewTask: false, isReadOnly: false,
-                        conflictResolutionRequested: false,
-                        onConflictResolutionChecked: { _ in }
-                    ) {
-                        withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
-                    }
-                    .frame(width: chatSidebarWidth)
-                    .frame(maxHeight: .infinity, alignment: .topLeading)
-                    .overlay(alignment: .trailing) {
-                        Rectangle()
-                            .fill(Color.primary.opacity(0.07))
-                            .frame(width: 1)
-                    }
-                    .transition(.move(edge: .leading).combined(with: .opacity))
-                    .id(chatTask.id)
-                    // Without a container, this identifier replaces the conversation controls' own.
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("chat-sidebar")
-                }
             }
-            .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            standaloneChatOverlay
         }
+        .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task(id: draggedTaskID) {
             // SwiftUI reports no end for a drag that lands outside every drop target (for
             // example a card dropped back in place), and the drag session consumes the
@@ -430,6 +416,32 @@ struct KanbanBoardView: View {
             } catch {
                 presentSaveError(error.localizedDescription)
                 archiveSearchResults = []
+            }
+        }
+    }
+
+    private var standaloneChatOverlay: some View {
+        Group {
+            if isShowingChatSidebar, selectedTask == nil, let chatTask {
+                TaskConversationView(
+                    task: chatTask, isNewTask: false, isReadOnly: false,
+                    conflictResolutionRequested: false,
+                    onConflictResolutionChecked: { _ in }
+                ) {
+                    setChatSidebarVisible(false)
+                }
+                .frame(width: chatSidebarWidth)
+                .frame(maxHeight: .infinity, alignment: .topLeading)
+                .overlay(alignment: .trailing) {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.07))
+                        .frame(width: 1)
+                }
+                .transition(.move(edge: .leading).combined(with: .opacity))
+                .id(chatTask.id)
+                // Without a container, this identifier replaces the conversation controls' own.
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("chat-sidebar")
             }
         }
     }
@@ -546,7 +558,7 @@ struct KanbanBoardView: View {
         .background(WorkspaceTheme.panelBackground.opacity(0.62))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Kanban sidebar")
-        .accessibilityHidden(isShowingChatSidebar && selectedTask == nil && chatTask != nil)
+        .accessibilityHidden(isChatOverlayVisible)
     }
 
     private var boardHeader: some View {
@@ -567,6 +579,7 @@ struct KanbanBoardView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .accessibilityHidden(isChatOverlayVisible)
 
             Spacer(minLength: 20)
 
@@ -810,7 +823,7 @@ struct KanbanBoardView: View {
 
     private func openChatSidebar() {
         if isShowingChatSidebar {
-            withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
+            setChatSidebarVisible(false)
             return
         }
         guard !isOpeningChatSidebar else { return }
@@ -833,11 +846,15 @@ struct KanbanBoardView: View {
                     throw BridgeCommandError(code: "operation_failed", message: "The standalone chat could not be opened.")
                 }
                 chatTask = chat
-                withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = true }
+                setChatSidebarVisible(true)
             } catch {
                 saveError = error.localizedDescription
             }
         }
+    }
+
+    private func setChatSidebarVisible(_ visible: Bool) {
+        withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = visible }
     }
 
     private func openNewTask() {

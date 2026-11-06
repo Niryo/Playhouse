@@ -5229,7 +5229,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(reopened?["id"] as? String, legacyID, "Migration must run once, not create a second chat.")
     }
 
-    // case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, the Changes sidebar, and the no-repository-selected banner. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn never triggers the private task-outcome reminders, because the chat is told not to report an outcome; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer. Opening a board task while the chat sidebar is showing replaces it with that task's conversation view instead of showing both at once, and returning to the board reveals the chat sidebar again, with the chat's own model left untouched by the unrelated task. The visible chat panel overlays the narrow board sidebar and hides its controls from accessibility navigation while open, without moving the logo header; it pushes the columns to the panel’s right edge; closing chat reveals the sidebar and restores the columns.
+    // case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, the Changes sidebar, and the no-repository-selected banner. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn never triggers the private task-outcome reminders, because the chat is told not to report an outcome; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer. Opening a board task while the chat sidebar is showing replaces it with that task's conversation view instead of showing both at once, and returning to the board reveals the chat sidebar again, with the chat's own model left untouched by the unrelated task. The visible chat panel opens at full board-content height, overlaps the logo header and narrow board sidebar, and hides the covered branding and sidebar controls from accessibility navigation while open; it raises the board's minimum width by the chat panel width, so the window grows to keep the shifted columns visible; it pushes the columns to the panel’s right edge; closing chat reveals the sidebar and moves the columns back beside it while the window keeps its grown width.
     func test_standalone_chat_separate_model_and_pages_round_trip() throws {
         let fixtureSource = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureSource.path), "The prepared Codex fixture is missing or not executable.")
@@ -5249,15 +5249,36 @@ final class PlayhouseUITests: XCTestCase {
         let boardHeader = element(containingAccessibilityText: "Kanban header")
         let boardSidebar = element(withAccessibilityLabel: "Kanban sidebar")
         let backlogColumn = element("column-backlog")
+        let reviewColumn = element("column-review")
+        let mainWindow = app.windows.firstMatch
+        let windowFrameBeforeOpeningChat = mainWindow.frame
         let headerFrameBeforeOpeningChat = boardHeader.frame
         let sidebarFrameBeforeOpeningChat = boardSidebar.frame
         let backlogColumnFrameBeforeOpeningChat = backlogColumn.frame
 
         element("chat-sidebar-button").click()
         XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10), "Clicking Chat should slide in the sidebar.")
+        XCTAssertTrue(
+            waitUntil({ mainWindow.frame.width > windowFrameBeforeOpeningChat.width + 1 }, timeout: 5),
+            "Opening chat should grow the window to fit the columns beside the chat."
+        )
+        XCTAssertTrue(reviewColumn.waitForExistence(timeout: 5), "The rightmost review column should remain present after the window grows.")
+        let columnsViewport = element("board-columns-scroll-view")
+        // Read the geometry once the slide-in and window growth have settled.
+        XCTAssertTrue(
+            waitUntil({
+                let review = reviewColumn.frame
+                let viewport = columnsViewport.frame
+                return review.width >= 260 && review.minX >= viewport.minX
+                    && review.maxX <= viewport.maxX && review.maxX <= mainWindow.frame.maxX
+            }, timeout: 5),
+            "Growing the window should keep the rightmost board column fully inside the board viewport and window."
+        )
         let chatFrame = element("chat-sidebar").frame
-        XCTAssertEqual(boardHeader.frame, headerFrameBeforeOpeningChat, "Opening chat should leave the logo header in place.")
+        XCTAssertLessThanOrEqual(chatFrame.minY, headerFrameBeforeOpeningChat.minY, "The full-height chat panel should begin at the top of the logo header.")
+        XCTAssertEqual(chatFrame.maxY, sidebarFrameBeforeOpeningChat.maxY, accuracy: 1, "The chat panel should extend to the bottom of the board content.")
         XCTAssertFalse(element(withAccessibilityLabel: "Kanban sidebar").exists, "The covered board sidebar should not remain in accessibility navigation while chat is open.")
+        XCTAssertFalse(app.images["Playhouse logo"].exists, "The covered logo should not remain in accessibility navigation while chat is open.")
         XCTAssertTrue(chatFrame.contains(sidebarFrameBeforeOpeningChat), "The open chat panel should cover the board sidebar.")
         XCTAssertGreaterThan(
             backlogColumn.frame.minX,
@@ -5268,6 +5289,17 @@ final class PlayhouseUITests: XCTestCase {
             backlogColumn.frame.minX,
             chatFrame.maxX,
             "The board columns should begin at or to the right of the chat panel."
+        )
+        let backlogColumnFrameWhileChatOpen = backlogColumn.frame
+        let reviewColumnFrame = reviewColumn.frame
+        let columnsViewportFrame = columnsViewport.frame
+        XCTAssertGreaterThanOrEqual(reviewColumnFrame.width, 260, "The review column should be fully visible rather than clipped by the scroll viewport.")
+        XCTAssertGreaterThanOrEqual(reviewColumnFrame.minX, columnsViewportFrame.minX, "The review column should begin within the board viewport.")
+        XCTAssertLessThanOrEqual(reviewColumnFrame.maxX, columnsViewportFrame.maxX, "The review column should end within the board viewport.")
+        XCTAssertLessThanOrEqual(
+            reviewColumnFrame.maxX,
+            mainWindow.frame.maxX,
+            "Growing the window should keep the rightmost board column inside the visible window."
         )
         XCTAssertTrue(element("message-composer").waitForExistence(timeout: 10), "The sidebar should reuse the standard chat composer.")
         XCTAssertFalse(element("task-status-message").exists, "Standalone chat must not show task status.")
@@ -5662,14 +5694,23 @@ final class PlayhouseUITests: XCTestCase {
 
         element("back-to-board-button").click()
         XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5), "Returning to the board should slide the chat sidebar away.")
-        XCTAssertEqual(boardHeader.frame, headerFrameBeforeOpeningChat, "Closing chat should leave the logo header in place.")
+        // As before the board sidebar existed, the window keeps the width it grew to.
+        XCTAssertGreaterThan(mainWindow.frame.width, windowFrameBeforeOpeningChat.width + 1, "Closing chat should keep the window's grown width.")
+        XCTAssertEqual(boardHeader.frame.origin, headerFrameBeforeOpeningChat.origin, "Closing chat should leave the logo header in place.")
+        XCTAssertEqual(boardHeader.frame.height, headerFrameBeforeOpeningChat.height, "Closing chat should leave the logo header's height unchanged.")
         XCTAssertTrue(element(withAccessibilityLabel: "Kanban sidebar").waitForExistence(timeout: 5), "Closing chat should restore the board sidebar to accessibility navigation.")
+        XCTAssertTrue(app.images["Playhouse logo"].exists, "Closing chat should restore the logo to accessibility navigation.")
         XCTAssertEqual(boardSidebar.frame, sidebarFrameBeforeOpeningChat, "Closing chat should reveal the sidebar in its original position.")
-        XCTAssertEqual(
-            backlogColumn.frame.minX,
-            backlogColumnFrameBeforeOpeningChat.minX,
-            accuracy: 1,
-            "Closing chat should return the board columns to their original position."
+        // The kept width can leave room to spare, so the columns return beside the sidebar
+        // rather than to their exact original x.
+        XCTAssertTrue(
+            waitUntil({
+                let backlog = backlogColumn.frame
+                return backlog.minX < backlogColumnFrameWhileChatOpen.minX - 1
+                    && backlog.minX >= boardSidebar.frame.maxX
+                    && reviewColumn.frame.maxX <= columnsViewport.frame.maxX
+            }, timeout: 5),
+            "Closing chat should move the board columns back beside the sidebar, still fully inside the board viewport."
         )
         attachScreenshot(named: "Board layout restored after closing chat")
     }
