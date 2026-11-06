@@ -524,6 +524,10 @@ struct KanbanBoardView: View {
         .accessibilityIdentifier("board-search-bar")
     }
 
+    private var runningTaskCountByProvider: [ConversationProvider: Int] {
+        tasks.filter { $0.status == .inProgress }.reduce(into: [:]) { $0[$1.conversationProvider, default: 0] += 1 }
+    }
+
     private var boardSidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
             Button {} label: {
@@ -539,6 +543,8 @@ struct KanbanBoardView: View {
             .nativeHelp("Placeholder sidebar button")
 
             Spacer(minLength: 0)
+
+            AgentsInfoView(client: conversationRuntime.client, runningProviders: runningTaskCountByProvider)
         }
         .padding(12)
         .frame(width: boardSidebarWidth)

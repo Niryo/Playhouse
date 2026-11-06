@@ -610,6 +610,47 @@ def run_cpu_attribution_server():
     return 0
 
 
+ACCOUNT_METHODS = ("account/read", "account/rateLimits/read", "account/login/start", "account/logout")
+
+
+def account_rate_limits(used_primary, used_secondary):
+    now = int(time.time())
+    return {"limitId": "codex", "limitName": None, "planType": "plus", "rateLimitReachedType": None,
+            "primary": {"usedPercent": used_primary, "windowDurationMins": 300, "resetsAt": now + 8040},
+            "secondary": {"usedPercent": used_secondary, "windowDurationMins": 10080, "resetsAt": now + 4 * 86400},
+            "credits": {"hasCredits": True, "unlimited": False, "balance": "12.50"}}
+
+
+def handle_account_request(message):
+    """The app-server account methods Playhouse's Agents info block uses. The
+    account lives in `<executable>.account` so a test can sign it out or in."""
+    state_path = Path(str(sys.argv[0]) + ".account")
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {
+        "loggedIn": True, "email": "codex-fixture@example.com", "used": [30, 62]}
+    method = message["method"]
+    reply = lambda result: write({"jsonrpc": "2.0", "id": message["id"], "result": result})
+    if method == "account/read":
+        account = {"type": "chatgpt", "email": state["email"], "planType": "plus"} if state["loggedIn"] else None
+        reply({"account": account, "requiresOpenaiAuth": True})
+    elif method == "account/rateLimits/read":
+        if not state["loggedIn"]:
+            write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32600, "message": "Not signed in."}})
+            return
+        snapshot = account_rate_limits(*state["used"])
+        reply({"rateLimits": snapshot, "rateLimitsByLimitId": {"codex": snapshot}})
+    elif method == "account/logout":
+        state_path.write_text(json.dumps({"loggedIn": False, "email": None, "used": [0, 0]}), encoding="utf-8")
+        reply({})
+    elif method == "account/login/start":
+        state = {"loggedIn": True, "email": "codex-second@example.com", "used": [7, 20]}
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        reply({"type": "chatgpt", "authUrl": "https://example.invalid/codex-login", "loginId": "fixture-login"})
+        write({"jsonrpc": "2.0", "method": "account/login/completed",
+               "params": {"success": True, "loginId": "fixture-login", "error": None}})
+        write({"jsonrpc": "2.0", "method": "account/rateLimits/updated",
+               "params": {"rateLimits": account_rate_limits(*state["used"])}})
+
+
 def main():
     global THREAD_ID, TURN_ID
     if "-cpu-attribution" in os.path.basename(sys.argv[0]):
@@ -785,6 +826,9 @@ def main():
                     "message": "Fixture thread resume failed after receiving fixture-secret.",
                 }})
                 return
+        if message.get("method") in ACCOUNT_METHODS and "id" in message:
+            handle_account_request(message)
+            return
         if message.get("method") == "initialized":
             return
         if "method" in message and "id" not in message:

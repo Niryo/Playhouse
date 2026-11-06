@@ -48,6 +48,8 @@ shared_sources=(
   "${repository_root}/Playhouse/App/ClaudeCodeClient.swift"
   "${repository_root}/Playhouse/App/ProviderRequestLog.swift"
   "${repository_root}/Playhouse/App/ProcessCPUSampler.swift"
+  "${repository_root}/Playhouse/App/AgentUsage.swift"
+  "${repository_root}/Playhouse/App/AgentUsageStore.swift"
   "${repository_root}/Playhouse/App/ConversationTranscriptStore.swift"
   "${repository_root}/Playhouse/App/StandaloneChatStore.swift"
   "${repository_root}/Playhouse/App/BridgeCore.swift"

@@ -427,6 +427,16 @@ enum PlayhouseCLI {
             return BridgeRequest(command: "workspace.suggest", arguments: [
                 "parent": .string(try requiredFlag("--parent", flags: flags).first!)
             ])
+        case "usage":
+            switch rest.first {
+            case "get":
+                return BridgeRequest(command: "usage.get", arguments: ["refresh": .boolean(rest.dropFirst().contains("--refresh"))])
+            case "login", "switch-account":
+                guard rest.count == 2 else { throw CLIError.usage("Use: playhouse usage \(rest[0]) <codex|claude>") }
+                return BridgeRequest(command: "usage.\(rest[0])", arguments: ["provider": .string(rest[1])])
+            default:
+                throw CLIError.usage("Use: playhouse usage get [--refresh]|login <codex|claude>|switch-account <codex|claude>")
+            }
         case "settings":
             guard let operation = rest.first else { throw CLIError.usage("Missing settings operation.") }
             switch operation {
@@ -761,6 +771,7 @@ enum PlayhouseCLI {
       playhouse chat page close-turn <chat-id> --continues <true|false> [--new-title <title>] [--summary-hint <text>]
       playhouse workspace suggest --parent <path>
       playhouse workspace repos list
+      playhouse usage get [--refresh]|login <codex|claude>|switch-account <codex|claude>
       playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>
       playhouse task token-usage <task-id>
       playhouse task token-waste <task-id>

@@ -733,6 +733,9 @@ final class ClaudeSessionRunner {
             handleSystem(message)
         case "result":
             handleResult(message)
+        case "rate_limit_event":
+            // Account-wide, so it feeds the shared store rather than this turn.
+            AgentUsageStore.shared(scope: owner?.runtimeScope).recordClaudeEvent(message)
         default:
             break
         }
@@ -1779,7 +1782,9 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         }
     }
 
-    private var executablePath: String? { executableOverride ?? Self.findExecutable() }
+    fileprivate var loginProcess: Process?
+
+    fileprivate var executablePath: String? { executableOverride ?? Self.findExecutable() }
 
     static func findExecutable() -> String? {
         let home = NSHomeDirectory()
@@ -1797,6 +1802,92 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         let home = NSHomeDirectory()
         paths.append(contentsOf: ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])
         return Array(NSOrderedSet(array: paths)).compactMap { $0 as? String }.joined(separator: ":")
+    }
+}
+
+// MARK: - Account and usage
+
+extension ClaudeCodeClient {
+    var isInstalled: Bool { executablePath != nil }
+
+    /// Reads the sign-in state with `claude auth status`, a local call that
+    /// needs no network. Usage itself only arrives as `rate_limit_event`
+    /// messages while a task runs, so it is not read here.
+    func refreshAgentUsage() async {
+        let store = AgentUsageStore.shared(scope: runtimeScope)
+        store.setInstalled(.claude, isInstalled)
+        guard isInstalled, let output = await runAuthCommand(["auth", "status", "--json"]),
+              let status = try? JSONSerialization.jsonObject(with: output.data) as? [String: Any],
+              let loggedIn = status["loggedIn"] as? Bool else { return }
+        let subscription = (status["subscriptionType"] as? String).map { $0.prefix(1).uppercased() + $0.dropFirst() }
+        store.setAuth(
+            .claude,
+            loggedIn: loggedIn,
+            account: (status["email"] as? String) ?? (status["authMethod"] as? String),
+            plan: subscription
+        )
+    }
+
+    /// Starts `claude auth login`, which opens the browser itself and exits once
+    /// the sign-in finishes; the block refreshes then.
+    func startAccountLogin() throws {
+        guard loginProcess?.isRunning != true else { return }
+        let process = try makeAuthProcess(["auth", "login"])
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        let store = AgentUsageStore.shared(scope: runtimeScope)
+        process.terminationHandler = { [weak self] _ in
+            Task { @MainActor in
+                self?.loginProcess = nil
+                store.setLoginInProgress(.claude, false)
+                await self?.refreshAgentUsage()
+            }
+        }
+        try process.run()
+        loginProcess = process
+        store.setLoginInProgress(.claude, true)
+    }
+
+    func logoutAccount() async {
+        _ = await runAuthCommand(["auth", "logout"])
+        AgentUsageStore.shared(scope: runtimeScope).setAuth(.claude, loggedIn: false, account: nil, plan: nil)
+    }
+
+    private func makeAuthProcess(_ arguments: [String]) throws -> Process {
+        guard let executable = executablePath else { throw ClientError.cliNotFound }
+        let command = ConversationProviderFixture.launchCommand(executable: executable, arguments: arguments)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: command.executable)
+        process.arguments = command.arguments
+        var environment = PlayhouseProcessEnvironment.current
+        environment["PATH"] = Self.expandedSearchPath(environment["PATH"])
+        environment["HOME"] = environment["HOME"] ?? NSHomeDirectory()
+        ConversationProcessEnvironment.forwardPlayhouseBridgeEnvironment(&environment, dataDirectoryOverride: dataDirectoryOverride)
+        if let configDirectoryOverride { environment["CLAUDE_CONFIG_DIR"] = configDirectoryOverride }
+        process.environment = environment
+        return process
+    }
+
+    /// Runs a short `claude` command and returns its output, or nil if it could
+    /// not start, failed, or did not finish within `timeout`.
+    private func runAuthCommand(_ arguments: [String], timeout: TimeInterval = 20) async -> (data: Data, status: Int32)? {
+        guard let process = try? makeAuthProcess(arguments) else { return nil }
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                do { try process.run() } catch { continuation.resume(returning: nil); return }
+                let timer = DispatchWorkItem { if process.isRunning { process.terminate() } }
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                timer.cancel()
+                continuation.resume(returning: process.terminationStatus == 0 ? (data, process.terminationStatus) : nil)
+            }
+        }
     }
 }
 

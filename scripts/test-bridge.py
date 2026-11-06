@@ -8258,7 +8258,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         probe = self.data_directory / "codex-question-ownership-probe"
         core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
-                "ConversationModel", "ClaudeCodeClient", "ProviderRequestLog", "ProcessCPUSampler", "ConversationTranscriptStore",
+                "ConversationModel", "ClaudeCodeClient", "ProviderRequestLog", "ProcessCPUSampler", "AgentUsage", "AgentUsageStore", "ConversationTranscriptStore",
                 "StandaloneChatStore", "BridgeCore"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine"):
@@ -9834,6 +9834,135 @@ class PlayhouseBridgeTests(unittest.TestCase):
         entries = {entry["path"]: entry for entry in self.assert_success(response)["unviewed"]}
         self.assertEqual(set(entries), {"post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"})
         self.assertNotIn("local-ahead.txt", entries)
+
+    # case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude, which only reports usage while a task runs, starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the placeholder button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running.
+    def test_agents_info_shows_provider_usage_and_accounts(self):
+        source = Path(__file__).resolve().parent / "fixtures"
+        codex = self.data_directory / "codex-fixture-agents-info"
+        claude = self.data_directory / "claude-fixture-agents-info"
+        shutil.copyfile(source / "codex-app-server-fixture.py", codex)
+        shutil.copyfile(source / "claude-code-fixture.py", claude)
+        codex.chmod(0o755)
+        claude.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(codex),
+            "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude),
+        }
+
+        def usage(*extra):
+            result = self.assert_success(self.call_cli("usage", "get", *extra, extra_environment=environment)[0])
+            return {entry["provider"]: entry for entry in result["providers"]}
+
+        def wait_for(provider, predicate, message, refresh=False):
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                state = usage(*(["--refresh"] if refresh else []))[provider]
+                if predicate(state):
+                    return state
+                time.sleep(0.2)
+            self.fail(message)
+
+        def windows(state):
+            return {window["id"]: window for window in (state.get("snapshot") or {}).get("windows", [])}
+
+        # Validation: the provider must be one Playhouse knows.
+        unknown, _ = self.call_cli("usage", "login", "gemini", extra_environment=environment, expected_status=2)
+        self.assert_failure(unknown, "invalid_argument")
+
+        # A refresh reads both providers. Codex reports usage from its app-server;
+        # Claude only reports while a task runs, so it has an account and no usage yet.
+        providers = usage("--refresh")
+        codex_state, claude_state = providers["codex"], providers["claude"]
+        self.assertTrue(codex_state["installed"] and codex_state["loggedIn"])
+        self.assertEqual((codex_state["account"], codex_state["plan"]), ("codex-fixture@example.com", "Plus"))
+        codex_windows = windows(codex_state)
+        self.assertEqual([codex_windows[key]["label"] for key in ("primary", "secondary")], ["5h", "Weekly"])
+        self.assertEqual([codex_windows[key]["usedPercent"] for key in ("primary", "secondary")], [30, 62])
+        self.assertGreater(codex_windows["primary"]["resetsAt"], time.time())
+        self.assertEqual(codex_state["snapshot"]["credits"], {"hasCredits": True, "unlimited": False, "balance": "12.50"})
+        self.assertTrue(claude_state["installed"] and claude_state["loggedIn"])
+        self.assertEqual((claude_state["account"], claude_state["plan"]), ("claude-fixture@example.com", "Max"))
+        self.assertIsNone(claude_state.get("snapshot"), "Claude has no usage before a task reports it.")
+
+        # A Claude turn's rate_limit_event fills its windows from the stream.
+        task_id = self.create_task("Claude usage", provider="claude")["id"]
+        event_path = Path(str(claude) + ".rate-limit-event")
+
+        def claude_turn(info):
+            event_path.write_text(json.dumps({"type": "rate_limit_event", "rate_limit_info": info}), encoding="utf-8")
+            self.assert_success(self.call_cli(
+                "conversation", "send", task_id, "--message", "Say hello.", extra_environment=environment
+            )[0])
+
+        now = int(time.time())
+        claude_turn({
+            "status": "allowed_warning", "rateLimitType": "five_hour", "utilization": 0.83, "resetsAt": now + 3600,
+            "unifiedWindows": {
+                "five_hour": {"utilization": 0.83, "resetsAt": now + 3600},
+                "seven_day": {"utilization": 0.41, "resetsAt": now + 3 * 86400},
+            },
+        })
+        claude_state = usage()["claude"]
+        claude_windows = windows(claude_state)
+        self.assertEqual([claude_windows[key]["label"] for key in ("five_hour", "seven_day")], ["5h", "Weekly"])
+        self.assertEqual([claude_windows[key]["usedPercent"] for key in ("five_hour", "seven_day")], [83, 41])
+        self.assertEqual(claude_state["snapshot"]["status"], "warning")
+        persisted = list(self.data_directory.rglob("agent-usage.json"))
+        self.assertTrue(persisted, "The last-known usage should be saved so it survives a restart.")
+        saved = json.loads(persisted[0].read_text(encoding="utf-8"))
+        self.assertEqual(saved["claude"]["snapshot"]["windows"][0]["usedPercent"], 83)
+
+        # A window whose reset time has passed reads as reset, with no provider call.
+        claude_turn({"status": "rejected", "rateLimitType": "five_hour", "utilization": 1.0, "resetsAt": now - 10})
+        claude_state = usage()["claude"]
+        expired = windows(claude_state)["five_hour"]
+        self.assertTrue(expired["isReset"])
+        self.assertEqual(expired["usedPercent"], 0)
+        self.assertIsNone(expired.get("resetsAt"))
+        self.assertEqual(claude_state["snapshot"]["status"], "allowed", "The limit lifts with the window that held it.")
+        self.assertEqual(windows(claude_state)["seven_day"]["usedPercent"], 41)
+
+        # Switching the Codex account signs out, clears usage, and signs in again;
+        # the new account's usage arrives with the login's own notifications.
+        switched = self.assert_success(self.call_cli("usage", "switch-account", "codex", extra_environment=environment)[0])
+        self.assertEqual(switched["loginURL"], "https://example.invalid/codex-login")
+        codex_state = wait_for(
+            "codex", lambda state: state.get("account") == "codex-second@example.com" and windows(state).get("primary", {}).get("usedPercent") == 7,
+            "Codex never showed the switched account's usage.",
+        )
+        self.assertEqual(windows(codex_state)["secondary"]["usedPercent"], 20)
+
+        # Switching the Claude account runs the CLI's logout and login and drops the old usage.
+        switched = self.assert_success(self.call_cli("usage", "switch-account", "claude", extra_environment=environment)[0])
+        self.assertIsNone(switched["loginURL"])
+        claude_state = wait_for(
+            "claude", lambda state: state.get("account") == "claude-second@example.com" and not state["loginInProgress"],
+            "Claude never showed the switched account.",
+        )
+        self.assertEqual(claude_state["plan"], "Pro")
+        self.assertIsNone(claude_state.get("snapshot"), "The old account's usage must not carry over.")
+
+        # A signed-out provider has no account or usage; logging in restores it.
+        Path(str(codex) + ".account").write_text(json.dumps({"loggedIn": False, "email": None, "used": [0, 0]}), encoding="utf-8")
+        Path(str(claude) + ".auth-state").write_text(json.dumps({"loggedIn": False}), encoding="utf-8")
+        providers = usage("--refresh")
+        for provider in ("codex", "claude"):
+            self.assertIs(providers[provider]["loggedIn"], False)
+            self.assertIsNone(providers[provider].get("account"))
+            self.assertIsNone(providers[provider].get("snapshot"))
+        self.assert_success(self.call_cli("usage", "login", "claude", extra_environment=environment)[0])
+        wait_for("claude", lambda state: state["loggedIn"] is True and state.get("account") == "claude-second@example.com",
+                 "A Claude login should restore the account.")
+        login = self.assert_success(self.call_cli("usage", "login", "codex", extra_environment=environment)[0])
+        self.assertEqual(login["loginURL"], "https://example.invalid/codex-login")
+        wait_for("codex", lambda state: state["loggedIn"] is True and state.get("account") == "codex-second@example.com",
+                 "A Codex login should restore the account.")
 
     def install_claude_fixture(self, name):
         """Installs the Claude Code protocol fixture and returns its turn environment."""

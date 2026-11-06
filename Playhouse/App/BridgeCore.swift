@@ -8076,6 +8076,10 @@ final class PlayhouseBridgeRuntime {
                 )
             }
 
+            if let storeDirectory {
+                AgentUsageStore.shared(scope: dataDirectory).configurePersistence(directory: URL(fileURLWithPath: storeDirectory, isDirectory: true))
+            }
+
             let result: BridgeValue
             switch request.command {
             case "status":
@@ -8458,6 +8462,20 @@ final class PlayhouseBridgeRuntime {
                 let repositories = try request.requiredStrings("repositories")
                 try settings.setLastSelectedRepositories(repositories)
                 result = .object(["lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string))])
+            case "usage.get":
+                result = try Self.value(await AgentUsageService.report(
+                    clients: conversationClients(), refresh: request.arguments["refresh"]?.bool == true
+                ))
+            case "usage.login", "usage.switch-account":
+                let name = try request.requiredString("provider")
+                guard let provider = ConversationProvider(rawValue: name) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Unknown provider '\(name)'. Valid providers: codex, claude.")
+                }
+                let clients = conversationClients()
+                let url = request.command == "usage.login"
+                    ? try await AgentUsageService.login(provider, clients: clients)
+                    : try await AgentUsageService.switchAccount(provider, clients: clients)
+                result = .object(["loginURL": url.map(BridgeValue.string) ?? .null])
             case "conversation.history":
                 let taskID = try request.requiredUUID("taskID")
                 let clients = conversationClients()
