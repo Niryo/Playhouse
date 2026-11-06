@@ -5,32 +5,31 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Answers `sizeThatFits` for `CodeBlockTextView` and `SelectableAnnotationText`. One layout pass
-/// proposes several widths, so heights are kept per width until the text changes, and a single
-/// text system is reused instead of a throwaway one being built and torn down for each call.
+/// proposes several widths, so heights are kept per width until the text changes. The height is
+/// measured with the text view's own layout manager: a separate copy of the text laid out the
+/// whole reply a second time at every new width, as on each frame of a chat resize, before the
+/// view laid out its own copy again to draw it. Measured this way, the view's frame then takes
+/// the width its text was just laid out for, and drawing reuses that layout.
 private final class TextHeightMeasurer {
-    private let storage = NSTextStorage()
-    private let layoutManager = NSLayoutManager()
-    private let container = NSTextContainer(size: .zero)
     private var heights: [CGFloat: CGFloat] = [:]
     /// The text last measured, as it was given.
     private(set) var text: NSAttributedString?
 
-    init() {
-        container.lineFragmentPadding = 0
-        layoutManager.addTextContainer(container)
-        storage.addLayoutManager(layoutManager)
-    }
-
-    /// Replaces the measured text, which forgets every height measured for the previous text.
+    /// Records the text the view now shows, which forgets every height measured for the previous text.
     func setText(_ text: NSAttributedString) {
-        storage.replaceChangedTail(with: text, previous: self.text)
         self.text = text.copy() as? NSAttributedString
         heights.removeAll()
     }
 
-    func height(forWidth width: CGFloat) -> CGFloat {
+    func height(forWidth width: CGFloat, in view: NSTextView) -> CGFloat {
         if let height = heights[width] { return height }
-        container.size = NSSize(width: width, height: .greatestFiniteMagnitude)
+        guard let layoutManager = view.layoutManager, let container = view.textContainer else { return 0 }
+        // The container tracks the view's width, which SwiftUI sets to this proposal next, so the
+        // layout made here is usually the one the view draws; `MeasuredTextView` puts the
+        // container back to its own width before drawing when a later question moved it.
+        if container.size.width != width {
+            container.size = NSSize(width: width, height: .greatestFiniteMagnitude)
+        }
         layoutManager.ensureLayout(for: container)
         let height = layoutManager.usedRect(for: container).height
         // A live window resize proposes a new width every frame; only the latest few recur.
@@ -472,7 +471,7 @@ private struct CodeBlockTextView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSTextView {
         // TextKit 1 lays out and draws all of the text; see SelectableAnnotationText.
-        let view = NSTextView(usingTextLayoutManager: false)
+        let view = MeasuredTextView(usingTextLayoutManager: false)
         view.isEditable = false
         view.isSelectable = true
         view.drawsBackground = false
@@ -497,7 +496,7 @@ private struct CodeBlockTextView: NSViewRepresentable {
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView, context: Context) -> CGSize? {
         let width = max(40, proposal.width ?? 500)
-        let contentHeight = context.coordinator.height(forWidth: width)
+        let contentHeight = context.coordinator.height(forWidth: width, in: nsView)
         return CGSize(width: width, height: ceil(contentHeight) + 2)
     }
 }
@@ -796,7 +795,23 @@ private struct ResponseCommentHoverCard: View {
     }
 }
 
-private final class CommentTrackingTextView: NSTextView {
+/// A text view whose height `TextHeightMeasurer` measures with its own layout manager. Measuring
+/// sets the text container to each width SwiftUI asks about, and a width answered from the
+/// measurer's cache leaves the container where the last uncached question put it, so the
+/// container is matched to the view's own width again before the text is drawn.
+private class MeasuredTextView: NSTextView {
+    override func viewWillDraw() {
+        if let textContainer {
+            let width = bounds.width - 2 * textContainerInset.width
+            if textContainer.size.width != width {
+                textContainer.size = NSSize(width: width, height: .greatestFiniteMagnitude)
+            }
+        }
+        super.viewWillDraw()
+    }
+}
+
+private final class CommentTrackingTextView: MeasuredTextView {
     var hoverTrackingOwner: AnyObject?
     /// The whole message this block belongs to; copying a fully selected block copies it all.
     var wholeMessageText: String?
@@ -1206,7 +1221,10 @@ struct TaskConversationView: View {
     }
 
     private var progressMessages: [ConversationMessage] {
-        messages.filter { progressMessageIDs.contains($0.id) }
+        // Computed once: reading the property inside the filter rebuilt the set for every message.
+        let ids = progressMessageIDs
+        guard !ids.isEmpty else { return [] }
+        return messages.filter { ids.contains($0.id) }
     }
 
     private var conversationMessages: [ConversationMessage] {
@@ -1528,7 +1546,7 @@ struct TaskConversationView: View {
     }
 
     private var shouldShowActivityDisclosure: Bool {
-        !activities.isEmpty || !progressMessages.isEmpty || isResponding || completedResponseDuration != nil || hasCompletedAssistantResponse
+        !activities.isEmpty || !progressMessageIDs.isEmpty || isResponding || completedResponseDuration != nil || hasCompletedAssistantResponse
     }
 
     private var hasCompletedAssistantResponse: Bool {
@@ -3147,23 +3165,32 @@ struct TaskConversationView: View {
         }
     }
 
+    /// What every row of one transcript pass shares, worked out once for the pass.
+    private struct TranscriptRowContext {
+        let inlineTools: [String: [ConversationActivity]]
+        /// The message the activity disclosure sits above, or nil when it is not shown above one.
+        let activityDisclosureAnchorID: String?
+        let latestTurnStartID: String?
+        let conversationMessages: [ConversationMessage]
+    }
+
     /// One message of the rendered window with the rows anchored to it: its
     /// page separator and activity disclosure above, and the boundaries, goal
     /// achievements, tool calls, and compactions that follow it.
     @ViewBuilder
-    private func transcriptRows(for message: ConversationMessage, inlineTools: [String: [ConversationActivity]]) -> some View {
+    private func transcriptRows(for message: ConversationMessage, context: TranscriptRowContext) -> some View {
         if let page = standaloneChatPageSeparator(before: message) {
             standaloneChatPageSeparator(page)
                 .id("chat-page-separator-\(page.id)-\(message.id)")
         }
-        if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
+        if message.id == context.activityDisclosureAnchorID {
             activityList
         }
         transcriptEntry(message)
             .id(message.id)
             // The question itself starts the newest turn, below any page
             // separator, so a pin lands on the bubble.
-            .layoutValue(key: ConversationLatestTurnStartKey.self, value: message.id == latestConversationTurnStartID)
+            .layoutValue(key: ConversationLatestTurnStartKey.self, value: message.id == context.latestTurnStartID)
         ForEach(providerBoundaries.filter {
             renderedAnchorMessageID(for: boundaryAnchorID(for: $0)) == message.id
         }) { boundary in
@@ -3175,14 +3202,14 @@ struct TaskConversationView: View {
             goalAchievementTimelineRow(entry)
                 .id(entry.id)
         }
-        ForEach(inlineTools[message.id] ?? []) { activity in
+        ForEach(context.inlineTools[message.id] ?? []) { activity in
             if let pageID = activity.recalledChatPageID {
                 ChatPageRecallRow(activityID: activity.id, pageID: pageID)
             } else {
                 ToolCallTimelineRow(activity: activity)
             }
         }
-        let nextOrder = conversationMessages.first(where: {
+        let nextOrder = context.conversationMessages.first(where: {
             guard let current = message.timelineOrder, let candidate = $0.timelineOrder else { return false }
             return candidate > current
         })?.timelineOrder
@@ -3249,7 +3276,14 @@ struct TaskConversationView: View {
                 // SwiftUI reports a pass later, left it stale and opened blank
                 // overscroll below the transcript.
                 let leadingGoalEntries = goalAchievementTimelineEntries.filter { goalAchievementAnchorMessageID(for: $0) == nil }
-                let inlineTools = inlineToolCalls.byMessageID
+                // Worked out once per pass rather than once per row: each walks the whole transcript, and
+                // every row of it is rebuilt whenever the transcript's width changes, as while resizing the chat.
+                let rowContext = TranscriptRowContext(
+                    inlineTools: inlineToolCalls.byMessageID,
+                    activityDisclosureAnchorID: shouldShowActivityDisclosure ? activityDisclosureAnchorID : nil,
+                    latestTurnStartID: latestConversationTurnStartID,
+                    conversationMessages: conversationMessages
+                )
                 ConversationTranscriptLayout(
                     spacing: 16,
                     minimumLatestTurnHeight: max(0, viewport.size.height - Self.conversationVerticalPadding - Self.conversationScrollEndHeight)
@@ -3301,7 +3335,7 @@ struct TaskConversationView: View {
                             providerBoundaryRow(boundary)
                         }
                         ForEach(renderedConversationMessages) { message in
-                            transcriptRows(for: message, inlineTools: inlineTools)
+                            transcriptRows(for: message, context: rowContext)
                         }
                         ForEach(liveChatPageRecalls) { activity in
                             if let pageID = activity.recalledChatPageID {
@@ -7482,7 +7516,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
         let width = max(40, proposal.width ?? 500)
         // Laying the text out again is the costliest part of a transcript re-render, and its
         // result only changes with the width or with the text, which `update` replaces.
-        let contentHeight = context.coordinator.measurer.height(forWidth: width)
+        let contentHeight = context.coordinator.measurer.height(forWidth: width, in: nsView)
         return CGSize(width: width, height: ceil(contentHeight) + 2 * nsView.textContainerInset.height + 2)
     }
 

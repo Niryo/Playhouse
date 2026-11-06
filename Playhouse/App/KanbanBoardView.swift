@@ -19,14 +19,42 @@ enum ChatSidebarLayout {
     }
 }
 
+/// The standalone chat's conversation. The board re-renders on every frame of a chat resize, and
+/// a conversation view rebuilt from it, closures and all, re-ran its whole transcript each time;
+/// compared by the chat it shows, it updates only from its own state and the chat's model. Any
+/// input added here that can change must also be compared in `==`, or its changes are ignored.
+private struct StandaloneChatPanel: View, Equatable {
+    let chat: StandaloneChat
+    let onClose: () -> Void
+
+    static func == (lhs: StandaloneChatPanel, rhs: StandaloneChatPanel) -> Bool {
+        lhs.chat === rhs.chat
+    }
+
+    var body: some View {
+        TaskConversationView(
+            task: chat, isNewTask: false, isReadOnly: false,
+            conflictResolutionRequested: false,
+            onConflictResolutionChecked: { _ in },
+            onBack: onClose
+        )
+    }
+}
+
 struct KanbanBoardView: View {
     private let boardSidebarWidth: CGFloat = 184
     @AppStorage(ChatSidebarLayout.widthKey, store: WorkspaceSettings.preferencesStore)
     private var storedChatSidebarWidth = Double(ChatSidebarLayout.defaultWidth)
     @State private var chatSidebarResizeStartWidth: CGFloat?
+    /// The width while a drag is under way; it is saved to the preferences only when the drag ends.
+    @State private var chatSidebarDragWidth: CGFloat?
+    /// The width the chat was last laid out at during a drag. Laying out every reply again on each
+    /// frame of the drag made it stutter, so the chat catches up only when the edge pauses, and
+    /// when the drag ends.
+    @State private var chatSidebarReflowWidth: CGFloat?
 
     private var chatSidebarWidth: CGFloat {
-        ChatSidebarLayout.clampedWidth(CGFloat(storedChatSidebarWidth))
+        chatSidebarDragWidth ?? ChatSidebarLayout.clampedWidth(CGFloat(storedChatSidebarWidth))
     }
 
     @Environment(\.modelContext) private var modelContext
@@ -503,10 +531,12 @@ struct KanbanBoardView: View {
             .fill(Color.primary.opacity(0.07))
             .frame(width: 1)
             .frame(maxHeight: .infinity)
-            .overlay {
-                // A wide invisible strip makes the 1pt border easy to grab.
+            .overlay(alignment: .leading) {
+                // A wide invisible strip makes the 1pt border easy to grab. It starts at the border
+                // and extends only over the board, so the chat transcript's scroller, which runs
+                // along the border's inner side, keeps its own pointer and drags.
                 Color.clear
-                    .frame(width: 17)
+                    .frame(width: 9)
                     .contentShape(Rectangle())
                     .hoverCursor(.resizeLeftRight)
                     .gesture(
@@ -518,21 +548,16 @@ struct KanbanBoardView: View {
                                 }
                                 let start = chatSidebarResizeStartWidth ?? width
                                 chatSidebarResizeStartWidth = start
-                                storedChatSidebarWidth = Double(ChatSidebarLayout.clampedWidth(
-                                    start + value.translation.width
-                                ))
+                                if chatSidebarReflowWidth == nil { chatSidebarReflowWidth = start }
+                                chatSidebarDragWidth = ChatSidebarLayout.clampedWidth(start + value.translation.width)
                             }
                             .onEnded { _ in
-                                if chatSidebarResizeStartWidth != nil { NSCursor.pop() }
-                                chatSidebarResizeStartWidth = nil
+                                endChatSidebarResize()
                             }
                     )
                     .onDisappear {
                         // A sidebar closed mid-drag may never end the gesture.
-                        if chatSidebarResizeStartWidth != nil {
-                            NSCursor.pop()
-                            chatSidebarResizeStartWidth = nil
-                        }
+                        endChatSidebarResize()
                     }
                     .accessibilityElement()
                     .accessibilityLabel("Resize chat")
@@ -541,17 +566,37 @@ struct KanbanBoardView: View {
             }
     }
 
+    private func endChatSidebarResize() {
+        guard chatSidebarResizeStartWidth != nil else { return }
+        NSCursor.pop()
+        if let chatSidebarDragWidth {
+            storedChatSidebarWidth = Double(chatSidebarDragWidth)
+        }
+        chatSidebarResizeStartWidth = nil
+        chatSidebarDragWidth = nil
+        chatSidebarReflowWidth = nil
+    }
+
     private var standaloneChatOverlay: some View {
         Group {
             if isShowingChatSidebar, selectedTask == nil, let chatTask {
-                TaskConversationView(
-                    task: chatTask, isNewTask: false, isReadOnly: false,
-                    conflictResolutionRequested: false,
-                    onConflictResolutionChecked: { _ in }
-                ) {
+                StandaloneChatPanel(chat: chatTask) {
                     setChatSidebarVisible(false)
                 }
-                .frame(width: chatSidebarWidth)
+                .equatable()
+                // While the edge moves, the chat keeps the width it was last laid out at, and the panel
+                // clips or reveals the rest; it reflows when the edge rests and when the drag ends.
+                .frame(width: chatSidebarReflowWidth ?? chatSidebarWidth)
+                .frame(width: chatSidebarWidth, alignment: .leading)
+                .background(WorkspaceTheme.windowBackground)
+                .clipped()
+                .task(id: chatSidebarDragWidth) {
+                    // Each move restarts this wait, so the chat reflows once the edge rests.
+                    guard let chatSidebarDragWidth else { return }
+                    try? await Task.sleep(for: .milliseconds(150))
+                    guard !Task.isCancelled else { return }
+                    chatSidebarReflowWidth = chatSidebarDragWidth
+                }
                 .frame(maxHeight: .infinity, alignment: .topLeading)
                 .overlay(alignment: .trailing) {
                     chatSidebarResizeHandle(width: chatSidebarWidth)
