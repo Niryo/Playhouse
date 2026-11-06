@@ -9,6 +9,7 @@ struct PlayhouseApp: App {
     private let appPreferences: UserDefaults
     @StateObject private var conversationRuntime: ConversationRuntimeModel
     @StateObject private var cpuUsageModel: TaskCPUUsageModel
+    @StateObject private var pluginLibrary = PluginLibraryModel()
 
     private var windowTitle: String {
         let configuredTitle = ProcessInfo.processInfo.environment["PLAYHOUSE_WINDOW_TITLE"]?
@@ -70,8 +71,25 @@ struct PlayhouseApp: App {
                 .help("Search tasks")
                 .keyboardShortcut("f", modifiers: .command)
             }
+            CommandMenu("Plugins") { PluginsMenuContent(library: pluginLibrary) }
             CommandMenu("Debug") { DebugConversationImportMenu(modelContainer: modelContainer) } // DEBUG-IMPORT:
         }
+
+        Window("Component Catalog", id: "component-catalog") {
+            ComponentCatalogView()
+                .defaultAppStorage(appPreferences)
+        }
+        .defaultSize(width: 1180, height: 820)
+
+        WindowGroup("Plugin", id: "plugin", for: PluginViewRef.self) { $ref in
+            if let ref = ref {
+                PluginWindowView(ref: ref)
+                    .defaultAppStorage(appPreferences)
+            }
+        }
+        .defaultSize(width: 520, height: 420)
+        // Plugin windows open from the Plugins menu with a view; no empty "New Plugin Window".
+        .commandsRemoved()
 
         Settings {
             WorkspaceSettingsView()

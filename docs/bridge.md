@@ -48,6 +48,11 @@ The daemon accepts a versioned, length-prefixed JSON request over its socket, st
 | `skills enable\|disable --skill <skill-id>` | Turn a skill on or off in Playhouse sessions without touching either provider's settings |
 | `skills link\|unlink --skill <skill-id>` | Write or remove a real symlink into the other provider's layout so the skill also works outside Playhouse |
 | `skills bridge --task <task-id> [--message <text>]` | Prepare the task's skill bridge wrappers, exactly as its next launch does, and report what that launch passes each provider; with `--message`, also the skills the message invokes |
+| `plugin list` | List the plugin folders in `<data>/Plugins` with their views and validation issues |
+| `plugin validate --path <dir> \| --id <id>` | Validate a plugin folder against the component catalog: manifest fields, unknown components and props, binding syntax, and actions logic.js must define. Issues carry their file and JSON path; the command exits 1 when any are found |
+| `plugin components [--type <component>]` | The component catalog: sections, every component's typed props and events, the common props and semantic colors |
+| `plugin check-showcases [--path <showcase-root>]` | Check the Component Catalog's showcases (the app's bundled ones by default): each validates, every component appears in one, and components with events have an interactive one. Exits 1 when any check fails |
+| `plugin new --id <id> [--template view\|showcase] [--section <section>] [--path <parent>]` | Scaffold a working plugin, in `<data>/Plugins` by default; a showcase lands in `<path>/<section>/NN-<id>` |
 
 For example:
 
@@ -79,6 +84,10 @@ At each turn's launch, Playhouse bridges the skills a provider would not otherwi
 - Codex shares one app-server across tasks, so it gets `skills/extraRoots/set` with every task's wrapper under `<data>/skill-bridge/codex/<key>`, and each thread starts with a `config.skills.config` that disables other tasks' bridged skills and the task's disabled skills by path. A `/skill-name` in the message is also sent to Codex as a structured `skill` input, since Codex has no slash commands. A thread that is already loaded keeps the skill configuration it started with.
 
 Wrappers are content addressed and never changed once written, so concurrent launches can share them; ones unused for 14 days are removed. A skill named twice in one scope with different contents is reported as a conflict and not bridged; each provider keeps its own copy. `skills link` writes a real symlink (relative inside a repository) for use outside Playhouse. Requests from a test bundle (`.e2e.` builds) with an isolated data directory read skills from `<data>/skills-home`, so tests never see the host's skills; development worktree builds read the user's real skills.
+
+## Plugins
+
+Plugins are folders in `<data>/Plugins/<plugin-id>/` holding `plugin.json`, `view.json` and an optional `logic.js`; see `docs/plugins/README.md`. They open from the app menu's Plugins menu, which also opens the Component Catalog. The plugin core (`Playhouse/App/Plugins/Core`) loads, validates and runs them, and is compiled into the app, the daemon (for the `plugin` commands) and `playhouse-plugin-dev`, which runs one plugin live without the app. The core may use only Foundation and JavaScriptCore: the runner is built with nothing else, so a SwiftUI import there breaks the build.
 
 ## Shared implementation
 

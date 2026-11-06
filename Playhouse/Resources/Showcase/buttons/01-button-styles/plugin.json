@@ -1,0 +1,14 @@
+{
+  "id": "button-styles",
+  "name": "Button styles",
+  "version": "1.0.0",
+  "description": "Buttons come in bordered, prominent, borderless and plain styles, with an optional icon and a destructive role.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Button styles"
+      }
+    ]
+  }
+}

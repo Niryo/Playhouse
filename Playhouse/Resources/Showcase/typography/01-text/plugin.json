@@ -1,0 +1,14 @@
+{
+  "id": "text",
+  "name": "Text",
+  "version": "1.0.0",
+  "description": "text shows a run of text with a style, weight, color, monospacing and a line limit.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Text"
+      }
+    ]
+  }
+}

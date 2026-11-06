@@ -15,6 +15,12 @@ These rules govern development work in this repository. They describe the develo
 - Use `scripts/playhouse.sh` for semantic Playhouse actions and state reads. It builds the app-bundled CLI when needed and sends versioned JSON requests to the bridge daemon (`playhouse-daemon`, bundled beside the CLI in `Contents/MacOS`) over its Unix domain socket, starting the daemon on demand, without opening a window. The "CLI/XPC" suite name used below is historical; the bridge no longer uses XPC.
 - Implement product operations in the shared managers in `Playhouse/App/BridgeCore.swift`; GUI actions and CLI/daemon commands must call the same manager logic. Add a CLI operation and real bridge assertion for each new semantic product capability. Window focus, open sheets, and current selection are transient presentation state and are outside the bridge API.
 
+## Plugins
+
+- Keep the plugin core (`Playhouse/App/Plugins/Core`) free of SwiftUI, AppKit, SwiftData and app-target types. It is compiled into `playhouse-plugin-dev` with only Foundation and JavaScriptCore, and app-only behavior reaches it through its protocols (`PluginDaemonTransport`).
+- Every plugin component has a catalog spec, a renderer and at least one Component Catalog showcase; components with events or presentation get an interactive one. Follow `docs/plugins/adding-a-component.md` (also the `add-plugin-component` skill), and keep `playhouse-cli plugin check-showcases` and `scripts/test-showcases.sh` passing.
+- Playhouse must never install skills, instructions, hooks or config into the user's home or repositories (`~/.claude`, `~/.agents`, `~/.codex`, a repository's `.claude/`). Agent guidance Playhouse provides is injected at runtime only, through launch flags, thread configuration or developer instructions.
+
 ## AI provider parity
 
 - For every new feature or behavior change involving an AI provider, assess both Claude and Codex, even when the request or edited code names only one. Implement the feature for both wherever the relevant capability exists. Record each provider's implementation path and explain any difference; an existing one-provider implementation is not proof that the other provider is inapplicable.

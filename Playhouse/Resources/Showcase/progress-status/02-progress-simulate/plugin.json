@@ -1,0 +1,14 @@
+{
+  "id": "progress-simulate",
+  "name": "Simulated upload",
+  "version": "1.0.0",
+  "description": "Click Start to watch a progress bar advance: the action updates state every 50 ms and the bar re-renders each time.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Simulated upload"
+      }
+    ]
+  }
+}

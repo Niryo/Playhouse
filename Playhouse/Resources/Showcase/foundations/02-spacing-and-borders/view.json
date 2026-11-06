@@ -1,0 +1,58 @@
+{
+  "main": {
+    "type": "hstack",
+    "props": {
+      "spacing": 12,
+      "alignment": "center"
+    },
+    "children": [
+      {
+        "type": "text",
+        "props": {
+          "text": "padding 4",
+          "padding": 4,
+          "border": "secondary"
+        }
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "padding 12",
+          "padding": 12,
+          "border": "secondary"
+        }
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "radius 10",
+          "padding": 12,
+          "background": "info",
+          "foreground": "#FFFFFF",
+          "radius": 10
+        }
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "shadow",
+          "padding": 12,
+          "background": "secondary",
+          "radius": 8,
+          "shadow": true
+        }
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "opacity 0.5",
+          "padding": 12,
+          "background": "accent",
+          "foreground": "#FFFFFF",
+          "radius": 8,
+          "opacity": 0.5
+        }
+      }
+    ]
+  }
+}

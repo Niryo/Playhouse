@@ -1,0 +1,14 @@
+{
+  "id": "common-events",
+  "name": "Clickable anything",
+  "version": "1.0.0",
+  "description": "onTap works on every component, so a plain text or stack can be clickable.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Clickable anything"
+      }
+    ]
+  }
+}

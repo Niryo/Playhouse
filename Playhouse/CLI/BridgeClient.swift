@@ -89,3 +89,45 @@ enum BridgeClientError: LocalizedError {
         }
     }
 }
+
+extension BridgeRequest {
+    /// This request with the caller's Playhouse settings attached: its data
+    /// directory, test overrides and forwardable session environment. Shared by
+    /// `playhouse-cli` and `playhouse-plugin-dev`, which both run from the app's
+    /// Contents/MacOS.
+    func configuredForCaller(environment: [String: String] = ProcessInfo.processInfo.environment) -> BridgeRequest {
+        let dataDirectory = environment["PLAYHOUSE_DATA_DIRECTORY"]
+        let defaultsSuite = environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"]
+        var configuredRequest = self
+        configuredRequest.dataDirectory = dataDirectory
+        configuredRequest.defaultsSuite = defaultsSuite
+        configuredRequest.worktreeDirectory = environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"]
+        // Same identity lookup as BridgeClient.applicationIdentifier(): these tools
+        // live in `<App>.app/Contents/MacOS/`, so `Bundle.main` already resolves
+        // to the app's own Info.plist.
+        let applicationIdentifier = Bundle.main.infoDictionary?["PlayhouseApplicationBundleIdentifier"] as? String
+            ?? Bundle.main.bundleIdentifier ?? ""
+        let forwardableNames = BridgeContract.environmentNamesToForward(
+            applicationIdentifier: applicationIdentifier,
+            from: environment
+        )
+        configuredRequest.environment = environment
+            .filter { forwardableNames.contains($0.key) }
+        if let codexHome = environment["CODEX_HOME"] {
+            configuredRequest.arguments["__codexHome"] = .string(codexHome)
+        }
+        if let fixtureExecutable = environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] {
+            configuredRequest.arguments["__codexExecutable"] = .string(fixtureExecutable)
+        }
+        if let fixtureExecutable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] {
+            configuredRequest.arguments["__claudeExecutable"] = .string(fixtureExecutable)
+        }
+        // The daemon is started by launchd and never sees the caller's environment,
+        // so a caller's own Claude config directory travels with the request, as
+        // CODEX_HOME does: its turns and its session-file reads then use it.
+        if let claudeConfig = environment["CLAUDE_CONFIG_DIR"], !claudeConfig.isEmpty {
+            configuredRequest.arguments["__claudeConfigDirectory"] = .string(claudeConfig)
+        }
+        return configuredRequest
+    }
+}

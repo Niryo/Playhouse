@@ -1,0 +1,14 @@
+{
+  "id": "dividers",
+  "name": "Dividers",
+  "version": "1.0.0",
+  "description": "A divider follows its parent stack: horizontal in a vstack, vertical in an hstack.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Dividers"
+      }
+    ]
+  }
+}

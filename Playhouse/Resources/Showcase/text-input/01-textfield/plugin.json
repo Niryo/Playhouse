@@ -1,0 +1,14 @@
+{
+  "id": "textfield",
+  "name": "Text field",
+  "version": "1.0.0",
+  "description": "A textfield sends every edit to its onChange action; here the text is echoed and counted, and Add appends it to a list.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Text field"
+      }
+    ]
+  }
+}

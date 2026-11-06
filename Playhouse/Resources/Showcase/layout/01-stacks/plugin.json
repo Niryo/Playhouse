@@ -1,0 +1,14 @@
+{
+  "id": "stacks",
+  "name": "Stacks",
+  "version": "1.0.0",
+  "description": "vstack arranges children vertically, hstack horizontally, and zstack layers them.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Stacks"
+      }
+    ]
+  }
+}
