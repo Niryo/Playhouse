@@ -490,7 +490,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Playhouse board opened with a healthy bridge")
     }
 
-    // case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude, which only reports usage while a task runs, starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the placeholder button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running.
+    // case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude, which only reports usage while a task runs, starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the placeholder button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards.
     func test_agents_info_shows_provider_usage_and_accounts() throws {
         let codexExecutable = try makeCodexFixture(emptyQuestions: false)
         let codexAccount = URL(fileURLWithPath: codexExecutable.path + ".account")
@@ -525,6 +525,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(claudeBlock.exists && codexBlock.exists, "Claude and Codex should each have their own block.")
         XCTAssertLessThanOrEqual(claudeBlock.frame.maxY, codexBlock.frame.minY, "The blocks should be separate, Claude above Codex.")
         XCTAssertLessThan(section.frame.height, 330, "The section should stay a compact sidebar footer.")
+        let toggle = element("agents-info-toggle")
+        XCTAssertEqual(toggle.value as? String, "Expanded", "The section should be open by default.")
+        let expandedTitleMinY = toggle.frame.minY
 
         // Codex shows its account, both windows, and credits from the app-server; Claude has no usage until a task runs.
         XCTAssertTrue(element("agents-info-codex-window-secondary").waitForExistence(timeout: 30), "Codex usage should show soon after launch.")
@@ -595,6 +598,24 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ text("agents-info-codex-account") == "codex-second@example.com" }, timeout: 40), "Logging in to Codex should restore its account.")
         XCTAssertTrue(waitUntil({ text("agents-info-codex-window-primary").contains("7%") }, timeout: 20), "Logging in should bring Codex usage back.")
         attachScreenshot(named: "Agents info after logging in again")
+
+        // Minimizing hides the blocks and rests the title at the bottom of the sidebar; the choice is sticky.
+        toggle.click()
+        XCTAssertTrue(waitUntil({ !self.element("agents-info-claude").exists && !self.element("agents-info-codex").exists }, timeout: 10), "Minimizing should hide the agent blocks.")
+        XCTAssertEqual(toggle.value as? String, "Collapsed")
+        XCTAssertGreaterThan(toggle.frame.minY, expandedTitleMinY, "The title should move down as the section collapses.")
+        XCTAssertLessThan(sidebar.frame.maxY - toggle.frame.maxY, 40, "The minimized title should rest at the bottom of the sidebar.")
+        attachScreenshot(named: "Agents info minimized at the bottom of the sidebar")
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before the minimized relaunch.")
+        launchAppWithOpen(environmentOverrides: agentsInfoEnvironment)
+        waitForBoardOrAbortSuite()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 40), "The minimized title should still show after a relaunch.")
+        XCTAssertEqual(toggle.value as? String, "Collapsed", "A minimized section should stay minimized after a relaunch.")
+        XCTAssertFalse(element("agents-info-claude").exists || element("agents-info-codex").exists)
+        attachScreenshot(named: "Agents info still minimized after relaunch")
+        toggle.click()
+        XCTAssertTrue(element("agents-info-claude").waitForExistence(timeout: 10), "Expanding should bring the agent blocks back.")
+        XCTAssertEqual(toggle.value as? String, "Expanded")
     }
 
     // case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, test IDs that do not match the current worktree, and nonisolated test data before launching; the current app preserves a saved draft across restart.

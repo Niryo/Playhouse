@@ -72,6 +72,8 @@ struct AgentsInfoView: View {
     /// Providers that have a task running, which a sign-out would affect.
     let runningProviders: [ConversationProvider: Int]
     @State private var providerAwaitingSwitch: ConversationProvider?
+    /// Whether the user minimized the section; one value kept across launches, open by default.
+    @AppStorage(WorkspaceSettings.agentsInfoSectionCollapsedKey, store: WorkspaceSettings.preferencesStore) private var isCollapsed = false
 
     init(client: DaemonClient, runningProviders: [ConversationProvider: Int]) {
         _model = StateObject(wrappedValue: AgentUsageModel(client: client))
@@ -93,32 +95,52 @@ struct AgentsInfoView: View {
                 // Re-evaluated on a slow tick so reset times and "updated" hints stay current.
                 TimelineView(.periodic(from: .now, by: 30)) { timeline in
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Agents info")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .textCase(.uppercase)
-                            .accessibilityAddTraits(.isHeader)
-                        ForEach(visibleProviders, id: \.provider) { usage in
-                            if let provider = ConversationProvider(rawValue: usage.provider) {
-                                AgentUsageBlock(
-                                    provider: provider,
-                                    usage: usage,
-                                    now: timeline.date,
-                                    hasRunningTask: (runningProviders[provider] ?? 0) > 0,
-                                    onLogin: { Task { await model.login(provider) } },
-                                    onSwitch: {
-                                        if (runningProviders[provider] ?? 0) > 0 { providerAwaitingSwitch = provider }
-                                        else { Task { await model.switchAccount(provider) } }
-                                    }
-                                )
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.22)) { isCollapsed.toggle() }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: isCollapsed ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .accessibilityHidden(true)
+                                Text("Agents info")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .textCase(.uppercase)
+                                Spacer(minLength: 0)
                             }
+                            .foregroundStyle(.secondary)
+                            .contentShape(Rectangle())
                         }
-                        if let message = model.errorMessage {
-                            Text(message)
-                                .font(.system(size: 9))
-                                .foregroundStyle(.red)
-                                .lineLimit(3)
-                                .accessibilityIdentifier("agents-info-error")
+                        .buttonStyle(.plain)
+                        .buttonHoverPointer()
+                        .nativeHelp(isCollapsed ? "Expand Agents info" : "Collapse Agents info")
+                        .accessibilityLabel("Agents info")
+                        .accessibilityValue(isCollapsed ? "Collapsed" : "Expanded")
+                        .accessibilityAddTraits(.isHeader)
+                        .accessibilityIdentifier("agents-info-toggle")
+                        if !isCollapsed {
+                            ForEach(visibleProviders, id: \.provider) { usage in
+                                if let provider = ConversationProvider(rawValue: usage.provider) {
+                                    AgentUsageBlock(
+                                        provider: provider,
+                                        usage: usage,
+                                        now: timeline.date,
+                                        hasRunningTask: (runningProviders[provider] ?? 0) > 0,
+                                        onLogin: { Task { await model.login(provider) } },
+                                        onSwitch: {
+                                            if (runningProviders[provider] ?? 0) > 0 { providerAwaitingSwitch = provider }
+                                            else { Task { await model.switchAccount(provider) } }
+                                        }
+                                    )
+                                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                                }
+                            }
+                            if let message = model.errorMessage {
+                                Text(message)
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.red)
+                                    .lineLimit(3)
+                                    .accessibilityIdentifier("agents-info-error")
+                            }
                         }
                     }
                 }
