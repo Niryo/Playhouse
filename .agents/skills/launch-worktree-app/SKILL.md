@@ -5,10 +5,10 @@ description: Build and launch the Playhouse macOS app from a chosen source workt
 
 # Launch a Playhouse worktree app
 
-Run the chosen worktree's `scripts/run.sh` from that worktree root. For the current worktree:
+Run the chosen worktree's `scripts/run.sh` from that worktree root, with the inherited Playhouse bridge variables cleared (see "Environment overrides" for why). For the current worktree:
 
 ```bash
-./scripts/run.sh
+env -u PLAYHOUSE_DATA_DIRECTORY -u PLAYHOUSE_BRIDGE_SERVICE_NAME -u PLAYHOUSE_BRIDGE_SOCKET_PATH ./scripts/run.sh
 ```
 
 For another worktree, run its own `scripts/run.sh` using its absolute path. Do not run this repository's launcher while pointing it at another worktree: the script derives its build and app profile from its own location.

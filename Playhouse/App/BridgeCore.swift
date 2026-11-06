@@ -855,6 +855,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let conversationEffort: String
     let savedPrompt: String?
     let pendingSubmittedPrompt: String?
+    let hasUnsentDraft: Bool
     let workspaceRoots: [String]
     let repositoryWorktrees: [RepositoryWorktreeRecord]
     let contextFolders: [String]
@@ -879,6 +880,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         conversationEffort = task.conversationEffort
         savedPrompt = task.savedPrompt
         pendingSubmittedPrompt = task.pendingSubmittedPrompt
+        hasUnsentDraft = task.hasUnsentDraft
         workspaceRoots = task.workspaceRootPaths
         repositoryWorktrees = task.repositoryWorktrees
         contextFolders = task.contextFolderPaths
@@ -1881,6 +1883,7 @@ final class BoardTaskManager {
                 chat.conversationModelIDsData = task.conversationModelIDsData
                 chat.savedPrompt = task.savedPrompt
                 chat.pendingSubmittedPrompt = task.pendingSubmittedPrompt
+                chat.hasUnsentDraft = task.hasUnsentDraft
                 chat.draftImageDataURLsData = task.draftImageDataURLsData
                 chat.conversationActivityDurationsData = task.conversationActivityDurationsData
                 chat.answeredAsyncQuestionIDsData = task.answeredAsyncQuestionIDsData
@@ -3320,11 +3323,23 @@ final class BoardTaskManager {
             let providerName = task.conversationProvider.displayName
             let client = clients.client(for: task.conversationProvider)
             guard let threadID = task.activeConversationID else {
-                if task.pendingSubmittedPrompt != nil, !(try hasConversationTurnReservation(id)) {
+                if let submittedPrompt = task.pendingSubmittedPrompt, !(try hasConversationTurnReservation(id)) {
                     if task.status == .inProgress {
                         task.status = .waitingResponse
                         task.statusMessage = "Playhouse restarted before \(providerName) started this turn. Your prompt is saved; review it and continue when ready."
                     }
+                    // The prompt never reached the provider. A draft typed after sending it
+                    // was saved separately, so return both to the composer rather than one.
+                    let draft = task.hasUnsentDraft ? task.savedPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" : ""
+                    let submittedText = submittedPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if submittedText.isEmpty {
+                        // An image-only send returns through its images, still in the draft.
+                    } else if draft.isEmpty {
+                        task.savedPrompt = submittedPrompt
+                    } else if draft != submittedText {
+                        task.savedPrompt = submittedPrompt + "\n\n" + (task.savedPrompt ?? "")
+                    }
+                    task.hasUnsentDraft = task.savedPrompt != nil || !task.draftImageDataURLs.isEmpty
                     task.pendingSubmittedPrompt = nil
                     try await saveTaskContext(taskID: id)
                 }
@@ -3438,7 +3453,9 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil, submitted: Bool = false, imageDataURLs: [String]? = nil) async throws -> BoardTaskRecord {
+    /// `replacingDraft` marks a send of the composer's own draft, which replaces the unsent
+    /// draft in this same write; other submitted prompts leave a different unsent draft alone.
+    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil, submitted: Bool = false, imageDataURLs: [String]? = nil, replacingDraft: Bool = false) async throws -> BoardTaskRecord {
         PlayhouseDiagnostics.record("task.prompt.write.started", fields: [
             "taskID": id.uuidString,
             "promptByteCount": String(prompt.utf8.count),
@@ -3456,8 +3473,17 @@ final class BoardTaskManager {
         }
         return try await withTaskOperationLock(id) {
             let task = try requireSubject(id)
-            task.savedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : prompt
-            if let imageDataURLs { task.draftImageDataURLs = imageDataURLs }
+            let normalizedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            // A prompt sent from elsewhere (a queued follow-up, the CLI) must not replace an
+            // unsent composer draft holding different text.
+            let keepsUnsentDraft = submitted && !replacingDraft && task.hasUnsentDraft
+                && (task.savedPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") != normalizedPrompt
+            if !keepsUnsentDraft {
+                task.savedPrompt = normalizedPrompt.isEmpty ? nil : prompt
+                if let imageDataURLs { task.draftImageDataURLs = imageDataURLs }
+                // Only `saveDraft`, the composer's draft writer, marks an unsent draft.
+                task.hasUnsentDraft = false
+            }
             task.pendingSubmittedPrompt = submitted ? prompt : nil
             if let status {
                 task.status = status
@@ -3470,6 +3496,46 @@ final class BoardTaskManager {
                 "submitted": String(submitted)
             ])
             return BoardTaskRecord(task: task)
+        }
+    }
+
+    /// Saves the composer's unsent text and images as one draft. Unlike `savePrompt`, it leaves
+    /// the submitted prompt and status alone, so the composer can save while a turn runs
+    /// without ending that turn's pending prompt. Steering, queueing, and sending clear the
+    /// draft by saving the emptied composer; a blank draft therefore means the user cleared it.
+    func saveDraft(_ id: UUID, prompt: String, imageDataURLs: [String]) async throws -> BoardTaskRecord {
+        PlayhouseDiagnostics.record("task.draft.write.started", fields: [
+            "taskID": id.uuidString,
+            "promptByteCount": String(prompt.utf8.count),
+            "imageCount": String(imageDataURLs.count)
+        ])
+        if imageDataURLs.count > 8 || imageDataURLs.contains(where: { !ConversationManager.isValidImageDataURL($0) }) {
+            throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
+        }
+        return try await withTaskOperationLock(id) {
+            let task = try requireSubject(id)
+            task.savedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : prompt
+            task.draftImageDataURLs = imageDataURLs
+            task.hasUnsentDraft = task.savedPrompt != nil || !imageDataURLs.isEmpty
+            try await saveTaskContext(taskID: id)
+            PlayhouseDiagnostics.record("task.draft.write.succeeded", fields: [
+                "taskID": id.uuidString,
+                "status": task.status.rawValue
+            ])
+            return BoardTaskRecord(task: task)
+        }
+    }
+
+    /// Images sent with a prompt stay in the draft until its turn starts, so a restart before
+    /// then returns them with the prompt. Once the turn starts they leave the draft, unless the
+    /// user has since saved a new draft. A draft saved in that short window replaces the sent
+    /// images, so only the prompt text returns if Playhouse also stops before the turn starts.
+    func clearSentDraftImages(_ id: UUID, sentImageDataURLs: [String]) async throws {
+        try await withTaskOperationLock(id) {
+            let task = try requireSubject(id)
+            guard !task.hasUnsentDraft, !sentImageDataURLs.isEmpty, task.draftImageDataURLs == sentImageDataURLs else { return }
+            task.draftImageDataURLs = []
+            try await saveTaskContext(taskID: id)
         }
     }
 
@@ -3651,7 +3717,7 @@ final class BoardTaskManager {
         } catch {
             fields["phase"] = phase
             fields.merge(
-                PlayhouseDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
+                PlayhouseDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? "", task.pendingSubmittedPrompt ?? ""])
             ) { _, new in new }
             PlayhouseDiagnostics.record("task.delete.failed", fields: fields)
             throw error
@@ -3686,13 +3752,21 @@ final class BoardTaskManager {
         return try modelContext.fetch(descriptor).first
     }
 
-    func setViewedWorkspaceChange(_ snapshot: WorkspaceViewedChange, taskID: UUID) async throws {
+    func setViewedWorkspaceChanges(_ newSnapshots: [WorkspaceViewedChange], taskID: UUID) async throws {
         let task = try requireTask(taskID)
         var snapshots = task.viewedWorkspaceChanges
-        snapshots.removeAll { $0.repository == snapshot.repository && $0.path == snapshot.path }
-        snapshots.append(snapshot)
+        for snapshot in newSnapshots {
+            snapshots.removeAll { $0.repository == snapshot.repository && $0.path == snapshot.path }
+            snapshots.append(snapshot)
+        }
         task.viewedWorkspaceChanges = snapshots
-        try await saveTaskContext(operation: "BoardTaskManager.setViewedWorkspaceChange", taskID: taskID)
+        try await saveTaskContext(operation: "BoardTaskManager.setViewedWorkspaceChanges", taskID: taskID)
+    }
+
+    func removeViewedWorkspaceChange(repository: String, path: String, taskID: UUID) async throws {
+        let task = try requireTask(taskID)
+        task.viewedWorkspaceChanges = task.viewedWorkspaceChanges.filter { !($0.repository == repository && $0.path == path) }
+        try await saveTaskContext(operation: "BoardTaskManager.removeViewedWorkspaceChange", taskID: taskID)
     }
 
     fileprivate func isRepositoryAttached(_ record: RepositoryWorktreeRecord, to taskID: UUID) throws -> Bool {
@@ -3718,7 +3792,9 @@ final class BoardTaskManager {
         if let resolvedTitle, !resolvedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             branchTitle = resolvedTitle
         } else if ["Generating title…", "Untitled task"].contains(initialTask.title) {
-            let prompt = initialTask.savedPrompt ?? fallbackPrompt ?? initialTask.title
+            // A send names the branch after the prompt it sent; an unsent draft kept beside it
+            // describes later work.
+            let prompt = fallbackPrompt ?? initialTask.savedPrompt ?? initialTask.title
             branchTitle = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
         } else {
             branchTitle = initialTask.title
@@ -4038,6 +4114,20 @@ final class WorkspaceSettingsManager {
         return value
     }
 
+    /// Repositories most recently selected for any task, newest first.
+    var recentRepositories: [String] {
+        defaults.stringArray(forKey: WorkspaceSettings.recentRepositoriesKey) ?? []
+    }
+
+    /// Recent repositories still on disk that are not already attached, for quick re-adding.
+    func recentRepositorySuggestions(excluding attachedPaths: [String]) -> [String] {
+        let attached = Set(attachedPaths.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL.path })
+        return recentRepositories.filter { path in
+            !attached.contains(path)
+                && FileManager.default.fileExists(atPath: URL(fileURLWithPath: path).appendingPathComponent(".git").path)
+        }
+    }
+
     var appearance: String {
         let value = defaults.string(forKey: WorkspaceSettings.appearanceKey) ?? "dark"
         let appearance = value == "light" ? "light" : "dark"
@@ -4203,10 +4293,16 @@ final class WorkspaceSettingsManager {
             if !normalized.contains(url.path) { normalized.append(url.path) }
         }
         defaults.set(normalized, forKey: WorkspaceSettings.lastSelectedRepositoriesKey)
+        // The current selection moves to the front of the recent history; repositories
+        // removed from it stay behind so they can be suggested again.
+        let recent = Array((normalized + recentRepositories.filter { !normalized.contains($0) })
+            .prefix(WorkspaceSettings.recentRepositoryHistoryLimit))
+        defaults.set(recent, forKey: WorkspaceSettings.recentRepositoriesKey)
         PlayhouseDiagnostics.record("settings.write.succeeded", fields: [
             "setting": "lastSelectedRepositories",
             "repositoryCount": String(normalized.count),
-            "repositoryPaths": normalized.joined(separator: "\n")
+            "repositoryPaths": normalized.joined(separator: "\n"),
+            "recentRepositoryPaths": recent.joined(separator: "\n")
         ])
     }
 }
@@ -4237,6 +4333,13 @@ final class WorkspaceManager {
             "repositories": repositories.joined(separator: "\n")
         ])
         return repositories
+    }
+
+    /// Recently selected repositories the repository picker offers before anything is typed.
+    func recentRepositorySuggestions(for taskID: UUID) throws -> [String] {
+        guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
+        let attached = try taskManager.get(taskID).repositoryWorktrees.map(\.repositoryPath)
+        return settingsManager.recentRepositorySuggestions(excluding: attached)
     }
 
     func roots(for taskID: UUID) throws -> [String] {
@@ -4393,6 +4496,45 @@ final class WorkspaceManager {
         }
     }
 
+    /// How the task's terminal starts: the user's login shell, opened in the task's first created
+    /// repository worktree. It never opens in a source repository or a context folder, and never
+    /// creates a pending worktree, which the task's start names and creates.
+    func terminalLaunch(for taskID: UUID) throws -> TaskTerminalLaunch {
+        guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
+        let records = try taskManager.get(taskID).repositoryWorktrees
+        if let reason = TaskTerminalLaunch.unavailableReason(for: records) {
+            PlayhouseDiagnostics.record("workspace.terminal.launch.failed", fields: [
+                "taskID": taskID.uuidString,
+                "reason": records.isEmpty ? "no_repository" : "worktree_pending"
+            ])
+            throw BridgeCommandError(code: "terminal_unavailable", message: reason)
+        }
+        guard let directory = records.filter({ !$0.isPending }).map(\.worktreePath)
+            .first(where: { WorkspaceSettings.validDirectoryURL(for: $0) != nil }) else {
+            PlayhouseDiagnostics.record("workspace.terminal.launch.failed", fields: [
+                "taskID": taskID.uuidString,
+                "reason": "worktree_missing"
+            ])
+            throw BridgeCommandError(
+                code: "terminal_unavailable",
+                message: "This task's worktree no longer exists, so there is nowhere to open a terminal."
+            )
+        }
+        let launch = TaskTerminalLaunch(
+            taskID: taskID,
+            directory: URL(fileURLWithPath: directory, isDirectory: true).standardizedFileURL.path,
+            shell: TaskTerminalLaunch.loginShell(),
+            arguments: ["-l"],
+            environment: TaskTerminalLaunch.environment(taskID: taskID)
+        )
+        PlayhouseDiagnostics.record("workspace.terminal.launch.resolved", fields: [
+            "taskID": taskID.uuidString,
+            "directory": launch.directory,
+            "shell": launch.shell
+        ])
+        return launch
+    }
+
     func changes(for taskID: UUID) async throws -> WorkspaceChangeInventory {
         guard let taskManager else {
             throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
@@ -4419,7 +4561,37 @@ final class WorkspaceManager {
             throw BridgeCommandError(code: "not_found", message: "The file isn't currently an unviewed change.")
         }
         let snapshot = try await WorkspaceChangeScanner.captureViewedChange(workspaceRoots: task.workspaceRootPaths, repositoryPath: repository, relativePath: path)
-        try await taskManager.setViewedWorkspaceChange(snapshot, taskID: taskID)
+        try await taskManager.setViewedWorkspaceChanges([snapshot], taskID: taskID)
+    }
+
+    /// Marks every current Changes entry viewed in one save, returning how many were marked.
+    func markAllViewed(for taskID: UUID) async throws -> Int {
+        guard let taskManager else {
+            throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
+        }
+        let task = try taskManager.taskModel(taskID)
+        let inventory = try await changes(for: taskID)
+        guard !inventory.unviewed.isEmpty else { return 0 }
+        let snapshots = try await WorkspaceChangeScanner.captureViewedChanges(
+            workspaceRoots: task.workspaceRootPaths,
+            files: inventory.unviewed.map { ($0.repository, $0.path) }
+        )
+        try await taskManager.setViewedWorkspaceChanges(snapshots, taskID: taskID)
+        return snapshots.count
+    }
+
+    /// Drops a file's viewed snapshot so its whole change from the branch base is listed under
+    /// Changes again. The Git index is left as is: unviewing never discards staged work.
+    func markUnviewed(for taskID: UUID, repository: String, path: String) async throws {
+        guard let taskManager else {
+            throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
+        }
+        let repository = URL(fileURLWithPath: repository).standardizedFileURL.path
+        let inventory = try await changes(for: taskID)
+        guard inventory.viewed.contains(where: { $0.repository == repository && $0.path == path }) else {
+            throw BridgeCommandError(code: "not_found", message: "The file isn't currently a viewed change.")
+        }
+        try await taskManager.removeViewedWorkspaceChange(repository: repository, path: path, taskID: taskID)
     }
 
     func diff(
@@ -5158,7 +5330,7 @@ final class ConversationManager {
             } else {
                 fields = PlayhouseDiagnostics.errorFields(
                     error,
-                    redacting: [task.title, task.savedPrompt ?? ""] + sensitiveUserInputAnswerValues
+                    redacting: [task.title, task.savedPrompt ?? "", task.pendingSubmittedPrompt ?? ""] + sensitiveUserInputAnswerValues
                 )
             }
             fields["taskID"] = taskID.uuidString
@@ -6787,7 +6959,7 @@ final class ConversationManager {
             if !task.isStandaloneChat {
                 task = try await tasks.prepareRepositoryWorktrees(
                     taskID,
-                    fallbackPrompt: hideInternalOutcomeReminder ? (task.savedPrompt ?? persistedText) : persistedText,
+                    fallbackPrompt: hideInternalOutcomeReminder && !task.hasUnsentDraft ? (task.savedPrompt ?? persistedText) : persistedText,
                     resolvedTitle: resolvedWorktreeTitle ?? persistedText
                 )
             }
@@ -6940,6 +7112,16 @@ final class ConversationManager {
             if onTurnStarting != nil {
                 client.markTurnStarting(threadID: threadID)
                 onTurnStarting?()
+            }
+            if !hideInternalOutcomeReminder, !imageDataURLs.isEmpty {
+                // Leftover images stay safely in the draft, so a failed cleanup must not fail the turn.
+                do {
+                    try await tasks.clearSentDraftImages(taskID, sentImageDataURLs: imageDataURLs)
+                } catch {
+                    var fields = PlayhouseDiagnostics.errorFields(error)
+                    fields["taskID"] = taskID.uuidString
+                    PlayhouseDiagnostics.record("task.draft.sent_images_clear.failed", fields: fields)
+                }
             }
             phase = "\(provider.rawValue)-turn"
             try tasks.activateConversationTurnOutcome(taskID)
@@ -7344,7 +7526,7 @@ final class ConversationManager {
                 ? ["error": "Private conversation recovery turn failed."]
                 : PlayhouseDiagnostics.errorFields(
                     error,
-                    redacting: [task.title, task.savedPrompt ?? ""] + sensitiveUserInputAnswerValues
+                    redacting: [task.title, task.savedPrompt ?? "", task.pendingSubmittedPrompt ?? ""] + sensitiveUserInputAnswerValues
                 )
             fields["taskID"] = taskID.uuidString
             fields["threadID"] = persistedThreadID ?? ""
@@ -8210,6 +8392,10 @@ final class PlayhouseBridgeRuntime {
                     request.requiredStrings("repositoryPaths"),
                     on: request.requiredUUID("taskID")
                 ))
+            case "task.repository.recent":
+                let taskID = try request.requiredUUID("taskID")
+                try Self.rejectStandaloneChat(taskManager, taskID)
+                result = .object(["repositories": .array(try workspaces.recentRepositorySuggestions(for: taskID).map(BridgeValue.string))])
             case "task.repository.edit":
                 try Self.rejectStandaloneChat(taskManager, request.requiredUUID("taskID"))
                 result = try Self.value(await taskManager.updateRepository(
@@ -8245,6 +8431,15 @@ final class PlayhouseBridgeRuntime {
                     submitted: submitted,
                     imageDataURLs: request.arguments["images"]?.strings
                 ))
+            case "task.draft.save":
+                guard let prompt = request.arguments["prompt"]?.string else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Missing required argument: prompt.")
+                }
+                result = try Self.value(try await taskManager.saveDraft(
+                    request.requiredUUID("taskID"),
+                    prompt: prompt,
+                    imageDataURLs: request.arguments["images"]?.strings ?? []
+                ))
             case "task.delete":
                 try await taskManager.delete(request.requiredUUID("taskID"), diagnostics: conversationClients().codex.diagnosticFields())
                 result = .object(["deleted": .boolean(true)])
@@ -8257,6 +8452,8 @@ final class PlayhouseBridgeRuntime {
                 try Self.rejectStandaloneChat(taskManager, request.requiredUUID("taskID"))
                 let roots = try request.requiredStrings("roots")
                 result = try Self.value(await workspaces.setRoots(roots, for: request.requiredUUID("taskID")))
+            case "task.terminal":
+                result = try Self.value(workspaces.terminalLaunch(for: request.requiredUUID("taskID")))
             case "task.changes.list":
                 result = try Self.value(await workspaces.changes(for: request.requiredUUID("taskID")))
             case "task.changes.mark-viewed":
@@ -8266,6 +8463,16 @@ final class PlayhouseBridgeRuntime {
                     path: request.requiredString("path")
                 )
                 result = .object(["viewed": .boolean(true)])
+            case "task.changes.mark-all-viewed":
+                let count = try await workspaces.markAllViewed(for: request.requiredUUID("taskID"))
+                result = .object(["markedCount": .integer(count)])
+            case "task.changes.mark-unviewed":
+                try await workspaces.markUnviewed(
+                    for: request.requiredUUID("taskID"),
+                    repository: request.requiredString("repository"),
+                    path: request.requiredString("path")
+                )
+                result = .object(["viewed": .boolean(false)])
             case "task.changes.diff":
                 result = try Self.value(await workspaces.diff(
                     for: request.requiredUUID("taskID"),
@@ -8288,6 +8495,7 @@ final class PlayhouseBridgeRuntime {
                     "defaultParentFolder": settings.defaultParentFolderPath.isEmpty ? .null : .string(settings.defaultParentFolderPath),
                     "defaultParentAvailable": .boolean(settings.defaultParentFolderURL != nil),
                     "lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string)),
+                    "recentRepositories": .array(settings.recentRepositories.map(BridgeValue.string)),
                     "appearance": .string(settings.appearance),
                     "defaultProvider": .string(settings.defaultConversationProvider.rawValue),
                     "tokenUsageColorMax": .integer(settings.tokenUsageColorMax),

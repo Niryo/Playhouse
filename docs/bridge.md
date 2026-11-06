@@ -15,16 +15,18 @@ The daemon accepts a versioned, length-prefixed JSON request over its socket, st
 | `task get <task-id>` | Read a task and its thread/root state |
 | `task move <task-id> <Review\|Done>` | Move a Waiting Response task to Review (after the same pull request sync and PR mode a completed turn gets; rejected while its turn is still running), or a Review task to Done. Other statuses are set by the conversation |
 | `task rename <task-id> --title <title>` | Rename a task |
+| `task terminal <task-id>` | Read how the task's terminal panel starts: the login shell, opened in the task's first created repository worktree (never the source repository or a context folder), and the variables Playhouse adds (`TERM`, `PLAYHOUSE_TASK_ID`). It never creates a worktree; fails with `terminal_unavailable` when the task has no repository, its worktree is still pending (it is created when the task starts), or the worktree no longer exists |
 | `task repository add <task-id> --repo <path>` / `task repository add-batch <task-id> --repo <path> [--repo <path>...]` | Add repository context, prepare managed worktrees immediately, and update saved repository selection |
 | `task repository replace <task-id> --repo <path> [--repo <path>...]` | Replace the task's repository set while preserving folder-only context |
 | `task repository remove <task-id> --repo <path>` | Remove a repository from a task, subject to managed-worktree safety checks |
+| `task repository recent <task-id>` | List the recently selected repositories (up to twenty, newest first) that still exist and are not attached to the task; the repository picker offers these before a search is typed |
 | `task roots get <task-id>` | Read ordered task roots |
 | `task roots set <task-id> --root <path> [--root <path>...]` | Replace ordered task roots |
 | `task delete <task-id>` | Delete a task |
 | `task pr sync <task-id>` | Push every local change on the task's PR-linked branches: commit local work, merge new remote pull request commits (conflicts are resolved by the task's provider), and push. The same sync runs automatically before a completed turn reaches Review and when the board detects a diverged pull request head, so a reviewed task never holds local-only changes; on failure the task moves to Blocked with the sync error, and a successful rerun returns it to Review |
 | `workspace suggest --parent <path>` | Find Git repository roots below a parent folder |
 | `workspace repos list` | Return the configured repository root and its discovered Git repositories |
-| `settings get` | Read the default parent folder and saved repository defaults |
+| `settings get` | Read the default parent folder, saved repository defaults, and the recent repository history |
 | `settings set-parent <path>` / `settings clear-parent` | Change the default parent folder |
 | `task create ... [--provider <codex\|claude>]` | Create a task with a specific conversation provider instead of the default |
 | `settings set-default-provider <codex\|claude>` | Change the provider new tasks start with |
