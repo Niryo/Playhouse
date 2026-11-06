@@ -39,6 +39,15 @@ REMINDER_TURN_IDS = set()
 
 MARKDOWN_PLAN = '## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n\nTwo numbered steps follow on the very next lines:\n1. First numbered step: capture the baseline state before changes.\n\n2. Second numbered step: apply the fix and confirm there are no regressions.\n\n```javascript\nconsole.log("Hello, world!");\n```\n\n| Step | Status |\n| --- | :---: |\n| Verify fixture | Done |\n| Render table | Pending |'
 
+
+def markdown_plan_deltas():
+    """The plan in four deltas that end inside a paragraph, inside a list item that follows that
+    paragraph, and inside the fenced code block, so the streamed reply grows across each kind."""
+    list_item = MARKDOWN_PLAN.index("- Implementation detail 11: verify") + len("- Implementation detail 11: verify")
+    code = MARKDOWN_PLAN.index('console.log("Hello') + len('console.log("Hello')
+    return (MARKDOWN_PLAN[:64], MARKDOWN_PLAN[64:list_item], MARKDOWN_PLAN[list_item:code], MARKDOWN_PLAN[code:])
+
+
 ECHOED_OUTCOME_PREFIX = "Echo the outcome command for "
 ECHOED_OUTCOME_ANSWER = "Fixture answer with an echoed outcome."
 
@@ -1731,15 +1740,16 @@ def main():
                     "threadId": THREAD_ID, "turnId": TURN_ID,
                     "item": {"id": plan_item_id, "type": "plan", "text": ""},
                 }})
-                for index, delta in enumerate((MARKDOWN_PLAN[:64], MARKDOWN_PLAN[64:])):
+                for stage, delta in enumerate(markdown_plan_deltas(), start=1):
                     write({"jsonrpc": "2.0", "method": "item/plan/delta", "params": {
                         "threadId": THREAD_ID, "turnId": TURN_ID,
                         "itemId": plan_item_id, "delta": delta,
                     }})
-                    if index == 0 and is_plan_turn and Path(str(sys.argv[0]) + ".plan-delta-hold").exists():
-                        ready = Path(str(sys.argv[0]) + ".plan-delta-ready")
-                        release = Path(str(sys.argv[0]) + ".plan-delta-release")
-                        ready.write_text("The first plan delta is visible before completion.\n", encoding="utf-8")
+                    # Every delta but the last can be held, so a test sees the plan at each stage.
+                    if stage < 4 and is_plan_turn and Path(str(sys.argv[0]) + ".plan-delta-hold").exists():
+                        ready = Path(str(sys.argv[0]) + f".plan-delta-ready-{stage}")
+                        release = Path(str(sys.argv[0]) + f".plan-delta-release-{stage}")
+                        ready.write_text(f"Plan delta {stage} is visible before completion.\n", encoding="utf-8")
                         deadline = time.monotonic() + 30
                         while not release.exists() and time.monotonic() < deadline:
                             drain_pending_stdin()

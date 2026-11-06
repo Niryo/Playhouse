@@ -12,6 +12,8 @@ private final class TextHeightMeasurer {
     private let layoutManager = NSLayoutManager()
     private let container = NSTextContainer(size: .zero)
     private var heights: [CGFloat: CGFloat] = [:]
+    /// The text last measured, as it was given.
+    private(set) var text: NSAttributedString?
 
     init() {
         container.lineFragmentPadding = 0
@@ -21,7 +23,8 @@ private final class TextHeightMeasurer {
 
     /// Replaces the measured text, which forgets every height measured for the previous text.
     func setText(_ text: NSAttributedString) {
-        storage.setAttributedString(text)
+        storage.replaceChangedTail(with: text, previous: self.text)
+        self.text = text.copy() as? NSAttributedString
         heights.removeAll()
     }
 
@@ -34,6 +37,45 @@ private final class TextHeightMeasurer {
         if heights.count >= 8 { heights.removeAll() }
         heights[width] = height
         return height
+    }
+}
+
+private extension NSTextStorage {
+    /// Changes the storage from showing `previous` to showing `text`, keeping the paragraphs both
+    /// share at the start. A streaming reply grows at its end, and a layout manager re-lays out
+    /// only from the first edited character, so each update costs the new text rather than the
+    /// whole reply. The two are compared as given because the storage itself never equals what
+    /// was set: it substitutes fonts, for emoji for example.
+    func replaceChangedTail(with text: NSAttributedString, previous: NSAttributedString?) {
+        guard let previous, previous.length == length else {
+            setAttributedString(text)
+            return
+        }
+        let oldText = previous.string as NSString
+        let newText = text.string as NSString
+        var common = 0
+        for (old, new) in zip(previous.string.utf16, text.string.utf16) {
+            guard old == new else { break }
+            common += 1
+        }
+        if common == oldText.length, common == newText.length, previous.isEqual(to: text) { return }
+        // A paragraph's style can depend on what follows it (list spacing, the line break that
+        // joins it to a new block), so the paragraph before the change is replaced as well.
+        var start = oldText.paragraphRange(for: NSRange(location: common, length: 0)).location
+        if start > 0 {
+            start = oldText.paragraphRange(for: NSRange(location: start - 1, length: 0)).location
+        }
+        // A change of style further back, such as a highlighted comment, replaces everything.
+        if start > 0, !previous.attributedSubstring(from: NSRange(location: 0, length: start))
+            .isEqual(to: text.attributedSubstring(from: NSRange(location: 0, length: start))) {
+            start = 0
+        }
+        beginEditing()
+        replaceCharacters(
+            in: NSRange(location: start, length: oldText.length - start),
+            with: text.attributedSubstring(from: NSRange(location: start, length: newText.length - start))
+        )
+        endEditing()
     }
 }
 
@@ -180,6 +222,35 @@ private enum AssistantMarkdownSegment: Identifiable {
     }
 }
 
+/// Remembers a value derived from reply text for each slot, such as one reply's prose run. Every
+/// message in the transcript re-renders when any of it changes, as on each update of a streaming
+/// reply, and parsing and styling every earlier reply again each time kept the main thread busy.
+/// A slot holds only its latest text, so a streaming reply replaces its own entry rather than
+/// filling the cache with each partial version and pushing finished replies out.
+private final class ReplyRenderCache<Value> {
+    private final class Entry {
+        let key: String
+        let value: Value
+        init(key: String, value: Value) {
+            self.key = key
+            self.value = value
+        }
+    }
+
+    private let cache = NSCache<NSString, Entry>()
+
+    init(countLimit: Int) {
+        cache.countLimit = countLimit
+    }
+
+    func value(slot: String, key: String, make: () -> Value) -> Value {
+        if let entry = cache.object(forKey: slot as NSString), entry.key == key { return entry.value }
+        let value = make()
+        cache.setObject(Entry(key: key, value: value), forKey: slot as NSString)
+        return value
+    }
+}
+
 /// Consecutive prose blocks laid out as one attributed string. Comments keep block-relative
 /// offsets, so they survive a change in how blocks are grouped; this maps between those and
 /// positions in the combined text.
@@ -214,6 +285,27 @@ private struct AssistantProseLayout {
         case .listItem, .orderedListItem: true
         case .heading, .paragraph, .codeBlock, .table: false
         }
+    }
+
+    private static let cache = ReplyRenderCache<AssistantProseLayout>(countLimit: 2000)
+
+    /// The layout for these blocks, kept for `slot` until their text or comments change.
+    static func cached(slot: String, blocks: [AssistantMarkdownBlock], responseAnnotations: [ResponseAnnotationReference]) -> AssistantProseLayout {
+        var key = ""
+        for block in blocks {
+            let kind = switch block.kind {
+            case .heading(let level): "h\(level)"
+            case .listItem: "li"
+            case .orderedListItem(let number): "ol\(number)"
+            case .paragraph: "p"
+            case .codeBlock, .table: "card"
+            }
+            key += "\(block.id)\u{1}\(kind)\u{1}\(block.text)\u{2}"
+        }
+        for annotation in responseAnnotations {
+            key += "\u{3}\(annotation.text)\u{1}\(annotation.comment)"
+        }
+        return cache.value(slot: slot, key: key) { AssistantProseLayout(blocks: blocks, responseAnnotations: responseAnnotations) }
     }
 
     init(blocks: [AssistantMarkdownBlock], responseAnnotations: [ResponseAnnotationReference]) {
@@ -398,7 +490,8 @@ private struct CodeBlockTextView: NSViewRepresentable {
 
     func updateNSView(_ view: NSTextView, context: Context) {
         guard view.textStorage?.string != attributedText.string else { return }
-        view.textStorage?.setAttributedString(attributedText)
+        // The measurer holds the text the view shows, until it takes the new one below.
+        view.textStorage?.replaceChangedTail(with: attributedText, previous: context.coordinator.text)
         context.coordinator.setText(attributedText)
     }
 
@@ -4337,7 +4430,10 @@ struct TaskConversationView: View {
         messageID: String? = nil,
         responseAnnotations: [ResponseAnnotationReference] = []
     ) -> some View {
-        let blocks = Self.markdownBlocks(markdown)
+        // Progress text without a message ID is short-lived, so only replies are kept.
+        let blocks = messageID.map { messageID in
+            Self.markdownBlocksCache.value(slot: messageID, key: markdown) { Self.markdownBlocks(markdown) }
+        } ?? Self.markdownBlocks(markdown)
         return VStack(alignment: .leading, spacing: 7) {
             if let messageID {
                 ForEach(AssistantMarkdownSegment.segments(of: blocks)) { segment in
@@ -4406,7 +4502,7 @@ struct TaskConversationView: View {
         responseAnnotations: [ResponseAnnotationReference],
         wholeMessageText: String
     ) -> some View {
-        let layout = AssistantProseLayout(blocks: blocks, responseAnnotations: responseAnnotations)
+        let layout = AssistantProseLayout.cached(slot: "\(messageID):\(blocks[0].id)", blocks: blocks, responseAnnotations: responseAnnotations)
         return SelectableAnnotationText(
             text: layout.text.string,
             highlightedRanges: annotations.filter { $0.messageID == messageID }.compactMap(layout.range(of:)),
@@ -4535,6 +4631,8 @@ struct TaskConversationView: View {
         guard afterDigits.first == ".", afterDigits.dropFirst().first == " " else { return nil }
         return (number, afterDigits.dropFirst(2))
     }
+
+    private static let markdownBlocksCache = ReplyRenderCache<[AssistantMarkdownBlock]>(countLimit: 2000)
 
     private static func markdownBlocks(_ markdown: String) -> [AssistantMarkdownBlock] {
         var blocks: [AssistantMarkdownBlock] = []
@@ -7422,11 +7520,16 @@ private struct SelectableAnnotationText: NSViewRepresentable {
             value.addAttribute(.foregroundColor, value: NSColor.systemOrange, range: range)
         }
         Self.replaceResponseAnnotationMarkers(in: value, references: responseAnnotations)
-        view.font = font
-        view.textColor = textColor
+        // Setting these restyles all of the text already shown, which would defeat replacing only
+        // its changed tail; every run in `value` carries its own font and color anyway.
+        if view.textStorage?.length == 0 {
+            view.font = font
+            view.textColor = textColor
+        }
         view.backgroundColor = .clear
-        view.textStorage?.setAttributedString(value)
-        coordinator.measurer.setText(view.textStorage ?? value)
+        // The measurer holds the text the view shows, until it takes the new one below.
+        view.textStorage?.replaceChangedTail(with: value, previous: coordinator.measurer.text)
+        coordinator.measurer.setText(value)
         view.setSelectedRange(NSRange(location: 0, length: 0))
         coordinator.responseCommentContentDidChange()
     }

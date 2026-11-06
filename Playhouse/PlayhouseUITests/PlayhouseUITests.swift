@@ -10765,7 +10765,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing is hidden until a first message is sent and while the agent waits on answers to its questions, then stays enabled with an empty composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, including a list that starts on the line right after a paragraph without a blank line, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in and fits the viewport, the question that started it stays pinned near the top of the transcript, consistent with the user message preceding its final answer in CLI/XPC history.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing is hidden until a first message is sent and while the agent waits on answers to its questions, then stays enabled with an empty composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, including a list that starts on the line right after a paragraph without a blank line, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in and fits the viewport, the question that started it stays pinned near the top of the transcript, consistent with the user message preceding its final answer in CLI/XPC history. The plan streams in four held deltas that end inside a paragraph, inside a list item after it, and inside the fenced code block; CLI/XPC events carry exactly those deltas in order, and at each held stage the plan's one prose text view and its code block show exactly the text streamed so far, with nothing repeated or left over from an earlier stage, before the completed plan shows its whole code block.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".playhouse-bridge-fixture")
@@ -10777,8 +10777,10 @@ final class PlayhouseUITests: XCTestCase {
         let fixtureCopy = fixtureRoot.appendingPathComponent("codex-fixture-markdown")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the Markdown fixture before launch.")
         let deltaHold = URL(fileURLWithPath: fixtureCopy.path + ".plan-delta-hold")
-        let deltaReady = URL(fileURLWithPath: fixtureCopy.path + ".plan-delta-ready")
-        let deltaRelease = URL(fileURLWithPath: fixtureCopy.path + ".plan-delta-release")
+        func deltaReady(_ stage: Int) -> URL { URL(fileURLWithPath: fixtureCopy.path + ".plan-delta-ready-\(stage)") }
+        func releaseDelta(_ stage: Int) throws {
+            try Data().write(to: URL(fileURLWithPath: fixtureCopy.path + ".plan-delta-release-\(stage)"))
+        }
         try Data().write(to: deltaHold)
         codexFixtureExecutable = fixtureCopy.path
         launchApp(defaultParent: fixture.parent.path)
@@ -10820,7 +10822,7 @@ final class PlayhouseUITests: XCTestCase {
         let assistantMarkdown = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Implementation plan"))
             .firstMatch
-        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: deltaReady.path) }, timeout: 10), "The fixture should pause after the first plan delta.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: deltaReady(1).path) }, timeout: 10), "The fixture should pause after the first plan delta.")
         XCTAssertTrue(assistantMarkdown.waitForExistence(timeout: 10), "The first plan delta should appear before the turn completes.")
         // The streamed message can be replaced by its persisted item; read the partial plan once.
         let partialPlan = assistantMarkdown.label
@@ -10834,9 +10836,46 @@ final class PlayhouseUITests: XCTestCase {
             planQuestion.frame.minY >= planTranscriptScrollView.frame.minY - 4
                 && planQuestion.frame.minY <= planTranscriptScrollView.frame.minY + 120
         }, timeout: 5), "While the partial plan still fits below it, the question that started the turn should stay pinned near the top of the transcript; question=\(planQuestion.frame), viewport=\(planTranscriptScrollView.frame).")
-        try Data().write(to: deltaRelease)
+
+        // The streaming plan grows in place: each held stage shows exactly the text streamed so
+        // far, ending inside a paragraph, then a list item after it, then the code block.
+        let streamingProse = app.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "Implementation plan")).firstMatch
+        // Matching on value across the whole transcript times out, so look only inside the code card.
+        let streamingCode = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier MATCHES %@", "assistant-markdown-code-block-[0-9]+"))
+            .firstMatch
+            .descendants(matching: .any).matching(NSPredicate(format: "value BEGINSWITH %@", "console.log("))
+            .firstMatch
+        let planOpening = ["Implementation plan", "Start with the workspace model."]
+        let fullSecondParagraph = "A separate paragraph confirms readable spacing between plan sections."
+        func detail(_ number: Int) -> String {
+            String(format: "•\tImplementation detail %02d: verify the saved conversation state and rendered result", number)
+        }
+        func assertStreamedProse(_ lines: [String], stage: Int) {
+            let expected = lines.joined(separator: "\n")
+            XCTAssertTrue(waitUntil({ streamingProse.exists && streamingProse.value as? String == expected }, timeout: 10),
+                          "Stage \(stage) should show exactly the plan streamed so far, with nothing repeated or left over from earlier stages; shown=\(String(describing: streamingProse.value)), expected=\(expected)")
+        }
+        assertStreamedProse(planOpening + ["A s"], stage: 1)
+        try releaseDelta(1)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: deltaReady(2).path) }, timeout: 10), "The fixture should pause after the second plan delta.")
+        assertStreamedProse(planOpening + [fullSecondParagraph] + (1...10).map(detail) + ["•\tImplementation detail 11: verify"], stage: 2)
+        attachScreenshot(named: "Plan grown into its list while streaming")
+        try releaseDelta(2)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: deltaReady(3).path) }, timeout: 10), "The fixture should pause after the third plan delta.")
+        assertStreamedProse(planOpening + [fullSecondParagraph] + (1...29).map(detail) + [
+            "•\tFinal verification: confirm the latest message is visible after reopening",
+            "Two numbered steps follow on the very next lines:",
+            "1.\tFirst numbered step: capture the baseline state before changes.",
+            "2.\tSecond numbered step: apply the fix and confirm there are no regressions.",
+        ], stage: 3)
+        XCTAssertTrue(waitUntil({ streamingCode.exists && streamingCode.value as? String == "console.log(\"Hello" }, timeout: 10),
+                      "The code block should show the code streamed so far; shown=\(String(describing: streamingCode.value)).")
+        try releaseDelta(3)
         // A long reply's label is a summary; its paragraphs carry the text.
         XCTAssertTrue(waitUntil({ self.transcriptContains("Final verification") }, timeout: 30), "The completed plan should replace the partial plan.")
+        XCTAssertTrue(waitUntil({ streamingCode.exists && streamingCode.value as? String == "console.log(\"Hello, world!\");" }, timeout: 10),
+                      "The completed code block should show all of its code; shown=\(String(describing: streamingCode.value)).")
         try FileManager.default.removeItem(at: deltaHold)
         XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Plan mode should stay selected after a planning response completes.")
         XCTAssertFalse(transcriptContains("<proposed_plan>"), "The plan should be shown automatically without its protocol wrapper.")
