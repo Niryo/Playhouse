@@ -1705,7 +1705,7 @@ struct TaskConversationView: View {
             .frame(maxHeight: .infinity)
             .overlay {
                 Color.clear
-                    .frame(width: 9)
+                    .frame(width: 17)
                     .contentShape(Rectangle())
                     .hoverCursor(.resizeLeftRight)
                     .gesture(
@@ -1763,7 +1763,9 @@ struct TaskConversationView: View {
                 Image(systemName: "terminal")
                     .font(.system(size: 12, weight: .medium))
                     .frame(width: 26, height: 24)
-                    .foregroundStyle(isTerminalPresented ? WorkspaceTheme.accent : Color.secondary)
+                    .foregroundStyle(terminalUnavailableReason != nil && !isTerminalPresented
+                        ? Color.secondary.opacity(0.35)
+                        : (isTerminalPresented ? WorkspaceTheme.accent : Color.secondary))
                     .background(
                         RoundedRectangle(cornerRadius: 5)
                             .fill(isTerminalPresented ? WorkspaceTheme.accent.opacity(0.14) : Color.clear)
