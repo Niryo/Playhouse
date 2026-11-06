@@ -2660,7 +2660,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertGreaterEqual(len(archived_tasks), 41, "The CLI board read should retain completed tasks beyond the first visible archive page.")
         self.assertTrue(set(filler_ids).issubset(archived_ids), "All persisted archive records should remain available across pages.")
 
-    # case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
+    # case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done removes its managed worktree and keeps its branch and target commit without committing or merging. When the worktree holds uncommitted changes the move is refused until the user confirms discarding them: declining keeps the task in Review with its files intact, and confirming removes them. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
     def test_task_done_preserves_dirty_worktree(self):
         task = self.create_repo_task("Dirty cleanup", [self.primary], materialize=True)
         worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
@@ -2674,13 +2674,19 @@ class PlayhouseBridgeTests(unittest.TestCase):
         branch_head = self.run_git(worktree, "rev-parse", "HEAD")
         persisted_review = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(persisted_review["status"], "Review", "A reviewed task should stay in Review until it is moved.")
-        response, _ = self.call_cli("task", "move", task["id"], "Done")
-        self.assertEqual(self.assert_success(response)["status"], "Done")
-        self.assertTrue(worktree.exists())
+        rejected, _ = self.call_cli("task", "move", task["id"], "Done", expected_status=1)
+        self.assertEqual(rejected["error"]["code"], "invalid_transition")
+        self.assertIn("discards the uncommitted changes", rejected["error"]["message"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review",
+                         "An unconfirmed move must leave the task in Review.")
+        self.assertTrue(worktree.exists(), "An unconfirmed move must keep the worktree.")
         self.assertEqual(tracked.read_text(encoding="utf-8"), "Edited after review\n")
         self.assertEqual(untracked.read_text(encoding="utf-8"), "keep me\n")
+        response, _ = self.call_cli("task", "move", task["id"], "Done", "--discard-changes")
+        self.assertEqual(self.assert_success(response)["status"], "Done")
+        self.assertFalse(worktree.exists(), "A confirmed move must remove the worktree with its uncommitted changes.")
         self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_before)
-        self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
+        self.assertEqual(self.run_git(self.primary, "rev-parse", branch), branch_head, "The branch must keep its commits without merging.")
         self.assertTrue(self.branch_exists(self.primary, branch))
 
     # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.

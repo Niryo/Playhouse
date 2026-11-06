@@ -34,6 +34,8 @@ struct KanbanBoardView: View {
     @State private var mergedPullRequestCheckTimerScheduled = false
     @State private var lastMergedPullRequestCheckAt: Date?
     @State private var taskAwaitingUnmergedConfirmation: UUID?
+    @State private var taskAwaitingDiscardConfirmation: UUID?
+    @State private var discardConfirmationMessage = ""
     @State private var syncingReviewTaskIDs = Set<UUID>()
     @State private var attemptedReviewSyncSignatures: [UUID: String] = [:]
     /// Last probed check colour of each linked PR, keyed by task then PR number.
@@ -229,7 +231,30 @@ struct KanbanBoardView: View {
             .buttonHoverPointer()
             .nativeHelp("Cancel marking this task Done")
         } message: {
-            Text("The pull request hasn't been merged. Marking this task Done will keep its worktree and branch as they are.")
+            Text("The pull request hasn't been merged. Marking this task Done removes its worktree and keeps its branch.")
+        }
+        .confirmationDialog(
+            "Discard uncommitted changes?",
+            isPresented: Binding(
+                get: { taskAwaitingDiscardConfirmation != nil },
+                set: { if !$0 { taskAwaitingDiscardConfirmation = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Discard Changes and Mark Done", role: .destructive) {
+                guard let id = taskAwaitingDiscardConfirmation else { return }
+                taskAwaitingDiscardConfirmation = nil
+                moveTask(id: id, to: .done, allowUnmergedPullRequests: true, allowDiscardingUncommittedChanges: true)
+            }
+            .buttonHoverPointer()
+            .nativeHelp("Discard uncommitted changes and mark this task Done")
+            .accessibilityIdentifier("discard-changes-confirm-button")
+            Button("Cancel", role: .cancel) { taskAwaitingDiscardConfirmation = nil }
+            .buttonHoverPointer()
+            .nativeHelp("Keep the worktree and leave this task in Review")
+            .accessibilityIdentifier("discard-changes-cancel-button")
+        } message: {
+            Text(discardConfirmationMessage)
         }
         .alert("Some task worktrees were kept", isPresented: Binding(
             get: { lifecycleResetNotice != nil },
@@ -864,7 +889,12 @@ struct KanbanBoardView: View {
         draggedTaskID.flatMap { id in tasks.first(where: { $0.id == id })?.status }
     }
 
-    private func moveTask(id: UUID, to status: TaskStatus, allowUnmergedPullRequests: Bool = false) {
+    private func moveTask(
+        id: UUID,
+        to status: TaskStatus,
+        allowUnmergedPullRequests: Bool = false,
+        allowDiscardingUncommittedChanges: Bool = false
+    ) {
         guard let task = tasks.first(where: { $0.id == id }), task.status != status else { return }
         if status == .review {
             guard task.status == .waitingResponse else { return }
@@ -885,10 +915,18 @@ struct KanbanBoardView: View {
                     id,
                     to: status.rawValue,
                     allowUnmergedPullRequests: allowUnmergedPullRequests,
+                    allowDiscardingUncommittedChanges: allowDiscardingUncommittedChanges,
                     skipMergeVerification: skipMergeVerification
                 )
             } catch PlayhouseManagerError.unmergedPullRequests {
                 taskAwaitingUnmergedConfirmation = id
+            } catch let error as PlayhouseManagerError {
+                if case .uncommittedChanges = error {
+                    discardConfirmationMessage = error.localizedDescription
+                    taskAwaitingDiscardConfirmation = id
+                } else {
+                    doneMoveError = error.localizedDescription
+                }
             } catch {
                 doneMoveError = error.localizedDescription
             }

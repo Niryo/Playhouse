@@ -1284,6 +1284,7 @@ enum PlayhouseManagerError: LocalizedError {
     case repositoryAssigned(String)
     case invalidTransition(String)
     case unmergedPullRequests([Int])
+    case uncommittedChanges([String])
 
     var errorDescription: String? {
         switch self {
@@ -1307,6 +1308,8 @@ enum PlayhouseManagerError: LocalizedError {
             message
         case .unmergedPullRequests(let numbers):
             "Pull request(s) \(numbers.map { "#\($0)" }.joined(separator: ", ")) haven't been merged. Confirm that you want to mark this task Done."
+        case .uncommittedChanges(let paths):
+            "Marking this task Done removes its worktree and discards the uncommitted changes in \(paths.joined(separator: ", ")). Confirm that you want to discard them."
         }
     }
 }
@@ -2286,12 +2289,14 @@ final class BoardTaskManager {
         _ id: UUID,
         to statusName: String,
         allowUnmergedPullRequests: Bool = false,
+        allowDiscardingUncommittedChanges: Bool = false,
         skipMergeVerification: Bool = false
     ) async throws -> BoardTaskRecord {
         PlayhouseDiagnostics.record("task.move.started", fields: [
             "taskID": id.uuidString,
             "requestedStatus": statusName,
             "allowUnmergedPullRequests": String(allowUnmergedPullRequests),
+            "allowDiscardingUncommittedChanges": String(allowDiscardingUncommittedChanges),
             "skipMergeVerification": String(skipMergeVerification)
         ])
         guard let status = TaskStatus(rawValue: statusName) else {
@@ -2329,8 +2334,18 @@ final class BoardTaskManager {
             guard task.repositoryWorktrees == originalRepositories else {
                 throw BridgeCommandError(code: "invalid_transition", message: "The task's pull request links changed while they were being checked. Try again.")
             }
+            let removable = originalRepositories.filter { !$0.isPending && $0.createdByPlayhouse }
+            if !allowDiscardingUncommittedChanges {
+                // Removing a worktree deletes whatever was never committed, so the
+                // caller must confirm before that happens.
+                var dirty: [String] = []
+                for record in removable where FileManager.default.fileExists(atPath: record.worktreePath) {
+                    if try await worktreeService.hasChanges(record) { dirty.append(record.worktreePath) }
+                }
+                if !dirty.isEmpty { throw PlayhouseManagerError.uncommittedChanges(dirty) }
+            }
             try await withRepositoryAllocationLocks(originalRepositories.map(\.repositoryPath)) {
-                for record in originalRepositories where !record.isPending && record.createdByPlayhouse {
+                for record in removable {
                     try await worktreeService.removeAfterConfirmation(record)
                 }
             }
@@ -8294,7 +8309,8 @@ final class PlayhouseBridgeRuntime {
                     result = try Self.value(await taskManager.move(
                         taskID,
                         to: status,
-                        allowUnmergedPullRequests: request.arguments["allowUnmergedPullRequests"]?.bool ?? false
+                        allowUnmergedPullRequests: request.arguments["allowUnmergedPullRequests"]?.bool ?? false,
+                        allowDiscardingUncommittedChanges: request.arguments["allowDiscardingUncommittedChanges"]?.bool ?? false
                     ))
                 }
             case "task.pr.auto":
@@ -8905,7 +8921,7 @@ final class PlayhouseBridgeRuntime {
             case .taskNotFound: code = "not_found"
             case .invalidTitle, .invalidStatus, .noWorkspaceRoots, .unavailableWorkspaceRoot, .invalidParentFolder, .invalidMessage, .repositoryAssigned: code = "invalid_argument"
             case .invalidTransition: code = "invalid_argument"
-            case .unmergedPullRequests: code = "invalid_transition"
+            case .unmergedPullRequests, .uncommittedChanges: code = "invalid_transition"
             }
             PlayhouseDiagnostics.record("bridge.request.failed", fields: requestFields.merging([
                 "errorCode": code,

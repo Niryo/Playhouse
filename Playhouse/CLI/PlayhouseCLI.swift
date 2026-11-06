@@ -141,12 +141,14 @@ enum PlayhouseCLI {
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.cpu-usage", arguments: ["taskID": .string(id)])
             case "move":
-                guard (2...3).contains(tail.count), tail.count == 2 || tail[2] == "--allow-unmerged" else {
-                    throw CLIError.usage("Use: playhouse task move <task-id> <status> [--allow-unmerged]")
+                let flags = Array(tail.dropFirst(2))
+                guard tail.count >= 2, Set(flags).isSubset(of: ["--allow-unmerged", "--discard-changes"]), Set(flags).count == flags.count else {
+                    throw CLIError.usage("Use: playhouse task move <task-id> <status> [--allow-unmerged] [--discard-changes]")
                 }
                 return BridgeRequest(command: "task.move", arguments: [
                     "taskID": .string(tail[0]), "status": .string(tail[1]),
-                    "allowUnmergedPullRequests": .boolean(tail.count == 3)
+                    "allowUnmergedPullRequests": .boolean(flags.contains("--allow-unmerged")),
+                    "allowDiscardingUncommittedChanges": .boolean(flags.contains("--discard-changes"))
                 ])
             case "pr":
                 guard tail.count >= 2 else {
@@ -777,6 +779,7 @@ enum PlayhouseCLI {
       playhouse task move <task-id> Review
       playhouse task move <task-id> Done
       playhouse task move <task-id> Done --allow-unmerged
+      playhouse task move <task-id> Done --discard-changes
       playhouse task pr create <task-id>
       playhouse task pr status <task-id>
       playhouse task pr verify <task-id>

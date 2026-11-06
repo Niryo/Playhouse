@@ -2086,7 +2086,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try runGitOutput(remote, "show", "refs/heads/\(branch):\(conflictPath)"), "resolved local and remote versions")
     }
 
-    // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
+    // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done removes its managed worktree and keeps its branch and target commit without committing or merging. When the worktree holds uncommitted changes the move is refused until the user confirms discarding them: declining keeps the task in Review with its files intact, and confirming removes them. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
     func test_task_done_preserves_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -2118,19 +2118,35 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(named: "Dirty done UI")?["status"] as? String, "Review", "Dropping a card in place must not move the task.")
         attachScreenshot(named: "Done drawer closes again after a drop in place", fullScreen: true)
         let openDrawerCapture = startDelayedScreenCapture(afterSeconds: 2)
-        moveTaskToDone("Dirty done UI")
+        dragTaskToDone(card)
         attachScreenCapture(openDrawerCapture, named: "Done drawer slides open while a card is dragged")
+        // Scoped to the dialog sheet: a bare "Cancel" button also matches a Touch Bar element.
+        let discardButton = app.sheets.buttons["Discard Changes and Mark Done"].firstMatch
+        let keepButton = app.sheets.buttons["Cancel"].firstMatch
+        XCTAssertTrue(discardButton.waitForExistence(timeout: 10), "A worktree with uncommitted changes must ask before Done discards them.")
+        attachScreenshot(named: "Done asks before discarding uncommitted changes")
+        // Declining leaves the task and its files exactly as they were.
+        keepButton.click()
+        XCTAssertTrue(waitUntil({ !discardButton.exists }, timeout: 5), "Cancel should dismiss the confirmation.")
+        assertDoneDrawerResting("after declining to discard changes")
+        XCTAssertEqual(try taskRecord(named: "Dirty done UI")?["status"] as? String, "Review", "Declining must leave the task in Review.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path), "Declining must keep the task worktree.")
+        XCTAssertEqual(try String(contentsOf: URL(fileURLWithPath: path).appendingPathComponent("unsaved.txt"), encoding: .utf8), "New unsaved work\n")
+        dragTaskToDone(card)
+        XCTAssertTrue(discardButton.waitForExistence(timeout: 10))
+        discardButton.click()
+        XCTAssertTrue(waitUntil({
+            do { return try taskRecord(named: "Dirty done UI")?["status"] as? String == "Done" }
+            catch { return false }
+        }, timeout: 15), "Confirming should persist the Done status.")
         assertDoneDrawerResting("after a card is dropped on Done")
         attachScreenshot(named: "Done drawer closes after a drop on Done", fullScreen: true)
         try assertTaskArchived("Dirty done UI")
-        XCTAssertEqual(try taskRecord(named: "Dirty done UI")?["status"] as? String, "Done")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: path), "Done must preserve the task worktree.")
-        XCTAssertEqual(try String(contentsOf: URL(fileURLWithPath: path).appendingPathComponent("playhouse-primary.txt"), encoding: .utf8), "Edited after review\n")
-        XCTAssertEqual(try String(contentsOf: URL(fileURLWithPath: path).appendingPathComponent("unsaved.txt"), encoding: .utf8), "New unsaved work\n")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path), "Confirmed Done must remove the task worktree with its uncommitted changes.")
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetBefore)
-        XCTAssertEqual(try runGitOutput(URL(fileURLWithPath: path), "rev-parse", "HEAD"), branchHead)
+        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", branch), branchHead)
         try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)")
-        attachScreenshot(named: "Done preserves the task worktree without merging")
+        attachScreenshot(named: "Done removes the worktree and keeps the branch")
     }
 
     // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
