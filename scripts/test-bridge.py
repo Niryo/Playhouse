@@ -6160,7 +6160,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn(first_record.get("claudeSessionID"), fixture_sessions, turns)
         self.assertIn(second_record.get("claudeSessionID"), fixture_sessions, turns)
 
-    # case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history.
+    # case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message in its conversation, where the open and reopened task show it, with an empty composer and no unsent draft, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history.
     def test_conversation_isolates_failing_claude_turn_from_parallel_send(self):
         source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-parallel-failure"
@@ -6225,6 +6225,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
         diagnostics = (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8")
         first_record = self.assert_success(self.call_cli("task", "get", first["id"])[0])
+        self.assertFalse(first_record["hasUnsentDraft"], "The failing turn's prompt stays in history, not in an unsent draft.")
         exits = [
             json.loads(line) for line in diagnostics.splitlines()
             if '"event":"claude.process.exited"' in line and json.loads(line).get("exitStatus") == "1"
@@ -9083,7 +9084,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertNotIn("Answer: Green", diagnostics)
         self.assertNotIn("private recovery prompt", diagnostics.lower())
 
-    # case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; Playhouse restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream retains safe assistant text while redacting secret echoes; persisted history hides secret recovery responses, provider activities, and file-change diffs. A later non-sensitive Codex turn keeps its own diff and safe response visible in refreshed CLI/UI history while the earlier secret stays absent. In one task, a no-secret recovery response remains visible after a later secret recovery while the secret response is hidden. Secret answers with surrounding whitespace are still redacted when Codex normalizes its echo; the visible UI shows the safe response immediately and after app restart.
+    # case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; Playhouse restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream retains safe assistant text while redacting secret echoes; persisted history hides secret recovery responses, provider activities, and file-change diffs. A later non-sensitive Codex turn keeps its own diff and safe response visible in refreshed CLI/UI history while the earlier secret stays absent. In one task, a no-secret recovery response remains visible after a later secret recovery while the secret response is hidden. Secret answers with surrounding whitespace are still redacted when Codex normalizes its echo; the visible UI shows the safe response immediately and after app restart. The first prompt, delivered before the provider exited although its send reported failure, is in history, never returns to the composer, and is not saved as an unsent draft.
     def test_codex_pending_question_recovers_after_provider_process_restarts(self):
         task_id = self.create_task("Restart-safe Codex question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -9103,7 +9104,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
         request = self.assert_success(pending).get("pendingUserInputRequest")
         self.assertEqual([item["id"] for item in request["questions"]], ["color", "token"])
         self.assertTrue(request["questions"][1]["isSecret"])
-        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+        self.assertTrue(any(
+            message["role"] == "user" and message["text"] == "Ask a restart-safe structured question."
+            for message in self.assert_success(pending)["messages"]
+        ), "A send that failed after its turn started has still delivered its prompt to the conversation.")
+        waiting_record = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(waiting_record["status"], "Waiting Response")
+        self.assertFalse(waiting_record["hasUnsentDraft"], "A delivered prompt must not be kept as an unsent draft.")
         blocked_switch, _ = self.call_cli("conversation", "provider", task_id, "set", "claude", expected_status=1, extra_environment=env)
         self.assert_failure(blocked_switch, "invalid_transition")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "provider", task_id)[0])["provider"], "codex")

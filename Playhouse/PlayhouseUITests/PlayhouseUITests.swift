@@ -790,11 +790,19 @@ final class PlayhouseUITests: XCTestCase {
             $0["event"] as? String == "workspace.repository.add.succeeded"
                 && $0["taskID"] as? String == createdTaskID
         }.count, 2)
+        // An unsent prompt is saved as the composer's draft, not as a submitted prompt.
         let promptSave = try XCTUnwrap(events.first {
-            $0["event"] as? String == "task.prompt.write.succeeded" && $0["taskID"] as? String == createdTaskID
+            $0["event"] as? String == "task.draft.write.succeeded" && $0["taskID"] as? String == createdTaskID
         })
         XCTAssertEqual(promptSave["status"] as? String, "Backlog")
-        XCTAssertEqual(promptSave["submitted"] as? String, "false")
+        XCTAssertTrue(events.contains {
+            $0["event"] as? String == "task.draft.write.started" && $0["taskID"] as? String == createdTaskID
+                && $0["promptByteCount"] as? String == String(prompt.utf8.count)
+        }, "The draft write should record the prompt's size without its text.")
+        XCTAssertFalse(events.contains {
+            $0["event"] as? String == "task.prompt.write.started" && $0["taskID"] as? String == createdTaskID
+                && $0["submitted"] as? String == "true"
+        }, "Saving an unsent prompt must not submit it.")
         XCTAssertTrue(events.contains {
             $0["event"] as? String == "persistence.read.succeeded"
                 && $0["operation"] as? String == "BoardTaskManager.requireTask"
@@ -1859,7 +1867,7 @@ final class PlayhouseUITests: XCTestCase {
         try "Continue after verified conflict resolution.\n".write(to: continueURL, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ element("send-message-button").exists }, timeout: 15), "The second Codex turn should finish after the verified push.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
-        element("back-to-board-button").click()
+        returnToBoard()
         XCTAssertTrue(resolveButton.exists, "A mergeable PR with a mismatched remote head must retain the conflict action.")
         try runGit(primaryWorktree, "push", remote.path, "HEAD:refs/heads/pr-123")
         XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/pr-123"), resolvedLocalHead)
@@ -4361,25 +4369,26 @@ final class PlayhouseUITests: XCTestCase {
         badge.click()
         element("conversation-repository-branch-from-edit").click()
         let branchFromField = element("conversation-repository-branch-from")
+        let branchFromSave = element("conversation-repository-branch-from-save")
+        XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
         replaceText(branchFromField, with: remoteBranch)
         attachScreenshot(named: "Branch-from names a branch that exists only on the remote")
-        element("save-conversation-repository-button").click()
+        branchFromSave.click()
         XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "branchFrom", expected: "origin/\(remoteBranch)"))
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", trackingRef).trimmingCharacters(in: .whitespacesAndNewlines), remoteCommit)
         let localBranches = try runGitOutput(fixture.primary, "for-each-ref", "--format=%(refname)", "refs/heads/\(remoteBranch)")
         XCTAssertEqual(localBranches.trimmingCharacters(in: .whitespacesAndNewlines), "", "Fetching must not create a local branch.")
-        XCTAssertTrue(waitForDisappearance(element("save-conversation-repository-button")), "A successful repository save should close its editor.")
+        XCTAssertTrue(waitForDisappearance(branchFromField), "A successful save should leave edit mode.")
 
-        badge.click()
-        app.activate()
         let branchFromValue = element("conversation-repository-branch-from-value")
         XCTAssertTrue(branchFromValue.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(accessibleLabelOrValue(of: branchFromValue), "origin/\(remoteBranch)", app.debugDescription)
         attachScreenshot(named: "Remote branch-from is fetched and saved as its remote-tracking branch")
 
         element("conversation-repository-branch-from-edit").click()
+        XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
         replaceText(branchFromField, with: "missing-everywhere/branch")
-        element("save-conversation-repository-button").click()
+        branchFromSave.click()
         let error = element("codex-chat-error")
         XCTAssertTrue(error.waitForExistence(timeout: 10), "A branch-from missing locally and on the remote should be shown in the conversation.")
         XCTAssertTrue(error.label.contains("missing-everywhere/branch"), error.label)
@@ -4389,10 +4398,11 @@ final class PlayhouseUITests: XCTestCase {
             "origin/\(remoteBranch)",
             "Rejecting a missing branch-from must preserve the saved value."
         )
+        XCTAssertTrue(branchFromField.exists, "A rejected value should stay open for correction.")
 
         try runGit(fixture.primary, "remote", "set-url", "origin", runDirectory.appendingPathComponent("unreachable-origin.git").path)
         replaceText(branchFromField, with: "unfetched/branch")
-        element("save-conversation-repository-button").click()
+        branchFromSave.click()
         XCTAssertTrue(
             waitUntil({ error.exists && error.label.contains("couldn't fetch 'unfetched/branch' from origin") }, timeout: 10),
             "A fetch failure should be reported as such, not as a missing branch: \(error.label)"
@@ -4405,7 +4415,7 @@ final class PlayhouseUITests: XCTestCase {
             "A failed fetch must preserve the saved value."
         )
         app.typeKey(.escape, modifierFlags: [])
-        XCTAssertTrue(waitForDisappearance(element("save-conversation-repository-button")), "Dismissing the editor should close it before the turn starts.")
+        XCTAssertTrue(waitForDisappearance(branchFromValue), "Dismissing the editor should close it before the turn starts.")
 
         try completeCurrentTaskWithFixtureAnswers(taskTitle: title)
         let started = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
@@ -8271,7 +8281,7 @@ final class PlayhouseUITests: XCTestCase {
                        URL(fileURLWithPath: secondWorktree).resolvingSymlinksInPath().path)
     }
 
-    // case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history.
+    // case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message in its conversation, where the open and reopened task show it, with an empty composer and no unsent draft, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history.
     func test_conversation_isolates_failing_claude_turn_from_parallel_send() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-parallel-failure")
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
@@ -8329,6 +8339,12 @@ final class PlayhouseUITests: XCTestCase {
             $0["event"] as? String == "claude.process.exited" && $0["exitStatus"] as? String == "1"
         }.compactMap { $0["activeThreadID"] as? String })
         XCTAssertEqual(failureThreadIDs, [firstSessionID], "Only the failing conversation's Claude process should exit with a failure.")
+        // The failed send keeps its prompt in the conversation, so it isn't also returned to the composer.
+        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "The failing turn should be reported in its conversation.")
+        XCTAssertTrue(transcriptMessage(firstPrompt).exists, "The failing turn's prompt stays in its conversation.")
+        XCTAssertEqual(firstComposer.value as? String, "", "The failing turn's prompt must not return to the composer.")
+        XCTAssertEqual(try taskRecord(id: firstID)?["hasUnsentDraft"] as? Bool, false, "The failing turn's prompt must not be saved as an unsent draft.")
+        attachScreenshot(named: "Failed Claude turn keeps its prompt in the conversation with an empty composer")
 
         let firstHistory = try XCTUnwrap(try runCLI(["conversation", "history", firstID])["result"] as? [String: Any])
         let firstMessages = firstHistory["messages"] as? [[String: Any]] ?? []
@@ -8339,7 +8355,11 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(secondMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == secondPrompt })
         XCTAssertTrue(secondMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "OK." })
 
-        element("back-to-board-button").click()
+        returnToBoard()
+        openTask(named: "Failing Claude conversation")
+        XCTAssertTrue(transcriptMessage(firstPrompt).waitForExistence(timeout: 15), "Reopening keeps the failing prompt in the conversation.")
+        XCTAssertEqual(element("message-composer").value as? String, "", "Reopening must not restore the failing prompt to the composer.")
+        returnToBoard()
         openTask(named: "Unaffected Claude conversation")
         XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15), "The reopened UI should show the parallel answer from persisted history.")
     }
@@ -12426,7 +12446,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Answer: Green")).firstMatch.exists)
     }
 
-    // case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; Playhouse restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream retains safe assistant text while redacting secret echoes; persisted history hides secret recovery responses, provider activities, and file-change diffs. A later non-sensitive Codex turn keeps its own diff and safe response visible in refreshed CLI/UI history while the earlier secret stays absent. In one task, a no-secret recovery response remains visible after a later secret recovery while the secret response is hidden. Secret answers with surrounding whitespace are still redacted when Codex normalizes its echo; the visible UI shows the safe response immediately and after app restart.
+    // case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; Playhouse restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream retains safe assistant text while redacting secret echoes; persisted history hides secret recovery responses, provider activities, and file-change diffs. A later non-sensitive Codex turn keeps its own diff and safe response visible in refreshed CLI/UI history while the earlier secret stays absent. In one task, a no-secret recovery response remains visible after a later secret recovery while the secret response is hidden. Secret answers with surrounding whitespace are still redacted when Codex normalizes its echo; the visible UI shows the safe response immediately and after app restart. The first prompt, delivered before the provider exited although its send reported failure, is in history, never returns to the composer, and is not saved as an unsent draft.
     func test_codex_pending_question_recovers_after_provider_process_restarts() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-restart-question")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -12447,12 +12467,25 @@ final class PlayhouseUITests: XCTestCase {
         element("send-message-button").click()
         XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        // The fixture exits right after asking, so the send reports failure; wait until the app
+        // has handled it, or the checks below could pass before the handler runs.
+        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "The provider exit should be reported in the conversation.")
+        XCTAssertTrue(transcriptMessage("Ask a restart-safe structured question.").exists,
+            "The prompt Codex received stays in the conversation after its send reports failure.")
+        XCTAssertEqual(element("message-composer").value as? String, "",
+            "The prompt Codex received must not return to the composer.")
+        attachScreenshot(named: "Delivered prompt stays in the conversation while the composer is empty")
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Restart-safe Codex question")
         XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
+        XCTAssertEqual(try taskRecord(id: taskID)?["hasUnsentDraft"] as? Bool, false,
+            "A prompt the provider received before it exited must not be saved as an unsent draft.")
+        XCTAssertTrue(transcriptMessage("Ask a restart-safe structured question.").exists,
+            "After restart the delivered prompt is still in the conversation.")
+        attachScreenshot(named: "After restart the pending question shows with the delivered prompt")
         XCTAssertFalse(element("conversation-provider-menu").isEnabled, "A saved structured question must block provider switching after restart.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         element("back-to-board-button").click()
@@ -12499,6 +12532,8 @@ final class PlayhouseUITests: XCTestCase {
             "The reloaded section must still be open, so the redaction check above was not vacuous.")
 
         let followUpComposer = element("message-composer")
+        XCTAssertEqual(followUpComposer.value as? String, "",
+            "The delivered first prompt must not come back to the composer after restarts.")
         followUpComposer.click()
         followUpComposer.typeText("Follow up after private recovery.")
         element("send-message-button").click()
@@ -15340,6 +15375,17 @@ final class PlayhouseUITests: XCTestCase {
         field.typeText(value)
     }
 
+    /// Leaves the open task for the board. Right after a turn ends the back
+    /// button can be re-rendered and swallow a click, so wait for it to be
+    /// hittable and confirm the board actually appeared.
+    private func returnToBoard() {
+        let backToBoard = element("back-to-board-button")
+        XCTAssertTrue(waitUntil({ backToBoard.isHittable }, timeout: 5), "The back-to-board button never became clickable.")
+        XCTAssertTrue(waitForStableFrame(backToBoard), "The back-to-board button kept moving.")
+        backToBoard.click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5), "Clicking back-to-board should show the board.")
+    }
+
     private func openTask(named title: String, horizontalRecovery: Bool = false) {
         // Task cards are only on the board; leave an open task first. The back
         // button can be briefly non-hittable right after a send (tooltip,
@@ -15377,17 +15423,15 @@ final class PlayhouseUITests: XCTestCase {
         if !useCoordinateFallback {
             XCTAssertTrue(card.isHittable, "Task card must be hittable after bounded board scrolling.")
         }
-        let openPoint = CGPoint(
-            x: card.frame.minX + card.frame.width * 0.5,
-            y: card.frame.minY + card.frame.height * 0.78
-        )
-        XCTAssertTrue(card.frame.contains(openPoint), "Task card open point must remain inside the visible card.")
-        if useCoordinateFallback {
-            card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.78)).click()
-        } else {
-            card.click()
-        }
-        XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
+        // Open the card through its title. The card's center can sit on one of
+        // its own controls (the token counter button opens Token stats), so a
+        // plain card.click() may open that control instead of the task.
+        let cardTitle = element(card.identifier.replacingOccurrences(of: "task-card-", with: "task-title-"))
+        XCTAssertTrue(cardTitle.exists, "Task card title is missing: \(title)")
+        let titleCenter = CGPoint(x: cardTitle.frame.midX, y: cardTitle.frame.midY)
+        XCTAssertTrue(card.frame.contains(titleCenter), "Task card title must lie inside the visible card.")
+        cardTitle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10), "Clicking the task card title should open the task.")
     }
 
     private func completeCurrentTaskWithFixtureAnswers(
