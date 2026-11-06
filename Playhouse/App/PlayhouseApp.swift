@@ -10,6 +10,7 @@ struct PlayhouseApp: App {
     @StateObject private var conversationRuntime: ConversationRuntimeModel
     @StateObject private var cpuUsageModel: TaskCPUUsageModel
     @StateObject private var pluginLibrary = PluginLibraryModel()
+    @StateObject private var agentUsageModel = AgentUsageModel(client: DaemonClient())
 
     private var windowTitle: String {
         let configuredTitle = ProcessInfo.processInfo.environment["PLAYHOUSE_WINDOW_TITLE"]?
@@ -102,6 +103,7 @@ struct PlayhouseApp: App {
             .modelContainer(modelContainer)
             .environmentObject(conversationRuntime)
             .environmentObject(cpuUsageModel)
+            .environmentObject(agentUsageModel)
             .defaultAppStorage(appPreferences)
     }
 }

@@ -72,6 +72,13 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/unit/codex-cpu-attribution-tests.swift" \
   -o "${codex_cpu_attribution_tests}"
 "${codex_cpu_attribution_tests}"
+# Pure-logic unit checks of the agent usage payload parsing and reset rules.
+agent_usage_parsing_tests="${test_output_dir}/agent-usage-parsing-tests"
+xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/Playhouse/App/AgentUsage.swift" \
+  "${repository_root}/scripts/unit/agent-usage-parsing-tests.swift" \
+  -o "${agent_usage_parsing_tests}"
+"${agent_usage_parsing_tests}"
 if [[ ! -x "${cli_path}" ]]; then
   printf 'The app build did not produce its bundled CLI at %s.\n' "${cli_path}" >&2
   exit 1

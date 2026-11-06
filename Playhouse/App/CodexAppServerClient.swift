@@ -368,6 +368,107 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         return [ConversationModelOption(id: Self.modelID, name: "GPT-6 Luna", isDefault: true)]
     }
 
+    // MARK: Account and usage
+
+    private var isRefreshingAgentUsage = false
+    /// A short-lived client that only reads the account; it never refreshes itself again.
+    private var isAccountReader = false
+    private var agentUsageRefreshPending = false
+    private static let accountReadTimeout: Duration = .seconds(30)
+
+    var isInstalled: Bool { Self.findCodexExecutable(override: codexExecutableOverride) != nil }
+
+    /// Reads the account and its rate limits from the app-server, launching it
+    /// if it is not running. Later changes arrive as `account/rateLimits/updated`
+    /// pushes, so this runs on launch and after a login, not on a timer.
+    func refreshAgentUsage() async {
+        let store = AgentUsageStore.shared(scope: runtimeScope)
+        store.setInstalled(.codex, isInstalled)
+        guard isInstalled else { return }
+        // A refresh asked for while one runs (a login finishing during the launch
+        // read) runs again afterwards rather than being dropped.
+        guard !isRefreshingAgentUsage else {
+            agentUsageRefreshPending = true
+            return
+        }
+        isRefreshingAgentUsage = true
+        defer { isRefreshingAgentUsage = false }
+        // Read through a short-lived app-server of its own, so a refresh never
+        // reaches the process running tasks mid-turn, and that process is still
+        // started by the first task, in that task's workspace. Pushes from the
+        // task process keep the numbers current between refreshes.
+        guard isAccountReader else {
+            let reader = CodexAppServerClient(
+                codexExecutableOverride: codexExecutableOverride,
+                codexHomeOverride: codexHomeOverride,
+                goalFeatureEnabled: goalFeatureEnabled,
+                goalRuntimeEnabled: goalRuntimeEnabled,
+                dataDirectory: dataDirectoryOverride
+            )
+            reader.isAccountReader = true
+            // An app-server that stops answering is stopped, which fails its
+            // pending requests, so a hung read never blocks later refreshes.
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await reader.refreshAgentUsage() }
+                group.addTask {
+                    try? await Task.sleep(for: Self.accountReadTimeout)
+                    await reader.shutdown()
+                }
+                await group.next()
+                group.cancelAll()
+            }
+            reader.shutdown()
+            if agentUsageRefreshPending {
+                agentUsageRefreshPending = false
+                isRefreshingAgentUsage = false
+                await refreshAgentUsage()
+            }
+            return
+        }
+        do {
+            let workspace = try ConversationWorkspaceContext(roots: [URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)])
+            try await ensureInitialized(workspace: workspace)
+            let response = try await request(method: "account/read", params: ["refreshToken": false])
+            guard let account = response["account"] as? [String: Any] else {
+                store.setAuth(.codex, loggedIn: false, account: nil, plan: nil)
+                return
+            }
+            let type = account["type"] as? String
+            store.setAuth(
+                .codex,
+                loggedIn: true,
+                account: (account["email"] as? String) ?? (type == "apiKey" ? "API key" : nil),
+                plan: CodexRateLimits.planName(account["planType"] as? String)
+            )
+            store.recordCodexRead(try await request(method: "account/rateLimits/read", params: [:]))
+        } catch {
+            PlayhouseDiagnostics.record("codex.agent_usage.refresh.failed", fields: diagnosticFields(["error": error.localizedDescription]))
+        }
+    }
+
+    /// Starts Codex's browser sign-in and returns the URL the user opens. The
+    /// app-server completes it with `account/login/completed`.
+    /// Sign-in and sign-out run on the shared app-server: its login server has to
+    /// stay up until the browser step finishes, and its account notifications
+    /// refresh the block afterwards.
+    func startAccountLogin() async throws -> String {
+        let workspace = try ConversationWorkspaceContext(roots: [URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)])
+        try await ensureInitialized(workspace: workspace)
+        let response = try await request(method: "account/login/start", params: ["type": "chatgpt"])
+        guard let url = response["authUrl"] as? String, !url.isEmpty else {
+            throw ClientError.protocolFailure("Codex did not return a sign-in URL.")
+        }
+        AgentUsageStore.shared(scope: runtimeScope).setLoginInProgress(.codex, true)
+        return url
+    }
+
+    func logoutAccount() async throws {
+        let workspace = try ConversationWorkspaceContext(roots: [URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)])
+        try await ensureInitialized(workspace: workspace)
+        _ = try await request(method: "account/logout", params: [:])
+        AgentUsageStore.shared(scope: runtimeScope).setAuth(.codex, loggedIn: false, account: nil, plan: nil)
+    }
+
     func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws {
         guard let model = try await availableModels(workspace: workspace).first(where: { $0.id == modelID }),
               let supportedEfforts = model.supportedEfforts,
@@ -1719,6 +1820,13 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             }
         case "thread/tokenUsage/updated":
             reportCallUsage(params)
+        case "account/rateLimits/updated":
+            if let snapshot = params["rateLimits"] as? [String: Any] {
+                AgentUsageStore.shared(scope: runtimeScope).recordCodexUpdate(snapshot)
+            }
+        case "account/login/completed", "account/updated":
+            guard !isAccountReader else { return }
+            Task { await refreshAgentUsage() }
         case "turn/diff/updated":
             guard let context, let diff = params["diff"] as? String, !diff.isEmpty else { return }
             context.onDiff(ConversationTurnDiff(unifiedDiff: diff))
@@ -2086,6 +2194,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     static var isInstalled: Bool { findCodexExecutable(override: nil) != nil }
 
     private static func findCodexExecutable(override: String?) -> String? {
+        if override == ConversationProviderFixture.notInstalledOverride { return nil }
         if let override, FileManager.default.isExecutableFile(atPath: override) { return override }
         let home = NSHomeDirectory()
         let commonPaths = [

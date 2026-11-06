@@ -104,6 +104,8 @@ enum WorkspaceSettings {
     static let taskSidebarCollapsedKey = "taskSidebarCollapsed"
     /// Whether the Changes section inside the task sidebar is collapsed; one value shared by every task.
     static let workspaceChangesSectionCollapsedKey = "workspaceChangesSectionCollapsed"
+    /// Whether the Agents info section at the bottom of the board sidebar is minimized.
+    static let agentsInfoSectionCollapsedKey = "agentsInfoSectionCollapsed"
     static let defaultConversationProviderKey = "defaultConversationProvider"
     static let autoCreatePullRequestDefaultKey = "autoCreatePullRequestDefault"
     static let pullRequestModeDefaultKey = "pullRequestModeDefault"

@@ -230,28 +230,42 @@ struct RemoteConversationManager {
             .decoded(SkillCatalog.self)
     }
 
+    /// The skill's SKILL.md exactly as written, or nil for a skill without a folder.
     func skillContent(taskID: UUID, skillID: String) async throws -> String? {
         let result = try await daemon.call("skills.get", ["taskID": id(taskID), "skillID": .string(skillID)])
-        guard case .object(let fields) = result else { return nil }
-        return fields["content"]?.string
+        return result.object?["content"]?.string
     }
 
-    func createSkill(taskID: UUID, name: String, description: String, body: String, scope: SkillScope, root: String?) async throws -> SkillRecord {
+    func createSkill(
+        taskID: UUID, name: String, description: String, body: String, fields: [String: String],
+        scope: SkillScope, root: String?
+    ) async throws -> SkillRecord {
         var arguments: [String: BridgeValue] = [
             "taskID": id(taskID), "name": .string(name), "description": .string(description),
-            "body": .string(body), "scope": .string(scope.rawValue),
+            "body": .string(body), "scope": .string(scope.rawValue), "fields": .object(fields.mapValues(BridgeValue.string)),
         ]
         if let root { arguments["root"] = .string(root) }
         return try await daemon.call("skills.create", arguments).decoded(SkillRecord.self)
     }
 
-    func updateSkill(taskID: UUID, skillID: String, content: String) async throws -> SkillRecord {
-        try await daemon.call("skills.update", ["taskID": id(taskID), "skillID": .string(skillID), "content": .string(content)])
-            .decoded(SkillRecord.self)
+    /// Replaces the whole SKILL.md; the daemon rejects a renamed or description-less file.
+    func updateSkillContent(taskID: UUID, skillID: String, content: String) async throws -> SkillRecord {
+        try await daemon.call("skills.update", [
+            "taskID": id(taskID), "skillID": .string(skillID), "content": .string(content),
+        ]).decoded(SkillRecord.self)
     }
 
-    func deleteSkill(taskID: UUID, skillID: String) async throws {
-        _ = try await daemon.call("skills.delete", ["taskID": id(taskID), "skillID": .string(skillID)])
+    func deleteSkills(taskID: UUID, skillIDs: [String]) async throws {
+        _ = try await daemon.call("skills.delete", ["taskID": id(taskID), "skillIDs": .array(skillIDs.map(BridgeValue.string))])
+    }
+
+    /// Opens a task whose agent repairs the skills, and returns it with the prompt to send.
+    func fixSkills(taskID: UUID, skillIDs: [String]) async throws -> (task: BoardTaskRecord, prompt: String) {
+        let result = try await daemon.call("skills.fix", ["taskID": id(taskID), "skillIDs": .array(skillIDs.map(BridgeValue.string))])
+        guard let task = result.object?["task"], let prompt = result.object?["prompt"]?.string else {
+            throw BridgeCommandError(code: "invalid_response", message: "The bridge did not return the new task.")
+        }
+        return (try task.decoded(BoardTaskRecord.self), prompt)
     }
 
     func moveSkill(taskID: UUID, skillID: String, scope: SkillScope, root: String?) async throws -> SkillRecord {

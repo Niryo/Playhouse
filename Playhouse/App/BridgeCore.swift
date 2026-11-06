@@ -5762,7 +5762,7 @@ final class ConversationManager {
         let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
         let codex = ConversationProviderCapabilities(
             provider: .codex,
-            isAvailable: CodexAppServerClient.isInstalled,
+            isAvailable: clients.codex.isInstalled,
             supportsGoals: true,
             notes: ["Playhouse runs Codex without MCP servers, apps, or hooks.", "Goals are available."]
         )
@@ -8094,6 +8094,27 @@ final class PlayhouseBridgeRuntime {
             }
         }
 
+        // Usage state lives in this process's memory too; a window follows its changes.
+        if request.command == "usage.subscribe" {
+            let runtimeScope: String?
+            #if DEBUG
+            runtimeScope = request.dataDirectory
+            #else
+            runtimeScope = nil
+            #endif
+            do {
+                for await report in AgentUsageStore.shared(scope: runtimeScope).changes() {
+                    if Task.isCancelled { break }
+                    eventHandler(BridgeEvent(requestID: request.id, type: "usage_state", payload: try Self.value(report)))
+                }
+                await PlayhouseDiagnostics.endBatch()
+                return .success(request, result: .object(["subscribed": .boolean(false)]))
+            } catch {
+                await PlayhouseDiagnostics.endBatch()
+                return .failure(request, code: "operation_failed", message: error.localizedDescription)
+            }
+        }
+
         // CPU samples also live only in this process's memory (the real PIDs).
         if request.command == "conversation.cpuUsage" || request.command == "conversation.cpuUsage.subscribe" {
             let runtimeScope: String?
@@ -8212,12 +8233,34 @@ final class PlayhouseBridgeRuntime {
                 }
                 return scope
             }
+            /// One skill as `skillID`, or several as `skillIDs`.
+            func skillIDs() throws -> [String] {
+                if let ids = request.arguments["skillIDs"]?.strings, !ids.isEmpty { return ids }
+                return [try request.requiredString("skillID")]
+            }
+            /// Optional SKILL.md header fields, such as license, keyed by name.
+            func skillFields() throws -> [String: String] {
+                guard let value = request.arguments["fields"], value != .null else { return [:] }
+                guard let object = value.object else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Fields must be an object of text values.")
+                }
+                return try object.mapValues { value in
+                    guard let text = value.string else {
+                        throw BridgeCommandError(code: "invalid_argument", message: "Each skill field must be text.")
+                    }
+                    return text
+                }
+            }
             func bundledClaudeSkills(_ roots: [SkillRoot]) async -> [(name: String, description: String)] {
                 guard request.arguments["includeBundled"]?.bool == true || request.arguments["includeBundled"]?.string == "true" else { return [] }
                 let workspace = (try? ConversationWorkspaceContext(roots: roots.map { URL(fileURLWithPath: $0.path, isDirectory: true) }))
                     ?? (try? ConversationWorkspaceContext(roots: []))
                 guard let workspace else { return [] }
                 return (try? await conversationClients().claude.bundledSkills(workspace: workspace)) ?? []
+            }
+
+            if let storeDirectory {
+                AgentUsageStore.shared(scope: dataDirectory).configurePersistence(directory: URL(fileURLWithPath: storeDirectory, isDirectory: true))
             }
 
             let result: BridgeValue
@@ -8603,6 +8646,20 @@ final class PlayhouseBridgeRuntime {
                 let repositories = try request.requiredStrings("repositories")
                 try settings.setLastSelectedRepositories(repositories)
                 result = .object(["lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string))])
+            case "usage.get":
+                result = try Self.value(await AgentUsageService.report(
+                    clients: conversationClients(), refresh: request.arguments["refresh"]?.bool == true
+                ))
+            case "usage.login", "usage.switch-account":
+                let name = try request.requiredString("provider")
+                guard let provider = ConversationProvider(rawValue: name) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Unknown provider '\(name)'. Valid providers: codex, claude.")
+                }
+                let clients = conversationClients()
+                let url = request.command == "usage.login"
+                    ? try await AgentUsageService.login(provider, clients: clients)
+                    : try await AgentUsageService.switchAccount(provider, clients: clients)
+                result = .object(["loginURL": url.map(BridgeValue.string) ?? .null])
             case "conversation.history":
                 let taskID = try request.requiredUUID("taskID")
                 let clients = conversationClients()
@@ -8703,6 +8760,7 @@ final class PlayhouseBridgeRuntime {
                 result = .object([
                     "skill": try Self.value(record),
                     "content": record.folderPath == nil ? .null : .string(try skills.content(id: skillID, roots: roots)),
+                    "manifest": record.folderPath == nil ? .null : try Self.value(skills.manifest(id: skillID, roots: roots)),
                 ])
             case "skills.create":
                 let roots = try skillRoots()
@@ -8711,17 +8769,40 @@ final class PlayhouseBridgeRuntime {
                     name: request.requiredString("name"),
                     description: request.arguments["description"]?.string ?? "",
                     body: request.arguments["body"]?.string ?? "",
+                    fields: try skillFields(),
                     scope: scope,
                     root: scope == .repo ? try skillRoot(in: roots) : nil,
                     roots: roots
                 ))
             case "skills.update":
-                result = try Self.value(skills.update(
-                    id: request.requiredString("skillID"), content: request.requiredString("content"), roots: skillRoots()
-                ))
+                let skillID = try request.requiredString("skillID")
+                if let content = request.arguments["content"]?.string {
+                    result = try Self.value(skills.update(id: skillID, content: content, roots: skillRoots()))
+                } else {
+                    let description = request.arguments["description"]?.string
+                    let body = request.arguments["body"]?.string
+                    let fields = try skillFields()
+                    guard description != nil || body != nil || !fields.isEmpty else {
+                        throw BridgeCommandError(code: "invalid_argument", message: "Give the new SKILL.md content, or a description, instructions, or field to change.")
+                    }
+                    result = try Self.value(skills.update(id: skillID, description: description, body: body, fields: fields, roots: skillRoots()))
+                }
             case "skills.delete":
-                try skills.delete(id: request.requiredString("skillID"), roots: skillRoots())
+                try skills.delete(ids: skillIDs(), roots: skillRoots())
                 result = .object(["deleted": .boolean(true)])
+            case "skills.fix":
+                let taskID = try request.requiredUUID("taskID")
+                let plan = try skills.fixPlan(ids: skillIDs(), roots: skillRoots())
+                let source = try taskManager.conversationSubject(taskID)
+                let created = try await taskManager.create(
+                    title: plan.title,
+                    repositories: plan.repositoryPaths.map { RepositoryWorktreeSpec(repositoryPath: $0, branch: nil, branchFrom: nil) },
+                    contextFolders: plan.contextFolders,
+                    provider: source.conversationProvider,
+                    pullRequestMode: settings.pullRequestModeDefault,
+                    prompt: plan.prompt
+                )
+                result = .object(["task": try Self.value(created), "prompt": .string(plan.prompt)])
             case "skills.move":
                 let roots = try skillRoots()
                 let scope = try skillScope()
@@ -8735,9 +8816,9 @@ final class PlayhouseBridgeRuntime {
                 guard let enabled = value?.bool ?? value?.string.flatMap({ ["true": true, "false": false][$0] }) else {
                     throw BridgeCommandError(code: "invalid_argument", message: "Enabled must be true or false.")
                 }
-                result = try Self.value(skills.setEnabled(
+                result = try Self.value(await skills.setEnabled(
                     id: request.requiredString("skillID"), enabled: enabled, roots: roots,
-                    bundledClaudeSkills: await bundledClaudeSkills(roots)
+                    bundledClaudeSkills: { await bundledClaudeSkills(roots) }
                 ))
             case "skills.link":
                 result = try Self.value(skills.link(id: request.requiredString("skillID"), roots: skillRoots()))
