@@ -312,6 +312,19 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
             && input.map { TaskProgressReportInstructions.reportCommand(in: $0) == nil } != false
     }
 
+    /// The standalone chat page this call loads into the agent's context, when the call is the
+    /// agent's `chat page read <page-id>` command. Both providers name a shell call "Running
+    /// <command>", so this reads the same way for Claude and Codex, live and from history.
+    var recalledChatPageID: String? {
+        Self.recalledChatPageID(inCommand: input ?? title)
+    }
+
+    static func recalledChatPageID(inCommand command: String) -> String? {
+        guard command.contains(TaskProgressReportInstructions.executableName),
+              let match = command.firstMatch(of: #/\schat page read\s+['"]?([A-Za-z0-9-]+)/#) else { return nil }
+        return String(match.1)
+    }
+
     /// Whether this call is the agent doing work: a tool call or a subagent,
     /// not Playhouse's own progress and outcome bookkeeping. A private status
     /// nudge turn that does work is shown like any other turn.
