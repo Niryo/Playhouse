@@ -490,6 +490,189 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Playhouse board opened with a healthy bridge")
     }
 
+    // case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude, which only reports usage while a task runs, starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the placeholder button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
+    func test_agents_info_shows_provider_usage_and_accounts() throws {
+        let codexExecutable = try makeCodexFixture(emptyQuestions: false)
+        let codexAccount = URL(fileURLWithPath: codexExecutable.path + ".account")
+        try? FileManager.default.removeItem(at: codexAccount)
+        defer { try? FileManager.default.removeItem(at: codexAccount) }
+        codexFixtureExecutable = codexExecutable.path
+        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-agents-info")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claudeExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8
+        )
+        claudeFixtureExecutable = claudeExecutable.path
+        launchApp(defaultParent: fixture.parent.path)
+
+        func text(_ identifier: String) -> String {
+            let match = element(identifier)
+            return match.exists ? accessibleLabelOrValue(of: match) : ""
+        }
+
+        // The section sits at the bottom of the sidebar, below the placeholder button, with one block per agent.
+        let sidebar = element(withAccessibilityLabel: "Kanban sidebar")
+        let section = element("agents-info")
+        XCTAssertTrue(section.waitForExistence(timeout: 30), "Agents info should appear once an agent CLI is installed.")
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label =[c] %@ OR value =[c] %@", "Agents info", "Agents info")).firstMatch.exists, "The section should be titled Agents info.")
+        XCTAssertTrue(sidebar.frame.contains(section.frame), "Agents info should be inside the left sidebar.")
+        XCTAssertLessThanOrEqual(app.buttons["Placeholder"].frame.maxY, section.frame.minY, "Agents info should sit below the placeholder button.")
+        XCTAssertLessThan(sidebar.frame.maxY - section.frame.maxY, 40, "Agents info should be pinned at the bottom of the sidebar.")
+        let claudeBlock = element("agents-info-claude")
+        let codexBlock = element("agents-info-codex")
+        XCTAssertTrue(claudeBlock.exists && codexBlock.exists, "Claude and Codex should each have their own block.")
+        XCTAssertLessThanOrEqual(claudeBlock.frame.maxY, codexBlock.frame.minY, "The blocks should be separate, Claude above Codex.")
+        XCTAssertLessThan(section.frame.height, 330, "The section should stay a compact sidebar footer.")
+        let toggle = element("agents-info-toggle")
+        XCTAssertEqual(toggle.value as? String, "Expanded", "The section should be open by default.")
+        let expandedTitleMinY = toggle.frame.minY
+
+        // Codex shows its account, both windows, and credits from the app-server; Claude has no usage until a task runs.
+        XCTAssertTrue(element("agents-info-codex-window-secondary").waitForExistence(timeout: 30), "Codex usage should show soon after launch.")
+        XCTAssertEqual(text("agents-info-codex-account"), "codex-fixture@example.com")
+        let primary = text("agents-info-codex-window-primary")
+        XCTAssertTrue(primary.contains("5h") && primary.contains("30%") && primary.contains("Resets in"), "Codex's 5h window should show its percent and reset time: \(primary)")
+        let secondary = text("agents-info-codex-window-secondary")
+        XCTAssertTrue(secondary.contains("Weekly") && secondary.contains("62%"), "Codex's weekly window should show its percent: \(secondary)")
+        XCTAssertEqual(text("agents-info-codex-credits"), "Credits: 12.50")
+        XCTAssertEqual(text("agents-info-claude-account"), "claude-fixture@example.com")
+        XCTAssertTrue(element("agents-info-claude-empty").exists, "Claude should say it has no data yet.")
+        XCTAssertTrue(element("agents-info-switch-claude").exists && element("agents-info-switch-codex").exists, "Each agent should offer a switch-account button.")
+        attachScreenshot(named: "Agents info with Codex usage and Claude awaiting data")
+
+        // A Claude turn's rate-limit event reaches the open window without a relaunch.
+        let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Claude usage UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"])["result"] as? [String: Any])
+        let claudeTaskID = try XCTUnwrap(created["id"] as? String)
+        let eventURL = URL(fileURLWithPath: claudeExecutable.path + ".rate-limit-event")
+        func claudeTurn(_ info: [String: Any]) throws {
+            let event = try JSONSerialization.data(withJSONObject: ["type": "rate_limit_event", "rate_limit_info": info])
+            try event.write(to: eventURL)
+            _ = try runCLI(["conversation", "send", claudeTaskID, "--message", "Say hello."])
+        }
+        let now = Int(Date().timeIntervalSince1970)
+        try claudeTurn([
+            "status": "allowed_warning", "rateLimitType": "five_hour", "utilization": 0.83, "resetsAt": now + 3600,
+            "unifiedWindows": [
+                "five_hour": ["utilization": 0.83, "resetsAt": now + 3600],
+                "seven_day": ["utilization": 0.41, "resetsAt": now + 3 * 86400],
+            ],
+        ])
+        XCTAssertTrue(waitUntil({ text("agents-info-claude-window-five_hour").contains("83%") }, timeout: 40), "Claude's 5h usage should update from its rate-limit event.")
+        XCTAssertTrue(text("agents-info-claude-window-seven_day").contains("41%"), "Claude's weekly usage should update too.")
+        XCTAssertEqual(text("agents-info-claude-status"), "Near limit", "A warning status should show on the block.")
+        XCTAssertFalse(element("agents-info-claude-empty").exists)
+        attachScreenshot(named: "Agents info with Claude usage near its limit")
+
+        // A window past its reset time reads as reset, and the limit lifts with it.
+        try claudeTurn(["status": "rejected", "rateLimitType": "five_hour", "utilization": 1.0, "resetsAt": now - 10])
+        XCTAssertTrue(waitUntil({ text("agents-info-claude-window-five_hour").contains("Reset") && text("agents-info-claude-window-five_hour").contains("0%") }, timeout: 40), "A window past its reset time should show as reset.")
+        XCTAssertFalse(element("agents-info-claude-status").exists, "The limit state should lift once its window has reset.")
+        XCTAssertTrue(text("agents-info-claude-window-seven_day").contains("41%"))
+
+        // While a Codex task runs, switching asks first, and cancelling keeps the account.
+        let holdMarker = URL(fileURLWithPath: codexExecutable.path + ".hold-release")
+        let turnActive = URL(fileURLWithPath: codexExecutable.path + ".turn-active")
+        let turnRelease = URL(fileURLWithPath: codexExecutable.path + ".turn-release")
+        for marker in [turnActive, turnRelease] { try? FileManager.default.removeItem(at: marker) }
+        try Data("hold\n".utf8).write(to: holdMarker)
+        defer { try? FileManager.default.removeItem(at: holdMarker) }
+        try createTaskFixture(title: "Running Codex task", roots: [fixture.primary.path])
+        let runningTaskID = try taskID(named: "Running Codex task")
+        openTask(named: "Running Codex task")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15), "The task should open its composer.")
+        composer.click()
+        composer.typeText("Hold this turn.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: turnActive.path) }, timeout: 30), "The Codex turn should be running.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: runningTaskID)?["status"] as? String) == "In Progress" }, timeout: 10))
+        // The confirmation counts the board's own tasks, so wait until the board shows it running.
+        XCTAssertTrue(element("column-in-progress").buttons["task-card-\(runningTaskID.uppercased())"].waitForExistence(timeout: 10), "The board should show the Codex task running.")
+        element("agents-info-switch-codex").click()
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 10), "Switching with a running Codex task should ask for confirmation.")
+        XCTAssertTrue(sheet.buttons["Switch Account"].exists)
+        XCTAssertTrue(sheet.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", "1 Codex task is running", "1 Codex task is running")).firstMatch.exists, "The confirmation should name the running task.")
+        attachScreenshot(named: "Switching the Codex account asks first while a Codex task runs")
+        sheet.buttons["Cancel"].click()
+        XCTAssertTrue(waitForDisappearance(sheet))
+        // A switch would sign out through the fixture, which records the change in its account file.
+        XCTAssertFalse(waitUntil({
+            FileManager.default.fileExists(atPath: codexAccount.path) || text("agents-info-codex-account") != "codex-fixture@example.com"
+        }, timeout: 5), "Cancelling must not sign the account out.")
+        try? FileManager.default.removeItem(at: holdMarker)
+        try Data("release\n".utf8).write(to: turnRelease)
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: runningTaskID)?["status"] as? String) != "In Progress" }, timeout: 60), "The held turn should finish.")
+
+        // With nothing running, switching signs out and in again, and the new account's usage replaces the old.
+        element("agents-info-switch-codex").click()
+        XCTAssertTrue(waitUntil({ text("agents-info-codex-account") == "codex-second@example.com" }, timeout: 40), "The switched Codex account should show.")
+        XCTAssertTrue(waitUntil({ text("agents-info-codex-window-primary").contains("7%") }, timeout: 20), "The new account's usage should replace the old.")
+        XCTAssertFalse(app.sheets.firstMatch.exists, "Switching with nothing running needs no confirmation.")
+        attachScreenshot(named: "Agents info after switching the Codex account")
+        element("agents-info-switch-claude").click()
+        XCTAssertTrue(waitUntil({ text("agents-info-claude-account") == "claude-second@example.com" }, timeout: 40), "The switched Claude account should show.")
+        XCTAssertTrue(element("agents-info-claude-empty").waitForExistence(timeout: 10), "The old Claude account's usage must not carry over.")
+
+        // A signed-out agent shows Log in instead of usage; logging in brings its usage back.
+        try JSONSerialization.data(withJSONObject: ["loggedIn": false, "email": NSNull(), "used": [0, 0]]).write(to: codexAccount)
+        try JSONSerialization.data(withJSONObject: ["loggedIn": false]).write(to: URL(fileURLWithPath: claudeExecutable.path + ".auth-state"))
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before the signed-out relaunch.")
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
+        XCTAssertTrue(element("agents-info-login-codex").waitForExistence(timeout: 40), "A signed-out Codex should offer Log in.")
+        XCTAssertTrue(element("agents-info-login-claude").exists, "A signed-out Claude should offer Log in.")
+        XCTAssertFalse(element("agents-info-codex-window-primary").exists, "A signed-out agent shows no usage.")
+        attachScreenshot(named: "Agents info with both agents signed out")
+        element("agents-info-login-claude").click()
+        XCTAssertTrue(waitUntil({ text("agents-info-claude-account") == "claude-second@example.com" }, timeout: 40), "Logging in to Claude should restore its account.")
+        XCTAssertFalse(element("agents-info-login-claude").exists)
+        element("agents-info-login-codex").click()
+        XCTAssertTrue(waitUntil({ text("agents-info-codex-account") == "codex-second@example.com" }, timeout: 40), "Logging in to Codex should restore its account.")
+        XCTAssertTrue(waitUntil({ text("agents-info-codex-window-primary").contains("7%") }, timeout: 20), "Logging in should bring Codex usage back.")
+        attachScreenshot(named: "Agents info after logging in again")
+
+        // Minimizing hides the blocks and rests the title at the bottom of the sidebar; the choice is sticky.
+        toggle.click()
+        XCTAssertTrue(waitUntil({ !self.element("agents-info-claude").exists && !self.element("agents-info-codex").exists }, timeout: 10), "Minimizing should hide the agent blocks.")
+        XCTAssertEqual(toggle.value as? String, "Collapsed")
+        XCTAssertGreaterThan(toggle.frame.minY, expandedTitleMinY, "The title should move down as the section collapses.")
+        XCTAssertLessThan(sidebar.frame.maxY - toggle.frame.maxY, 40, "The minimized title should rest at the bottom of the sidebar.")
+        attachScreenshot(named: "Agents info minimized at the bottom of the sidebar")
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before the minimized relaunch.")
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 40), "The minimized title should still show after a relaunch.")
+        XCTAssertEqual(toggle.value as? String, "Collapsed", "A minimized section should stay minimized after a relaunch.")
+        XCTAssertFalse(element("agents-info-claude").exists || element("agents-info-codex").exists)
+        attachScreenshot(named: "Agents info still minimized after relaunch")
+        toggle.click()
+        XCTAssertTrue(element("agents-info-claude").waitForExistence(timeout: 10), "Expanding should bring the agent blocks back.")
+        XCTAssertEqual(toggle.value as? String, "Expanded")
+
+        // An agent whose CLI is not installed has no block; with neither installed the section is gone.
+        // Without a fixture the harness passes `none`, so the real CLIs on the machine are never found.
+        claudeFixtureExecutable = nil
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before the Codex-only relaunch.")
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
+        XCTAssertTrue(element("agents-info-codex").waitForExistence(timeout: 40), "Codex, still installed, keeps its block.")
+        XCTAssertFalse(element("agents-info-claude").exists, "Claude, not installed, should have no block.")
+        attachScreenshot(named: "Agents info with only Codex installed")
+        codexFixtureExecutable = nil
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before the no-agents relaunch.")
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
+        let bare = try XCTUnwrap(try runCLI(["usage", "get"])["result"] as? [String: Any])
+        let installed = (bare["providers"] as? [[String: Any]] ?? []).map { $0["installed"] as? Bool }
+        XCTAssertEqual(installed, [false, false], "Neither CLI is installed without the fixtures.")
+        XCTAssertFalse(waitUntil({ self.element("agents-info").exists }, timeout: 15), "With neither CLI installed the section should not show.")
+        XCTAssertTrue(element(withAccessibilityLabel: "Kanban sidebar").exists)
+        attachScreenshot(named: "Sidebar without Agents info when no agent CLI is installed")
+    }
+
     // case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, test IDs that do not match the current worktree, and nonisolated test data before launching; the current app preserves a saved draft across restart.
     func test_app_override_rejects_incompatible_bundles() throws {
         let root = repositoryRoot.path
@@ -16190,6 +16373,18 @@ final class PlayhouseUITests: XCTestCase {
     /// Live Codex cases use the guest's signed-in Codex home.
     private var isLiveCodexIntegration: Bool { liveProvider == "codex" }
 
+    /// Each provider runs the case's fixture, or nothing: without a fixture the
+    /// provider reads as not installed, so no default case reaches a real CLI
+    /// that happens to be on the machine. Live cases keep the real CLIs.
+    private var providerExecutableEnvironment: [String: String] {
+        var environment: [String: String] = [:]
+        if let codexFixtureExecutable { environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable }
+        else if !isLiveIntegration { environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = "none" }
+        if let claudeFixtureExecutable { environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = claudeFixtureExecutable }
+        else if !isLiveIntegration { environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = "none" }
+        return environment
+    }
+
     /// Points a live case's task at the selected real provider.
     private func useLiveProvider(taskID: String) throws {
         guard let liveProvider else { return }
@@ -16212,12 +16407,7 @@ final class PlayhouseUITests: XCTestCase {
         if let launchWindowTitle {
             app.launchEnvironment["PLAYHOUSE_WINDOW_TITLE"] = launchWindowTitle
         }
-        if let codexFixtureExecutable {
-            app.launchEnvironment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
-        }
-        if let claudeFixtureExecutable {
-            app.launchEnvironment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = claudeFixtureExecutable
-        }
+        app.launchEnvironment.merge(providerExecutableEnvironment, uniquingKeysWith: { _, new in new })
         if let codexFixtureStateDirectory {
             app.launchEnvironment["PLAYHOUSE_E2E_FIXTURE_STATE_DIRECTORY"] = codexFixtureStateDirectory.path
         }
@@ -16258,12 +16448,7 @@ final class PlayhouseUITests: XCTestCase {
         if let launchWindowTitle {
             environment["PLAYHOUSE_WINDOW_TITLE"] = launchWindowTitle
         }
-        if let codexFixtureExecutable {
-            environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
-        }
-        if let claudeFixtureExecutable {
-            environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = claudeFixtureExecutable
-        }
+        environment.merge(providerExecutableEnvironment, uniquingKeysWith: { _, new in new })
         if let codexFixtureStateDirectory {
             environment["PLAYHOUSE_E2E_FIXTURE_STATE_DIRECTORY"] = codexFixtureStateDirectory.path
         }
@@ -17469,12 +17654,7 @@ final class PlayhouseUITests: XCTestCase {
         environment["CODEX_HOME"] = usesLiveCodex ? liveCodexHome : dataDirectory.appendingPathComponent("codex-home").path
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = serviceName
-        if let codexFixtureExecutable {
-            environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
-        }
-        if let claudeFixtureExecutable {
-            environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] = claudeFixtureExecutable
-        }
+        environment.merge(providerExecutableEnvironment, uniquingKeysWith: { _, new in new })
         if let codexFixtureStateDirectory {
             environment["PLAYHOUSE_E2E_FIXTURE_STATE_DIRECTORY"] = codexFixtureStateDirectory.path
         }

@@ -1161,6 +1161,22 @@ def respond(user_text, instructions, preserve_no_outcome=False, previous_prompt=
     return commands
 
 
+def auth_command(arguments):
+    """`claude auth status|login|logout`, as the Agents info block uses them.
+    The account lives in `<executable>.auth-state` so a test can sign it out or in."""
+    state_path = Path(str(sys.argv[0]) + ".auth-state")
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {
+        "loggedIn": True, "authMethod": "claude.ai", "email": "claude-fixture@example.com", "subscriptionType": "max"}
+    if arguments[:1] == ["status"]:
+        print(json.dumps(state))
+    elif arguments[:1] == ["logout"]:
+        state_path.write_text(json.dumps({"loggedIn": False}), encoding="utf-8")
+    elif arguments[:1] == ["login"]:
+        state_path.write_text(json.dumps({
+            "loggedIn": True, "authMethod": "claude.ai", "email": "claude-second@example.com", "subscriptionType": "pro"}), encoding="utf-8")
+    return 0
+
+
 def fixture_commands():
     """Mirrors Claude Code's initialize commands: its built-ins, plus the skills it
     finds in `.claude/skills` of the working folder and of each --add-dir folder,
@@ -1182,6 +1198,8 @@ def fixture_commands():
 
 def main():
     global background_result_sent, current_command_uuid
+    if sys.argv[1:2] == ["auth"]:
+        return auth_command(sys.argv[2:])
     history_path = Path(str(sys.argv[0]) + ".history")
     instructions = argument("--append-system-prompt") or ""
     turn = {
@@ -1276,6 +1294,9 @@ def main():
         elif message.get("type") == "user":
             background_result_sent = False
             current_command_uuid = message.get("uuid")
+            rate_limit_event = Path(str(sys.argv[0]) + ".rate-limit-event")
+            if rate_limit_event.exists():
+                write(json.loads(rate_limit_event.read_text(encoding="utf-8")))
             content = message.get("message", {}).get("content", [])
             user_text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
             turn["userText"] = user_text

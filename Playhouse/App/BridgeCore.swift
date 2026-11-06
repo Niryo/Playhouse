@@ -5762,7 +5762,7 @@ final class ConversationManager {
         let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
         let codex = ConversationProviderCapabilities(
             provider: .codex,
-            isAvailable: CodexAppServerClient.isInstalled,
+            isAvailable: clients.codex.isInstalled,
             supportsGoals: true,
             notes: ["Playhouse runs Codex without MCP servers, apps, or hooks.", "Goals are available."]
         )
@@ -8094,6 +8094,27 @@ final class PlayhouseBridgeRuntime {
             }
         }
 
+        // Usage state lives in this process's memory too; a window follows its changes.
+        if request.command == "usage.subscribe" {
+            let runtimeScope: String?
+            #if DEBUG
+            runtimeScope = request.dataDirectory
+            #else
+            runtimeScope = nil
+            #endif
+            do {
+                for await report in AgentUsageStore.shared(scope: runtimeScope).changes() {
+                    if Task.isCancelled { break }
+                    eventHandler(BridgeEvent(requestID: request.id, type: "usage_state", payload: try Self.value(report)))
+                }
+                await PlayhouseDiagnostics.endBatch()
+                return .success(request, result: .object(["subscribed": .boolean(false)]))
+            } catch {
+                await PlayhouseDiagnostics.endBatch()
+                return .failure(request, code: "operation_failed", message: error.localizedDescription)
+            }
+        }
+
         // CPU samples also live only in this process's memory (the real PIDs).
         if request.command == "conversation.cpuUsage" || request.command == "conversation.cpuUsage.subscribe" {
             let runtimeScope: String?
@@ -8236,6 +8257,10 @@ final class PlayhouseBridgeRuntime {
                     ?? (try? ConversationWorkspaceContext(roots: []))
                 guard let workspace else { return [] }
                 return (try? await conversationClients().claude.bundledSkills(workspace: workspace)) ?? []
+            }
+
+            if let storeDirectory {
+                AgentUsageStore.shared(scope: dataDirectory).configurePersistence(directory: URL(fileURLWithPath: storeDirectory, isDirectory: true))
             }
 
             let result: BridgeValue
@@ -8621,6 +8646,20 @@ final class PlayhouseBridgeRuntime {
                 let repositories = try request.requiredStrings("repositories")
                 try settings.setLastSelectedRepositories(repositories)
                 result = .object(["lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string))])
+            case "usage.get":
+                result = try Self.value(await AgentUsageService.report(
+                    clients: conversationClients(), refresh: request.arguments["refresh"]?.bool == true
+                ))
+            case "usage.login", "usage.switch-account":
+                let name = try request.requiredString("provider")
+                guard let provider = ConversationProvider(rawValue: name) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Unknown provider '\(name)'. Valid providers: codex, claude.")
+                }
+                let clients = conversationClients()
+                let url = request.command == "usage.login"
+                    ? try await AgentUsageService.login(provider, clients: clients)
+                    : try await AgentUsageService.switchAccount(provider, clients: clients)
+                result = .object(["loginURL": url.map(BridgeValue.string) ?? .null])
             case "conversation.history":
                 let taskID = try request.requiredUUID("taskID")
                 let clients = conversationClients()
