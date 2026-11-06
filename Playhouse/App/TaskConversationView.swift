@@ -97,6 +97,8 @@ private final class InlineCodeLayoutManager: NSLayoutManager {
 @Observable
 private final class ComposerDraftModel {
     var text = ""
+    /// Bumped to put the keyboard back in the composer, such as after the Skills page closes.
+    var focusRequest = 0
     /// The composer text that needs no save: the draft last saved or restored, or the empty
     /// composer a send, steer, or queue left behind.
     @ObservationIgnored var settledText = ""
@@ -853,7 +855,8 @@ struct TaskConversationView: View {
     }
     private var isDraftUnsaved: Bool { draft != composerDraft.settledText }
     @State private var pendingImages: [PendingImage] = []
-    @State private var isShowingImagePicker = false
+    /// The task's skill gallery covers the conversation, which keeps its draft underneath.
+    @State private var isShowingSkills = false
     @State private var selectedChatImage: NSImage?
     @State private var isGeneratingTitle = false
     @State private var chatPagesByTurnID: [String: StandaloneChatPage] = [:]
@@ -1537,10 +1540,13 @@ struct TaskConversationView: View {
                 .frame(minWidth: 900, minHeight: 600)
             }
         }
-        .fileImporter(isPresented: $isShowingImagePicker, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
-            do {
-                for url in try result.get() { try addImageData(Data(contentsOf: url)) }
-            } catch { errorMessage = "Couldn't load image: \(error.localizedDescription)" }
+        .overlay {
+            if isShowingSkills {
+                SkillsPageView(task: task, manager: conversationManager, onUse: useSkill) {
+                    isShowingSkills = false
+                    composerDraft.focusRequest += 1
+                }
+            }
         }
         .task {
             // Synchronous, so the picker shows the cached model name on the
@@ -4830,6 +4836,7 @@ struct TaskConversationView: View {
                     text: $composerDraft.text,
                     height: $composerHeight,
                     isFocused: Binding(get: { isComposerFocused }, set: { isComposerFocused = $0 }),
+                    focusRequest: composerDraft.focusRequest,
                     isEnabled: !isReadOnly,
                     autofocusOnAppear: isNewTask,
                     accessibilityHelp: isReadOnly
@@ -4878,11 +4885,11 @@ struct TaskConversationView: View {
                     .accessibilityIdentifier("message-composer-scroll-view")
 
                 HStack(spacing: 12) {
-                    Button { isShowingImagePicker = true } label: { Image(systemName: "paperclip") }
+                    Button { isShowingSkills = true } label: { Image(systemName: "sparkles") }
                     .buttonHoverPointer()
-                    .nativeHelp("Attach image")
-                        .buttonStyle(.plain).accessibilityLabel("Attach image")
-                        .accessibilityIdentifier("attach-chat-image-button")
+                    .nativeHelp("Skills")
+                        .buttonStyle(.plain).accessibilityLabel("Skills")
+                        .accessibilityIdentifier("open-skills-button")
                     Menu {
                         if provider.supportsGoals {
                             Button {
@@ -6524,6 +6531,19 @@ struct TaskConversationView: View {
         }
     }
 
+    /// Puts `/skill-name` at the start of the draft and returns to the
+    /// conversation. Claude Code runs it as a slash command; Codex receives the
+    /// skill itself alongside the message.
+    private func useSkill(_ skill: SkillRecord) {
+        let token = "/" + skill.name
+        let rest = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !rest.hasPrefix(token + " "), rest != token {
+            draft = rest.isEmpty ? token + " " : token + " " + rest
+        }
+        isShowingSkills = false
+        composerDraft.focusRequest += 1
+    }
+
     /// Summarizes how the selected provider's native configuration differs, so a
     /// switch doesn't silently change which skills or MCP servers are available.
     private func loadProviderNotice() async {
@@ -7004,6 +7024,8 @@ private struct NativeChatEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var height: CGFloat
     @Binding var isFocused: Bool
+    /// Each new value moves the keyboard into the editor once, with the caret at the end.
+    let focusRequest: Int
     let isEnabled: Bool
     let autofocusOnAppear: Bool
     let accessibilityHelp: String
@@ -7082,11 +7104,23 @@ private struct NativeChatEditor: NSViewRepresentable {
             }
         }
         scroll.focusEditorIfNeeded()
+        if focusRequest != context.coordinator.handledFocusRequest, isEnabled {
+            context.coordinator.handledFocusRequest = focusRequest
+            // After this update, so a view that covered the editor has gone.
+            DispatchQueue.main.async { [weak editor] in
+                guard let editor, editor.window?.makeFirstResponder(editor) == true else { return }
+                editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
+            }
+        }
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NativeChatEditor
-        init(_ parent: NativeChatEditor) { self.parent = parent }
+        var handledFocusRequest: Int
+        init(_ parent: NativeChatEditor) {
+            self.parent = parent
+            handledFocusRequest = parent.focusRequest
+        }
 
         func textDidChange(_ notification: Notification) {
             guard let editor = notification.object as? ChatEditorTextView else { return }

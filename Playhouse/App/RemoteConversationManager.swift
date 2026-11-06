@@ -223,6 +223,54 @@ struct RemoteConversationManager {
             .decoded(BoardTaskRecord.self)
     }
 
+    // MARK: - Skills, read and managed by the daemon like the CLI's `skills` commands
+
+    func skills(taskID: UUID, includeBundled: Bool) async throws -> SkillCatalog {
+        try await daemon.call("skills.list", ["taskID": id(taskID), "includeBundled": .boolean(includeBundled)])
+            .decoded(SkillCatalog.self)
+    }
+
+    func skillContent(taskID: UUID, skillID: String) async throws -> String? {
+        let result = try await daemon.call("skills.get", ["taskID": id(taskID), "skillID": .string(skillID)])
+        guard case .object(let fields) = result else { return nil }
+        return fields["content"]?.string
+    }
+
+    func createSkill(taskID: UUID, name: String, description: String, body: String, scope: SkillScope, root: String?) async throws -> SkillRecord {
+        var arguments: [String: BridgeValue] = [
+            "taskID": id(taskID), "name": .string(name), "description": .string(description),
+            "body": .string(body), "scope": .string(scope.rawValue),
+        ]
+        if let root { arguments["root"] = .string(root) }
+        return try await daemon.call("skills.create", arguments).decoded(SkillRecord.self)
+    }
+
+    func updateSkill(taskID: UUID, skillID: String, content: String) async throws -> SkillRecord {
+        try await daemon.call("skills.update", ["taskID": id(taskID), "skillID": .string(skillID), "content": .string(content)])
+            .decoded(SkillRecord.self)
+    }
+
+    func deleteSkill(taskID: UUID, skillID: String) async throws {
+        _ = try await daemon.call("skills.delete", ["taskID": id(taskID), "skillID": .string(skillID)])
+    }
+
+    func moveSkill(taskID: UUID, skillID: String, scope: SkillScope, root: String?) async throws -> SkillRecord {
+        var arguments: [String: BridgeValue] = ["taskID": id(taskID), "skillID": .string(skillID), "scope": .string(scope.rawValue)]
+        if let root { arguments["root"] = .string(root) }
+        return try await daemon.call("skills.move", arguments).decoded(SkillRecord.self)
+    }
+
+    func setSkillEnabled(taskID: UUID, skillID: String, enabled: Bool) async throws -> SkillRecord {
+        try await daemon.call("skills.enable", [
+            "taskID": id(taskID), "skillID": .string(skillID), "enabled": .boolean(enabled), "includeBundled": .boolean(true),
+        ]).decoded(SkillRecord.self)
+    }
+
+    func linkSkill(taskID: UUID, skillID: String, linked: Bool) async throws -> SkillRecord {
+        try await daemon.call(linked ? "skills.link" : "skills.unlink", ["taskID": id(taskID), "skillID": .string(skillID)])
+            .decoded(SkillRecord.self)
+    }
+
     func providerCapabilities(taskID: UUID) async throws -> [ConversationProviderCapabilities] {
         try await daemon.call("conversation.provider.capabilities", ["taskID": id(taskID)])
             .decoded([ConversationProviderCapabilities].self)

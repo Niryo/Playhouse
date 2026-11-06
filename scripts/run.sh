@@ -90,6 +90,7 @@ if [[ "${app_executable}" -ef "${cli_executable}" ]]; then
   printf 'Playhouse CLI and app executable resolve to the same file: %s\n' "${app_executable}" >&2
   exit 1
 fi
+playhouse_clear_inherited_bridge_overrides
 open -n \
   --env "PLAYHOUSE_DATA_DIRECTORY=${launch_data_directory}" \
   --env "PLAYHOUSE_WORKTREE_LABEL=${worktree_label}" \
