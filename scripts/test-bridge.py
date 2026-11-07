@@ -8216,6 +8216,58 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(assistants[-1]["modelID"], "gpt-6-luna")
         self.assertEqual(assistants[-1]["createdAt"], "2026-10-26T12:34:00Z")
 
+    # case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread, and after the selection moves to another non-default model (Mini) it resumes with that selected model rather than the hardcoded default and succeeds even though Codex, still holding the thread open, reports Sol; the reply stays visible with no conversation error. A later send on Luna still confirms the model Codex reports and fails with a model mismatch instead of switching silently, without starting a turn, and the next Luna send whose model Codex confirms succeeds.
+    def test_codex_history_keeps_loaded_thread_model(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-kept-model-unique-turns-success"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        kept_model = Path(str(executable) + ".resume-keeps-model")
+        task_id = self.create_task(title="Codex kept model history")["id"]
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-sol")[0])
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Run on Sol.", "--model", "gpt-6-sol", extra_environment=environment
+        )[0])
+        # The turn just ended and the selected model is still Sol: history reuses the
+        # loaded thread instead of resuming it with the hardcoded default (Luna).
+        kept_model.write_text("gpt-6-sol\n", encoding="utf-8")
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        self.assertTrue(any(message["role"] == "assistant" for message in history["messages"]))
+        self.assertTrue(kept_model.is_file(), "History must not resume a thread already loaded with the task's model.")
+        # The selection moves to Mini (neither Sol nor the default) while Codex still
+        # holds the thread on Sol: history resumes with Mini, Codex keeps Sol, and the
+        # read still succeeds.
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-mini")[0])
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        self.assertFalse(kept_model.exists(), "History must have resumed the thread and read Codex's reported model.")
+        recorded = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertEqual(recorded["threadResumeKeptModels"][-1], {"requested": "gpt-6-mini", "reported": "gpt-6-sol"},
+                         "History resumes with the task's selected model, not the hardcoded default.")
+        self.assertTrue(any(message["role"] == "assistant" for message in history["messages"]))
+        # A send still confirms its model: Codex keeping Sol fails a send on Luna.
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-luna")[0])
+        kept_model.write_text("gpt-6-sol\n", encoding="utf-8")
+        mismatch, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Run on Luna.", "--model", "gpt-6-luna",
+            expected_status=1, extra_environment=environment
+        )
+        self.assertIn("Codex selected gpt-6-sol instead of gpt-6-luna", mismatch["error"]["message"])
+        self.assertFalse(kept_model.exists())
+        recorded = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertEqual(recorded["threadResumeKeptModels"][-1], {"requested": "gpt-6-luna", "reported": "gpt-6-sol"})
+        self.assertFalse(any(turn.get("userMessage", "").endswith("Run on Luna.") for turn in recorded["turns"]),
+                         "A send whose model Codex didn't confirm must not start a turn.")
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Run on Luna again.", "--model", "gpt-6-luna", extra_environment=environment
+        )[0])
+        recorded = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        luna_turn = next(turn for turn in reversed(recorded["turns"]) if turn.get("userMessage", "").endswith("Run on Luna again."))
+        self.assertEqual(luna_turn["modelID"], "gpt-6-luna")
+
     # case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 resolved from Claude Code's bare alias entry as the concrete latest choice in place of the older Opus 5. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
     def test_conversation_effort_dispatches_to_claude(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"

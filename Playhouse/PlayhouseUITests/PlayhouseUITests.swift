@@ -11954,6 +11954,97 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(effort["effort"] as? String, "xhigh")
     }
 
+    // case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread, and after the selection moves to another non-default model (Mini) it resumes with that selected model rather than the hardcoded default and succeeds even though Codex, still holding the thread open, reports Sol; the reply stays visible with no conversation error. A later send on Luna still confirms the model Codex reports and fails with a model mismatch instead of switching silently, without starting a turn, and the next Luna send whose model Codex confirms succeeds.
+    func test_codex_history_keeps_loaded_thread_model() throws {
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-unique-turns-success")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
+        codexFixtureExecutable = executable.path
+        let historyURL = URL(fileURLWithPath: executable.path + ".history")
+        let keptModel = URL(fileURLWithPath: executable.path + ".resume-keeps-model")
+        try? FileManager.default.removeItem(at: historyURL)
+        try? FileManager.default.removeItem(at: keptModel)
+        defer { try? FileManager.default.removeItem(at: keptModel) }
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Codex kept model UI", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Codex kept model UI")
+        openTask(named: "Codex kept model UI")
+        let picker = element("model-picker-menu")
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.click()
+        app.buttons["model-option-gpt-6-sol"].click()
+        picker.click()
+        XCTAssertTrue(app.staticTexts["Send a message to Codex · Sol."].waitForExistence(timeout: 10))
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Run on Sol.")
+        element("send-message-button").click()
+        let reply = "Answers received: Blue / fixture-secret."
+        XCTAssertTrue(transcriptMessage(reply).waitForExistence(timeout: 15), "The Sol turn's reply should arrive.")
+        XCTAssertTrue(app.staticTexts["Codex · Sol"].exists)
+        // The turn just ended with Sol still selected: reopening reuses the loaded
+        // thread instead of resuming it with the hardcoded default (Luna).
+        XCTAssertEqual((try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "gpt-6-sol")
+        try "gpt-6-sol\n".write(to: keptModel, atomically: true, encoding: .utf8)
+        returnToBoard()
+        openTask(named: "Codex kept model UI")
+        XCTAssertTrue(transcriptMessage(reply).waitForExistence(timeout: 10))
+        XCTAssertFalse(waitUntil({ !FileManager.default.fileExists(atPath: keptModel.path) }, timeout: 3),
+                       "History must not resume a thread already loaded with the task's model.")
+        XCTAssertFalse(element("codex-chat-error").exists)
+        // Codex still holds the thread on Sol while the selection moves to Mini (neither
+        // Sol nor the default), so reopening resumes with Mini and Codex reports Sol.
+        picker.click()
+        app.buttons["model-option-gpt-6-mini"].click()
+        picker.click()
+        XCTAssertTrue(waitUntil({ picker.label.contains("GPT-6 Mini") }, timeout: 10))
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["conversation", "model", taskID]))?["result"] as? [String: Any])?["modelID"] as? String == "gpt-6-mini"
+        }, timeout: 10))
+        returnToBoard()
+        openTask(named: "Codex kept model UI")
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: keptModel.path) }, timeout: 15),
+                      "Reopening the task should resume the thread and read the model Codex kept.")
+        let resumes = try XCTUnwrap(
+            (try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any])?["threadResumeKeptModels"] as? [[String: String]]
+        )
+        XCTAssertEqual(resumes.last, ["requested": "gpt-6-mini", "reported": "gpt-6-sol"],
+                       "History resumes with the task's selected model, not the hardcoded default.")
+        XCTAssertTrue(transcriptMessage(reply).waitForExistence(timeout: 10), "History still shows the Sol reply.")
+        XCTAssertTrue(app.staticTexts["Codex · Sol"].exists)
+        XCTAssertFalse(element("codex-chat-error").waitForExistence(timeout: 2),
+                       "Loading history must not fail when Codex keeps the loaded thread's model.")
+        attachScreenshot(named: "History loads after Codex keeps the Sol thread model")
+        // A send on a model the thread wasn't loaded with still has its model confirmed.
+        picker.click()
+        app.buttons["model-option-gpt-6-luna"].click()
+        picker.click()
+        XCTAssertTrue(waitUntil({ picker.label.contains("GPT-6 Luna") }, timeout: 10))
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["conversation", "model", taskID]))?["result"] as? [String: Any])?["modelID"] as? String == "gpt-6-luna"
+        }, timeout: 10))
+        try "gpt-6-sol\n".write(to: keptModel, atomically: true, encoding: .utf8)
+        composer.click()
+        composer.typeText("Run on Luna.")
+        element("send-message-button").click()
+        let error = element("codex-chat-error")
+        XCTAssertTrue(error.waitForExistence(timeout: 15), "A send whose model Codex didn't confirm must fail visibly.")
+        XCTAssertTrue(error.label.contains("Codex selected gpt-6-sol instead of gpt-6-luna"), error.label)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: keptModel.path))
+        attachScreenshot(named: "A send still reports a Codex model mismatch")
+        composer.click()
+        composer.typeText("Run on Luna again.")
+        element("send-message-button").click()
+        XCTAssertTrue(app.staticTexts["Codex · Luna"].waitForExistence(timeout: 15), "The confirmed Luna send replies on Luna.")
+        XCTAssertFalse(error.exists, "A successful send clears the mismatch error.")
+        let turns = try XCTUnwrap(
+            (try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any])?["turns"] as? [[String: Any]]
+        )
+        XCTAssertFalse(turns.contains { ($0["userMessage"] as? String)?.hasSuffix("Run on Luna.") == true },
+                       "A send whose model Codex didn't confirm must not start a turn.")
+        XCTAssertEqual(turns.last { ($0["userMessage"] as? String)?.hasSuffix("Run on Luna again.") == true }?["modelID"] as? String, "gpt-6-luna")
+        attachScreenshot(named: "The confirmed Luna send succeeds")
+    }
+
     // case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 resolved from Claude Code's bare alias entry as the concrete latest choice in place of the older Opus 5. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
     func test_conversation_effort_dispatches_to_claude() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")

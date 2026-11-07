@@ -960,7 +960,20 @@ def main():
                     message.get("params", {}).get("developerInstructions")
                 )
                 history_path.write_text(json.dumps(history), encoding="utf-8")
-            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": message.get("params", {}).get("model", "gpt-6-luna")}})
+            resumed_model = message.get("params", {}).get("model", "gpt-6-luna")
+            # Codex ignores the requested model when it still has the thread open (a
+            # turn on it just ended) and reports the thread's own; a one-shot marker
+            # names the model that loaded thread keeps.
+            kept_model = Path(str(sys.argv[0]) + ".resume-keeps-model")
+            if kept_model.is_file():
+                history = serial_history()
+                history.setdefault("threadResumeKeptModels", []).append(
+                    {"requested": resumed_model, "reported": kept_model.read_text(encoding="utf-8").strip()}
+                )
+                history_path.write_text(json.dumps(history), encoding="utf-8")
+                resumed_model = history["threadResumeKeptModels"][-1]["reported"]
+                kept_model.unlink(missing_ok=True)
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": resumed_model}})
         elif message.get("method") == "turn/start":
             if "-question-isolation-" in mode:
                 THREAD_ID = message["params"]["threadId"]
