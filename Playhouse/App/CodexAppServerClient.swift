@@ -263,6 +263,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     func loadThread(
         id threadID: String,
         workspace: ConversationWorkspaceContext,
+        modelID: String? = nil,
         developerInstructions: String? = nil,
         sensitiveUserInputAnswerValues: [String] = [],
         sensitiveConversation: Bool = false,
@@ -280,14 +281,19 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
         // A thread with a turn running here is already loaded with that turn's
         // model and instructions; resuming it with history's defaults would
-        // replace them under the running turn.
+        // replace them under the running turn. Reading history doesn't run the
+        // model, so it resumes with the task's model but accepts whichever one
+        // Codex reports: a thread Codex still has open (a turn that just ended)
+        // keeps its own. Sends still confirm the model they run with.
         try await resumeThreadIfNeeded(
             id: threadID,
             workspace: workspace,
+            modelID: modelID ?? Self.modelID,
             developerInstructions: developerInstructions,
             sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
             sensitiveConversation: sensitiveConversation,
-            reusingLoadedThread: turnContexts[threadID] != nil
+            reusingLoadedThread: turnContexts[threadID] != nil,
+            confirmingModel: false
         )
         return try await readMessages(threadID: threadID)
     }
@@ -1216,9 +1222,10 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         developerInstructions: String? = nil,
         sensitiveUserInputAnswerValues: [String] = [],
         sensitiveConversation: Bool = false,
-        reusingLoadedThread: Bool = false
+        reusingLoadedThread: Bool = false,
+        confirmingModel: Bool = true
     ) async throws {
-        let currentParameters = ResumeParameters(
+        var currentParameters = ResumeParameters(
             modelID: modelID, cwd: workspace.cwd.path, roots: workspace.roots.map(\.path), developerInstructions: developerInstructions
         )
         // Goal reads and writes don't change how the thread runs, so any loaded
@@ -1259,7 +1266,22 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             PlayhouseDiagnostics.record("codex.thread.resume_failed", fields: fields)
             throw error
         }
-        try confirmModel(response["model"] as? String, expected: modelID)
+        let reportedModel = response["model"] as? String
+        if confirmingModel {
+            try confirmModel(reportedModel, expected: modelID)
+        } else if let reportedModel, reportedModel != modelID {
+            // Record the model the thread really has, so a send asking for
+            // another one resumes again and has its own model confirmed.
+            PlayhouseDiagnostics.record("codex.thread.resume_kept_model", fields: diagnosticFields([
+                "threadID": threadID,
+                "requestedModel": modelID,
+                "reportedModel": reportedModel
+            ]))
+            currentParameters = ResumeParameters(
+                modelID: reportedModel, cwd: currentParameters.cwd, roots: currentParameters.roots,
+                developerInstructions: currentParameters.developerInstructions
+            )
+        }
         resumedThreadParameters[threadID] = currentParameters
         PlayhouseDiagnostics.record("codex.thread.resumed", fields: diagnosticFields([
             "threadID": threadID,
