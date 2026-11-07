@@ -69,6 +69,30 @@ enum PrivatePromptPlaceholder {
     }
 }
 
+/// Prompts Playhouse sends to the agent on its own (status nudges, pull request fixes). The
+/// conversation shows them, but as automatic messages rather than something the user wrote.
+enum PlayhouseSentMessage {
+    static let pullRequestAutopilotMarker = "Playhouse autopilot:"
+    static let pullRequestConflicts = "The PR has conflicts. Fix them, commit, and push."
+    static let pullRequestConflictsRetry = "The PR still has conflicts or your latest commit has not reached GitHub. Resolve the remaining conflicts, commit, and push. Verify the PR's merge status before finishing."
+
+    static func matches(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return PrivateOutcomeNudgeMarker.matches(trimmed)
+            || trimmed.hasPrefix(pullRequestAutopilotMarker)
+            || trimmed == pullRequestConflicts
+            || trimmed == pullRequestConflictsRetry
+    }
+
+    /// The text shown in the automatic message: a nudge's marker line only identifies it.
+    static func displayText(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard PrivateOutcomeNudgeMarker.matches(trimmed) else { return trimmed }
+        return trimmed.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).dropFirst().joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 struct ConversationMessage: Codable, Identifiable, Equatable {
     let id: String
     let role: ConversationRole
@@ -98,6 +122,9 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
         self.provider = provider
         self.modelID = modelID
     }
+
+    /// A user-role message Playhouse sent on its own, shown apart from the user's own.
+    var isPlayhouseSent: Bool { role == .user && PlayhouseSentMessage.matches(text) }
 
     private enum CodingKeys: String, CodingKey { case id, role, createdAt, text, imageDataURLs, phase, turnID, timelineOrder, asyncQuestions, provider, modelID }
     init(from decoder: Decoder) throws {

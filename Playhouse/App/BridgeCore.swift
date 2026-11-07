@@ -3,9 +3,9 @@ import SwiftData
 import Darwin
 import SQLite3
 
-/// Marker line Playhouse puts at the top of the private turns it sends itself.
-/// Every provider's history reader matches on it, so these turns never surface
-/// as conversation content.
+/// Marker line Playhouse puts at the top of the status nudges it sends itself.
+/// The conversation shows these turns like any other, but renders the prompt as
+/// an automatic Playhouse message (`PlayhouseSentMessage`) rather than the user's.
 enum PrivateOutcomeNudgeMarker {
     static let current = "Playhouse internal outcome nudge:"
     /// Threads and transcripts written before the nudge rename.
@@ -4880,10 +4880,15 @@ final class ConversationManager {
             }
             offset = range.upperBound
         }
+        // The latest turn is the latest one the user started; status nudges after it only add their work.
+        let latestIndex = visibleTurns.lastIndex { !$0.userTexts.contains(where: PrivateOutcomeNudgeMarker.matches) } ?? (visibleTurns.endIndex - 1)
+        let activityTurns = latestIndex >= 0 ? Array(visibleTurns[latestIndex...]) : []
         var selection = ConversationTranscriptStore.TurnSelection(turnIDs: Set(covered))
-        if let latest = visibleTurns.last { selection.turnIDs.insert(latest.id) }
+        selection.turnIDs.formUnion(activityTurns.map(\.id))
         var partial = try store.read(taskID, turns: selection, includeImages: false)
-        let latestTurn = partial.turns.last { $0.id == visibleTurns.last?.id }
+        let latestTurn = partial.turns.last { $0.id == activityTurns.first?.id }
+        let nudgeWork = partial.turns.filter { turn in activityTurns.dropFirst().contains { $0.id == turn.id } }
+            .flatMap { $0.activities.filter { $0.isSubagent || $0.isTimelineToolCall } }
         partial.turns = partial.turns.filter { covered.contains($0.id) }
         let composed = Self.compose(transcript: partial, codex: nil)
         let modelIDs = state.segments.reduce(into: [String: String]()) { result, segment in
@@ -4899,11 +4904,11 @@ final class ConversationManager {
             if message.modelID == nil, let turnID = message.turnID { message.modelID = modelIDs[turnID] }
             return message
         }
-        let earlierTurnIDs = visibleTurns.dropLast().map(\.id)
+        let earlierTurnIDs = visibleTurns.prefix(max(latestIndex, 0)).map(\.id)
         let pageMessageIDs = Set(pageMessages.map(\.id))
         return ConversationHistory(
             messages: Array(pageMessages),
-            activities: try store.subagentActivities(taskID, turnIDs: earlierTurnIDs) + (latestTurn?.activities ?? []),
+            activities: try store.subagentActivities(taskID, turnIDs: earlierTurnIDs) + (latestTurn?.activities ?? []) + nudgeWork,
             timelineActivities: ConversationActivity.visibleTimelineActivities(
                 composed.timelineActivities, visibleMessageIDs: pageMessageIDs, excludedTurnIDs: []
             ),
@@ -5270,9 +5275,6 @@ final class ConversationManager {
                 var attributed = message
                 attributed.turnID = transcript.turns[index].id
                 transcript.turns[index].messages.append(attributed)
-                // Presenting an image is work the user must see, even from a
-                // private status nudge turn.
-                Self.dropPrivateReminderPrompt(from: &transcript.turns[index])
             } else {
                 transcript.turns.append(.init(id: "agent-image-\(message.id)", segmentID: segment.id, messages: [message]))
             }
@@ -5499,9 +5501,16 @@ final class ConversationManager {
         let diff: ConversationTurnDiff?
         if segments.last?.provider == .claude {
             let visibleTurns = transcript.turns.filter { !privateTranscriptReminderTurnIDs.contains($0.id) }
-            let latestTurn = visibleTurns.last
-            let subagents = visibleTurns.dropLast().flatMap { $0.activities.filter(\.isSubagent) }
-            activities = subagents + (latestTurn?.activities ?? []) + compactions
+            // The latest turn is the latest one the user started. Status nudges Playhouse sent
+            // after it are shown as messages, but only the work they did joins its activities.
+            let latestTurnIndex = visibleTurns.lastIndex { turn in
+                !turn.messages.contains { $0.role == .user && PrivateOutcomeNudgeMarker.matches($0.text) }
+            } ?? visibleTurns.endIndex - 1
+            let latestTurn = latestTurnIndex >= 0 ? visibleTurns[latestTurnIndex] : nil
+            let nudgeWork = visibleTurns.suffix(from: min(latestTurnIndex + 1, visibleTurns.endIndex))
+                .flatMap { $0.activities.filter { $0.isSubagent || $0.isTimelineToolCall } }
+            let subagents = visibleTurns.enumerated().filter { $0.offset < latestTurnIndex }.flatMap { $0.element.activities.filter(\.isSubagent) }
+            activities = subagents + (latestTurn?.activities ?? []) + nudgeWork + compactions
             diff = nil
         } else {
             activities = codexActivities.filter { !$0.isContextCompaction } + compactions
@@ -6151,7 +6160,7 @@ final class ConversationManager {
         sensitiveUserInputAnswerValues: [String] = [],
         requiresSensitiveAnswerRedaction: Bool = false,
         hideSensitiveRecoveryPrompt: Bool = false,
-        hideInternalOutcomeReminder: Bool = false,
+        isPlayhouseNudge: Bool = false,
         applyingUserInputRequestID: String? = nil,
         onUserInputApplied: (() throws -> Void)? = nil,
         historyMessageLimit: Int? = nil
@@ -6163,7 +6172,7 @@ final class ConversationManager {
         }
         defer { Self.bumpVisibleRevision(taskID) }
         let task = try tasks.conversationSubject(taskID)
-        if !task.isStandaloneChat, !hideInternalOutcomeReminder, !text.hasPrefix(Self.pullRequestAutopilotPromptMarker) {
+        if !task.isStandaloneChat, !isPlayhouseNudge, !text.hasPrefix(Self.pullRequestAutopilotPromptMarker) {
             try await tasks.clearPullRequestAutopilotSignature(taskID)
         }
         guard contextPageIDs.isEmpty || task.isStandaloneChat else {
@@ -6243,7 +6252,7 @@ final class ConversationManager {
                         sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
                         requiresSensitiveAnswerRedaction: requiresSensitiveAnswerRedaction,
                         hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt,
-                        hideInternalOutcomeReminder: hideInternalOutcomeReminder,
+                        isPlayhouseNudge: isPlayhouseNudge,
                         deferMissingOutcomeStatus: true,
                         statusBeforeSubmission: statusBeforeSubmission,
                         contextPageIDs: contextPageIDs,
@@ -6292,8 +6301,8 @@ final class ConversationManager {
                                 requestedModelID: modelID,
                                 userInputAnswers: [:],
                                 sensitiveUserInputAnswerValues: [],
-                                hideSensitiveRecoveryPrompt: true,
-                                hideInternalOutcomeReminder: true,
+                                hideSensitiveRecoveryPrompt: false,
+                                isPlayhouseNudge: true,
                                 deferMissingOutcomeStatus: true,
                                 statusBeforeSubmission: nil,
                                 // An internal reminder quotes no chat page of its own.
@@ -6701,29 +6710,6 @@ final class ConversationManager {
         }
     }
 
-    /// Shows a private status nudge turn that went on to do work. Every history
-    /// path hides a turn by its private prompt, so dropping that prompt row
-    /// leaves the rest of the turn as an ordinary one, prompt still unseen.
-    private func revealPrivateReminderTurn(taskID: UUID, turnID: String) {
-        do {
-            try transcripts.mutate(taskID, turns: .turn(turnID)) { transcript in
-                guard let index = transcript.turns.lastIndex(where: { $0.id == turnID }) else { return }
-                Self.dropPrivateReminderPrompt(from: &transcript.turns[index])
-            }
-            PlayhouseDiagnostics.record("conversation.private_reminder.revealed", fields: [
-                "taskID": taskID.uuidString, "turnID": turnID
-            ])
-        } catch {
-            var fields = PlayhouseDiagnostics.errorFields(error)
-            fields["taskID"] = taskID.uuidString
-            PlayhouseDiagnostics.record("conversation.transcript.write_failed", fields: fields)
-        }
-    }
-
-    private static func dropPrivateReminderPrompt(from turn: inout ConversationTranscript.Turn) {
-        turn.messages.removeAll { $0.role == .user && isPrivateOutcomeReminderPrompt($0.text) }
-    }
-
     private func recordClaudeActivity(taskID: UUID, turnID: String, _ activity: ConversationActivity) {
         // Loads only the turns this update can touch: its own turn, wherever an
         // activity with the same background task lives, and wherever that
@@ -6887,7 +6873,7 @@ final class ConversationManager {
             let ownTurnIDs = Set(transcript.turns(in: transcript.segments[index]).map(\.id) + transcript.segments[index].codexTurnIDs)
             return (history.messages.lastIndex { $0.turnID.map(ownTurnIDs.contains) == true } ?? -1) + 1
         } ?? 0
-        let unseen = history.messages.dropFirst(unseenStart).filter {
+        let unseen = Self.withoutNudgeTurns(Array(history.messages.dropFirst(unseenStart))).filter {
             $0.provider != provider && !Self.isPrivateOutcomeReminderPrompt($0.text)
                 && $0.text != Self.privateOutcomeReminderResponsePlaceholder
         }
@@ -6904,7 +6890,7 @@ final class ConversationManager {
         sensitiveUserInputAnswerValues: [String],
         requiresSensitiveAnswerRedaction: Bool = false,
         hideSensitiveRecoveryPrompt: Bool,
-        hideInternalOutcomeReminder: Bool,
+        isPlayhouseNudge: Bool,
         deferMissingOutcomeStatus: Bool,
         statusBeforeSubmission: TaskStatus?,
         contextPageIDs: [String],
@@ -6957,14 +6943,14 @@ final class ConversationManager {
         let repositoryRoot: URL? = task.isStandaloneChat ? nil : try (task.workspaceRootPaths
             .compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
             .first ?? settingsManager.requireRepositoryRootFolder())
-        let shouldGenerateTitle = !hideInternalOutcomeReminder
+        let shouldGenerateTitle = !isPlayhouseNudge
             && !normalizedText.isEmpty
             && ["Untitled task", "Generating title…"].contains(task.title)
         // A caller that already saved the submitted prompt (the composer does,
         // so it survives navigation) supplies the status it replaced.
         let priorStatus = statusBeforeSubmission ?? task.status
         let priorStatusMessage = task.statusMessage
-        if !hideInternalOutcomeReminder {
+        if !isPlayhouseNudge {
             _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
         }
         let resolveTitleBeforeWorktree: Bool
@@ -7012,11 +6998,11 @@ final class ConversationManager {
             if !task.isStandaloneChat {
                 task = try await tasks.prepareRepositoryWorktrees(
                     taskID,
-                    fallbackPrompt: hideInternalOutcomeReminder && !task.hasUnsentDraft ? (task.savedPrompt ?? persistedText) : persistedText,
+                    fallbackPrompt: isPlayhouseNudge && !task.hasUnsentDraft ? (task.savedPrompt ?? persistedText) : persistedText,
                     resolvedTitle: resolvedWorktreeTitle ?? persistedText
                 )
             }
-            if !hideInternalOutcomeReminder, !normalizedText.isEmpty {
+            if !isPlayhouseNudge, !normalizedText.isEmpty {
                 _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
             }
             let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
@@ -7075,7 +7061,7 @@ final class ConversationManager {
             if let standaloneChatPage {
                 sessionRecoveryContext = standaloneChatPageContext(taskID: taskID, pageIDs: [standaloneChatPage.id])
             } else if provider == .claude {
-                sessionRecoveryContext = ConversationHandoff.context(for: .claude, messages: try await history(taskID: taskID).messages)
+                sessionRecoveryContext = ConversationHandoff.context(for: .claude, messages: Self.withoutNudgeTurns(try await history(taskID: taskID).messages))
             } else {
                 sessionRecoveryContext = nil
             }
@@ -7145,10 +7131,8 @@ final class ConversationManager {
                 persistedThreadID = threadID
             }
             let claudeTurnID = provider == .claude ? UUID().uuidString.lowercased() : nil
-            // A status nudge passes `hideSensitiveRecoveryPrompt` only to store its
-            // prompt as a placeholder; it carries no secret, so its output follows
-            // the reminder rule below rather than being hidden as a private answer's.
-            let hidesRecoveryOutput = hideSensitiveRecoveryPrompt && !hideInternalOutcomeReminder
+            // Only a private answer's recovery turn hides its output; a status nudge is shown.
+            let hidesRecoveryOutput = hideSensitiveRecoveryPrompt
             if let claudeTurnID, let segment {
                 try transcripts.mutate(taskID, turns: .none) { transcript in
                     if hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty {
@@ -7168,30 +7152,14 @@ final class ConversationManager {
             var finalMessageCount = 0
             var leakedOutcome: String?
             var pendingQuestionLifecycleRevision: Int?
-            // A private status nudge keeps its prompt private, and so does a reply
-            // that only reports status. The nudge also tells the agent to keep
-            // working when work remains, and Claude delivers every background
-            // result inside the turn that is running, so once this turn does work
-            // (a tool call, a subagent, a steered message) it is shown like any
-            // other turn. Until then its output is recorded but not streamed.
-            var reminderTurnRevealed = !hideInternalOutcomeReminder
-            var withheldReminderUpdates: [ConversationUpdate] = []
-            let streamTurnUpdate: (ConversationUpdate) -> Void = { update in
-                if reminderTurnRevealed { onUpdate(update) } else { withheldReminderUpdates.append(update) }
-            }
-            let revealReminderTurn: () -> Void = {
-                guard !reminderTurnRevealed else { return }
-                reminderTurnRevealed = true
-                if let claudeTurnID { self.revealPrivateReminderTurn(taskID: taskID, turnID: claudeTurnID) }
-                let withheld = withheldReminderUpdates
-                withheldReminderUpdates = []
-                withheld.forEach(onUpdate)
-            }
+            // A status nudge turn is shown like any other turn; the prompt renders as
+            // an automatic Playhouse message.
+            let streamTurnUpdate = onUpdate
             if onTurnStarting != nil {
                 client.markTurnStarting(threadID: threadID)
                 onTurnStarting?()
             }
-            if !hideInternalOutcomeReminder, !imageDataURLs.isEmpty {
+            if !isPlayhouseNudge, !imageDataURLs.isEmpty {
                 // Leftover images stay safely in the draft, so a failed cleanup must not fail the turn.
                 do {
                     try await tasks.clearSentDraftImages(taskID, sentImageDataURLs: imageDataURLs)
@@ -7228,7 +7196,7 @@ final class ConversationManager {
                 onDelta: { delta in
                     // Deltas are many and superseded by the recorded message, so a
                     // turn not shown yet drops them instead of withholding them.
-                    guard !hidesRecoveryOutput, reminderTurnRevealed else { return }
+                    guard !hidesRecoveryOutput else { return }
                     onUpdate(ConversationUpdate(type: "text_delta", text: delta))
                 },
                 onFinalMessage: { answer in
@@ -7247,7 +7215,6 @@ final class ConversationManager {
                 onActivity: { activity in
                     guard !hidesRecoveryOutput else { return }
                     if let claudeTurnID { self.recordClaudeActivity(taskID: taskID, turnID: claudeTurnID, activity) }
-                    if activity.isAgentWork { revealReminderTurn() }
                     if let durationMs = activity.durationMs {
                         Task { @MainActor in
                             try? await self.tasks.recordConversationActivityDuration(
@@ -7365,7 +7332,7 @@ final class ConversationManager {
                             redactAllMessages: currentTranscript?.pendingSensitiveUserInputRedaction == true
                         )[0]
                     }
-                    let hideProviderDetails = hidesRecoveryOutput || !reminderTurnRevealed
+                    let hideProviderDetails = hidesRecoveryOutput
                         || currentTranscript?.pendingSensitiveUserInputRedaction == true
                     let modelIDs = currentTranscript?.segments.reduce(into: [String: String]()) { result, segment in
                         result.merge(segment.codexTurnModelIDs) { existing, _ in existing }
@@ -7403,7 +7370,7 @@ final class ConversationManager {
                     onUpdate(ConversationUpdate(type: "action_notice", message: approvalNotice))
                 },
                 onUserInput: { request async in
-                    if hideInternalOutcomeReminder {
+                    if isPlayhouseNudge {
                         client.rejectUserInput(
                             requestID: request.id,
                             threadID: request.threadID,
@@ -7453,8 +7420,6 @@ final class ConversationManager {
                             id: UUID().uuidString.lowercased(), role: .user, text: message, imageDataURLs: images
                         ))
                     }
-                    // The user wrote this, so the turn it joined can't stay private.
-                    revealReminderTurn()
                     onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
                 },
                 onProgressMessage: { message in
@@ -7486,7 +7451,7 @@ final class ConversationManager {
                     // A private recovery turn still costs tokens, so the task's
                     // totals include it, but its per-turn row is withheld for the
                     // same reason its activity and messages are.
-                    let isHidden = hidesRecoveryOutput || !reminderTurnRevealed
+                    let isHidden = hidesRecoveryOutput
                     let attributed = ConversationTurnUsageReport(
                         turnID: isHidden ? nil : (provider == .claude ? claudeTurnID : report.turnID),
                         usage: report.usage,
@@ -7601,7 +7566,7 @@ final class ConversationManager {
                     durationMs: durationMs
                 )
             }
-            let hideInternalReminderDetails = hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder
+            let hideInternalReminderDetails = hideSensitiveRecoveryPrompt || isPlayhouseNudge
             var fields = hideInternalReminderDetails
                 ? ["error": "Private conversation recovery turn failed."]
                 : PlayhouseDiagnostics.errorFields(
@@ -7618,8 +7583,8 @@ final class ConversationManager {
             let shouldKeepResumable = client.isPreparingForApplicationTermination
             let wasUserInterrupted = persistedThreadID.map { client.wasLastTurnInterrupted(threadID: $0) } ?? false
             let shouldKeepWaiting = shouldKeepResumable || wasUserInterrupted
-            let safeFailureMessage = hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder
-                ? (hideInternalOutcomeReminder
+            let safeFailureMessage = hideSensitiveRecoveryPrompt || isPlayhouseNudge
+                ? (isPlayhouseNudge
                     ? "The private status nudge could not be completed."
                     : "The private answer could not be applied. Please answer the question again.")
                 : Self.redactingSensitiveText(error.localizedDescription, values: sensitiveUserInputAnswerValues)
@@ -7631,7 +7596,7 @@ final class ConversationManager {
             let failureStatus: TaskStatus
             if hasPendingBlockingQuestion || shouldKeepWaiting {
                 failureStatus = .waitingResponse
-            } else if hasPendingNonBlockingQuestion || hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder {
+            } else if hasPendingNonBlockingQuestion || hideSensitiveRecoveryPrompt || isPlayhouseNudge {
                 failureStatus = .inProgress
             } else {
                 failureStatus = .blocked
@@ -7644,7 +7609,7 @@ final class ConversationManager {
                     : (wasUserInterrupted ? nil : (hasPendingBlockingQuestion ? "Waiting for your saved question to be answered." : (hasPendingNonBlockingQuestion ? "A saved question is available for your response." : safeFailureMessage)))
             )
             PlayhouseDiagnostics.record("conversation.send.failed", fields: fields)
-            if hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder || !sensitiveUserInputAnswerValues.isEmpty {
+            if hideSensitiveRecoveryPrompt || isPlayhouseNudge || !sensitiveUserInputAnswerValues.isEmpty {
                 throw BridgeCommandError(code: "operation_failed", message: safeFailureMessage)
             }
             throw error
@@ -7875,7 +7840,7 @@ final class ConversationManager {
 
     private static var autopilotRunningTaskIDs = Set<UUID>()
 
-    static let pullRequestAutopilotPromptMarker = "Playhouse autopilot:"
+    static let pullRequestAutopilotPromptMarker = PlayhouseSentMessage.pullRequestAutopilotMarker
 
     static func pullRequestAutopilotPrompt(_ states: [PullRequestReviewState]) -> String {
         let problems = states.filter { !$0.merged }.compactMap { state -> String? in
@@ -7911,6 +7876,17 @@ final class ConversationManager {
         """
     }
 
+    /// A status nudge, and the agent's reply to it, only mean something in the session they were sent to,
+    /// so neither is replayed to another provider or into a fresh session. A message the user steered
+    /// into a nudge turn is theirs and stays.
+    static func withoutNudgeTurns(_ messages: [ConversationMessage]) -> [ConversationMessage] {
+        let nudgeTurnIDs = Set(messages.filter { $0.role == .user && PrivateOutcomeNudgeMarker.matches($0.text) }.compactMap(\.turnID))
+        return messages.filter { message in
+            guard let turnID = message.turnID, nudgeTurnIDs.contains(turnID) else { return true }
+            return message.role == .user && !PrivateOutcomeNudgeMarker.matches(message.text)
+        }
+    }
+
     private static func isPrivateTaskPrompt(_ text: String) -> Bool {
         text.contains(privateRecoveryPromptMarker) || isPrivateOutcomeReminderPrompt(text)
     }
@@ -7921,8 +7897,10 @@ final class ConversationManager {
             : PrivatePromptPlaceholder.recoveryAnswer
     }
 
+    /// Only transcripts written before nudges were shown still hold a nudge as the hidden-prompt
+    /// placeholder; those turns stay hidden. A nudge sent today is stored and shown as sent.
     private static func isPrivateOutcomeReminderPrompt(_ text: String) -> Bool {
-        PrivateOutcomeNudgeMarker.matches(text) || text.contains(privateOutcomeReminderPlaceholder)
+        text.contains(privateOutcomeReminderPlaceholder)
     }
 
     private static func redactingSensitiveText(_ text: String, values: [String]) -> String {
