@@ -74,11 +74,6 @@ final class DaemonLifecycle: @unchecked Sendable {
         lock.unlock()
         guard stillIdle else { return }
         daemonLog("idle, exiting")
-        // Every task's Codex app-server is this process's child; stop them all
-        // rather than leave one behind (an active Goal keeps its server running).
-        DispatchQueue.main.sync {
-            MainActor.assumeIsolated { CodexAppServerClient.shutdownAllSharedClients() }
-        }
         exit(0)
     }
 }

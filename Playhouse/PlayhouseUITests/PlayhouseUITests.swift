@@ -16093,8 +16093,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !bar.exists }, timeout: 15), "The bar should disappear once the turn completes.")
     }
 
-    // case-contract: test_task_cpu_usage_measures_each_codex_task_app_server | Two Codex tasks rooted in different repository folders each run on their own real fixture app-server. Before any turn each reports cpu-usage as not running. While task A's turn runs a real CPU-burning child process and task B's concurrent turn runs an idle child, each child runs in its own task's folder under a different app-server process; once a baseline is sampled, `task cpu-usage` reports a plausible non-zero percentage for A's app-server process tree and a near-zero one for B's, and the task cards show A's CPU bar reading hot against a lowered ceiling beside B's visible but empty bar. Both readings return to not-running once the turns complete.
-    func test_task_cpu_usage_measures_each_codex_task_app_server() throws {
+    // case-contract: test_task_cpu_usage_attributes_codex_load_by_worktree | Two Codex tasks rooted in different repository folders share one real fixture app-server. Before any turn each reports cpu-usage as not running. While task A's turn runs a real CPU-burning child process in A's folder and task B's concurrent turn runs an idle child in B's folder, both children belong to the same app-server process; once a baseline is sampled, `task cpu-usage` attributes a plausible non-zero percentage to A and a near-zero one to B, and the task cards show A's CPU bar reading hot against a lowered ceiling beside B's visible but empty bar. Both readings return to not-running once the turns complete.
+    func test_task_cpu_usage_attributes_codex_load_by_worktree() throws {
         let executable = dataDirectory.appendingPathComponent("codex-fixture-cpu-attribution")
         try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
@@ -16144,7 +16144,7 @@ final class PlayhouseUITests: XCTestCase {
             }
             return children.count == 2
         }, timeout: 15), "Both tasks' turns should be running their command children.")
-        XCTAssertNotEqual(children["burn"]?.parentPID, children["idle"]?.parentPID, "Each task's command should run under its own task's app-server.")
+        XCTAssertEqual(children["burn"]?.parentPID, children["idle"]?.parentPID, "Both tasks' commands should run under one shared app-server.")
         XCTAssertEqual(children["burn"].map { URL(fileURLWithPath: $0.workingDirectory).resolvingSymlinksInPath().path },
                        fixture.primary.resolvingSymlinksInPath().path, "The busy command runs in its task's folder.")
         XCTAssertEqual(children["idle"].map { URL(fileURLWithPath: $0.workingDirectory).resolvingSymlinksInPath().path },
@@ -16166,7 +16166,7 @@ final class PlayhouseUITests: XCTestCase {
         let idleReading = try XCTUnwrap(try runCLI(["task", "cpu-usage", idleID])["result"] as? [String: Any])
         let busyPercent = try XCTUnwrap(busyReading["cpuPercent"] as? Double, "\(busyReading)")
         let idlePercent = try XCTUnwrap(idleReading["cpuPercent"] as? Double, "A running Codex task with an idle command still reports a value: \(idleReading)")
-        XCTAssertGreaterThan(busyPercent, 20, "The busy-looping command's CPU should count toward its own task's app-server.")
+        XCTAssertGreaterThan(busyPercent, 20, "The busy-looping command's CPU should be attributed to its own task.")
         XCTAssertLessThan(busyPercent, Double(ProcessInfo.processInfo.activeProcessorCount * 100 + 50), "One busy loop can't exceed every core.")
         XCTAssertLessThan(idlePercent, 5, "The other task's busy command must not leak into the idle task's reading.")
         // The bars' own labels carry the streamed reading: the idle card's
@@ -16194,162 +16194,6 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertEqual(finished["reason"] as? String, "not_running")
         }
         attachScreenshot(named: "Both Codex task cards drop their CPU bars once the turns finish")
-    }
-
-    // case-contract: test_codex_tasks_run_on_separate_app_servers | Two Codex tasks whose turns run at the same time each get their own real fixture app-server process, and each process starts, resumes and runs turns only for its own task's thread. Killing task A's app-server mid-turn fails only A's turn: A is no longer running while task B's concurrent turn keeps running and completes on its own server. Once B's turn has ended and its server stays idle, that server exits by itself. A next message in each task (B's sent from the conversation's composer in the app) starts a fresh app-server that resumes the task's existing thread and completes the turn, and the conversation shows the turns from before and after the restart. Moving B to Done and deleting A stop their fresh servers right away, well before the idle delay, and no app-server ever served more than one thread or is left running.
-    func test_codex_tasks_run_on_separate_app_servers() throws {
-        let executable = dataDirectory.appendingPathComponent("codex-fixture-servers-cpu-attribution")
-        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8)
-            .write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
-        let environment = ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path]
-        // The window reads these tasks' threads from the same fixture the CLI runs them on.
-        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
-        let firstID = try XCTUnwrap((try runCLI([
-            "task", "create", "--title", "Codex server A", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex",
-        ])["result"] as? [String: Any])?["id"] as? String)
-        let secondID = try XCTUnwrap((try runCLI([
-            "task", "create", "--title", "Codex server B", "--prompt", "Fixture task description.", "--root", fixture.secondary.path, "--provider", "codex",
-        ])["result"] as? [String: Any])?["id"] as? String)
-        XCTAssertTrue(app.buttons["Codex server A"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["Codex server B"].waitForExistence(timeout: 10))
-
-        let first = try startCLIProcess(["conversation", "send", firstID, "--message", "Please idle cpu for 30 seconds."], extraEnvironment: environment)
-        let second = try startCLIProcess(["conversation", "send", secondID, "--message", "Please idle cpu for 15 seconds."], extraEnvironment: environment)
-        defer {
-            for running in [first, second] where running.process.isRunning {
-                running.process.terminate()
-                running.process.waitUntilExit()
-            }
-        }
-
-        var threadIDs: [String: String] = [:]
-        XCTAssertTrue(waitUntil({
-            for taskID in [firstID, secondID] {
-                if let threadID = ((try? self.runCLI(["task", "get", taskID]))?["result"] as? [String: Any])?["codexThreadID"] as? String {
-                    threadIDs[taskID] = threadID
-                }
-            }
-            return threadIDs.count == 2
-        }, timeout: 15), "Both tasks' turns should start a Codex thread.")
-        XCTAssertNotEqual(threadIDs[firstID], threadIDs[secondID])
-
-        var serverOf: [String: Int32] = [:]
-        XCTAssertTrue(waitUntil({
-            serverOf = [:]
-            for (pid, server) in self.codexFixtureServers(executable: executable) {
-                for (taskID, threadID) in threadIDs where server.turns.contains(threadID) { serverOf[taskID] = pid }
-            }
-            return serverOf.count == 2
-        }, timeout: 15), "Both tasks' turns should be running.")
-        XCTAssertNotEqual(serverOf[firstID], serverOf[secondID], "Each task's turn should run on an app-server of its own.")
-        for (pid, server) in codexFixtureServers(executable: executable) where !server.threads.isEmpty {
-            XCTAssertEqual(server.threads.count, 1, "App-server \(pid) should serve only one task's thread: \(server.threads)")
-        }
-        XCTAssertTrue(element("task-cpu-usage-bar-\(firstID)").waitForExistence(timeout: 15), "Task A's running turn should show on its card.")
-        XCTAssertTrue(element("task-cpu-usage-bar-\(secondID)").waitForExistence(timeout: 15), "Task B's running turn should show on its card.")
-        attachScreenshot(named: "Both Codex tasks run at once, each on its own app-server")
-
-        // A crash of A's app-server ends A's turn and nothing else.
-        kill(try XCTUnwrap(serverOf[firstID]), SIGKILL)
-        let failed = try finishCLIProcess(first, expectedStatus: 1)
-        XCTAssertEqual(failed["ok"] as? Bool, false, "The crashed app-server's turn should fail.")
-        XCTAssertTrue(((failed["error"] as? [String: Any])?["message"] as? String ?? "").contains("app-server"), "\(failed)")
-        XCTAssertTrue(waitUntil({ !self.element("task-cpu-usage-bar-\(firstID)").exists }, timeout: 10), "Task A's card should stop showing a running turn.")
-        XCTAssertTrue(element("task-cpu-usage-bar-\(secondID)").exists, "Task B keeps running on its own app-server.")
-        attachScreenshot(named: "Task A stopped with its crashed app-server while task B keeps running")
-        let completed = try finishCLIProcess(second)
-        XCTAssertEqual(completed["ok"] as? Bool, true, "Task B's turn should complete on its own app-server: \(completed)")
-
-        // B's server has nothing left to do, so it stops by itself.
-        try waitForCodexFixtureServerExit(executable: executable, pid: XCTUnwrap(serverOf[secondID]), "An idle task's app-server should exit after its turn ends.")
-
-        // B's next message, sent from the app's composer, runs on a fresh app-server that resumes B's thread.
-        let secondThread = try XCTUnwrap(threadIDs[secondID])
-        var before = Set(codexFixtureServers(executable: executable).keys)
-        openTask(named: "Codex server B")
-        XCTAssertTrue(waitUntil({ self.transcriptContains("Finished the idle command after 15 seconds.") }, timeout: 15), "B's earlier reply, from before its app-server restarted, should show.")
-        let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10))
-        composer.click()
-        composer.typeText("Please idle cpu for 2 seconds.")
-        element("send-message-button").click()
-        XCTAssertTrue(waitUntil({ self.transcriptContains("Finished the idle command after 2 seconds.") }, timeout: 30), "The resumed turn's reply should show.")
-        var fresh = codexFixtureServers(executable: executable).filter { !before.contains($0.key) && $0.value.turns.contains(secondThread) }
-        XCTAssertEqual(fresh.count, 1, "The composer's message should run on one fresh app-server.")
-        XCTAssertEqual(fresh.first?.value.resumed, [secondThread], "The fresh app-server should resume B's own thread.")
-        XCTAssertEqual(fresh.first?.value.threads, [secondThread])
-        let secondFreshPID = try XCTUnwrap(fresh.first?.key)
-        // Closing the task stops its app-server at once: it is still running here,
-        // inside its idle delay, and gone well before that delay ends.
-        try assertCodexFixtureServerRunning(executable: executable, pid: secondFreshPID, "B's fresh app-server should still be inside its idle delay.")
-        _ = try runCLI(["task", "move", secondID, "Done"])
-        try waitForCodexFixtureServerExit(executable: executable, pid: secondFreshPID, "Moving B to Done should stop its app-server right away.", timeout: 4)
-        attachScreenshot(named: "Task B's conversation shows its turns from before and after its app-server restarted")
-
-        // A's next message also runs on a fresh app-server that resumes A's thread.
-        let firstThread = try XCTUnwrap(threadIDs[firstID])
-        before = Set(codexFixtureServers(executable: executable).keys)
-        _ = try runCLI(["conversation", "send", firstID, "--message", "Please idle cpu for 1 seconds."], extraEnvironment: environment)
-        fresh = codexFixtureServers(executable: executable).filter { !before.contains($0.key) && $0.value.turns.contains(firstThread) }
-        XCTAssertEqual(fresh.count, 1, "A's next message should run on one fresh app-server.")
-        XCTAssertEqual(fresh.first?.value.resumed, [firstThread], "The fresh app-server should resume A's own thread.")
-        let firstFreshPID = try XCTUnwrap(fresh.first?.key)
-        openTask(named: "Codex server A")
-        XCTAssertTrue(waitUntil({ self.transcriptContains("Finished the idle command after 1 seconds.") }, timeout: 15), "A's resumed reply should show.")
-        // The transcript opens on the newest turn, so the one from before the crash is
-        // read from the same history the window loads rather than scrolled to.
-        let firstHistory = try XCTUnwrap(try runCLI(["conversation", "history", firstID], extraEnvironment: environment)["result"] as? [String: Any])
-        XCTAssertTrue((firstHistory["messages"] as? [[String: Any]] ?? []).contains { $0["text"] as? String == "Please idle cpu for 30 seconds." },
-                      "A keeps the turn its crashed app-server was running.")
-        attachScreenshot(named: "Task A continues on a fresh app-server after its first one crashed")
-        try assertCodexFixtureServerRunning(executable: executable, pid: firstFreshPID, "A's fresh app-server should still be inside its idle delay.")
-        _ = try runCLI(["task", "delete", firstID])
-        try waitForCodexFixtureServerExit(executable: executable, pid: firstFreshPID, "Deleting A should stop its app-server right away.", timeout: 4)
-
-        // No app-server ever served two tasks, and none of the task servers is left running.
-        for (pid, server) in codexFixtureServers(executable: executable) {
-            XCTAssertLessThanOrEqual(server.threads.count, 1, "App-server \(pid) served more than one thread: \(server.threads)")
-            if pid == serverOf[firstID] {
-                // Killed above, so it recorded no exit of its own.
-                XCTAssertTrue(kill(pid, 0) != 0 && errno == ESRCH, "The crashed app-server should be gone.")
-            } else if !server.threads.isDisjoint(with: [firstThread, secondThread]) {
-                try waitForCodexFixtureServerExit(executable: executable, pid: pid, "Task app-server \(pid) should have stopped once idle.")
-            }
-        }
-    }
-
-    /// What each evented fixture app-server process recorded, by process ID:
-    /// the threads it served, those it resumed or ran turns on, and whether it exited.
-    private func codexFixtureServers(executable: URL) -> [Int32: (threads: Set<String>, resumed: Set<String>, turns: Set<String>, exited: Bool)] {
-        let log = URL(fileURLWithPath: executable.path + ".servers.jsonl")
-        guard let text = try? String(contentsOf: log, encoding: .utf8) else { return [:] }
-        var servers: [Int32: (threads: Set<String>, resumed: Set<String>, turns: Set<String>, exited: Bool)] = [:]
-        for line in text.split(whereSeparator: \.isNewline) {
-            guard let event = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                  let pid = (event["pid"] as? NSNumber)?.int32Value,
-                  let name = event["event"] as? String else { continue }
-            var server = servers[pid] ?? ([], [], [], false)
-            if let threadID = event["threadId"] as? String {
-                server.threads.insert(threadID)
-                if name == "thread/resume" { server.resumed.insert(threadID) }
-                if name == "turn/start" { server.turns.insert(threadID) }
-            }
-            if name == "exit" { server.exited = true }
-            servers[pid] = server
-        }
-        return servers
-    }
-
-    private func assertCodexFixtureServerRunning(executable: URL, pid: Int32, _ message: String) throws {
-        XCTAssertNotEqual(codexFixtureServers(executable: executable)[pid]?.exited, true, message)
-        XCTAssertEqual(kill(pid, 0), 0, message)
-    }
-
-    private func waitForCodexFixtureServerExit(executable: URL, pid: Int32, _ message: String, timeout: TimeInterval = 30) throws {
-        XCTAssertTrue(waitUntil({ self.codexFixtureServers(executable: executable)[pid]?.exited == true }, timeout: timeout), message)
-        XCTAssertTrue(waitUntil({ kill(pid, 0) != 0 && errno == ESRCH }, timeout: 5), "The stopped app-server \(pid) is still running.")
     }
 
     /// The pid, parent pid and working directory a running CPU-attribution

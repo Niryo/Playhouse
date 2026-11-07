@@ -759,16 +759,15 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
             interruptible.formUnion(client.activeThreadIDsSnapshot.filter { client.canInterruptActiveTurn(threadID: $0) })
             interrupted.formUnion(client.interruptedThreadIDsSnapshot)
             snapshot.pendingUserInput.merge(client.pendingUserInputsSnapshot) { current, _ in current }
-            if client.goalRuntimeEnabled { snapshot.goal.observedThreadIDs += client.observedGoalThreadIDs }
+            guard client.goalRuntimeEnabled else { continue }
+            snapshot.goal.stateThreadID = client.goalStateThreadID
+            snapshot.goal.stateRevision = client.goalStateRevision
+            snapshot.goal.turnRevision = client.goalTurnRevision
+            snapshot.goal.turnCompletedRevision = client.goalTurnCompletedRevision
+            snapshot.goal.turnCompletedTurnID = client.goalTurnCompletedTurnID
+            snapshot.goal.turnStartedThreadID = client.goalTurnStartedThreadID
+            snapshot.goal.observedThreadIDs = client.observedGoalThreadIDs
         }
-        let goal = CodexGoalRuntimeState.shared(scope: scope)
-        snapshot.goal.stateThreadID = goal.stateThreadID
-        snapshot.goal.stateRevision = goal.stateRevision
-        snapshot.goal.turnRevision = goal.turnRevision
-        snapshot.goal.turnCompletedRevision = goal.turnCompletedRevision
-        snapshot.goal.turnCompletedTurnID = goal.turnCompletedTurnID
-        snapshot.goal.turnStartedThreadID = goal.turnStartedThreadID
-        snapshot.goal.observedThreadIDs.sort()
         for client in ClaudeCodeClient.allSharedPrimaryClients where scope == nil || client.runtimeScope == scope {
             active.formUnion(client.activeThreadIDsSnapshot)
             interruptible.formUnion(client.activeThreadIDsSnapshot.filter { client.canInterruptActiveTurn(threadID: $0) })
@@ -804,10 +803,12 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
     }
 }
 
-/// Live CPU usage of each turn-active task, keyed by thread/session ID. Each
-/// task owns its provider process — a Claude task its Claude Code process, a
-/// Codex task its own `app-server` — so a task's value is that process tree's
-/// load, helpers and the commands it runs included.
+/// Live CPU usage of each turn-active task, keyed by thread/session ID. A
+/// Claude task owns its own Claude Code process, so its value is that
+/// process tree's load. Codex multiplexes every task's turns inside one
+/// shared `app-server` process, so a Codex task's value is the share of that
+/// app-server's tree attributed to it by working directory (see
+/// `CodexProcessAttribution`).
 struct TaskCPUUsageSnapshot: Codable, Equatable {
     var percentByThreadID: [String: Double] = [:]
 
@@ -820,14 +821,18 @@ struct TaskCPUUsageSnapshot: Codable, Equatable {
         for client in ClaudeCodeClient.allSharedPrimaryClients where scope == nil || client.runtimeScope == scope {
             pidsByThreadID.merge(client.activeProcessIdentifiersByThreadID) { current, _ in current }
         }
-        for client in CodexAppServerClient.allSharedClients where scope == nil || client.runtimeScope == scope {
-            pidsByThreadID.merge(client.activeProcessIdentifiersByThreadID) { current, _ in current }
-        }
         var snapshot = TaskCPUUsageSnapshot()
         for (threadID, pid) in pidsByThreadID {
             if let percent = await TaskCPUUsageSampler.shared.sample(threadID: threadID, rootPID: pid) {
                 snapshot.percentByThreadID[threadID] = percent
             }
+        }
+        for client in CodexAppServerClient.allSharedClients where scope == nil || client.runtimeScope == scope {
+            guard let pid = client.appServerProcessIdentifier else { continue }
+            let percents = await TaskCPUUsageSampler.shared.sampleCodexAppServer(
+                rootPID: pid, rootsByThreadID: client.activeThreadWorkspaceRootsByThreadID
+            )
+            snapshot.percentByThreadID.merge(percents) { current, _ in current }
         }
         return snapshot
     }
@@ -861,37 +866,24 @@ struct TaskCPUUsageSnapshot: Codable, Equatable {
 /// One client per provider, shared by a window or a single bridge request.
 @MainActor
 struct ConversationClients {
-    /// The Codex account client: installation, sign-in and usage. It never
-    /// runs a task's turns; those go through `codex(forTask:)`.
     let codex: CodexAppServerClient
     let claude: ClaudeCodeClient
     /// The shared skill gallery, which a turn's launch bridges to its provider.
     var skills: SkillCatalogManager? = nil
 
-    /// The Codex client for one task, on an app-server of the task's own.
-    func codex(forTask taskID: UUID) -> CodexAppServerClient {
-        codex.taskClient(for: taskID)
-    }
-
-    /// Stops the provider processes kept for a task that was closed or deleted.
-    /// Codex keeps an app-server per task; a Claude turn's process already ends with its turn.
-    static func retireTask(_ taskID: UUID) {
-        CodexAppServerClient.retireTaskClients(taskID: taskID)
-    }
-
-    /// The client that runs `taskID`'s conversation with `provider`.
-    func client(for provider: ConversationProvider, taskID: UUID) -> ConversationProviderClient {
+    func client(for provider: ConversationProvider) -> ConversationProviderClient {
         switch provider {
-        case .codex: codex(forTask: taskID)
+        case .codex: codex
         case .claude: claude
         }
     }
 
+    var all: [ConversationProviderClient] { [codex, claude] }
+
     /// Separate clients for one-shot helper turns: the task's provider first,
     /// then the other provider for when the preferred one is unavailable.
     func helperClients(preferring provider: ConversationProvider) -> [ConversationProviderClient] {
-        let all: [ConversationProviderClient] = [codex, claude]
-        let preferred = all.first { $0.provider == provider } ?? codex
+        let preferred = client(for: provider)
         return [preferred.makeAuxiliaryClient()] + all.filter { $0.provider != provider }.map { $0.makeAuxiliaryClient() }
     }
 }
