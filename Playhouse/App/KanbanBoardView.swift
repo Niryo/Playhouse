@@ -1921,8 +1921,7 @@ private struct TaskCardView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .buttonHoverPointer()
-            .buttonStyle(.plain)
-            .nativeHelp("Open task: \(task.title)")
+            .buttonStyle(.plain) // no-tooltip: clicking a card obviously opens it; VoiceOver gets the hint below.
             .accessibilityLabel(task.title)
             .accessibilityHint("Open task")
             .accessibilityIdentifier("task-card-\(task.id.uuidString)")
