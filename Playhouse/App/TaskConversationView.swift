@@ -1207,8 +1207,14 @@ struct TaskConversationView: View {
         return "Editor \(monacoPresentation.editorTag) \(reuse), showing \(monacoPresentation.path)"
     }
 
+    /// The turn is the latest one the user started: status nudges Playhouse sends after it
+    /// continue that turn rather than start a new one.
+    private static func latestUserTurnStart(in messages: [ConversationMessage]) -> Int? {
+        messages.lastIndex { $0.role == .user && !$0.isPlayhouseSent }
+    }
+
     private var latestConversationTurnID: String? {
-        if let latestUserIndex = messages.lastIndex(where: { $0.role == .user }) {
+        if let latestUserIndex = Self.latestUserTurnStart(in: messages) {
             return messages.dropFirst(latestUserIndex + 1).first(where: {
                 $0.role == .assistant && $0.turnID != nil
             })?.turnID ?? messages[latestUserIndex].turnID
@@ -1264,7 +1270,7 @@ struct TaskConversationView: View {
         // Prompts Playhouse sends on its own are not a turn the user started: anchoring the
         // window there would hide the conversation the recovery is continuing.
         // When redaction has replaced every user message, the placeholders are all there is to anchor on.
-        return allMessages.last(where: { $0.role == .user && !PrivatePromptPlaceholder.matches($0.text) })?.id
+        return allMessages.last(where: { $0.role == .user && !PrivatePromptPlaceholder.matches($0.text) && !$0.isPlayhouseSent })?.id
             ?? allMessages.last(where: { $0.role == .user })?.id
             ?? allMessages.last?.id
     }
@@ -1481,7 +1487,7 @@ struct TaskConversationView: View {
         // This pin already puts the newest question at the top, so record it as
         // the one in view; otherwise the next message count change scrolls to it
         // a second time as though it had just been sent.
-        lastScrolledUserMessageID = conversationMessages.last(where: { $0.role == .user })?.id
+        lastScrolledUserMessageID = conversationMessages.last(where: { $0.role == .user && !$0.isPlayhouseSent })?.id
         Task { @MainActor in
             await Task.yield()
             var transaction = Transaction()
@@ -1543,7 +1549,7 @@ struct TaskConversationView: View {
     }
 
     private var activityDisclosureAnchorID: String? {
-        if let latestUserIndex = conversationMessages.lastIndex(where: { $0.role == .user }) {
+        if let latestUserIndex = Self.latestUserTurnStart(in: conversationMessages) {
             return conversationMessages.dropFirst(latestUserIndex + 1).first(where: { $0.role == .assistant })?.id
         }
         return conversationMessages.first(where: { $0.role == .assistant })?.id
@@ -1554,7 +1560,7 @@ struct TaskConversationView: View {
     }
 
     private var hasCompletedAssistantResponse: Bool {
-        guard let latestUserIndex = messages.lastIndex(where: { $0.role == .user }) else {
+        guard let latestUserIndex = Self.latestUserTurnStart(in: messages) else {
             return messages.contains { $0.role == .assistant && $0.phase == "final_answer" }
         }
         let messagesAfterLatestUser = messages.dropFirst(latestUserIndex + 1)
@@ -1714,7 +1720,7 @@ struct TaskConversationView: View {
             }
             if conflictResolutionRequested && !isReadOnly && !isResponding {
                 conflictResolutionAttempt = 1
-                sendMessage(overrideText: "The PR has conflicts. Fix them, commit, and push.")
+                sendMessage(overrideText: PlayhouseSentMessage.pullRequestConflicts)
             } else if let skillFixPrompt, !isReadOnly, !isResponding, messages.isEmpty, task.pendingSubmittedPrompt == nil {
                 // Sent as the composer's own draft, so the composer clears as for any send.
                 draft = skillFixPrompt
@@ -4222,7 +4228,8 @@ struct TaskConversationView: View {
     }
 
     private func userBubble(_ message: ConversationMessage) -> some View {
-        let accessibleText = Self.displayableUserText(message.text)
+        let isPlayhouseSent = message.isPlayhouseSent
+        let accessibleText = isPlayhouseSent ? PlayhouseSentMessage.displayText(message.text) : Self.displayableUserText(message.text)
         return ZStack(alignment: .topLeading) {
             VStack(alignment: .trailing, spacing: 8) {
                 ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
@@ -4238,14 +4245,20 @@ struct TaskConversationView: View {
                         .nativeHelp("Open image at full size")
                     }
                 }
-                let visibleText = Self.displayableUserText(message.text)
+                let visibleText = accessibleText
+                if isPlayhouseSent {
+                    Label("Automatic message from Playhouse", systemImage: "gearshape.2")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("playhouse-message-label-\(message.id)")
+                }
                 if !visibleText.isEmpty {
                     SelectableAnnotationText(
                         text: visibleText,
                         highlightedRanges: annotations.filter { $0.messageID == message.id && $0.blockID == 0 }.map {
                             NSRange(location: $0.startOffset, length: $0.endOffset - $0.startOffset)
                         },
-                        textColor: .labelColor,
+                        textColor: isPlayhouseSent ? .secondaryLabelColor : .labelColor,
                         onSelection: { range, selectedText, bounds in
                             currentTextSelection = selectedText.isEmpty ? nil : AnnotationSelection(
                                 messageID: message.id, anchorID: 0, blockID: 0, startOffset: range.location,
@@ -4264,10 +4277,13 @@ struct TaskConversationView: View {
                         // The border is part of the background so the selection hint above stays clickable.
                         .background {
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(WorkspaceTheme.inputBackground)
+                                .fill(isPlayhouseSent ? Color.primary.opacity(0.04) : WorkspaceTheme.inputBackground)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .strokeBorder(Color.primary.opacity(0.2), lineWidth: 1)
+                                        .strokeBorder(
+                                            Color.primary.opacity(isPlayhouseSent ? 0.18 : 0.2),
+                                            style: StrokeStyle(lineWidth: 1, dash: isPlayhouseSent ? [4, 3] : [])
+                                        )
                                 )
                         }
                 }
@@ -4281,7 +4297,7 @@ struct TaskConversationView: View {
             .frame(maxWidth: 620, alignment: .trailing)
             .accessibilityElement(children: .contain)
             .accessibilityLabel(accessibleText.isEmpty ? "Attached image" : accessibleText)
-            .accessibilityIdentifier("user-message-\(message.id)")
+            .accessibilityIdentifier(isPlayhouseSent ? "playhouse-message-\(message.id)" : "user-message-\(message.id)")
         }
     }
 
@@ -5996,7 +6012,7 @@ struct TaskConversationView: View {
                         case .stillConflicted where resolutionAttempt == 1:
                             conflictResolutionAttempt = 2
                             isResponding = false
-                            sendMessage(overrideText: "The PR still has conflicts or your latest commit has not reached GitHub. Resolve the remaining conflicts, commit, and push. Verify the PR's merge status before finishing.")
+                            sendMessage(overrideText: PlayhouseSentMessage.pullRequestConflictsRetry)
                             return
                         case .stillConflicted:
                             conflictResolutionAttempt = 0
@@ -7024,7 +7040,7 @@ struct TaskConversationView: View {
             await Task.yield()
             // Record the question this presentation lands on, so a newly sent
             // one is told apart from the one already in view.
-            lastScrolledUserMessageID = renderedConversationMessages.last(where: { $0.role == .user })?.id
+            lastScrolledUserMessageID = renderedConversationMessages.last(where: { $0.role == .user && !$0.isPlayhouseSent })?.id
             let scroll = {
                 // A pending question renders below the latest message.
                 if let latestMessageID, userInputRequest == nil {
@@ -7062,7 +7078,7 @@ struct TaskConversationView: View {
             scrollToLatest(using: proxy, viewportHeight: viewportHeight)
             return
         }
-        guard let latestUserMessage = renderedConversationMessages.last(where: { $0.role == .user }),
+        guard let latestUserMessage = renderedConversationMessages.last(where: { $0.role == .user && !$0.isPlayhouseSent }),
               latestUserMessage.id != lastScrolledUserMessageID else { return }
         lastScrolledUserMessageID = latestUserMessage.id
         Task { @MainActor in

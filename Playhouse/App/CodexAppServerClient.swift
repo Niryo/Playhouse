@@ -1303,43 +1303,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             }
         } while cursor != nil
 
-        // A private status nudge turn stays out of history while it only reports
-        // status. The nudge tells the agent to keep working when work remains, so a
-        // nudge turn that did work is shown like any other turn, minus its prompt.
-        var privateOutcomeReminderTurnIDs = Set<String>()
-        var workingTurnIDs = Set<String>()
-        for entry in entries {
-            guard let item = entry["item"] as? [String: Any], let turnID = entry["turnId"] as? String else { continue }
-            if item["type"] as? String == "userMessage" {
-                // A message the user steered into a nudge turn shows it, as it does live.
-                if PrivateOutcomeNudgeMarker.matches(Self.chatMessage(from: entry)?.text ?? "") {
-                    privateOutcomeReminderTurnIDs.insert(turnID)
-                } else {
-                    workingTurnIDs.insert(turnID)
-                }
-            } else if ConversationActivity.from(item: item)?.isAgentWork == true {
-                workingTurnIDs.insert(turnID)
-            }
-        }
-
         for entry in entries {
             guard let item = entry["item"] as? [String: Any] else { continue }
-            let turnID = entry["turnId"] as? String
-            if let turnID, privateOutcomeReminderTurnIDs.contains(turnID) {
-                if !workingTurnIDs.contains(turnID) {
-                    historyItemOrder += 1
-                    continue
-                }
-                if item["type"] as? String == "userMessage",
-                   PrivateOutcomeNudgeMarker.matches(Self.chatMessage(from: entry)?.text ?? "") {
-                    // The prompt still starts the turn, but is never shown.
-                    latestTurnItems.removeAll()
-                    lastAssistantTurnID = nil
-                    lastAssistantPhase = nil
-                    historyItemOrder += 1
-                    continue
-                }
-            }
             if item["type"] as? String == "contextCompaction" {
                 compactionHistory.append((item, entry["turnId"] as? String, historyItemOrder))
                 // Preserve the event boundary between same-phase assistant
@@ -1376,7 +1341,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 }
             }
             if item["type"] as? String == "userMessage" {
-                latestTurnItems.removeAll()
+                // The diff is the latest turn the user started; a status nudge Playhouse sent
+                // is shown in the conversation but must not replace it.
+                if !PrivateOutcomeNudgeMarker.matches(Self.chatMessage(from: entry)?.text ?? "") {
+                    latestTurnItems.removeAll()
+                }
                 lastAssistantTurnID = nil
                 lastAssistantPhase = nil
             }

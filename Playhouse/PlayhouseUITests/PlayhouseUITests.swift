@@ -288,6 +288,34 @@ private final class RepositoryAllocationLockBarrier {
     deinit { try? release() }
 }
 
+/// A pipe read while its process runs. A held turn streams every event to its CLI, and a nudge shown in
+/// the conversation streams its own, so an unread pipe fills and blocks the CLI before it can exit.
+final class DrainingPipe: @unchecked Sendable {
+    let pipe = Pipe()
+    private let lock = NSLock()
+    private var buffer = Data()
+    private let finished = DispatchGroup()
+
+    init() {
+        finished.enter()
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                self.finished.leave()
+            } else {
+                self.lock.lock(); self.buffer.append(data); self.lock.unlock()
+            }
+        }
+    }
+
+    func drainedText() -> String {
+        _ = finished.wait(timeout: .now() + 10)
+        lock.lock(); defer { lock.unlock() }
+        return String(data: buffer, encoding: .utf8) ?? ""
+    }
+}
+
 final class PlayhouseUITests: XCTestCase {
     private static var suiteAbortReason: String?
     /// Mirrors TurnOutcome.maxContinuations: private continuation/nudge turns per request.
@@ -2083,6 +2111,8 @@ final class PlayhouseUITests: XCTestCase {
         let initialPromptElement = element("conversation-scroll-view").descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", initialPrompt)).firstMatch
         XCTAssertTrue(initialPromptElement.waitForExistence(timeout: 10), "The conflict action should send the corrected instruction into the task conversation.")
+        XCTAssertTrue(initialPromptElement.identifier.hasPrefix("playhouse-message-"), "The conflict instruction renders as an automatic Playhouse message: \(initialPromptElement.identifier)")
+        attachScreenshot(named: "Conflict instruction shown as an automatic Playhouse message")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: readyURL.path) }, timeout: 10), "Codex should start the conflict resolution turn.")
         try "Continue after first conflict attempt.\n".write(to: continueURL, atomically: true, encoding: .utf8)
 
@@ -2090,6 +2120,7 @@ final class PlayhouseUITests: XCTestCase {
         let retryPromptElement = element("conversation-scroll-view").descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", retryPrompt)).firstMatch
         XCTAssertTrue(retryPromptElement.waitForExistence(timeout: 15), "A still-conflicting PR should receive one follow-up turn.")
+        XCTAssertTrue(retryPromptElement.identifier.hasPrefix("playhouse-message-"), "The retry instruction renders as an automatic Playhouse message: \(retryPromptElement.identifier)")
         XCTAssertTrue(waitUntil({
             (try? String(contentsOf: startCountURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) == 2
         }, timeout: 10), "Codex should start exactly two resolution turns.")
@@ -2682,6 +2713,8 @@ final class PlayhouseUITests: XCTestCase {
         // The user sends the task back to Review: autopilot tries the still-red PR once
         // more, and when that fix changes nothing it stops with a reason.
         openTask(named: "PR autopilot UI")
+        try assertAutomaticMessageBubble(taskID: taskID, containing: "Playhouse autopilot:")
+        attachScreenshot(named: "Autopilot fix prompt shown as an automatic Playhouse message")
         // The task passes through Review only until the board runs autopilot again, so the
         // fix-turn wait below, not this status, proves autopilot picked it back up.
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "PR autopilot UI", expectedFinalStatus: "In Progress", whileTurnHeld: {
@@ -3504,7 +3537,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A private nudge that only reports status keeps its prompt, reply, and bookkeeping activities out of Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A status nudge Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while showing the nudge replies.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -3528,10 +3561,10 @@ final class PlayhouseUITests: XCTestCase {
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = serviceName
         environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = executable.path
         process.environment = environment
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
+        let stdout = DrainingPipe()
+        let stderr = DrainingPipe()
+        process.standardOutput = stdout.pipe
+        process.standardError = stderr.pipe
         try process.run()
 
         defer {
@@ -3581,8 +3614,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(completedOutcomeRecord["taskStatus"] as? String, "In Progress", "Outcome should be applied only after the turn completes.")
         try "Release the active turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
         process.waitUntilExit()
-        let output = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let errorOutput = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let output = stdout.drainedText()
+        let errorOutput = stderr.drainedText()
         XCTAssertEqual(process.terminationStatus, 0, "The fixture conversation should finish successfully: \(output) \(errorOutput)")
         let responseLine = try XCTUnwrap(output.split(whereSeparator: \.isNewline).last)
         let response = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(responseLine.utf8)) as? [String: Any])
@@ -3593,10 +3626,10 @@ final class PlayhouseUITests: XCTestCase {
         resumedProcess.executableURL = cliURL
         resumedProcess.arguments = ["conversation", "send", taskID, "--message", "Continue on this task."]
         resumedProcess.environment = environment
-        let resumedStdout = Pipe()
-        let resumedStderr = Pipe()
-        resumedProcess.standardOutput = resumedStdout
-        resumedProcess.standardError = resumedStderr
+        let resumedStdout = DrainingPipe()
+        let resumedStderr = DrainingPipe()
+        resumedProcess.standardOutput = resumedStdout.pipe
+        resumedProcess.standardError = resumedStderr.pipe
         try resumedProcess.run()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The follow-up should resume the existing fixture thread.")
         let waitingOutcome = try runCLI(["task", "outcome", taskID, "waiting-response"])
@@ -3605,8 +3638,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(waitingOutcomeRecord["taskStatus"] as? String, "In Progress")
         try "Release the resumed turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
         resumedProcess.waitUntilExit()
-        let resumedOutput = String(data: resumedStdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let resumedError = String(data: resumedStderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let resumedOutput = resumedStdout.drainedText()
+        let resumedError = resumedStderr.drainedText()
         XCTAssertEqual(resumedProcess.terminationStatus, 0, "The resumed fixture conversation should finish successfully: \(resumedOutput) \(resumedError)")
         let resumedResponseLine = try XCTUnwrap(resumedOutput.split(whereSeparator: \.isNewline).last)
         let resumedResponse = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(resumedResponseLine.utf8)) as? [String: Any])
@@ -3617,10 +3650,10 @@ final class PlayhouseUITests: XCTestCase {
         omittedProcess.executableURL = cliURL
         omittedProcess.arguments = ["conversation", "send", taskID, "--message", "A turn without an outcome."]
         omittedProcess.environment = environment
-        let omittedStdout = Pipe()
-        let omittedStderr = Pipe()
-        omittedProcess.standardOutput = omittedStdout
-        omittedProcess.standardError = omittedStderr
+        let omittedStdout = DrainingPipe()
+        let omittedStderr = DrainingPipe()
+        omittedProcess.standardOutput = omittedStdout.pipe
+        omittedProcess.standardError = omittedStderr.pipe
         try omittedProcess.run()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The no-outcome turn should resume the existing fixture thread.")
         for nudgeIndex in 0...Self.maxOutcomeContinuations {
@@ -3632,8 +3665,8 @@ final class PlayhouseUITests: XCTestCase {
             }
         }
         omittedProcess.waitUntilExit()
-        let omittedOutput = String(data: omittedStdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let omittedError = String(data: omittedStderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let omittedOutput = omittedStdout.drainedText()
+        let omittedError = omittedStderr.drainedText()
         XCTAssertEqual(omittedProcess.terminationStatus, 0, "The no-outcome fixture conversation should finish successfully: \(omittedOutput) \(omittedError)")
 
         let finished = try XCTUnwrap(taskRecord(id: taskID))
@@ -3647,21 +3680,19 @@ final class PlayhouseUITests: XCTestCase {
         let reminderHistory = try runCLI(["conversation", "history", taskID])
         let reminderHistoryRecord = try XCTUnwrap(reminderHistory["result"] as? [String: Any])
         let reminderMessages = try XCTUnwrap(reminderHistoryRecord["messages"] as? [[String: Any]])
-        XCTAssertFalse(reminderMessages.contains { ($0["text"] as? String)?.contains("Fixture internal reminder reply.") == true }, "Private reminder replies must stay out of the refreshed history.")
-        let reminderActivities = try XCTUnwrap(reminderHistoryRecord["activities"] as? [[String: Any]])
-        XCTAssertFalse(reminderActivities.contains { (($0["id"] as? String) ?? "").hasPrefix("item_private_reminder_activity_") }, "Tool activities owned by private reminders must stay out of refreshed history.")
+        XCTAssertTrue(reminderMessages.contains { ($0["text"] as? String)?.contains("Fixture internal reminder reply.") == true }, "Replies to the nudges Playhouse sent stay in the refreshed history.")
         let reminderDiff = try XCTUnwrap(reminderHistoryRecord["diff"] as? [String: Any])
         XCTAssertTrue((reminderDiff["unifiedDiff"] as? String)?.contains("ordinary-turn-diff-after-reminders") == true, "The latest ordinary-turn diff should remain available after private reminders.")
         openTask(named: "Progress reports")
-        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Fixture internal reminder reply.")).count, 0, "Private reminder replies must not appear in the visible transcript.")
+        XCTAssertTrue(transcriptContains("Fixture internal reminder reply."), "Replies to the nudges Playhouse sent appear in the visible transcript.")
         let recoveredProcess = Process()
         recoveredProcess.executableURL = cliURL
         recoveredProcess.arguments = ["conversation", "send", taskID, "--message", "Report the outcome after a reminder."]
         recoveredProcess.environment = environment
-        let recoveredStdout = Pipe()
-        let recoveredStderr = Pipe()
-        recoveredProcess.standardOutput = recoveredStdout
-        recoveredProcess.standardError = recoveredStderr
+        let recoveredStdout = DrainingPipe()
+        let recoveredStderr = DrainingPipe()
+        recoveredProcess.standardOutput = recoveredStdout.pipe
+        recoveredProcess.standardError = recoveredStderr.pipe
         try recoveredProcess.run()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The reminder recovery fixture turn should become active.")
         try "Release the initial unreported turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
@@ -3675,26 +3706,28 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((reminderOutcome["result"] as? [String: Any])?["outcome"] as? String, "completed")
         try "Release the reminder after its outcome is reported.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
         recoveredProcess.waitUntilExit()
-        let recoveredOutput = String(data: recoveredStdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let recoveredError = String(data: recoveredStderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let recoveredOutput = recoveredStdout.drainedText()
+        let recoveredError = recoveredStderr.drainedText()
         XCTAssertEqual(recoveredProcess.terminationStatus, 0, "The reminder recovery fixture conversation should finish successfully: \(recoveredOutput) \(recoveredError)")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review", "A completed CLI outcome reported during a private reminder should be honored.")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         assertTaskVisible("Progress reports", inColumn: "Review")
         openTask(named: "Progress reports")
-        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse internal outcome nudge:")).count, 0, "The private reminder prompt must not appear in the visible transcript.")
-        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "ended without reporting a task outcome")).count, 0, "Private reminder text must stay hidden while the task is visible.")
+        XCTAssertTrue(transcriptContains("ended without reporting a task outcome"), "The nudge Playhouse sent must appear in the visible transcript.")
+        try assertAutomaticMessageBubble(taskID: taskID, containing: "ended without reporting a task outcome")
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse internal outcome nudge:")).count, 0, "The marker line that identifies a nudge is not shown.")
+        attachScreenshot(named: "Playhouse status nudge shown as an automatic message")
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse private outcome reminder hidden")).count, 0, "Private reminder prompts should not be rendered in the transcript.")
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse private outcome response hidden")).count, 0, "Private reminder replies should not be rendered in the transcript.")
         let waitingReminderProcess = Process()
         waitingReminderProcess.executableURL = cliURL
         waitingReminderProcess.arguments = ["conversation", "send", taskID, "--message", "Report waiting after a reminder."]
         waitingReminderProcess.environment = environment
-        let waitingReminderStdout = Pipe()
-        let waitingReminderStderr = Pipe()
-        waitingReminderProcess.standardOutput = waitingReminderStdout
-        waitingReminderProcess.standardError = waitingReminderStderr
+        let waitingReminderStdout = DrainingPipe()
+        let waitingReminderStderr = DrainingPipe()
+        waitingReminderProcess.standardOutput = waitingReminderStdout.pipe
+        waitingReminderProcess.standardError = waitingReminderStderr.pipe
         try waitingReminderProcess.run()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The waiting outcome fixture turn should become active.")
         try "Release the initial unreported turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
@@ -3704,8 +3737,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((waitingReminderOutcome["result"] as? [String: Any])?["outcome"] as? String, "waiting-response")
         try "Release the reminder after its outcome is reported.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
         waitingReminderProcess.waitUntilExit()
-        let waitingReminderOutput = String(data: waitingReminderStdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let waitingReminderError = String(data: waitingReminderStderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let waitingReminderOutput = waitingReminderStdout.drainedText()
+        let waitingReminderError = waitingReminderStderr.drainedText()
         XCTAssertEqual(waitingReminderProcess.terminationStatus, 0, "The waiting reminder fixture conversation should finish successfully: \(waitingReminderOutput) \(waitingReminderError)")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response", "A waiting-response outcome reported during a private reminder should stop retries and be honored.")
         assertTaskVisible("Progress reports", inColumn: "Waiting Response")
@@ -3719,7 +3752,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(nudgeTurns.allSatisfy { ($0["userMessage"] as? String)?.contains("`in-progress`") == true }, "A nudge must offer in-progress alongside completed and waiting-response.")
         let visibleHistory = try runCLI(["conversation", "history", taskID])
         let visibleMessages = try XCTUnwrap((visibleHistory["result"] as? [String: Any])?["messages"] as? [[String: Any]])
-        XCTAssertFalse(visibleMessages.contains { ($0["text"] as? String)?.contains("ended without reporting a task outcome") == true }, "Private nudge text must not appear in conversation history.")
+        XCTAssertTrue(visibleMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String)?.contains("ended without reporting a task outcome") == true }, "The nudge Playhouse sent must appear in conversation history.")
         let instructions = try XCTUnwrap(turn["threadStartDeveloperInstructions"] as? String)
         XCTAssertTrue(instructions.contains(cliURL.path))
         XCTAssertTrue(instructions.contains("task progress publish"))
@@ -3767,12 +3800,13 @@ final class PlayhouseUITests: XCTestCase {
         try "Release the composer turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 15), "An outcome reported with the provider's inherited environment should move the app-started turn to Review.")
         openTask(named: "Progress reports")
-        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "ended without reporting a task outcome")).count, 0, "A later composer history refresh must keep earlier private reminder prompts hidden.")
+        // The reopened window starts at the newest question, so earlier nudges sit above it: check the history that feeds it.
+        let laterNudgeHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        XCTAssertTrue((laterNudgeHistory["messages"] as? [[String: Any]] ?? []).contains {
+            ($0["role"] as? String) == "user" && (($0["text"] as? String) ?? "").contains("ended without reporting a task outcome")
+        }, "A later composer history refresh must keep earlier nudges shown.")
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse private outcome reminder hidden")).count, 0, "Earlier private reminders should stay absent after a normal composer turn.")
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse private outcome response hidden")).count, 0, "Earlier private reminder replies should stay absent after a normal composer turn.")
-        let laterHistory = try runCLI(["conversation", "history", taskID])
-        let laterActivities = try XCTUnwrap((laterHistory["result"] as? [String: Any])?["activities"] as? [[String: Any]])
-        XCTAssertFalse(laterActivities.contains { (($0["id"] as? String) ?? "").hasPrefix("item_private_reminder_activity_") }, "A later normal turn must keep activities owned by private reminders out of the visible conversation.")
 
         // A model can write its outcome command as answer text instead of running
         // it. The echo is hidden, and it counts only when it names this task.
@@ -3802,7 +3836,7 @@ final class PlayhouseUITests: XCTestCase {
         assertTaskVisible("Progress reports", inColumn: "Review")
     }
 
-    // case-contract: test_task_outcome_in_progress_drives_continuations_until_blocked | An in-progress outcome is accepted during an active turn, leaves the task In Progress, and makes Playhouse send a private continuation turn that names the in-progress report; a completed report during that continuation stops the loop at Review. When every turn reports in-progress, Playhouse sends exactly five continuation turns, keeps the task In Progress throughout, and then marks it Blocked with a continuation-limit reason instead of Waiting Response, since the user was never asked anything. Continuation prompts and replies stay out of the visible conversation history. The user taking the work back ends Playhouse's private driving: stopping a continuation keeps the Stop's Waiting Response with no failure reason, and a queued follow-up runs next instead of being buried under further continuations.
+    // case-contract: test_task_outcome_in_progress_drives_continuations_until_blocked | An in-progress outcome is accepted during an active turn, leaves the task In Progress, and makes Playhouse send a private continuation turn that names the in-progress report; a completed report during that continuation stops the loop at Review. When every turn reports in-progress, Playhouse sends exactly five continuation turns, keeps the task In Progress throughout, and then marks it Blocked with a continuation-limit reason instead of Waiting Response, since the user was never asked anything. Continuation prompts and replies appear in the conversation history as Playhouse-sent messages and their replies. The user taking the work back ends Playhouse's private driving: stopping a continuation keeps the Stop's Waiting Response with no failure reason, and a queued follow-up runs next instead of being buried under further continuations.
     func test_task_outcome_in_progress_drives_continuations_until_blocked() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-continuation-hold-release")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -3827,10 +3861,10 @@ final class PlayhouseUITests: XCTestCase {
         process.executableURL = cliURL
         process.arguments = ["conversation", "send", taskID, "--message", "Work on this task."]
         process.environment = environment
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
+        let stdout = DrainingPipe()
+        let stderr = DrainingPipe()
+        process.standardOutput = stdout.pipe
+        process.standardError = stderr.pipe
         try process.run()
         defer {
             if process.isRunning {
@@ -3852,8 +3886,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((try runCLI(["task", "outcome", taskID, "completed"])["result"] as? [String: Any])?["outcome"] as? String, "completed")
         try "Release the continuation turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
         process.waitUntilExit()
-        let output = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let errorOutput = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let output = stdout.drainedText()
+        let errorOutput = stderr.drainedText()
         XCTAssertEqual(process.terminationStatus, 0, "The continuation conversation should finish successfully: \(output) \(errorOutput)")
         assertTaskVisible("Continue in progress", inColumn: "Review")
         let continuationHistory = try XCTUnwrap(
@@ -3867,14 +3901,13 @@ final class PlayhouseUITests: XCTestCase {
             "The continuation prompt should name the remaining budget."
         )
         openTask(named: "Continue in progress")
-        XCTAssertEqual(
-            app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "You reported")).count, 0,
-            "Private continuation prompts must not appear in the visible transcript."
-        )
-        for hidden in ["Fixture internal reminder reply.", "Playhouse private outcome reminder hidden", "Playhouse private outcome response hidden"] {
+        XCTAssertTrue(transcriptContains("You reported"), "Continuation prompts Playhouse sent must appear in the visible transcript.")
+        try assertAutomaticMessageBubble(taskID: taskID, containing: "You reported")
+        attachScreenshot(named: "Playhouse continuation prompt shown as an automatic message")
+        for hidden in ["Playhouse private outcome reminder hidden", "Playhouse private outcome response hidden"] {
             XCTAssertEqual(
                 app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", hidden)).count, 0,
-                "Private continuation replies must not appear in the visible transcript."
+                "No placeholder replaces a continuation or its reply."
             )
         }
         element("back-to-board-button").click()
@@ -3895,10 +3928,10 @@ final class PlayhouseUITests: XCTestCase {
         cappedProcess.executableURL = cliURL
         cappedProcess.arguments = ["conversation", "send", cappedID, "--message", "Work on this task."]
         cappedProcess.environment = environment
-        let cappedStdout = Pipe()
-        let cappedStderr = Pipe()
-        cappedProcess.standardOutput = cappedStdout
-        cappedProcess.standardError = cappedStderr
+        let cappedStdout = DrainingPipe()
+        let cappedStderr = DrainingPipe()
+        cappedProcess.standardOutput = cappedStdout.pipe
+        cappedProcess.standardError = cappedStderr.pipe
         try cappedProcess.run()
         defer {
             if cappedProcess.isRunning {
@@ -3925,8 +3958,8 @@ final class PlayhouseUITests: XCTestCase {
             }
         }
         cappedProcess.waitUntilExit()
-        let cappedOutput = String(data: cappedStdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let cappedError = String(data: cappedStderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let cappedOutput = cappedStdout.drainedText()
+        let cappedError = cappedStderr.drainedText()
         XCTAssertEqual(cappedProcess.terminationStatus, 0, "The capped continuation conversation should finish successfully: \(cappedOutput) \(cappedError)")
         let cappedRecord = try XCTUnwrap(taskRecord(id: cappedID))
         XCTAssertEqual(cappedRecord["status"] as? String, "Blocked", "Running out of continuations is Blocked, not Waiting Response.")
@@ -3960,8 +3993,8 @@ final class PlayhouseUITests: XCTestCase {
         stopProcess.executableURL = cliURL
         stopProcess.arguments = ["conversation", "send", stopID, "--message", "Work on this task."]
         stopProcess.environment = environment
-        stopProcess.standardOutput = Pipe()
-        stopProcess.standardError = Pipe()
+        stopProcess.standardOutput = DrainingPipe().pipe
+        stopProcess.standardError = DrainingPipe().pipe
         try stopProcess.run()
         defer {
             if stopProcess.isRunning {
@@ -4015,8 +4048,8 @@ final class PlayhouseUITests: XCTestCase {
         queuedProcess.executableURL = cliURL
         queuedProcess.arguments = ["conversation", "send", queuedID, "--message", "Work on this task."]
         queuedProcess.environment = environment
-        queuedProcess.standardOutput = Pipe()
-        queuedProcess.standardError = Pipe()
+        queuedProcess.standardOutput = DrainingPipe().pipe
+        queuedProcess.standardError = DrainingPipe().pipe
         try queuedProcess.run()
         defer {
             if queuedProcess.isRunning {
@@ -7812,7 +7845,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(transcriptContains("playhouse-handoff-context"))
     }
 
-    // case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its Playhouse progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn that leaves every status nudge unanswered ends in Blocked. The fixture records all five private nudge attempts for each unreported turn; fresh history hides nudge prompts and replies completely. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private nudge prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
+    // case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its Playhouse progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn that leaves every status nudge unanswered ends in Blocked. The fixture records all five private nudge attempts for each unreported turn; fresh history shows the nudge prompts and their replies. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private nudge prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
     func test_claude_answer_stays_final_around_outcome_report() throws {
         let claudeExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         let codexExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
@@ -7890,7 +7923,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(nudgeTurns.count, 2 * Self.maxOutcomeContinuations, "Both no-outcome turns should receive every private status nudge.")
         let visibleHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         let visibleMessages = try XCTUnwrap(visibleHistory["messages"] as? [[String: Any]])
-        XCTAssertFalse(visibleMessages.contains { (($0["text"] as? String) ?? "").localizedCaseInsensitiveContains("Playhouse internal outcome nudge:") })
+        XCTAssertTrue(visibleMessages.contains { ($0["role"] as? String) == "user" && (($0["text"] as? String) ?? "").localizedCaseInsensitiveContains("Playhouse internal outcome nudge:") }, "Nudges Playhouse sent are shown in history.")
         XCTAssertFalse(visibleMessages.contains { (($0["text"] as? String) ?? "").localizedCaseInsensitiveContains("private outcome reminder hidden") })
         XCTAssertFalse(visibleMessages.contains { (($0["text"] as? String) ?? "").localizedCaseInsensitiveContains("private outcome response hidden") })
         let codexHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: codexExecutable.path + ".history"))) as? [String: Any])
@@ -7988,7 +8021,13 @@ final class PlayhouseUITests: XCTestCase {
         try Data("Playhouse test owns this missing-session trigger.\n".utf8).write(to: URL(fileURLWithPath: executable.path + ".missing-resume"))
 
         send("What happened earlier?")
-        XCTAssertTrue(transcriptShows("OK.", timeout: 20), "Claude should complete after rebuilding its session from saved history.")
+        // Earlier status nudges already show "OK." replies, so wait for the recovered turn itself.
+        XCTAssertTrue(waitUntil({
+            guard let history = (try? JSONSerialization.jsonObject(with: Data(contentsOf: fixtureHistoryURL))) as? [String: Any],
+                  let turns = history["turns"] as? [[String: Any]] else { return false }
+            return turns.contains { (($0["userText"] as? String) ?? "").hasSuffix("What happened earlier?") }
+        }, timeout: 20), "Claude should complete after rebuilding its session from saved history.")
+        XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 30), "The recovered turn and its status nudges should finish.")
         fixtureHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureHistoryURL)) as? [String: Any])
         fixtureTurns = try XCTUnwrap(fixtureHistory["turns"] as? [[String: Any]])
         let recoveredTurn = try XCTUnwrap(fixtureTurns.last { !(($0["userText"] as? String ?? "").localizedCaseInsensitiveContains("Playhouse internal outcome nudge:")) })
@@ -8344,7 +8383,7 @@ final class PlayhouseUITests: XCTestCase {
             guard (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" else { return false }
             guard let history = try? self.runCLI(["conversation", "history", taskID])["result"] as? [String: Any],
                   let messages = history["messages"] as? [[String: Any]],
-                  let finalReply = messages.last(where: { ($0["role"] as? String) == "assistant" }) else { return false }
+                  let finalReply = self.ordinaryMessages(messages).last(where: { ($0["role"] as? String) == "assistant" }) else { return false }
             return (finalReply["text"] as? String ?? "").contains(":playhouse-annotation{index=\"1\"}")
         }, timeout: 60), "The fixture turn should finish before reopening to verify persisted comments.")
         app.terminate()
@@ -8352,9 +8391,9 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Comment source")
         let reloadedHistory = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
         let reloadedMessages = try XCTUnwrap(reloadedHistory?["messages"] as? [[String: Any]])
-        let annotatedUserMessage = try XCTUnwrap(reloadedMessages.last { $0["role"] as? String == "user" })
+        let annotatedUserMessage = try XCTUnwrap(ordinaryMessages(reloadedMessages).last { $0["role"] as? String == "user" })
         let annotatedUserID = try XCTUnwrap(annotatedUserMessage["id"] as? String)
-        let annotatedAssistantMessage = try XCTUnwrap(reloadedMessages.last { $0["role"] as? String == "assistant" })
+        let annotatedAssistantMessage = try XCTUnwrap(ordinaryMessages(reloadedMessages).last { $0["role"] as? String == "assistant" })
         let annotatedAssistantID = try XCTUnwrap(annotatedAssistantMessage["id"] as? String)
         let restoredLegacyAssistant = try XCTUnwrap(reloadedMessages.first {
             ($0["role"] as? String) == "assistant" && (($0["text"] as? String)?.contains("legacy highlighted words") ?? false)
@@ -8569,13 +8608,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             guard let history = try? self.runCLI(["conversation", "history", taskID])["result"] as? [String: Any],
                   let messages = history["messages"] as? [[String: Any]],
-                  let answer = messages.last(where: { ($0["role"] as? String) == "assistant" }) else { return false }
+                  let answer = self.ordinaryMessages(messages).last(where: { ($0["role"] as? String) == "assistant" }) else { return false }
             return (answer["id"] as? String) != annotatedAssistantID
                 && (answer["text"] as? String ?? "").contains(":playhouse-annotation{index=\"0\"}")
         }, timeout: 20), "A comment-only turn should reach the provider and produce a linked reply.")
         let commentOnlyHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         let commentOnlyMessages = try XCTUnwrap(commentOnlyHistory["messages"] as? [[String: Any]])
-        let commentOnlyRequest = try XCTUnwrap(commentOnlyMessages.last(where: { ($0["role"] as? String) == "user" }))
+        let commentOnlyRequest = try XCTUnwrap(ordinaryMessages(commentOnlyMessages).last(where: { ($0["role"] as? String) == "user" }))
         let commentOnlyPayload = try XCTUnwrap(commentOnlyRequest["text"] as? String)
         XCTAssertTrue(commentOnlyPayload.hasPrefix("<playhouse-comment-context>"),
                       "An empty-composer send should contain only the structured comment context.")
@@ -9968,7 +10007,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ isInView(finalLine) }, timeout: 10), "The settled turn should leave its final line in view; line=\(finalLine.frame), viewport=\(scrollView.frame).")
         // Settling folds the streamed lines into Worked for, so the settled turn fits the
         // viewport again and its question returns to the top.
-        assertTranscriptEndsWithoutOverscroll(question: question, lastRow: finalLine, in: scrollView, turnFitsViewport: true)
+        assertTranscriptEndsWithoutOverscroll(question: question, lastRow: try latestMessageRow(titled: title), in: scrollView, turnFitsViewport: false)
         attachScreenshot(named: "Scrolled to the bottom of the settled reply")
 
         // A follow-up whose turn fits the viewport is pinned to the top, and the space below it
@@ -9983,7 +10022,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.fixtureTurnCount(executable, containing: followUp) > 0 && self.noTurnIsRunning() }, timeout: 30),
                       "The follow-up turn should finish.")
         XCTAssertTrue(closing.waitForExistence(timeout: 10), "The follow-up's answer should render.")
-        assertTranscriptEndsWithoutOverscroll(question: transcriptMessage(followUp), lastRow: closing, in: scrollView, turnFitsViewport: true)
+        assertTranscriptEndsWithoutOverscroll(question: transcriptMessage(followUp), lastRow: try latestMessageRow(titled: title), in: scrollView, turnFitsViewport: false)
         attachScreenshot(named: "Scrolled to the bottom after a short follow-up")
 
         // Reopening the settled conversation is a fresh view that opens on the newest turn, with
@@ -9991,7 +10030,7 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         openTask(named: title)
         XCTAssertTrue(closing.waitForExistence(timeout: 10), "The reopened conversation should show the newest answer.")
-        assertTranscriptEndsWithoutOverscroll(question: transcriptMessage(followUp), lastRow: closing, in: scrollView, turnFitsViewport: true)
+        assertTranscriptEndsWithoutOverscroll(question: transcriptMessage(followUp), lastRow: try latestMessageRow(titled: title), in: scrollView, turnFitsViewport: false)
         attachScreenshot(named: "Reopened conversation scrolled to the bottom")
     }
 
@@ -10636,8 +10675,14 @@ final class PlayhouseUITests: XCTestCase {
 
         let full = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         XCTAssertNil(full["earlierMessageCount"], "Default history is complete, not a page.")
-        let messages = try XCTUnwrap(full["messages"] as? [[String: Any]])
+        let allMessages = try XCTUnwrap(full["messages"] as? [[String: Any]])
+        // The status nudges Playhouse sent are messages too, so the window counts include them.
+        let messages = ordinaryMessages(allMessages)
         XCTAssertEqual(messages.count, 95)
+        let total = allMessages.count
+        XCTAssertEqual(total, 99)
+        let latestStart = try XCTUnwrap(allMessages.lastIndex { ($0["role"] as? String) == "user" && !(($0["text"] as? String) ?? "").contains("Playhouse internal outcome nudge:") })
+        let latestWindow = total - latestStart
         XCTAssertEqual(messages.first?["text"] as? String, "Long history turn 1.")
         XCTAssertEqual(messages.last?["text"] as? String, "OK.")
         XCTAssertEqual((messages.first?["imageDataURLs"] as? [Any])?.count, 1, "Complete history includes the stored image.")
@@ -10669,8 +10714,8 @@ final class PlayhouseUITests: XCTestCase {
             return pages
         }
         let pages = try readPages(matching: full)
-        XCTAssertEqual(pages.map { ($0["messages"] as? [Any])?.count ?? -1 }, [15, 40, 40])
-        XCTAssertEqual(pages.map { $0["earlierMessageCount"] as? Int ?? -1 }, [0, 15, 55])
+        XCTAssertEqual(pages.map { ($0["messages"] as? [Any])?.count ?? -1 }, [19, 40, 40])
+        XCTAssertEqual(pages.map { $0["earlierMessageCount"] as? Int ?? -1 }, [0, 19, 59])
         for limit in ["0", "-3", "many"] {
             assertCLIError(try runCLI(["conversation", "history", taskID, "--limit", limit], expectedStatus: 2), code: "invalid_argument")
         }
@@ -10683,20 +10728,19 @@ final class PlayhouseUITests: XCTestCase {
         let scrollView = element("conversation-scroll-view")
         let latestQuestion = element("user-message-\(latestUserID)")
         let oldest = element("user-message-\(firstUserID)")
-        XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest 2 of 95 messages" }, timeout: 20),
+        XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest \(latestWindow) of \(total) messages" }, timeout: 20),
                       "Reopening loads only the newest page and pins the latest turn.")
         XCTAssertTrue(waitUntil({ latestQuestion.exists && latestQuestion.isHittable }, timeout: 5), "The latest question is visible on open.")
         XCTAssertFalse(oldest.exists, "The first turn is not loaded with the newest page.")
         let openReads = try historyReads().dropFirst(readsBeforeOpen)
         XCTAssertTrue(openReads.contains {
             $0["messageLimit"] as? String == "80" && $0["returnedMessageCount"] as? String == "80"
-                && $0["earlierMessageCount"] as? String == "15" && $0["source"] as? String == "stored-page"
+                && $0["earlierMessageCount"] as? String == "\(total - 80)" && $0["source"] as? String == "stored-page"
         }, "Opening reads only the newest 80 messages from the stored turns.")
-        XCTAssertFalse(openReads.contains { $0["returnedMessageCount"] as? String == "95" }, "Opening never reads the whole conversation.")
+        XCTAssertFalse(openReads.contains { $0["returnedMessageCount"] as? String == "\(total)" }, "Opening never reads the whole conversation.")
         attachScreenshot(named: "Paged Claude history opens on the latest turn")
         // Scrolling straight down from the pinned turn must find its end, not blank space below it.
-        let latestAnswerID = try XCTUnwrap(messages.last?["id"] as? String)
-        assertTranscriptEndsWithoutOverscroll(question: latestQuestion, lastRow: element("assistant-message-\(latestAnswerID)"), in: scrollView, turnFitsViewport: true)
+        assertTranscriptEndsWithoutOverscroll(question: latestQuestion, lastRow: try transcriptRow(for: XCTUnwrap(allMessages.last)), in: scrollView, turnFitsViewport: false)
         attachScreenshot(named: "Paged Claude history scrolled to the bottom")
         func isVisible(_ candidate: XCUIElement) -> Bool {
             candidate.exists && scrollView.frame.intersects(candidate.frame)
@@ -10707,18 +10751,18 @@ final class PlayhouseUITests: XCTestCase {
                 _ = waitUntil(condition, timeout: 1)
             }
         }
-        scrollUp(until: { scrollView.value as? String == "Showing latest 42 of 95 messages" })
-        XCTAssertEqual(scrollView.value as? String, "Showing latest 42 of 95 messages", "Scrolling up reveals an older batch already loaded.")
+        scrollUp(until: { scrollView.value as? String == "Showing latest \(latestWindow + 40) of \(total) messages" })
+        XCTAssertEqual(scrollView.value as? String, "Showing latest \(latestWindow + 40) of \(total) messages", "Scrolling up reveals an older batch already loaded.")
         let readsBeforeOlderPage = try historyReads().count
-        scrollUp(until: { scrollView.value as? String == "Showing latest 82 of 95 messages" })
-        XCTAssertEqual(scrollView.value as? String, "Showing latest 82 of 95 messages", "The next batch loads the older page from the store.")
+        scrollUp(until: { scrollView.value as? String == "Showing latest \(latestWindow + 80) of \(total) messages" })
+        XCTAssertEqual(scrollView.value as? String, "Showing latest \(latestWindow + 80) of \(total) messages", "The next batch loads the older page from the store.")
         XCTAssertTrue(try historyReads().dropFirst(readsBeforeOlderPage).contains {
-            $0["beforeMessageProvided"] as? String == "true" && $0["returnedMessageCount"] as? String == "15"
+            $0["beforeMessageProvided"] as? String == "true" && $0["returnedMessageCount"] as? String == "\(total - 80)"
                 && $0["earlierMessageCount"] as? String == "0" && $0["hydratedImageMessageCount"] as? String == "1"
         }, "Scrolling past the loaded messages reads the older page, with its image, from the store.")
         attachScreenshot(named: "Older Claude page read from the store while scrolling up")
-        scrollUp(until: { scrollView.value as? String == "Showing latest 95 of 95 messages" })
-        XCTAssertEqual(scrollView.value as? String, "Showing latest 95 of 95 messages")
+        scrollUp(until: { scrollView.value as? String == "Showing latest \(total) of \(total) messages" })
+        XCTAssertEqual(scrollView.value as? String, "Showing latest \(total) of \(total) messages")
         scrollUp(until: { isVisible(oldest) })
         XCTAssertTrue(waitUntil({ isVisible(oldest) }, timeout: 5), "Scrolling to the top shows the first turn.")
         let firstImage = element("chat-image-\(firstUserID)-0")
@@ -10738,7 +10782,12 @@ final class PlayhouseUITests: XCTestCase {
         composer.click()
         composer.typeText("Say hello again.")
         element("send-message-button").click()
-        XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest 97 of 97 messages" }, timeout: 30),
+        func historyMessageCount() -> Int {
+            ((try? self.runCLI(["conversation", "history", taskID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])?.count ?? 0
+        }
+        XCTAssertTrue(waitUntil({ historyMessageCount() > total && self.noTurnIsRunning() }, timeout: 60), "The new turn and its status nudges should finish.")
+        let grownTotal = historyMessageCount()
+        XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest \(grownTotal) of \(grownTotal) messages" }, timeout: 30),
                       "The completed turn joins the transcript without dropping the earlier pages.")
         // Rows far above the viewport are not realized, so scroll back up to
         // confirm the first turn and its image are still loaded.
@@ -10748,13 +10797,14 @@ final class PlayhouseUITests: XCTestCase {
         let sendReads = try historyReads().dropFirst(readsBeforeSend)
         XCTAssertFalse(sendReads.contains { $0["beforeMessageProvided"] as? String == "true" }, "Earlier pages are not read again.")
         XCTAssertTrue(sendReads.contains {
-            $0["messageLimit"] as? String == "80" && $0["returnedMessageCount"] as? String == "80" && $0["earlierMessageCount"] as? String == "17"
+            $0["messageLimit"] as? String == "80" && $0["returnedMessageCount"] as? String == "80" && (Int($0["earlierMessageCount"] as? String ?? "") ?? 0) >= 17
         }, "The completed turn brings back only the newest page.")
         let grown = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         let grownMessages = try XCTUnwrap(grown["messages"] as? [[String: Any]])
-        XCTAssertEqual(grownMessages.count, 97)
-        XCTAssertEqual(Array(grownMessages[..<95]) as NSArray, messages as NSArray, "A later turn does not change earlier messages.")
-        XCTAssertEqual(try readPages(matching: grown).map { $0["earlierMessageCount"] as? Int ?? -1 }, [0, 17, 57])
+        let grownOrdinary = ordinaryMessages(grownMessages)
+        XCTAssertEqual(grownOrdinary.count, 97)
+        XCTAssertEqual(Array(grownOrdinary[..<95]) as NSArray, messages as NSArray, "A later turn does not change earlier messages.")
+        XCTAssertEqual(try readPages(matching: grown).map { $0["earlierMessageCount"] as? Int ?? -1 }, [0, grownTotal - 80, grownTotal - 40])
     }
 
     // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, Working for renders open and active agents appear as individual named rows, each with an arrow that opens it, outside it, with available path/model/reasoning metadata and started-working wording; a mid-turn collapse the reader performs is honored. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
@@ -11940,9 +11990,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Codex · Luna"].exists, "The new turn is attributed to the model selected for that send.")
         XCTAssertEqual(app.staticTexts.matching(identifier: "message-time-item_assistant_fixture_1").count, 0,
                        "Legacy provider history without createdAt has no timestamp label.")
-        // Item numbers include Playhouse's own outcome-reminder turns, so find the latest reply.
-        let replies = app.groups.matching(NSPredicate(format: "identifier BEGINSWITH %@", "assistant-message-")).allElementsBoundByIndex
-        let latestReplyItem = try XCTUnwrap(replies.last?.identifier.replacingOccurrences(of: "assistant-message-", with: ""))
+        // The latest ordinary reply is the one the user's turn got, not a reply to a status nudge.
+        let effortHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let latestReplyItem = try XCTUnwrap(ordinaryMessages(effortHistory["messages"] as? [[String: Any]] ?? []).last { ($0["role"] as? String) == "assistant" }?["id"] as? String)
         XCTAssertNotEqual(latestReplyItem, "item_assistant_fixture_1")
         XCTAssertTrue(app.staticTexts.matching(identifier: "message-time-\(latestReplyItem)").firstMatch.waitForExistence(timeout: 5),
                       "The latest reply displays its provider-supplied timestamp.")
@@ -12532,7 +12582,7 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
-    // case-contract: test_claude_nudged_turn_work_stays_in_conversation | A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt and every private placeholder stay hidden.
+    // case-contract: test_claude_nudged_turn_work_stays_in_conversation | A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt Playhouse sent is shown once as its own message and no placeholder replaces it.
     func test_claude_nudged_turn_work_stays_in_conversation() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-nudged-work")
         try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: executable)
@@ -12589,9 +12639,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("chat-image-\(imageID)-0").waitForExistence(timeout: 10), "The screenshot the nudged turn presented should render.")
         let timeline = (history["timelineActivities"] as? [[String: Any]] ?? []).filter { $0["id"] as? String == "toolu_nudged_check" }
         XCTAssertEqual(timeline.first?["input"] as? String, "echo NUDGED CHECK PASSED", "The nudged turn's shell call should be a timeline row.")
-        for hidden in ["ended without reporting a task outcome", "Playhouse internal outcome nudge", "Playhouse private outcome"] {
-            XCTAssertFalse(transcriptContains(hidden), "The private nudge prompt must stay out of the transcript: \(hidden)")
-        }
+        XCTAssertTrue(transcriptContains("ended without reporting a task outcome"), "The nudge Playhouse sent is shown in the transcript.")
+        try assertAutomaticMessageBubble(taskID: taskID, containing: "ended without reporting a task outcome")
+        XCTAssertFalse(transcriptContains("Playhouse private outcome"), "No placeholder replaces the nudge.")
         attachScreenshot(named: "Claude nudged turn work follows the stale answer")
         XCTAssertTrue(expandLatestWorkedFor(), "The nudged turn's work should collapse into an expandable Worked for summary.")
         XCTAssertTrue(element("codex-activity-row-toolu_nudged_check").waitForExistence(timeout: 10),
@@ -12621,7 +12671,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Claude nudged turn work after a later turn")
     }
 
-    // case-contract: test_codex_nudged_turn_work_stays_in_conversation | A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. The nudge prompt and every private placeholder stay out of history, including after a later ordinary turn.
+    // case-contract: test_codex_nudged_turn_work_stays_in_conversation | A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. The nudge prompt Playhouse sent is shown once as its own message and no placeholder replaces it, including after a later ordinary turn.
     func test_codex_nudged_turn_work_stays_in_conversation() throws {
         let executable = dataDirectory.appendingPathComponent("codex-fixture-nudged-work-success")
         try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
@@ -12662,9 +12712,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(messages.last?["text"] as? String, finalReport, "The nudged turn's final answer is the latest message.")
         let timeline = (history["timelineActivities"] as? [[String: Any]] ?? []).filter { $0["id"] as? String == "item_nudged_check_1" }
         XCTAssertEqual(timeline.first?["input"] as? String, "echo NUDGED CHECK PASSED", "The nudged shell command should be a timeline row.")
-        for hidden in ["ended without reporting a task outcome", "Playhouse internal outcome nudge", "Playhouse private outcome"] {
-            XCTAssertFalse(transcriptContains(hidden), "The private nudge prompt must stay out of the transcript: \(hidden)")
-        }
+        XCTAssertTrue(transcriptContains("ended without reporting a task outcome"), "The nudge Playhouse sent is shown in the transcript.")
+        try assertAutomaticMessageBubble(taskID: nudgedTaskID, containing: "ended without reporting a task outcome")
+        XCTAssertFalse(transcriptContains("Playhouse private outcome"), "No placeholder replaces the nudge.")
         attachScreenshot(named: "Codex nudged turn work follows the earlier answer")
         XCTAssertTrue(expandLatestWorkedFor(), "The nudged turn's work should collapse into an expandable Worked for summary.")
         XCTAssertTrue(element("codex-activity-row-item_nudged_check_1").waitForExistence(timeout: 10),
@@ -12693,7 +12743,7 @@ final class PlayhouseUITests: XCTestCase {
     }
 
     /// Sends an ordinary turn from the composer, then checks that the earlier nudged
-    /// turn's work stays visible, its call now renders inline, and no private nudge text shows.
+    /// turn's work stays visible, its call now renders inline, and the nudge Playhouse sent stays shown.
     private func sendLaterTurnAndAssertNudgedCallInline(taskID: String, callID: String, visibleTexts: [String]) throws {
         let message = "Thanks, that's all."
         let composer = element("message-composer")
@@ -12716,13 +12766,12 @@ final class PlayhouseUITests: XCTestCase {
         for text in visibleTexts {
             XCTAssertTrue(transcriptContains(text), "A later turn keeps the nudged turn's message: \(text)")
         }
-        for hidden in ["ended without reporting a task outcome", "Playhouse internal outcome nudge", "Playhouse private outcome"] {
-            XCTAssertFalse(transcriptContains(hidden), "A later turn must keep the private nudge prompt hidden: \(hidden)")
-        }
+        XCTAssertTrue(transcriptContains("ended without reporting a task outcome"), "A later turn keeps the nudge Playhouse sent shown.")
+        XCTAssertFalse(transcriptContains("Playhouse private outcome"), "No placeholder replaces the nudge.")
         let later = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         let texts = (later["messages"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
-        XCTAssertFalse(texts.contains { $0.contains("ended without reporting a task outcome") || $0.contains("private outcome") },
-                       "History after a later turn must keep the private nudge prompt hidden.")
+        XCTAssertTrue(texts.contains { $0.contains("ended without reporting a task outcome") }, "History after a later turn keeps the nudge shown.")
+        XCTAssertFalse(texts.contains { $0.contains("private outcome") }, "No placeholder replaces the nudge.")
         for text in visibleTexts {
             XCTAssertTrue(texts.contains(text), "History after a later turn keeps: \(text)")
         }
@@ -17633,6 +17682,52 @@ final class PlayhouseUITests: XCTestCase {
 
     private func repositoryTitle() -> XCUIElement {
         element("empty-conversation-repository-title")
+    }
+
+    /// Playhouse's own prompts render as muted automatic messages: the history entry that holds `text`
+    /// is shown under the `playhouse-message-` identifier with its label, never as the user's bubble.
+    private func assertAutomaticMessageBubble(taskID: String, containing text: String, file: StaticString = #filePath, line: UInt = #line) throws {
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any], file: file, line: line)
+        let messages = try XCTUnwrap(history["messages"] as? [[String: Any]], file: file, line: line)
+        let sent = try XCTUnwrap(
+            messages.last { ($0["role"] as? String) == "user" && (($0["text"] as? String) ?? "").contains(text) },
+            "History should hold the Playhouse-sent message containing: \(text)", file: file, line: line
+        )
+        let id = try XCTUnwrap(sent["id"] as? String, file: file, line: line)
+        XCTAssertTrue(element("playhouse-message-\(id)").waitForExistence(timeout: 10), "The message renders as an automatic Playhouse message.", file: file, line: line)
+        let label = element("playhouse-message-label-\(id)")
+        XCTAssertTrue(label.waitForExistence(timeout: 5), "The automatic message carries its label.", file: file, line: line)
+        XCTAssertTrue(label.label.contains("Automatic message from Playhouse") || ((label.value as? String) ?? "").contains("Automatic message from Playhouse"), "The label says the message is automatic: \(label.label)", file: file, line: line)
+        XCTAssertFalse(element("user-message-\(id)").exists, "An automatic message is not rendered as the user's own bubble.", file: file, line: line)
+    }
+
+    /// The transcript's last row: the newest message, which can be the reply to a status nudge
+    /// sent after the turn the test is watching.
+    private func latestMessageRow(titled title: String) throws -> XCUIElement {
+        let id = try taskID(named: title)
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", id])["result"] as? [String: Any])
+        return try transcriptRow(for: try XCTUnwrap((history["messages"] as? [[String: Any]])?.last))
+    }
+
+    /// The transcript element a history message renders as.
+    private func transcriptRow(for message: [String: Any]) throws -> XCUIElement {
+        let isAutomatic = (message["role"] as? String) == "user"
+            && ((message["text"] as? String) ?? "").contains("Playhouse internal outcome nudge:")
+        let prefix = isAutomatic ? "playhouse-message-" : ((message["role"] as? String) == "assistant" ? "assistant-message-" : "user-message-")
+        return element(prefix + (try XCTUnwrap(message["id"] as? String)))
+    }
+
+    /// History without the status nudges Playhouse sent and the agent's replies to them.
+    private func ordinaryMessages(_ messages: [[String: Any]]) -> [[String: Any]] {
+        var kept: [[String: Any]] = []
+        var inNudge = false
+        for message in messages {
+            if (message["role"] as? String) == "user" {
+                inNudge = ((message["text"] as? String) ?? "").contains("Playhouse internal outcome nudge:")
+            }
+            if !inNudge { kept.append(message) }
+        }
+        return kept
     }
 
     /// Whether a transcript message shows this text, as a message group's label
