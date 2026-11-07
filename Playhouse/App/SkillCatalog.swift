@@ -116,9 +116,9 @@ struct SkillInvocation: Codable, Equatable, Sendable {
 }
 
 /// What a provider launch needs so it sees every skill in the gallery. Claude
-/// Code runs one process per turn, so its part is exact per launch. Codex shares
-/// one app-server across tasks, so its extra roots are the union of every
-/// task's bridge folder and each thread hides the folders that are not its own.
+/// Code runs one process per turn, so its part is exact per launch. Codex's
+/// extra roots, set once per app-server, are the union of every task's bridge
+/// folder, and each thread hides the folders that are not its own.
 struct SkillBridgeLaunch: Codable, Equatable, Sendable {
     struct BridgedSkill: Codable, Equatable, Sendable {
         let name: String

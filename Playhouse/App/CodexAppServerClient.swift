@@ -15,6 +15,28 @@ struct CodexThreadGoal: Codable, Equatable {
     }
 }
 
+/// The Goal signals a window follows, for every task's Codex client serving one
+/// data directory. Each signal is a revision a window compares with the last one
+/// it saw, so it has to count across clients rather than per client.
+@MainActor
+final class CodexGoalRuntimeState {
+    var stateThreadID: String?
+    var stateRevision = 0
+    var turnRevision = 0
+    var turnCompletedRevision = 0
+    var turnCompletedTurnID: String?
+    var turnStartedThreadID: String?
+
+    private static var states: [String: CodexGoalRuntimeState] = [:]
+
+    static func shared(scope: String?) -> CodexGoalRuntimeState {
+        if let state = states[scope ?? ""] { return state }
+        let state = CodexGoalRuntimeState()
+        states[scope ?? ""] = state
+        return state
+    }
+}
+
 @MainActor
 final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     let provider = ConversationProvider.codex
@@ -32,13 +54,14 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     @Published private(set) var isTurnActive = false
     @Published private(set) var activeThreadID: String?
     @Published private(set) var pendingUserInputRequest: ConversationUserInputRequest?
-    @Published private(set) var goalStateThreadID: String?
-    @Published private(set) var goalStateRevision = 0
-    @Published private(set) var goalTurnRevision = 0
-    @Published private(set) var goalTurnCompletedRevision = 0
-    @Published private(set) var goalTurnCompletedTurnID: String?
-    @Published private(set) var goalTurnStartedThreadID: String?
+    /// The Goal signals a window follows. Every task has its own client, so the
+    /// signals live in one place per data directory, where a window reads them
+    /// whichever task's client raised them.
+    var goalRuntimeState: CodexGoalRuntimeState { CodexGoalRuntimeState.shared(scope: runtimeScope) }
     let goalRuntimeEnabled: Bool
+    /// The task whose turns this client runs, on an app-server of its own;
+    /// `nil` for the account client (sign-in and usage) and one-shot helpers.
+    let taskID: UUID?
     private var activeConversationMode: ConversationMode = .code
 
     private enum ClientError: LocalizedError {
@@ -98,9 +121,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     /// safe when a later call's own model/workspace parameters are identical
     /// to what's already active for that thread in the app-server — otherwise
     /// the app-server would silently keep using stale parameters from an
-    /// earlier, unrelated request. This only matters now that one
-    /// `CodexAppServerClient` instance can legitimately serve many separate
-    /// requests over its life (the bridge daemon), rather than exactly one.
+    /// earlier, unrelated request: a task's client serves many separate
+    /// requests (sends, history reads, goals) while its app-server runs.
     private struct ResumeParameters: Equatable {
         let modelID: String
         let cwd: String
@@ -187,7 +209,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     private var completedTurns: [String: Result<Void, Error>] = [:]
     private var rejectedTurnKeys = Set<String>()
 
-    init(codexExecutableOverride: String? = nil, codexHomeOverride: String? = nil, goalFeatureEnabled: Bool = false, goalRuntimeEnabled: Bool = false, dataDirectory: String? = nil) {
+    init(codexExecutableOverride: String? = nil, codexHomeOverride: String? = nil, goalFeatureEnabled: Bool = false, goalRuntimeEnabled: Bool = false, dataDirectory: String? = nil, taskID: UUID? = nil) {
         self.codexExecutableOverride = ConversationProviderFixture.ownedExecutable(
             codexExecutableOverride,
             providerMarker: (".playhouse-codex-fixture-owner", "Playhouse test owns this Codex protocol fixture (v1).\n")
@@ -196,30 +218,34 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         self.goalFeatureEnabled = goalFeatureEnabled
         self.goalRuntimeEnabled = goalRuntimeEnabled
         self.dataDirectoryOverride = dataDirectory
+        self.taskID = taskID
     }
 
-    /// One Codex client per distinct configuration, shared across every caller in
-    /// this process. The bridge daemon is a single long-lived process per data
-    /// directory, so this is what makes a Codex thread's app-server process (and
+    /// One Codex client per distinct configuration and task, shared across every
+    /// caller in this process. The bridge daemon is a single long-lived process
+    /// per data directory, so this is what makes a task's app-server process (and
     /// its in-memory turn/ownership state) reachable the same way no matter which
     /// request handles a later steer/interrupt for it — mirroring
     /// `ClaudeCodeClient.sharedPrimaryClient`, which already did this for Claude.
     private static var sharedClients: [String: CodexAppServerClient] = [:]
 
     /// `dataDirectory` only ever varies across calls in debug/test builds (via
-    /// `BridgeRequest.dataDirectory`); production always passes `nil`, so one
-    /// real app only ever has one entry here. It's part of the cache key so
-    /// that the bridge daemon — now a single long-lived process that can serve
-    /// many isolated test data directories in sequence or concurrently — gives
-    /// each one its own client (and thus its own app-server child process with
-    /// correctly scoped environment forwarding) instead of silently sharing
-    /// one across directories that happen to share a process.
+    /// `BridgeRequest.dataDirectory`); production always passes `nil`. It's part
+    /// of the cache key so that the bridge daemon — a single long-lived process
+    /// that can serve many isolated test data directories in sequence or
+    /// concurrently — gives each one its own clients (and thus their own
+    /// app-server child processes with correctly scoped environment forwarding)
+    /// instead of silently sharing them across directories.
+    ///
+    /// The client returned here has no task: it serves account calls (sign-in,
+    /// sign-out, usage). A task's turns run on `taskClient(for:)`.
     static func sharedClient(
         executableOverride: String?,
         codexHomeOverride: String? = nil,
         goalFeatureEnabled: Bool = false,
         goalRuntimeEnabled: Bool = false,
-        dataDirectory: String? = nil
+        dataDirectory: String? = nil,
+        taskID: UUID? = nil
     ) -> CodexAppServerClient {
         let key = [
             executableOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "__default__",
@@ -227,6 +253,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             String(goalFeatureEnabled),
             String(goalRuntimeEnabled),
             dataDirectory.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "",
+            taskID?.uuidString ?? "",
         ].joined(separator: "\u{1}")
         if let client = sharedClients[key] { return client }
         let client = CodexAppServerClient(
@@ -234,16 +261,53 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             codexHomeOverride: codexHomeOverride,
             goalFeatureEnabled: goalFeatureEnabled,
             goalRuntimeEnabled: goalRuntimeEnabled,
-            dataDirectory: dataDirectory
+            dataDirectory: dataDirectory,
+            taskID: taskID
         )
         sharedClients[key] = client
         return client
+    }
+
+    /// The client that runs `taskID`'s threads and turns, with this client's
+    /// executable, Codex home, Goal flags and data directory. It launches its
+    /// own app-server on its first call and stops it once it is idle, so every
+    /// task's traffic goes through a process of its own.
+    func taskClient(for taskID: UUID) -> CodexAppServerClient {
+        if self.taskID == taskID { return self }
+        return Self.sharedClient(
+            executableOverride: codexExecutableOverride,
+            codexHomeOverride: codexHomeOverride,
+            goalFeatureEnabled: goalFeatureEnabled,
+            goalRuntimeEnabled: goalRuntimeEnabled,
+            dataDirectory: dataDirectoryOverride,
+            taskID: taskID
+        )
+    }
+
+    /// Stops the app-servers of a task that was deleted or closed, and forgets
+    /// its clients. A later call for the task starts over with a new client.
+    static func retireTaskClients(taskID: UUID) {
+        for (key, client) in sharedClients where client.taskID == taskID {
+            sharedClients.removeValue(forKey: key)
+            activeClientsByThreadID = activeClientsByThreadID.filter { $0.value !== client }
+            PlayhouseDiagnostics.record("codex.app_server.task_retired", fields: client.diagnosticFields([:]))
+            client.cancelIdleShutdown()
+            guard let stopping = client.process else { continue }
+            client.detachProcess(error: ClientError.processExited("Playhouse closed this task."))
+            Task { await stop(stopping) }
+        }
+    }
+
+    /// Stops every app-server this process started, before the process exits.
+    static func shutdownAllSharedClients() {
+        for client in sharedClients.values { client.shutdown() }
     }
 
     func diagnosticFields(_ additionalFields: [String: String]) -> [String: String] {
         var fields = additionalFields
         fields["clientPID"] = String(ProcessInfo.processInfo.processIdentifier)
         fields["codexPID"] = String(process?.processIdentifier ?? -1)
+        if let taskID { fields["codexTaskID"] = taskID.uuidString }
         fields["activeThreadID"] = activeThreadID ?? ""
         fields["activeTurnID"] = activeTurnID ?? ""
         fields["isTurnActive"] = String(isTurnActive)
@@ -400,9 +464,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         isRefreshingAgentUsage = true
         defer { isRefreshingAgentUsage = false }
         // Read through a short-lived app-server of its own, so a refresh never
-        // reaches the process running tasks mid-turn, and that process is still
-        // started by the first task, in that task's workspace. Pushes from the
-        // task process keep the numbers current between refreshes.
+        // reaches a process running a task's turn or the account client's sign-in.
+        // Pushes from the task processes keep the numbers current between refreshes.
         guard isAccountReader else {
             let reader = CodexAppServerClient(
                 codexExecutableOverride: codexExecutableOverride,
@@ -454,9 +517,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
 
     /// Starts Codex's browser sign-in and returns the URL the user opens. The
     /// app-server completes it with `account/login/completed`.
-    /// Sign-in and sign-out run on the shared app-server: its login server has to
-    /// stay up until the browser step finishes, and its account notifications
-    /// refresh the block afterwards.
+    /// Sign-in and sign-out run on the account client's app-server, which no
+    /// task's lifecycle stops: its login server has to stay up until the browser
+    /// step finishes, and its account notifications refresh the block afterwards.
     func startAccountLogin() async throws -> String {
         let workspace = try ConversationWorkspaceContext(roots: [URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)])
         try await ensureInitialized(workspace: workspace)
@@ -511,7 +574,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     func getGoal(threadID: String, workspace: ConversationWorkspaceContext) async throws -> CodexThreadGoal? {
         try await resumeThreadIfNeeded(id: threadID, workspace: workspace, reusingLoadedThread: true)
         let response = try await request(method: "thread/goal/get", params: ["threadId": threadID])
-        guard let value = response["goal"] as? [String: Any] else { return nil }
+        guard let value = response["goal"] as? [String: Any] else {
+            goalStatusByThreadID.removeValue(forKey: threadID)
+            return nil
+        }
+        goalStatusByThreadID[threadID] = value["status"] as? String
         return Self.decodeGoal(value)
     }
 
@@ -522,7 +589,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             activeTurnID = nil
             activeConversationMode = .code
             goalObservationThreadID = threadID
-            goalTurnStartedThreadID = nil
+            goalRuntimeState.turnStartedThreadID = nil
             isTurnActive = false
             Self.activeClientsByThreadID[threadID] = self
         }
@@ -532,9 +599,10 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         if let status { params["status"] = status }
         let response = try await request(method: "thread/goal/set", params: params)
         guard let value = response["goal"] as? [String: Any] else { return nil }
+        goalStatusByThreadID[threadID] = value["status"] as? String
         if observeRuntime && goalRuntimeEnabled {
             try await waitForGoalTurnStart(threadID: threadID, after: startRevision)
-            goalTurnRevision += 1
+            goalRuntimeState.turnRevision += 1
         }
         return Self.decodeGoal(value)
     }
@@ -542,9 +610,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     func clearGoal(threadID: String, workspace: ConversationWorkspaceContext) async throws {
         try await resumeThreadIfNeeded(id: threadID, workspace: workspace, reusingLoadedThread: true)
         _ = try await request(method: "thread/goal/clear", params: ["threadId": threadID])
+        goalStatusByThreadID.removeValue(forKey: threadID)
     }
 
     func shutdown() {
+        cancelIdleShutdown()
         guard let process else {
             PlayhouseDiagnostics.record("codex.app_server.shutdown.skipped", fields: ["reason": "no_process"])
             return
@@ -573,6 +643,67 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         PlayhouseDiagnostics.record("codex.app_server.shutdown.finished", fields: [
             "processID": String(processID),
             "terminationStatus": process.isRunning ? "still_running" : String(process.terminationStatus)
+        ])
+    }
+
+    // MARK: Task app-server lifecycle
+
+    /// How long a task's app-server stays up with nothing to do. Long enough
+    /// that the history read and outcome nudge that follow a turn reuse it,
+    /// short enough that a finished task holds no process for long.
+    static let idleShutdownDelay: Duration = .seconds(8)
+    private var idleShutdownTask: Task<Void, Never>?
+    /// The last Goal status Codex reported per thread. An active Goal keeps a
+    /// window's app-server running, since Codex starts the Goal's next turn itself.
+    private var goalStatusByThreadID: [String: String] = [:]
+    /// Every turn the app-server reported started and not yet finished, on any
+    /// thread, including one Codex started by itself (a Goal continuing).
+    private var runningTurnKeys = Set<String>()
+
+    /// Nothing runs, starts, waits for an answer or awaits a reply on this
+    /// client's app-server, and no Goal a window follows is still working.
+    private var isIdle: Bool {
+        turnContexts.isEmpty && startingThreadIDs.isEmpty && activeTurnID == nil && runningTurnKeys.isEmpty
+            && pendingUserInputs.isEmpty && pendingRequests.isEmpty && turnWaiters.isEmpty
+            && initializationTask == nil && conversationOperationsInFlight == 0
+            && !(goalRuntimeEnabled && goalStatusByThreadID.values.contains("active"))
+    }
+
+    private func cancelIdleShutdown() {
+        idleShutdownTask?.cancel()
+        idleShutdownTask = nil
+    }
+
+    /// Stops a task's app-server once it has stayed idle for `idleShutdownDelay`.
+    /// The task's next call starts a fresh one and resumes its thread.
+    private func scheduleIdleShutdownIfNeeded() {
+        guard taskID != nil, process != nil, isIdle else { return }
+        idleShutdownTask?.cancel()
+        idleShutdownTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.idleShutdownDelay)
+            guard !Task.isCancelled, let self, self.isIdle, let stopping = self.process else { return }
+            self.idleShutdownTask = nil
+            PlayhouseDiagnostics.record("codex.app_server.idle_stopped", fields: self.diagnosticFields([:]))
+            // Detach first, so a call arriving while it exits launches a new one.
+            self.detachProcess(error: ClientError.processExited("Playhouse stopped the idle app-server."))
+            await Self.stop(stopping)
+        }
+    }
+
+    /// SIGTERM, then SIGKILL if the process is still running half a second later,
+    /// without blocking the main actor that every other task's turn runs on.
+    private static func stop(_ process: Process) async {
+        guard process.isRunning else { return }
+        let processID = process.processIdentifier
+        process.terminate()
+        let deadline = ContinuousClock.now + .milliseconds(500)
+        while process.isRunning, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        if process.isRunning { _ = kill(processID, SIGKILL) }
+        PlayhouseDiagnostics.record("codex.app_server.stopped", fields: [
+            "processID": String(processID),
+            "forced": String(process.isRunning),
         ])
     }
 
@@ -627,10 +758,12 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
 
     func beginConversationOperation() {
         conversationOperationsInFlight += 1
+        cancelIdleShutdown()
     }
 
     func finishConversationOperation() {
         conversationOperationsInFlight = max(0, conversationOperationsInFlight - 1)
+        scheduleIdleShutdownIfNeeded()
     }
 
     private static func decodeGoal(_ value: [String: Any]) -> CodexThreadGoal? {
@@ -743,6 +876,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 activeConversationMode = .code
             }
             isTurnActive = turnContexts.values.contains { $0.turnID != nil }
+            scheduleIdleShutdownIfNeeded()
         }
         try await resumeThreadIfNeeded(
             id: threadID,
@@ -932,6 +1066,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     private func clearPendingUserInput(threadID: String) {
         pendingUserInputs.removeValue(forKey: threadID)
         pendingUserInputRequest = pendingUserInputs.values.first?.request
+        scheduleIdleShutdownIfNeeded()
     }
 
     func isTurnActive(threadID: String) -> Bool {
@@ -965,30 +1100,19 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         pendingUserInputs.mapValues(\.request)
     }
 
-    /// The running app-server's OS process ID. Every thread on this client
-    /// shares it, so CPU is attributed per thread from its descendants'
-    /// working directories (see `CodexProcessAttribution`), not from this PID.
+    /// The running app-server's OS process ID.
     var appServerProcessIdentifier: pid_t? {
         guard let process, process.isRunning, process.processIdentifier > 0 else { return nil }
         return process.processIdentifier
     }
 
-    /// The workspace (`cwd` first, then the runtime roots) each turn-active
-    /// thread was started or resumed with on this app-server, keyed by
-    /// thread ID. A thread still starting has no parameters yet and maps to
-    /// no roots, but still counts as active.
-    var activeThreadWorkspaceRootsByThreadID: [String: [String]] {
-        var result: [String: [String]] = [:]
-        for threadID in activeThreadIDsSnapshot {
-            guard let parameters = resumedThreadParameters[threadID] else {
-                result[threadID] = []
-                continue
-            }
-            var roots = [parameters.cwd]
-            for root in parameters.roots where !roots.contains(root) { roots.append(root) }
-            result[threadID] = roots
-        }
-        return result
+    /// The app-server process ID of each turn-active thread, for CPU sampling.
+    /// A task's app-server runs only that task's turns, so its whole process
+    /// tree (the app-server, its helpers and the commands it runs) is that
+    /// task's load. Clients without a task never run a task's turns.
+    var activeProcessIdentifiersByThreadID: [String: pid_t] {
+        guard taskID != nil, let processID = appServerProcessIdentifier else { return [:] }
+        return Dictionary(uniqueKeysWithValues: activeThreadIDsSnapshot.map { ($0, processID) })
     }
 
     var interruptedThreadIDsSnapshot: Set<String> { interruptedThreadIDs }
@@ -1036,6 +1160,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     func markTurnStarting(threadID: String) {
         startingThreadIDs.insert(threadID)
         activeThreadID = threadID
+        cancelIdleShutdown()
     }
 
     func clearTurnStarting(threadID: String) {
@@ -1043,6 +1168,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         if activeThreadID == threadID, activeTurnID == nil {
             activeThreadID = nil
         }
+        scheduleIdleShutdownIfNeeded()
     }
 
     func isTurnActiveInProcess(threadID: String) -> Bool {
@@ -1060,9 +1186,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
     }
 
-    /// The extra skill roots this app-server was last given. One app-server
-    /// serves every task, so it gets the union of their bridge folders and each
-    /// thread's config hides the folders that are not its own.
+    /// The extra skill roots this app-server was last given: the union of the
+    /// gallery's bridge folders, with each thread's config hiding the folders
+    /// that are not its own.
     private var appliedSkillExtraRoots: [String] = []
 
     private func applySkillBridge(_ workspace: ConversationWorkspaceContext) async throws {
@@ -1496,6 +1622,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     private func request(method: String, params: [String: Any]) async throws -> [String: Any] {
+        cancelIdleShutdown()
+        defer { scheduleIdleShutdownIfNeeded() }
         let requestID = nextRequestID
         nextRequestID += 1
         let startedAt = DispatchTime.now().uptimeNanoseconds
@@ -1555,6 +1683,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     private func consumeOutput(_ data: Data, from source: Process?) async {
+        // An app-server stopped while idle can still flush output after a new
+        // one took its place; only the running process's lines are read.
+        guard let source, source === process else { return }
         stdoutBuffer.append(data)
         let newline = Data([0x0A])
         while let range = stdoutBuffer.range(of: newline) {
@@ -1745,9 +1876,22 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         switch method {
         case "thread/goal/updated", "thread/goal/cleared":
             guard let threadID = params["threadId"] as? String else { return }
-            goalStateThreadID = threadID
-            goalStateRevision += 1
+            if method == "thread/goal/cleared" {
+                goalStatusByThreadID.removeValue(forKey: threadID)
+            } else if let status = (params["goal"] as? [String: Any])?["status"] as? String {
+                goalStatusByThreadID[threadID] = status
+            }
+            // A Goal that stopped working no longer keeps the app-server running.
+            scheduleIdleShutdownIfNeeded()
+            // Only a window's own runtime clients raise the signal a window follows.
+            guard goalRuntimeEnabled else { return }
+            goalRuntimeState.stateThreadID = threadID
+            goalRuntimeState.stateRevision += 1
         case "turn/started":
+            if let threadID = params["threadId"] as? String, let turnID = (params["turn"] as? [String: Any])?["id"] as? String {
+                runningTurnKeys.insert(Self.turnKey(threadID: threadID, turnID: turnID))
+                cancelIdleShutdown()
+            }
             // Server notifications use params {threadId, turn:{id,status,...}}.
             guard let threadID = params["threadId"] as? String,
                   context != nil || threadID == goalObservationThreadID,
@@ -1759,14 +1903,14 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             Self.processActiveThreadIDs.insert(threadID)
             if goalObservationThreadID == threadID {
                 goalTurnStartRevision += 1
-                goalTurnRevision += 1
-                goalTurnStartedThreadID = threadID
+                goalRuntimeState.turnRevision += 1
+                goalRuntimeState.turnStartedThreadID = threadID
             }
         case "item/agentMessage/delta", "item/plan/delta":
             guard let context, let delta = params["delta"] as? String else { return }
             context.onDelta(delta)
         case "item/started", "item/completed":
-            if goalObservationThreadID == (params["threadId"] as? String) { goalTurnRevision += 1 }
+            if goalObservationThreadID == (params["threadId"] as? String) { goalRuntimeState.turnRevision += 1 }
             guard let context, let item = params["item"] as? [String: Any] else { return }
             if method == "item/completed",
                let itemType = item["type"] as? String,
@@ -1900,6 +2044,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 "turnStatus": turn["status"] as? String ?? "unknown",
             ]))
 
+            runningTurnKeys.remove(Self.turnKey(threadID: threadID, turnID: turnID))
+            defer { scheduleIdleShutdownIfNeeded() }
             let isMatchingActiveTurn = activeThreadID == threadID && activeTurnID == turnID
             if isMatchingActiveTurn {
                 activeTurnID = nil
@@ -1909,9 +2055,10 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             }
 
             if goalObservationThreadID == threadID, isMatchingActiveTurn {
-                goalTurnCompletedTurnID = turnID
-                goalTurnRevision += 1
-                goalTurnCompletedRevision += 1
+                goalRuntimeState.turnCompletedTurnID = turnID
+                goalRuntimeState.turnRevision += 1
+                goalRuntimeState.turnCompletedRevision += 1
+                scheduleIdleShutdownIfNeeded()
                 return
             }
 
@@ -2053,19 +2200,24 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     /// of the child can keep the write end open after the child itself exits.
     private func processDidTerminate(_ terminatedProcess: Process) {
         guard process === terminatedProcess else { return }
-
-        for key in Array(deltaLogSummaries.keys) { flushDeltaLogSummary(for: key, reason: "app_server_exit") }
-
-        let exitDetail = "Codex CLI exited with status \(terminatedProcess.terminationStatus)."
-        pendingUserInputs.removeAll()
-        pendingUserInputRequest = nil
         PlayhouseDiagnostics.record("codex.app_server.exited", fields: diagnosticFields([
             "codexPID": String(terminatedProcess.processIdentifier),
             "exitStatus": String(terminatedProcess.terminationStatus),
             "activeThreadID": activeThreadID ?? "",
             "activeTurnID": activeTurnID ?? "",
         ]))
-        let error = ClientError.processExited(exitDetail)
+        detachProcess(error: ClientError.processExited("Codex CLI exited with status \(terminatedProcess.terminationStatus)."))
+    }
+
+    /// Forgets the current app-server and fails everything still waiting on it.
+    private func detachProcess(error: Error) {
+        cancelIdleShutdown()
+        runningTurnKeys.removeAll()
+        // Codex reports the Goal again when the next app-server reads it.
+        goalStatusByThreadID.removeAll()
+        for key in Array(deltaLogSummaries.keys) { flushDeltaLogSummary(for: key, reason: "app_server_exit") }
+        pendingUserInputs.removeAll()
+        pendingUserInputRequest = nil
         process = nil
         inputPipe = nil
         outputPipe?.fileHandleForReading.readabilityHandler = nil

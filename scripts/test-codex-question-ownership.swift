@@ -29,7 +29,8 @@ struct CodexQuestionOwnershipProbe {
         let container = try ModelContainer(for: schema, configurations: [configuration])
         let tasks = BoardTaskManager(modelContext: container.mainContext)
         let codex = CodexAppServerClient(codexExecutableOverride: arguments[2], goalRuntimeEnabled: true)
-        defer { codex.shutdown() }
+        // Each task runs on its own app-server, created from this client.
+        defer { CodexAppServerClient.shutdownAllSharedClients() }
         let suite = ProcessInfo.processInfo.environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"]!
         let preferences = UserDefaults(suiteName: suite)!
         let manager = ConversationManager(tasks: tasks, clients: ConversationClients(codex: codex, claude: ClaudeCodeClient()), preferences: preferences)
@@ -55,7 +56,7 @@ struct CodexQuestionOwnershipProbe {
         let store = try tasks.conversationTranscriptStore()
         try check(try store.readState(originalID).pendingUserInputRequest == original, "Original request persisted under wrong task.")
         try check(try store.readState(parallelID).pendingUserInputRequest == parallel, "Parallel request persisted under wrong task.")
-        // Exercise history switching on the GUI-configured shared production client.
+        // Exercise history switching across the GUI-configured production task clients.
         _ = try await manager.history(taskID: parallelID)
         _ = try await manager.history(taskID: originalID)
         let answers = ["color": ["Blue"], "token": ["fixture-secret"]]

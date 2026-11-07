@@ -2353,6 +2353,8 @@ final class BoardTaskManager {
             task.statusMessage = nil
             clearProgressReport(task)
             try await saveTaskContext(taskID: id)
+            // A closed task runs no more turns, so its provider processes stop now.
+            ConversationClients.retireTask(id)
             PlayhouseDiagnostics.record("task.move.succeeded", fields: [
                 "taskID": id.uuidString,
                 "status": task.status.rawValue
@@ -2789,7 +2791,7 @@ final class BoardTaskManager {
                     try await worktreeService.mergeTarget(record, target: target)
                 }
             }
-            try await resolveMergeConflictsWithProvider(affected, provider: try requireTask(id).conversationProvider, clients: clients)
+            try await resolveMergeConflictsWithProvider(affected, taskID: id, provider: try requireTask(id).conversationProvider, clients: clients)
             for record in affected {
                 try await worktreeService.commitChanges(record, message: "Resolve merge conflicts with \(record.mergeTarget ?? "target")")
                 if action == "resolve-and-push" { try await worktreeService.publishBranch(record) }
@@ -2806,6 +2808,7 @@ final class BoardTaskManager {
     /// left, leaving the merge in progress for manual resolution.
     private func resolveMergeConflictsWithProvider(
         _ records: [RepositoryWorktreeRecord],
+        taskID: UUID,
         provider: ConversationProvider,
         clients: ConversationClients
     ) async throws {
@@ -2814,7 +2817,7 @@ final class BoardTaskManager {
             if try await worktreeService.hasUnmergedFiles(record) { unresolved.append(record) }
         }
         guard !unresolved.isEmpty else { return }
-        let client = clients.client(for: provider)
+        let client = clients.client(for: provider, taskID: taskID)
         let failureMessage = "\(client.provider.displayName) couldn't resolve every merge conflict. The task branch was left available for manual resolution."
         let roots = try ConversationWorkspaceContext(roots: unresolved.map { URL(fileURLWithPath: $0.worktreePath, isDirectory: true) })
         let thread = try await client.startThread(workspace: roots, modelID: client.provider.defaultModelID, developerInstructions: nil)
@@ -2871,7 +2874,7 @@ final class BoardTaskManager {
                 // A failed earlier sync can leave its merge in progress; resolve
                 // its conflicts before anything else touches the working tree.
                 if try await worktreeService.hasMergeInProgress(record) {
-                    try await resolveMergeConflictsWithProvider([record], provider: provider, clients: clients)
+                    try await resolveMergeConflictsWithProvider([record], taskID: id, provider: provider, clients: clients)
                 }
                 let hadLocalChanges = try await worktreeService.hasChanges(record)
                 if hadLocalChanges {
@@ -2891,7 +2894,7 @@ final class BoardTaskManager {
                     try await worktreeService.mergeFetchedRemoteBranch(record)
                     if try await worktreeService.hasUnmergedFiles(record) {
                         resolvedConflicts = true
-                        try await resolveMergeConflictsWithProvider([record], provider: provider, clients: clients)
+                        try await resolveMergeConflictsWithProvider([record], taskID: id, provider: provider, clients: clients)
                     }
                     try await worktreeService.commitChanges(record, message: "Merge remote changes for \(record.branch)")
                 }
@@ -3274,9 +3277,8 @@ final class BoardTaskManager {
     }
 
     /// `reason` explains a `nil` percent: `"not_running"` for an idle or
-    /// not-yet-sampled task of either provider. A turn-active Codex task
-    /// reports its working-directory share of the shared app-server's tree
-    /// (see `TaskCPUUsageSnapshot`), `0` when none of it is attributable.
+    /// not-yet-sampled task of either provider. A turn-active task reports
+    /// its own provider process tree's load (see `TaskCPUUsageSnapshot`).
     struct TaskCPUUsageResult: Codable {
         var cpuPercent: Double?
         var reason: String?
@@ -3344,7 +3346,7 @@ final class BoardTaskManager {
         return try await withTaskOperationLock(id) {
             let task = try requireSubject(id)
             let providerName = task.conversationProvider.displayName
-            let client = clients.client(for: task.conversationProvider)
+            let client = clients.client(for: task.conversationProvider, taskID: id)
             guard let threadID = task.activeConversationID else {
                 if let submittedPrompt = task.pendingSubmittedPrompt, !(try hasConversationTurnReservation(id)) {
                     if task.status == .inProgress {
@@ -3699,6 +3701,7 @@ final class BoardTaskManager {
         try await withConversationTurnReservation(id) {
             try await self.deleteWhileTurnReserved(id, diagnostics: diagnostics)
         }
+        ConversationClients.retireTask(id)
     }
 
     private func deleteWhileTurnReserved(_ id: UUID, diagnostics: [String: String]) async throws {
@@ -4724,8 +4727,11 @@ final class ConversationManager {
         get throws { try tasks.conversationTranscriptStore() }
     }
 
+    /// The client that runs `task`'s conversation. Codex gives every task an
+    /// app-server of its own, so this is the only client a task's thread, turn,
+    /// Goal and question calls go through.
     private func client(for task: any ConversationSubject) -> ConversationProviderClient {
-        clients.client(for: task.conversationProvider)
+        clients.client(for: task.conversationProvider, taskID: task.id)
     }
 
     /// The workspace a provider launch for `task` runs in, carrying the skill
@@ -5204,7 +5210,7 @@ final class ConversationManager {
     func publishImage(taskID: UUID, path: String, caption: String = "") async throws -> ConversationMessage {
         let task = try tasks.conversationSubject(taskID)
         let provider = task.conversationProvider
-        let codexClient = clients.codex
+        let codexClient = clients.codex(forTask: taskID)
         let url = URL(fileURLWithPath: path)
         let data = try Data(contentsOf: url)
         guard data.count <= 10_000_000 else {
@@ -5290,9 +5296,10 @@ final class ConversationManager {
         // Codex allows one writer per thread: when another client already has it open (the
         // GUI's runtime client, for a CLI caller), read through that one without loading, or
         // a second app-server would resume it with history's defaults under a running turn.
-        let owner = CodexAppServerClient.sharedClient(loading: threadID, compatibleWith: clients.codex)
-        let codex = owner ?? clients.codex
-        let readsThroughOwner = owner != nil && owner !== clients.codex
+        let taskClient = clients.codex(forTask: taskID)
+        let owner = CodexAppServerClient.sharedClient(loading: threadID, compatibleWith: taskClient)
+        let codex = owner ?? taskClient
+        let readsThroughOwner = owner != nil && owner !== taskClient
         let recoveryTranscript = try? transcripts.readState(taskID)
         let hasSensitiveRecoveryState = recoveryTranscript?.pendingUserInputRequest != nil
             || recoveryTranscript?.pendingSensitiveUserInputRedaction == true
@@ -5540,7 +5547,7 @@ final class ConversationManager {
         }
         guard isClaudeSubagent else {
             let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
-            return try await clients.codex.inspectThreadReadOnly(id: childID, workspace: workspace)
+            return try await clients.codex(forTask: taskID).inspectThreadReadOnly(id: childID, workspace: workspace)
         }
         // Claude Code reports a subagent's prompt summary and final report to its
         // parent; Playhouse shows those rather than its private sidechain.
@@ -5879,7 +5886,7 @@ final class ConversationManager {
             }
             return nil
         }
-        let client = clients.codex
+        let client = clients.codex(forTask: taskID)
         guard action == "get" || task.status != .done else {
             throw PlayhouseManagerError.invalidTransition("Done tasks are closed. Create a new task to change its goal.")
         }
@@ -6923,7 +6930,7 @@ final class ConversationManager {
         }
         var task = try tasks.conversationSubject(taskID)
         let provider = task.conversationProvider
-        let client = clients.client(for: provider)
+        let client = clients.client(for: provider, taskID: taskID)
         let modelID = requestedModelID ?? provider.defaultModelID
         guard Self.isValidModelID(modelID) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
@@ -8834,15 +8841,17 @@ final class PlayhouseBridgeRuntime {
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .array(try await conversations.providerCapabilities(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })
             case "conversation.goal":
+                let goalTaskID = try request.requiredUUID("taskID")
                 var clients = conversationClients(goalFeatureEnabled: !guiRuntime)
-                // Codex allows one writer per thread: use the client that already has it open.
+                // Codex allows one writer per thread: use the task client that already has it open.
                 var ownsClient = !guiRuntime
-                if let threadID = try? taskManager.taskModel(request.requiredUUID("taskID")).codexThreadID,
-                   let owner = CodexAppServerClient.sharedClient(loading: threadID, compatibleWith: clients.codex), owner !== clients.codex {
+                if let threadID = try? taskManager.taskModel(goalTaskID).codexThreadID,
+                   let owner = CodexAppServerClient.sharedClient(loading: threadID, compatibleWith: clients.codex(forTask: goalTaskID)),
+                   owner !== clients.codex(forTask: goalTaskID) {
                     clients = ConversationClients(codex: owner, claude: clients.claude, skills: clients.skills)
                     ownsClient = false
                 }
-                defer { if ownsClient { clients.codex.shutdown() } }
+                defer { if ownsClient { clients.codex(forTask: goalTaskID).shutdown() } }
                 let conversations = ConversationManager(tasks: taskManager, clients: clients, settingsManager: settings, preferences: preferences)
                 let goal = try await conversations.goal(
                     taskID: request.requiredUUID("taskID"),

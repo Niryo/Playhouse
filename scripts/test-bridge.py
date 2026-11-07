@@ -11281,8 +11281,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         record = Path(f"{executable}.cpu-child-{kind}.json")
         return json.loads(record.read_text(encoding="utf-8")) if record.is_file() else None
 
-    # case-contract: test_task_cpu_usage_attributes_codex_load_by_worktree | Two Codex tasks rooted in different repository folders share one real fixture app-server. Before any turn each reports cpu-usage as not running. While task A's turn runs a real CPU-burning child process in A's folder and task B's concurrent turn runs an idle child in B's folder, both children belong to the same app-server process; once a baseline is sampled, `task cpu-usage` attributes a plausible non-zero percentage to A and a near-zero one to B, and the task cards show A's CPU bar reading hot against a lowered ceiling beside B's visible but empty bar. Both readings return to not-running once the turns complete.
-    def test_task_cpu_usage_attributes_codex_load_by_worktree(self):
+    # case-contract: test_task_cpu_usage_measures_each_codex_task_app_server | Two Codex tasks rooted in different repository folders each run on their own real fixture app-server. Before any turn each reports cpu-usage as not running. While task A's turn runs a real CPU-burning child process and task B's concurrent turn runs an idle child, each child runs in its own task's folder under a different app-server process; once a baseline is sampled, `task cpu-usage` reports a plausible non-zero percentage for A's app-server process tree and a near-zero one for B's, and the task cards show A's CPU bar reading hot against a lowered ceiling beside B's visible but empty bar. Both readings return to not-running once the turns complete.
+    def test_task_cpu_usage_measures_each_codex_task_app_server(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-cpu-attribution"
         shutil.copyfile(fixture, executable)
@@ -11307,7 +11307,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
                 children = {kind: child for kind in ("burn", "idle") if (child := self.cpu_attribution_child(executable, kind))}
                 time.sleep(0.1)
             self.assertEqual(set(children), {"burn", "idle"}, "Both tasks' turns should be running their command children.")
-            self.assertEqual(children["burn"]["parentPID"], children["idle"]["parentPID"], "Both tasks' commands should run under one shared app-server.")
+            self.assertNotEqual(children["burn"]["parentPID"], children["idle"]["parentPID"], "Each task's command should run under its own task's app-server.")
             self.assertEqual(os.path.realpath(children["burn"]["workingDirectory"]), os.path.realpath(self.primary), "The busy command runs in its task's folder.")
             self.assertEqual(os.path.realpath(children["idle"]["workingDirectory"]), os.path.realpath(self.secondary), "The idle command runs in its task's folder.")
 
@@ -11327,7 +11327,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             idle_reading = self.assert_success(self.call_cli("task", "cpu-usage", idle_id)[0])
             self.assertIsNone(busy_reading["reason"])
             self.assertIsNone(idle_reading["reason"], "A running Codex task with an idle command still reports a value, not not-running.")
-            self.assertGreater(busy_reading["cpuPercent"], 20, "The busy-looping command's CPU should be attributed to its own task.")
+            self.assertGreater(busy_reading["cpuPercent"], 20, "The busy-looping command's CPU should count toward its own task's app-server.")
             self.assertLess(busy_reading["cpuPercent"], (os.cpu_count() or 1) * 100 + 50, "One busy loop can't exceed every core.")
             self.assertLess(idle_reading["cpuPercent"], 5, "The other task's busy command must not leak into the idle task's reading.")
 
@@ -11345,6 +11345,134 @@ class PlayhouseBridgeTests(unittest.TestCase):
             finished = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])
             self.assertIsNone(finished["cpuPercent"], "A finished Codex turn is no longer running.")
             self.assertEqual(finished["reason"], "not_running")
+
+    def codex_server_events(self, executable):
+        """What each evented fixture app-server process recorded: its start, the threads it served, and its exit."""
+        log = Path(f"{executable}.servers.jsonl")
+        if not log.is_file():
+            return []
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def codex_servers(self, executable):
+        """Per fixture app-server process ID: the threads it served and whether it exited."""
+        servers = {}
+        for event in self.codex_server_events(executable):
+            server = servers.setdefault(event["pid"], {"threads": set(), "resumed": set(), "turns": set(), "exited": False})
+            if event["threadId"]:
+                server["threads"].add(event["threadId"])
+            if event["event"] == "thread/resume":
+                server["resumed"].add(event["threadId"])
+            if event["event"] == "turn/start":
+                server["turns"].add(event["threadId"])
+            if event["event"] == "exit":
+                server["exited"] = True
+        return servers
+
+    def wait_for_codex_server_exit(self, executable, pid, message, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.codex_servers(executable).get(pid, {}).get("exited"):
+                break
+            time.sleep(0.2)
+        self.assertTrue(self.codex_servers(executable).get(pid, {}).get("exited"), message)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        self.fail(f"The stopped app-server {pid} is still running.")
+
+    # case-contract: test_codex_tasks_run_on_separate_app_servers | Two Codex tasks whose turns run at the same time each get their own real fixture app-server process, and each process starts, resumes and runs turns only for its own task's thread. Killing task A's app-server mid-turn fails only A's turn: A is no longer running while task B's concurrent turn keeps running and completes on its own server. Once B's turn has ended and its server stays idle, that server exits by itself. A next message in each task (B's sent from the conversation's composer in the app) starts a fresh app-server that resumes the task's existing thread and completes the turn, and the conversation shows the turns from before and after the restart. Moving B to Done and deleting A stop their fresh servers right away, well before the idle delay, and no app-server ever served more than one thread or is left running.
+    def test_codex_tasks_run_on_separate_app_servers(self):
+        environment = self.install_codex_fixture("codex-fixture-servers-cpu-attribution")
+        executable = Path(environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"])
+        first_id = self.create_task(title="Codex server A", roots=[self.primary], provider="codex")["id"]
+        second_id = self.create_task(title="Codex server B", roots=[self.secondary], provider="codex")["id"]
+
+        first = self.start_cli("conversation", "send", first_id, "--message", "Please idle cpu for 30 seconds.", extra_environment=environment)
+        second = self.start_cli("conversation", "send", second_id, "--message", "Please idle cpu for 15 seconds.", extra_environment=environment)
+        try:
+            thread_ids = {}
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and len(thread_ids) < 2:
+                for task_id in (first_id, second_id):
+                    if thread_id := self.assert_success(self.call_cli("task", "get", task_id)[0]).get("codexThreadID"):
+                        thread_ids[task_id] = thread_id
+                time.sleep(0.1)
+            self.assertEqual(len(thread_ids), 2, "Both tasks' turns should start a Codex thread.")
+            self.assertNotEqual(thread_ids[first_id], thread_ids[second_id])
+
+            server_of = {}
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and len(server_of) < 2:
+                server_of = {
+                    task_id: pid
+                    for pid, server in self.codex_servers(executable).items()
+                    for task_id, thread_id in thread_ids.items() if thread_id in server["turns"]
+                }
+                time.sleep(0.1)
+            self.assertEqual(len(server_of), 2, f"Both turns should be running: {self.codex_server_events(executable)}")
+            self.assertNotEqual(server_of[first_id], server_of[second_id], "Each task's turn should run on an app-server of its own.")
+            for task_id, pid in server_of.items():
+                self.assertEqual(self.codex_servers(executable)[pid]["threads"], {thread_ids[task_id]},
+                                 "An app-server should serve only its own task's thread.")
+
+            # A crash of A's app-server ends A's turn and nothing else.
+            os.kill(server_of[first_id], signal.SIGKILL)
+            failed, _ = self.finish_cli(first, ["conversation", "send", first_id], expected_status=1, timeout=45)
+            self.assertFalse(failed.get("ok"), "The crashed app-server's turn should fail.")
+            self.assertIn("app-server", failed["error"]["message"])
+            runtime = self.assert_success(self.call_cli("conversation", "runtime")[0])
+            self.assertNotIn(thread_ids[first_id], runtime["activeThreadIDs"], "The crashed task's turn is no longer running.")
+            self.assertIn(thread_ids[second_id], runtime["activeThreadIDs"], "The other task's turn keeps running on its own app-server.")
+            completed, _ = self.finish_cli(second, ["conversation", "send", second_id], timeout=45)
+            self.assert_success(completed)
+        finally:
+            for process in (first, second):
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=10)
+
+        # B's server has nothing left to do, so it stops by itself.
+        self.wait_for_codex_server_exit(executable, server_of[second_id], "An idle task's app-server should exit after its turn ends.")
+
+        # Each task's next message starts a new app-server that resumes its thread.
+        for task_id, message, reply, earlier in (
+            (second_id, "Please idle cpu for 2 seconds.", "Finished the idle command after 2 seconds.", "Finished the idle command after 15 seconds."),
+            (first_id, "Please idle cpu for 1 seconds.", "Finished the idle command after 1 seconds.", "Please idle cpu for 30 seconds."),
+        ):
+            before = set(self.codex_servers(executable))
+            self.assert_success(self.call_cli("conversation", "send", task_id, "--message", message, timeout=60, extra_environment=environment)[0])
+            servers = self.codex_servers(executable)
+            fresh = [pid for pid in servers if pid not in before and thread_ids[task_id] in servers[pid]["turns"]]
+            self.assertEqual(len(fresh), 1, f"The next message should run on one fresh app-server: {self.codex_server_events(executable)}")
+            self.assertEqual(servers[fresh[0]]["resumed"], {thread_ids[task_id]}, "The fresh app-server should resume the task's own thread.")
+            self.assertEqual(servers[fresh[0]]["threads"], {thread_ids[task_id]})
+            history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+            texts = [item["text"] for item in history["messages"]]
+            self.assertIn(reply, texts, "The resumed turn's reply should show.")
+            self.assertIn(earlier, texts, "The resumed thread keeps the conversation from before its app-server stopped.")
+            # Closing the task stops its app-server at once: it is still running here,
+            # inside its idle delay, and gone well before that delay ends.
+            self.assertFalse(self.codex_servers(executable)[fresh[0]]["exited"], "The fresh app-server should still be inside its idle delay.")
+            os.kill(fresh[0], 0)
+            if task_id == second_id:
+                self.assert_success(self.call_cli("task", "move", task_id, "Done")[0])
+            else:
+                self.assert_success(self.call_cli("task", "delete", task_id)[0])
+            self.wait_for_codex_server_exit(executable, fresh[0], "Closing the task should stop its app-server right away.", timeout=4)
+
+        # No app-server ever served two tasks, and none of the task servers is left running.
+        for pid, server in self.codex_servers(executable).items():
+            self.assertLessEqual(len(server["threads"]), 1, f"App-server {pid} served more than one thread: {server['threads']}")
+            if pid == server_of[first_id]:
+                # Killed above, so it recorded no exit of its own.
+                with self.assertRaises(ProcessLookupError, msg="The crashed app-server should be gone."):
+                    os.kill(pid, 0)
+            elif server["threads"] & set(thread_ids.values()):
+                self.wait_for_codex_server_exit(executable, pid, f"Task app-server {pid} should have stopped once idle.")
 
     # case-contract: test_settings_cpu_usage_color_max_round_trip | The CPU usage color maximum defaults to one fully busy core per logical CPU, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting.
     def test_settings_cpu_usage_color_max_round_trip(self):
