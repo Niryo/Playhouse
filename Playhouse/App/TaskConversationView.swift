@@ -4423,11 +4423,8 @@ struct TaskConversationView: View {
                     .nativeHelp("Add comment to selected text")
                     .accessibilityIdentifier("add-comment-to-selection-button")
                     .frame(width: 112, height: 30)
-                    .position(
-                        x: min(max(selection.bounds.midX, 56), max(56, geometry.size.width - 56)),
-                        y: selection.bounds.minY - 22
-                    )
-                    .zIndex(20)
+                    // Attached to the hint itself: after `.position`, the view fills the whole
+                    // text block, and the popover opened at the block's top edge, away from the hint.
                     .popover(isPresented: Binding(
                         get: { annotationSelection?.id == selection.id },
                         set: { isPresented in
@@ -4452,10 +4449,6 @@ struct TaskConversationView: View {
                             .buttonHoverPointer()
                             .buttonStyle(.plain)
                             .nativeHelp("Add comment")
-                            // Over a user message the button's own action never ran although the
-                            // press reached it; a simultaneous tap does, and addAnnotation ignores
-                            // the second call when both fire.
-                            .simultaneousGesture(TapGesture().onEnded { addAnnotation(selection) })
                             .accessibilityLabel("Add comment")
                             .accessibilityIdentifier("add-comment-button")
                         }
@@ -4464,9 +4457,17 @@ struct TaskConversationView: View {
                         .padding(.vertical, 7)
                         .frame(width: 355)
                         .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
-                        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
+                        // The outline is drawn over the field and the arrow. Hit-testable, it took
+                        // every click on the arrow, which never ran its action; only the text
+                        // field, an AppKit view, still received clicks.
+                        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)).allowsHitTesting(false))
                         .padding(5)
                     }
+                    .position(
+                        x: min(max(selection.bounds.midX, 56), max(56, geometry.size.width - 56)),
+                        y: selection.bounds.minY - 22
+                    )
+                    .zIndex(20)
                 }
             }
         }

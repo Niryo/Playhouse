@@ -6230,6 +6230,7 @@ final class PlayhouseUITests: XCTestCase {
         addComment.click()
         let commentField = element("comment-input-field")
         XCTAssertTrue(commentField.waitForExistence(timeout: 5))
+        assertCommentFieldBesideHint(commentField)
         commentField.typeText("What did we say before?")
         // Clicking the arrow submits a comment on a user message (it once did nothing there).
         element("add-comment-button").click()
@@ -8283,10 +8284,7 @@ final class PlayhouseUITests: XCTestCase {
         let initialCommentField = element("comment-input-field")
         XCTAssertTrue(initialCommentField.waitForExistence(timeout: 5))
         XCTAssertLessThan(initialCommentField.frame.height, 40, "The comment entry should be a compact single-line field.")
-        XCTAssertLessThan(abs(initialCommentField.frame.midX - addComment.frame.midX), 250,
-                          "The compact comment field should stay beside the floating hint horizontally.")
-        XCTAssertLessThan(abs(initialCommentField.frame.midY - addComment.frame.midY), 200,
-                          "The compact comment field should stay beside the floating hint vertically.")
+        assertCommentFieldBesideHint(initialCommentField)
         initialCommentField.typeText("Discard this comment")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertFalse(element("send-message-button").isEnabled, "Cancelling should leave no pending comment to submit.")
@@ -8310,6 +8308,7 @@ final class PlayhouseUITests: XCTestCase {
             addComment.click()
             let field = element("comment-input-field")
             XCTAssertTrue(field.waitForExistence(timeout: 5))
+            assertCommentFieldBesideHint(field)
             XCTAssertLessThan(field.frame.height, 40, "The comment input should stay compact.")
             let submitComment = element("add-comment-button")
             XCTAssertTrue(submitComment.exists, "The compact input should include its submit arrow.")
@@ -8319,12 +8318,10 @@ final class PlayhouseUITests: XCTestCase {
                                  "The submit control should retain a light circular background behind the arrow.")
             // Typing the long comment would take most of the case's time budget.
             if comment.count > 100 { pasteText(comment, into: field) } else { field.typeText(comment) }
-            if comment == "Explain this phrase" {
-                field.typeKey(.return, modifierFlags: [])
-                XCTAssertTrue(field.waitForNonExistence(timeout: 2), "Enter should add the comment and close the modal.")
-            } else {
-                element("add-comment-button").click()
-            }
+            // The arrow submits on both message kinds; its outline once took every click on it.
+            // Return is covered by the comment-only selection below.
+            submitComment.click()
+            XCTAssertTrue(field.waitForNonExistence(timeout: 5), "The arrow should add the comment and close the field.")
             XCTAssertTrue(element("send-message-button").isEnabled, "A comment without freeform text should enable sending.")
             let expectedCountLabel = comment == "Explain this phrase" ? "1 comment" : "2 comments"
             XCTAssertTrue(waitUntil({
@@ -18513,6 +18510,29 @@ final class PlayhouseUITests: XCTestCase {
 
     private func element(_ identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    /// The comment popover opens on the Add comment hint, not elsewhere on the selected message:
+    /// its field sits just above or below the hint and roughly centered on it. A popover anchored
+    /// to the whole text block once opened at the block's top edge, far from a hint lower down.
+    /// The popover's arrow shares the hint's "Add comment" label, so it is excluded by identifier.
+    private func assertCommentFieldBesideHint(
+        _ field: XCUIElement, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        // An assistant hint takes its prose block's identifier, so it is found by label.
+        let hint = app.buttons.matching(NSPredicate(
+            format: "label == %@ AND identifier != %@", "Add comment", "add-comment-button"
+        )).firstMatch
+        XCTAssertTrue(hint.exists, "The Add comment hint should stay while its comment field is open.", file: file, line: line)
+        let fieldFrame = field.frame
+        let hintFrame = hint.frame
+        let verticalGap = min(abs(fieldFrame.midY - hintFrame.minY), abs(fieldFrame.midY - hintFrame.maxY))
+        XCTAssertLessThan(verticalGap, 60,
+                          "The comment field should open just above or below the Add comment hint (field \(fieldFrame), hint \(hintFrame)).",
+                          file: file, line: line)
+        XCTAssertLessThan(abs(fieldFrame.midX - hintFrame.midX), 120,
+                          "The comment field should open centered on the Add comment hint (field \(fieldFrame), hint \(hintFrame)).",
+                          file: file, line: line)
     }
 
     private func element(withAccessibilityLabel label: String) -> XCUIElement {
