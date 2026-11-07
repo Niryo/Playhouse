@@ -536,6 +536,43 @@ enum PlayhouseCLI {
             default:
                 throw CLIError.usage("Unknown skills operation \(operation).")
             }
+        case "schedule":
+            guard let operation = rest.first else {
+                throw CLIError.usage("Use: playhouse schedule list|set|clear|pause|resume|run-now|tick ...")
+            }
+            let tail = Array(rest.dropFirst())
+            switch operation {
+            case "list":
+                return BridgeRequest(command: "schedule.list")
+            case "set":
+                let usage = "Use: playhouse schedule set <task-id> --prompt <text> (--once <ISO8601> | --repeat <hourly|daily|weekdays|weekly> [--time HH:MM] [--minute MM] [--weekday mon]) [--title <title>] [--image <path>...] [--mode default|plan] [--model <id>]"
+                guard let id = tail.first, !id.hasPrefix("--") else { throw CLIError.usage(usage) }
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: [
+                    "--prompt", "--once", "--repeat", "--time", "--minute", "--weekday", "--title", "--image", "--mode", "--model"
+                ])
+                guard (flags["--once"] == nil) != (flags["--repeat"] == nil) else { throw CLIError.usage(usage) }
+                var arguments: [String: BridgeValue] = [
+                    "taskID": .string(id),
+                    "kind": .string(flags["--once"] != nil ? "once" : "recurring"),
+                    "prompt": .string(flags["--prompt"]?.first ?? ""),
+                    "images": .array(try (flags["--image"] ?? []).map(draftImageDataURL))
+                ]
+                let names = ["--once": "at", "--repeat": "repeat", "--time": "time", "--minute": "minute", "--weekday": "weekday", "--title": "title", "--mode": "mode", "--model": "model"]
+                for (flag, name) in names {
+                    if let value = flags[flag]?.first { arguments[name] = .string(value) }
+                }
+                return BridgeRequest(command: "schedule.set", arguments: arguments)
+            case "clear", "pause", "resume", "run-now":
+                guard tail.count == 1 else { throw CLIError.usage("Use: playhouse schedule \(operation) <task-id>") }
+                return BridgeRequest(command: "schedule.\(operation)", arguments: ["taskID": .string(tail[0])])
+            case "tick":
+                let flags = try parseFlags(tail, valueFlags: ["--now"])
+                var arguments: [String: BridgeValue] = [:]
+                if let now = flags["--now"]?.first { arguments["now"] = .string(now) }
+                return BridgeRequest(command: "schedule.tick", arguments: arguments)
+            default:
+                throw CLIError.usage("Unknown schedule operation '\(operation)'.")
+            }
         case "settings":
             guard let operation = rest.first else { throw CLIError.usage("Missing settings operation.") }
             switch operation {
@@ -844,6 +881,11 @@ enum PlayhouseCLI {
       playhouse task progress clear <task-id>
       playhouse task outcome <task-id> <completed|in-progress|waiting-response>
       playhouse task rename <task-id> --title <title>
+      playhouse schedule list
+      playhouse schedule set <task-id> --prompt <text> --once <ISO8601> [--image <path>...] [--mode default|plan] [--model <id>]
+      playhouse schedule set <task-id> --prompt <text> --repeat <hourly|daily|weekdays|weekly> --title <title> [--time HH:MM] [--minute MM] [--weekday mon] [--image <path>...] [--mode default|plan] [--model <id>]
+      playhouse schedule clear|pause|resume|run-now <task-id>
+      playhouse schedule tick
       playhouse task repository add <task-id> --repo <path>
       playhouse task repository add-batch <task-id> --repo <path> [--repo <path>...]
       playhouse task repository replace <task-id> --repo <path> [--repo <path>...]
