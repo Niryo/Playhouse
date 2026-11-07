@@ -102,6 +102,7 @@ struct PlayhouseApp: App {
         MainWindowView()
             .modelContainer(modelContainer)
             .environmentObject(conversationRuntime)
+            .environment(\.conversationRuntimeModel, conversationRuntime)
             .environmentObject(cpuUsageModel)
             .environmentObject(agentUsageModel)
             .defaultAppStorage(appPreferences)

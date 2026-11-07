@@ -8843,7 +8843,7 @@ final class PlayhouseUITests: XCTestCase {
                        URL(fileURLWithPath: secondWorktree).resolvingSymlinksInPath().path)
     }
 
-    // case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message in its conversation, where the open and reopened task show it, with an empty composer and no unsent draft, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history.
+    // case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message in its conversation, where the open and reopened task show it, with an empty composer and no unsent draft, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history. While the failing task's conversation is open and its turn held, the parallel turn starts, finishes and advances only its own revision: CLI/XPC runtime still reports the held session active and interruptible and the parallel session inactive, and the open conversation still offers an enabled Stop and never shows the parallel answer.
     func test_conversation_isolates_failing_claude_turn_from_parallel_send() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-parallel-failure")
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
@@ -8889,6 +8889,22 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: firstID)?["status"] as? String, "In Progress",
                        "The failing turn must still be held while the parallel conversation completes.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: secondID)?["status"] as? String) == "Waiting Response" }, timeout: 10))
+        // The parallel turn started, finished and advanced its own revision while this
+        // conversation stayed open. The open conversation follows only its own runtime state:
+        // its held turn still shows as running and can be stopped, and the other answer stays out.
+        let heldSessionID = try XCTUnwrap(try taskRecord(id: firstID)?["claudeSessionID"] as? String)
+        let parallelSessionID = try XCTUnwrap(try taskRecord(id: secondID)?["claudeSessionID"] as? String)
+        XCTAssertNotEqual(heldSessionID, parallelSessionID)
+        let parallelRuntime = try XCTUnwrap(try runCLI(["conversation", "runtime"])["result"] as? [String: Any])
+        XCTAssertTrue((parallelRuntime["activeThreadIDs"] as? [String] ?? []).contains(heldSessionID), "The held turn stays active.")
+        XCTAssertTrue((parallelRuntime["interruptibleThreadIDs"] as? [String] ?? []).contains(heldSessionID), "The held turn stays interruptible.")
+        XCTAssertFalse((parallelRuntime["activeThreadIDs"] as? [String] ?? []).contains(parallelSessionID), "The parallel turn has ended.")
+        XCTAssertNotNil((parallelRuntime["conversationRevisions"] as? [String: Any])?[secondID], "The parallel turn advanced its own revision.")
+        let heldStop = element("pause-response-button")
+        XCTAssertTrue(heldStop.waitForExistence(timeout: 5), "The open conversation's held turn still offers Stop after another task's turn.")
+        XCTAssertTrue(heldStop.isEnabled, "Stop stays enabled while the open conversation's own turn is held.")
+        XCTAssertFalse(transcriptMessage("OK.").exists, "The parallel conversation's answer must not appear in the open one.")
+        attachScreenshot(named: "Open conversation keeps its held turn after a parallel task answers")
 
         try "Fail the first Claude turn.\n".write(to: release, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({

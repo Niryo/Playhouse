@@ -44,6 +44,42 @@ private struct StandaloneChatPanel: View, Equatable {
     }
 }
 
+/// An open task's conversation. The board re-renders whenever any task's runtime state changes,
+/// and a conversation view rebuilt from it, closures and all, re-ran its whole transcript each
+/// time; compared by its inputs, it updates only from its own state and the task's model. Any
+/// input added here that can change must also be compared in `==`. The closures only reach the
+/// board's state storage, so an older copy of them stays valid.
+private struct TaskConversationPanel: View, Equatable {
+    let task: BoardTask
+    let isNewTask: Bool
+    let isReadOnly: Bool
+    let conflictResolutionRequested: Bool
+    let skillFixPrompt: String?
+    let presentScheduleOnAppear: TaskScheduleKind?
+    let onConflictResolutionChecked: (Bool) -> Void
+    let onOpenTask: (UUID, String) -> Void
+    let onBack: () -> Void
+
+    static func == (lhs: TaskConversationPanel, rhs: TaskConversationPanel) -> Bool {
+        lhs.task === rhs.task && lhs.isNewTask == rhs.isNewTask && lhs.isReadOnly == rhs.isReadOnly
+            && lhs.conflictResolutionRequested == rhs.conflictResolutionRequested
+            && lhs.skillFixPrompt == rhs.skillFixPrompt
+            && lhs.presentScheduleOnAppear == rhs.presentScheduleOnAppear
+    }
+
+    var body: some View {
+        TaskConversationView(
+            task: task, isNewTask: isNewTask, isReadOnly: isReadOnly,
+            conflictResolutionRequested: conflictResolutionRequested,
+            onConflictResolutionChecked: onConflictResolutionChecked,
+            skillFixPrompt: skillFixPrompt,
+            onOpenTask: onOpenTask,
+            presentScheduleOnAppear: presentScheduleOnAppear,
+            onBack: onBack
+        )
+    }
+}
+
 struct KanbanBoardView: View {
     private let boardSidebarWidth: CGFloat = 184
     @AppStorage(ChatSidebarLayout.widthKey, store: WorkspaceSettings.preferencesStore)
@@ -136,16 +172,16 @@ struct KanbanBoardView: View {
     }
 
     private func conversationView(for selectedTask: BoardTask) -> some View {
-        TaskConversationView(
+        TaskConversationPanel(
             task: selectedTask, isNewTask: isSelectedTaskNew, isReadOnly: selectedTask.status == .done,
             conflictResolutionRequested: conflictResolutionTaskID == selectedTask.id,
+            skillFixPrompt: skillFixPrompts[selectedTask.id],
+            presentScheduleOnAppear: presentScheduleOnOpen,
             onConflictResolutionChecked: { resolved in
                 if resolved { conflictedReviewTaskIDs.remove(selectedTask.id) }
                 else { conflictedReviewTaskIDs.insert(selectedTask.id) }
             },
-            skillFixPrompt: skillFixPrompts[selectedTask.id],
-            onOpenTask: openTask(_:sending:),
-            presentScheduleOnAppear: presentScheduleOnOpen
+            onOpenTask: openTask(_:sending:)
         ) {
             self.skillFixPrompts[selectedTask.id] = nil
             self.selectedTask = nil
@@ -153,6 +189,7 @@ struct KanbanBoardView: View {
             self.conflictResolutionTaskID = nil
             self.presentScheduleOnOpen = nil
         }
+        .equatable()
         .id(selectedTask.id)
     }
 

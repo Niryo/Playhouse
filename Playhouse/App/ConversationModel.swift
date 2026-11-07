@@ -728,6 +728,21 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
     func canInterruptActiveTurn(threadID: String) -> Bool { interruptibleThreadIDs.contains(threadID) }
     func wasLastTurnInterrupted(threadID: String) -> Bool { interruptedThreadIDs.contains(threadID) }
 
+    /// The part of the snapshot about one task: its conversation revision and the turn state of
+    /// its threads. Two slices differ whenever something that task's conversation reads from the
+    /// snapshot changed. The goal state is kept whole, as the conversation always read it: only a
+    /// window's own Goal turns change it, so it costs no re-render while other tasks work.
+    func slice(taskID: String, threadIDs: Set<String>) -> ConversationRuntimeSnapshot {
+        var slice = ConversationRuntimeSnapshot()
+        slice.activeThreadIDs = activeThreadIDs.filter(threadIDs.contains)
+        slice.interruptibleThreadIDs = interruptibleThreadIDs.filter(threadIDs.contains)
+        slice.interruptedThreadIDs = interruptedThreadIDs.filter(threadIDs.contains)
+        slice.pendingUserInput = pendingUserInput.filter { threadIDs.contains($0.key) }
+        slice.conversationRevisions = conversationRevisions.filter { $0.key == taskID }
+        slice.goal = goal
+        return slice
+    }
+
     /// `dataDirectory` limits the snapshot to the clients serving that data
     /// directory. Debug/test requests carry one so that two isolated stores
     /// in the same daemon never see each other's turns; production requests
