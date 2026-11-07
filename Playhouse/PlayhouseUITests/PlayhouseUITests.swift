@@ -11265,6 +11265,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(startImplementing.waitForExistence(timeout: 5), "Plan mode should offer a dedicated implementation handoff.")
         XCTAssertEqual(element("message-composer").value as? String ?? "", "", "The handoff should be available while the composer is empty.")
         XCTAssertTrue(startImplementing.isEnabled, "Start Implementing should not require draft text.")
+        XCTAssertFalse(element("start-implementing-unavailable-reason").exists, "A task with a working folder shows no missing-repository warning.")
         startImplementing.click()
         XCTAssertTrue(waitUntil({ element("conversation-mode-menu").label.contains("Code mode") }, timeout: 5), "Starting implementation should switch the composer to Code mode.")
         XCTAssertTrue(waitUntil({
@@ -11281,6 +11282,107 @@ final class PlayhouseUITests: XCTestCase {
                 && turns.last?["conversationMode"] as? String == "default"
         }, timeout: 30), "The handoff should start an implementation turn with the plan context.")
         attachScreenshot(named: "Plan mode stays active until implementation starts")
+    }
+
+    // case-contract: test_start_implementing_explains_missing_repository | A task with neither a repository nor a working folder can still plan, but once the plan exists its Start Implementing button is disabled and explains why: its tooltip and accessibility value read "Add a repository to this task to start implementing.", and a visible No repository warning beside it carries the same reason and opens the repository picker. Bridge state for the planned task has no workspace roots and no repository worktrees. Adding a repository gives the task a workspace root; in the still-open conversation the warning disappears and Start Implementing enables without reopening the task, then switches to Code mode and starts an implementation turn recorded after the plan turn, which runs in the task's created repository worktree as its only workspace root.
+    func test_start_implementing_explains_missing_repository() throws {
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-plan-handoff-markdown")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
+        codexFixtureExecutable = executable.path
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        let created = try runCLI(["task", "create", "--title", "Plan without repository", "--prompt", "Fixture task description."])
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        func turnModes() -> [String] {
+            let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
+            let history = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            return (history?["turns"] as? [[String: Any]] ?? [])
+                .filter { !(($0["userMessage"] as? String) ?? "").lowercased().contains("playhouse internal outcome nudge:") }
+                .compactMap { $0["conversationMode"] as? String }
+        }
+        func conversationMessages() -> [[String: Any]] {
+            (try? self.runCLI(["conversation", "history", taskID])["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+        }
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Plan without repository")
+
+        let modeMenu = element("conversation-mode-menu")
+        XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
+        modeMenu.click()
+        let planMode = app.menuItems["Plan mode"]
+        XCTAssertTrue(planMode.waitForExistence(timeout: 5))
+        planMode.click()
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"))
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Plan the task.")
+        element("send-message-button").click()
+
+        let reason = "Add a repository to this task to start implementing."
+        let startImplementing = element("start-implementing-button")
+        let warning = element("start-implementing-unavailable-reason")
+        XCTAssertTrue(startImplementing.waitForExistence(timeout: 30), "Planning works without a repository, so the handoff appears once the plan turn ends.")
+        XCTAssertTrue(waitUntil({
+            conversationMessages().contains { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+        }, timeout: 30), "The plan turn completes without a repository or folder.")
+        XCTAssertEqual(turnModes(), ["plan"], "The plan turn ran in Plan mode.")
+        XCTAssertFalse(startImplementing.isEnabled, "Implementing needs somewhere to change, so the handoff stays disabled.")
+        XCTAssertEqual(startImplementing.value as? String, reason, "The button's accessibility explains why it is unavailable.")
+        XCTAssertTrue(warning.waitForExistence(timeout: 5), "The reason is visible without hovering.")
+        XCTAssertEqual(warning.label, "No repository")
+        XCTAssertEqual(warning.value as? String, reason, "The warning carries the same reason as the button.")
+        XCTAssertLessThan(abs(warning.frame.midY - startImplementing.frame.midY), 4, "The warning sits beside the button in the composer toolbar.")
+        assertNativeHelpText(for: startImplementing, equals: reason)
+        // The reason appears on screen only in the tooltip (the warning shows "No repository"),
+        // so its disappearance shows the tooltip was dismissed.
+        movePointerToHelpRunway(below: startImplementing)
+        if !waitUntil({ !self.nativeHelpTextIsVisible(reason) }, timeout: 4) {
+            movePointerToHelpRunway(below: startImplementing, horizontalShift: -60)
+        }
+        XCTAssertTrue(waitUntil({ !self.nativeHelpTextIsVisible(reason) }, timeout: 6), "Moving away dismisses the Start Implementing tooltip.")
+        let task = try XCTUnwrap(try taskRecord(id: taskID))
+        XCTAssertEqual((task["workspaceRoots"] as? [String]) ?? [], [], "The task has no workspace root to implement in.")
+        XCTAssertEqual((task["repositoryWorktrees"] as? [[String: Any]])?.count ?? 0, 0)
+        attachScreenshot(named: "Start Implementing explains the missing repository")
+
+        // The warning is the way to fix it: it opens the header's repository picker.
+        warning.click()
+        XCTAssertTrue(element("conversation-repository-search").waitForExistence(timeout: 5), "The warning opens the repository picker.")
+        chooseRepositorySuggestion("primary")
+        // The header picker adds the repository as the task's root; its worktree is named and
+        // created by the next send, so the handoff below is what creates it.
+        XCTAssertTrue(waitUntil({
+            let record = try? self.taskRecord(id: taskID)
+            let repositories = (record?["repositoryWorktrees"] as? [[String: Any]] ?? []).compactMap { $0["repositoryPath"] as? String }
+            return repositories == [self.fixture.primary.path] && !(record?["workspaceRoots"] as? [String] ?? []).isEmpty
+        }, timeout: 20), "Adding the repository gives the task a workspace root.")
+        XCTAssertTrue(waitUntil({ !warning.exists && startImplementing.isEnabled }, timeout: 10), "The open conversation drops the warning and enables the handoff without reopening.")
+        XCTAssertEqual(startImplementing.value as? String, "Available")
+        attachScreenshot(named: "Start Implementing enabled once a repository is added")
+
+        startImplementing.click()
+        XCTAssertTrue(waitUntil({ modeMenu.label.contains("Code mode") }, timeout: 5), "Starting implementation switches the composer to Code mode.")
+        XCTAssertTrue(waitUntil({
+            // The fixture reuses one user item ID per thread, so the handoff's user item replaces
+            // the plan's in history; the fixture's own turn log below records their order.
+            let history = conversationMessages()
+            let handoffIndex = history.firstIndex { $0["role"] as? String == "user" && $0["text"] as? String == "Start implementing the plan." }
+            let finalIndex = history.lastIndex { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+            return handoffIndex != nil && finalIndex != nil && finalIndex! > handoffIndex!
+        }, timeout: 30), "The handoff starts an implementation turn that answers.")
+        XCTAssertTrue(waitUntil({ turnModes() == ["plan", "default"] }, timeout: 30), "The handoff turn runs in Code mode after the plan turn.")
+        // Paths are compared resolved, since /tmp fixtures can be reported through /private/tmp.
+        func resolved(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }
+        var lastRecord: [String: Any]?
+        XCTAssertTrue(waitUntil({
+            lastRecord = try? self.taskRecord(id: taskID)
+            guard let record = lastRecord,
+                  let worktree = (record["repositoryWorktrees"] as? [[String: Any]])?.first,
+                  worktree["isPending"] as? Bool == false,
+                  let path = worktree["worktreePath"] as? String,
+                  resolved(path) != resolved(self.fixture.primary.path) else { return false }
+            return (record["workspaceRoots"] as? [String] ?? []).map(resolved) == [resolved(path)]
+        }, timeout: 20), "The implementation turn runs in the task's created worktree: \(String(describing: lastRecord?["repositoryWorktrees"])) roots \(String(describing: lastRecord?["workspaceRoots"]))")
     }
 
     // case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.

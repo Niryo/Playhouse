@@ -7947,6 +7947,65 @@ class PlayhouseBridgeTests(unittest.TestCase):
                              for event in plan_diagnostics))
         self.assertNotIn(markdown_reply, json.dumps(plan_diagnostics))
 
+    # case-contract: test_start_implementing_explains_missing_repository | A task with neither a repository nor a working folder can still plan, but once the plan exists its Start Implementing button is disabled and explains why: its tooltip and accessibility value read "Add a repository to this task to start implementing.", and a visible No repository warning beside it carries the same reason and opens the repository picker. Bridge state for the planned task has no workspace roots and no repository worktrees. Adding a repository gives the task a workspace root; in the still-open conversation the warning disappears and Start Implementing enables without reopening the task, then switches to Code mode and starts an implementation turn recorded after the plan turn, which runs in the task's created repository worktree as its only workspace root.
+    def test_start_implementing_explains_missing_repository(self):
+        task_id = self.create_task(title="Plan without repository", roots=[])["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-plan-handoff-markdown"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        planned, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Plan the task.", "--mode", "plan",
+            extra_environment=env,
+        )
+        messages = self.assert_success(planned)["messages"]
+        self.assertTrue(any(message["role"] == "user" and message["text"] == "Plan the task." for message in messages))
+        self.assertTrue(any(message["role"] == "assistant" and message["phase"] == "final_answer" for message in messages),
+                        "Planning needs no repository or folder.")
+        # The handoff's availability reads these: with neither, Start Implementing explains the missing repository.
+        response, _ = self.call_cli("task", "get", task_id)
+        task = self.assert_success(response)
+        self.assertEqual(task["workspaceRoots"], [], "A task created without a folder or repository has no workspace root.")
+        self.assertEqual(task["repositoryWorktrees"], [])
+
+        repository = self.data_directory / "plan-handoff-repository"
+        repository.mkdir()
+        (repository / "README.md").write_text("Plan handoff fixture.\n", encoding="utf-8")
+        self.run_git(repository, "init", "--initial-branch=main")
+        self.run_git(repository, "config", "user.name", "Playhouse Bridge Test")
+        self.run_git(repository, "config", "user.email", "playhouse-bridge-test@example.invalid")
+        self.run_git(repository, "add", "README.md")
+        self.run_git(repository, "commit", "-m", "Baseline")
+        added, _ = self.call_cli("task", "repository", "add", task_id, "--repo", str(repository))
+        record = next(item for item in self.assert_success(added)["repositoryWorktrees"]
+                      if item["repositoryPath"] == str(repository))
+        self.assertFalse(record["isPending"], "Adding a repository to a started task creates its worktree.")
+        self.assertTrue(Path(record["worktreePath"]).is_dir())
+        response, _ = self.call_cli("task", "get", task_id)
+        self.assertIn(record["worktreePath"], self.assert_success(response)["workspaceRoots"],
+                      "A fresh read sees the worktree as the root implementation runs in.")
+
+        implementation, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Start implementing the plan.", "--mode", "default",
+            extra_environment=env,
+        )
+        self.assertEqual(self.assert_success(implementation)["messages"][-2]["text"], "Start implementing the plan.")
+        fixture_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        turn_modes = [turn["conversationMode"] for turn in fixture_history["turns"]
+                      if "playhouse internal outcome nudge:" not in (turn["userMessage"] or "").lower()]
+        self.assertEqual(turn_modes, ["plan", "default"], "The handoff runs in Code mode after the plan turn.")
+        response, _ = self.call_cli("task", "get", task_id)
+        handed_off = self.assert_success(response)
+        worktree = next(item for item in handed_off["repositoryWorktrees"] if item["repositoryPath"] == str(repository))
+        self.assertFalse(worktree["isPending"])
+        self.assertNotEqual(os.path.realpath(worktree["worktreePath"]), os.path.realpath(repository))
+        self.assertEqual([os.path.realpath(root) for root in handed_off["workspaceRoots"]], [os.path.realpath(worktree["worktreePath"])],
+                         "The implementation turn runs in the task's created worktree as its only root.")
+
     # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected model is global across conversations for the active provider, persists through fresh CLI/XPC reads and reopening, and remains isolated between providers; a saved per-conversation model migrates into the global preference on first read; effort persists per conversation. Malformed model IDs and unsupported efforts are rejected without replacing prior choices. The UI opens a second conversation and shows the global model selection; unsupported modes and malformed model IDs are rejected before creating history.
     def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):
         title = "Conversation mode validation"
