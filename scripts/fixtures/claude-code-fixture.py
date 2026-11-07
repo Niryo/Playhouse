@@ -1196,10 +1196,134 @@ def fixture_commands():
     return commands
 
 
+def run_reattach_turn():
+    """A turn for the daemon-restart cases (`-reattach` in the executable name).
+
+    Playhouse runs this process with file-backed stdio, so it keeps running when the daemon that
+    started it dies. The turn writes "Before restart." and holds; marker files beside the
+    executable drive it from there: `.reattach-ask` raises a tool approval and a question,
+    `.reattach-late-reply` writes a reply to Playhouse's first control request again,
+    `.reattach-release` finishes with "After restart." and the turn's outcome,
+    `.reattach-release-quiet` finishes with no outcome report, and `.reattach-exit` exits
+    without a result. Every input line is logged to `.reattach-stdin`."""
+    base = str(sys.argv[0])
+    instructions = argument("--append-system-prompt") or ""
+    turn_uuid = None
+    reporting = None
+    pending = {}
+    buffer = ""
+
+    def log(name, value):
+        with open(f"{base}.{name}", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(value) + "\n")
+
+    def finish():
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        complete_command(turn_uuid)
+
+    def handle(line):
+        nonlocal turn_uuid, reporting
+        log("reattach-stdin", line)
+        if not line.strip():
+            return
+        message = json.loads(line)
+        kind = message.get("type")
+        if kind == "control_request":
+            subtype = (message.get("request") or {}).get("subtype")
+            response = {"claude_code_version": "2.1.308 (Claude Code fixture)", "models": [], "commands": [], "agents": []} \
+                if subtype == "initialize" else {}
+            if subtype == "interrupt":
+                Path(f"{base}.reattach-interrupted").write_text(message.get("request_id", ""), encoding="utf-8")
+            write({"type": "control_response", "response": {
+                "subtype": "success", "request_id": message.get("request_id"), "response": response}})
+            if subtype == "interrupt":
+                write({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "Interrupted."})
+                complete_command(turn_uuid)
+        elif kind == "control_response":
+            response = message.get("response") or {}
+            request_id = response.get("request_id")
+            log("reattach-replies", {"id": request_id, "response": response.get("response")})
+            if pending.pop(request_id, None) == "question":
+                answers = ((response.get("response") or {}).get("updatedInput") or {}).get("answers") or {}
+                write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_reattach_question", "content": json.dumps(answers), "is_error": False}]}})
+                text("msg_reattach_answer", f"Answer received: {answers.get('Which color?', '')}.")
+        elif kind == "user":
+            content = message.get("message", {}).get("content", [])
+            user_text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
+            if turn_uuid is None and "playhouse internal outcome nudge" in user_text.lower():
+                # A status nudge is answered at once with the outcome.
+                turn_uuid = message.get("uuid")
+                text("msg_reattach_nudge", "Waiting for your review.")
+                command = report_command(instructions, "task outcome", "waiting-response")
+                reporting = subprocess.Popen(shlex.split(command), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) \
+                    if command else None
+                if reporting is None:
+                    finish()
+            elif turn_uuid is None:
+                turn_uuid = message.get("uuid")
+                write({"type": "system", "subtype": "init", "session_id": argument("--session-id") or argument("--resume")})
+                text("msg_reattach_before", "Before restart.")
+                Path(f"{base}.reattach-ready").write_text(user_text, encoding="utf-8")
+            else:
+                # A steered follow-up reaches the running turn and is answered in it.
+                log("reattach-steers", user_text)
+                text(f"msg_reattach_steer_{len(user_text)}", f"Steer received: {user_text}")
+                complete_command(message.get("uuid"))
+
+    while True:
+        readable, _, _ = select.select([sys.stdin], [], [], 0.05)
+        if readable:
+            chunk = os.read(sys.stdin.fileno(), 65536).decode()
+            if not chunk:
+                # A piped helper run ends with its input; a file-backed run never sees this.
+                return 0
+            buffer += chunk
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                handle(line)
+        if turn_uuid is None:
+            continue
+        if Path(f"{base}.reattach-ask").exists():
+            Path(f"{base}.reattach-ask").unlink()
+            pending["reattach-approval-1"] = "approval"
+            write({"type": "control_request", "request_id": "reattach-approval-1", "request": {
+                "subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "touch reattach.txt"}}})
+            pending["reattach-question-1"] = "question"
+            write({"type": "control_request", "request_id": "reattach-question-1", "request": {
+                "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [{
+                    "question": "Which color?", "header": "Color",
+                    "options": [{"label": "red"}, {"label": "blue"}], "multiSelect": False}]}}})
+            Path(f"{base}.reattach-asked").write_text("asked\n", encoding="utf-8")
+        if Path(f"{base}.reattach-late-reply").exists():
+            Path(f"{base}.reattach-late-reply").unlink()
+            write({"type": "control_response", "response": {"subtype": "success", "request_id": "playhouse-1", "response": {}}})
+        if Path(f"{base}.reattach-exit").exists():
+            os._exit(3)
+        if reporting is None and Path(f"{base}.reattach-release-quiet").exists():
+            Path(f"{base}.reattach-release-quiet").unlink()
+            text("msg_reattach_after", "After restart.")
+            finish()
+        if reporting is None and Path(f"{base}.reattach-release").exists():
+            Path(f"{base}.reattach-release").unlink()
+            text("msg_reattach_after", "After restart.")
+            command = report_command(instructions, "task outcome", "waiting-response")
+            # Like a tool call, the report runs while the turn keeps reading its input.
+            reporting = subprocess.Popen(shlex.split(command), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) \
+                if command else None
+            if reporting is None:
+                finish()
+        if reporting is not None and reporting.poll() is not None:
+            reporting = None
+            finish()
+
+
 def main():
     global background_result_sent, current_command_uuid
     if sys.argv[1:2] == ["auth"]:
         return auth_command(sys.argv[2:])
+    if "-reattach" in Path(sys.argv[0]).name and "-p" in sys.argv:
+        return run_reattach_turn()
     history_path = Path(str(sys.argv[0]) + ".history")
     instructions = argument("--append-system-prompt") or ""
     turn = {

@@ -997,6 +997,7 @@ struct TaskConversationView: View {
     /// A history reload for another caller's turn is running, and whether a
     /// newer revision arrived since it started.
     @State private var isFollowingHistory = false
+    @State private var isWatchingRunningTurn = false
     @State private var followedHistoryIsStale = false
     @State private var composerHeight: CGFloat = 28
     private var draftAutosaveTask: Task<Void, Never>? {
@@ -1804,6 +1805,7 @@ struct TaskConversationView: View {
             if !streamedRecoveryReplies.isEmpty { showStreamedRecoveryReplies() }
         }
         .onChange(of: providerTurnIsActive) { _, isTurnActive in
+            if isTurnActive { watchRunningTurnIfNeeded() }
             if !isTurnActive, task.isStandaloneChat { refreshChatPageStatus() }
             if !isTurnActive, !isReadOnly {
                 refreshQueuedMessages()
@@ -5584,6 +5586,8 @@ struct TaskConversationView: View {
         oldestRenderedMessageID = nil
         errorMessage = nil
         let draftAtLoadStart = draft
+        // A turn this window didn't send streams once the loaded history is in place.
+        defer { watchRunningTurnIfNeeded() }
         defer { isLoadingHistory = false }
 
         do {
@@ -6198,126 +6202,7 @@ struct TaskConversationView: View {
                 _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, statusBeforeSubmission: statusBeforeSubmission, contextPageIDs: annotationPageIDs, onTurnStarting: {
                     isResponding = true
                 }, onUpdate: { update in
-                    switch update.type {
-                    case "text_delta":
-                        guard let delta = update.text else { return }
-                        let messageIndex: Int
-                        if let existingIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
-                            messageIndex = existingIndex
-                        } else {
-                            messages.append(ConversationMessage(id: assistantMessageID, role: .assistant, text: ""))
-                            messageIndex = messages.index(before: messages.endIndex)
-                        }
-                        messages[messageIndex].text += delta
-                    case "assistant_final":
-                        guard let text = update.text else { return }
-                        if let messageIndex = messages.lastIndex(where: { $0.role == .assistant }),
-                           messages[messageIndex].asyncQuestions == nil {
-                            messages[messageIndex].text = text
-                            messages[messageIndex].phase = "final_answer"
-                        } else {
-                            messages.append(ConversationMessage(
-                                id: UUID().uuidString,
-                                role: .assistant,
-                                text: text,
-                                phase: "final_answer"
-                            ))
-                        }
-                    case "assistant_progress":
-                        guard let itemID = update.itemID, let text = update.text else { return }
-                        if let index = messages.firstIndex(where: { $0.id == itemID }) {
-                            messages[index].text = text
-                            messages[index].phase = update.phase
-                            messages[index].asyncQuestions = update.asyncQuestions
-                        } else if let placeholderIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
-                            messages.insert(ConversationMessage(
-                                id: itemID,
-                                role: .assistant,
-                                text: text,
-                                phase: update.phase,
-                                asyncQuestions: update.asyncQuestions
-                            ), at: placeholderIndex)
-                        } else {
-                            messages.append(ConversationMessage(
-                                id: itemID,
-                                role: .assistant,
-                                text: text,
-                                phase: update.phase,
-                                asyncQuestions: update.asyncQuestions
-                            ))
-                        }
-                        if let placeholderIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
-                            messages[placeholderIndex].text = ""
-                        }
-                    case "activity":
-                        guard let activity = update.activity else { return }
-                        if let index = activities.firstIndex(where: { $0.id == activity.id }) {
-                            activities[index] = activity
-                        } else {
-                            activities.append(activity)
-                        }
-                    case "chat_page_updated":
-                        refreshChatPageStatus()
-                    case "diff":
-                        break
-                    case "history", "completed":
-                        guard let history = update.history else { return }
-                        var mergedMessages = history.messages
-                        if update.type == "completed" {
-                            for liveMessage in messages where !liveMessage.text.isEmpty {
-                                if let persistedIndex = mergedMessages.firstIndex(where: { $0.id == liveMessage.id }) {
-                                    if mergedMessages[persistedIndex].text.isEmpty {
-                                        mergedMessages[persistedIndex] = liveMessage
-                                    }
-                                    continue
-                                }
-                                let alreadyPersisted = mergedMessages.contains {
-                                    $0.role == liveMessage.role && $0.text == liveMessage.text
-                                }
-                                if !alreadyPersisted {
-                                    mergedMessages.append(liveMessage)
-                                }
-                            }
-                        }
-                        applyHistoryMessages(history, mergedMessages)
-                        answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
-                        activities = history.activities
-                        if update.type == "completed" {
-                            let sentIDs = Set(pendingAnnotations.map(\.id))
-                            for index in annotations.indices where sentIDs.contains(annotations[index].id) {
-                                annotations[index].pending = false
-                            }
-                            if let responseStartedAt {
-                                let duration = Self.elapsedSeconds(since: responseStartedAt, now: Date())
-                                completedResponseDuration = duration
-                                WorkspaceSettings.preferencesStore.set(duration, forKey: completedResponseDurationDefaultsKey)
-                                WorkspaceSettings.preferencesStore.removeObject(forKey: responseStartedAtDefaultsKey)
-                            }
-                            let finalAnswer = history.messages.last { (message: ConversationMessage) -> Bool in
-                                message.role == .assistant && message.phase == "final_answer"
-                            }
-                            let completedTurnID: String? = finalAnswer?.turnID ?? history.messages.last?.turnID
-                            if let completedTurnID {
-                                collapsedProgressTurnIDs.insert(completedTurnID)
-                            }
-                            Task { await refreshWorkspaceChanges() }
-                        }
-                    case "queue_changed":
-                        refreshQueuedMessages()
-                    case "steered_message":
-                        let steered = update.message ?? ""
-                        if let index = unechoedLocalSteers.firstIndex(of: steered) {
-                            unechoedLocalSteers.remove(at: index)
-                        } else {
-                            unconfirmedStreamedSteers.append(steered)
-                            messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: steered, imageDataURLs: update.imageDataURLs ?? []))
-                        }
-                        if let message = update.message, draft == message { draft = "" }
-                    case "action_notice":
-                        actionNotice = update.message
-                    default:
-                        break
-                    }
+                    applyStreamedUpdate(update, assistantMessageID: assistantMessageID, pendingAnnotations: pendingAnnotations)
                 }, onUserInput: { request in
                     showUserInputRequest(request)
                 })
@@ -6382,6 +6267,131 @@ struct TaskConversationView: View {
             }
 
             isResponding = false
+        }
+    }
+
+    /// Applies one update of a turn this window streams: its own send, or a running turn it
+    /// watches (a CLI send, a schedule, or a turn the daemon reattached after a restart).
+    private func applyStreamedUpdate(_ update: ConversationUpdate, assistantMessageID: String, pendingAnnotations: [ConversationAnnotation] = []) {
+        switch update.type {
+        case "text_delta":
+            guard let delta = update.text else { return }
+            let messageIndex: Int
+            if let existingIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
+                messageIndex = existingIndex
+            } else {
+                messages.append(ConversationMessage(id: assistantMessageID, role: .assistant, text: ""))
+                messageIndex = messages.index(before: messages.endIndex)
+            }
+            messages[messageIndex].text += delta
+        case "assistant_final":
+            guard let text = update.text else { return }
+            if let messageIndex = messages.lastIndex(where: { $0.role == .assistant }),
+               messages[messageIndex].asyncQuestions == nil {
+                messages[messageIndex].text = text
+                messages[messageIndex].phase = "final_answer"
+            } else {
+                messages.append(ConversationMessage(
+                    id: UUID().uuidString,
+                    role: .assistant,
+                    text: text,
+                    phase: "final_answer"
+                ))
+            }
+        case "assistant_progress":
+            guard let itemID = update.itemID, let text = update.text else { return }
+            if let index = messages.firstIndex(where: { $0.id == itemID }) {
+                messages[index].text = text
+                messages[index].phase = update.phase
+                messages[index].asyncQuestions = update.asyncQuestions
+            } else if let placeholderIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
+                messages.insert(ConversationMessage(
+                    id: itemID,
+                    role: .assistant,
+                    text: text,
+                    phase: update.phase,
+                    asyncQuestions: update.asyncQuestions
+                ), at: placeholderIndex)
+            } else {
+                messages.append(ConversationMessage(
+                    id: itemID,
+                    role: .assistant,
+                    text: text,
+                    phase: update.phase,
+                    asyncQuestions: update.asyncQuestions
+                ))
+            }
+            if let placeholderIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
+                messages[placeholderIndex].text = ""
+            }
+        case "activity":
+            guard let activity = update.activity else { return }
+            if let index = activities.firstIndex(where: { $0.id == activity.id }) {
+                activities[index] = activity
+            } else {
+                activities.append(activity)
+            }
+        case "chat_page_updated":
+            refreshChatPageStatus()
+        case "diff":
+            break
+        case "history", "completed":
+            guard let history = update.history else { return }
+            var mergedMessages = history.messages
+            if update.type == "completed" {
+                for liveMessage in messages where !liveMessage.text.isEmpty {
+                    if let persistedIndex = mergedMessages.firstIndex(where: { $0.id == liveMessage.id }) {
+                        if mergedMessages[persistedIndex].text.isEmpty {
+                            mergedMessages[persistedIndex] = liveMessage
+                        }
+                        continue
+                    }
+                    let alreadyPersisted = mergedMessages.contains {
+                        $0.role == liveMessage.role && $0.text == liveMessage.text
+                    }
+                    if !alreadyPersisted {
+                        mergedMessages.append(liveMessage)
+                    }
+                }
+            }
+            applyHistoryMessages(history, mergedMessages)
+            answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
+            activities = history.activities
+            if update.type == "completed" {
+                let sentIDs = Set(pendingAnnotations.map(\.id))
+                for index in annotations.indices where sentIDs.contains(annotations[index].id) {
+                    annotations[index].pending = false
+                }
+                if let responseStartedAt {
+                    let duration = Self.elapsedSeconds(since: responseStartedAt, now: Date())
+                    completedResponseDuration = duration
+                    WorkspaceSettings.preferencesStore.set(duration, forKey: completedResponseDurationDefaultsKey)
+                    WorkspaceSettings.preferencesStore.removeObject(forKey: responseStartedAtDefaultsKey)
+                }
+                let finalAnswer = history.messages.last { (message: ConversationMessage) -> Bool in
+                    message.role == .assistant && message.phase == "final_answer"
+                }
+                let completedTurnID: String? = finalAnswer?.turnID ?? history.messages.last?.turnID
+                if let completedTurnID {
+                    collapsedProgressTurnIDs.insert(completedTurnID)
+                }
+                Task { await refreshWorkspaceChanges() }
+            }
+        case "queue_changed":
+            refreshQueuedMessages()
+        case "steered_message":
+            let steered = update.message ?? ""
+            if let index = unechoedLocalSteers.firstIndex(of: steered) {
+                unechoedLocalSteers.remove(at: index)
+            } else {
+                unconfirmedStreamedSteers.append(steered)
+                messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: steered, imageDataURLs: update.imageDataURLs ?? []))
+            }
+            if let message = update.message, draft == message { draft = "" }
+        case "action_notice":
+            actionNotice = update.message
+        default:
+            break
         }
     }
 
@@ -6490,6 +6500,33 @@ struct TaskConversationView: View {
             providerBoundaries = history.providerBoundaries
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Streams a running turn this window didn't send: a CLI send, a schedule, or a turn the
+    /// daemon reattached after a restart. History reloads alone would show its progress but
+    /// not its text as it is written.
+    private func watchRunningTurnIfNeeded() {
+        guard !isReadOnly, !isLoadingHistory, !isWatchingRunningTurn, followedTurnStreams == 0, providerTurnIsActive else { return }
+        isWatchingRunningTurn = true
+        let assistantMessageID = UUID().uuidString
+        followedTurnStreams += 1
+        Task { @MainActor in
+            defer {
+                followedTurnStreams -= 1
+                isWatchingRunningTurn = false
+            }
+            // The turn's prompt is already saved; show it while the rest streams in.
+            await refreshGoalConversation(keepingShownTurn: true)
+            _ = try? await conversationManager.watch(taskID: task.id, onUpdate: { update in
+                applyStreamedUpdate(update, assistantMessageID: assistantMessageID)
+            }, onUserInput: { request in
+                showUserInputRequest(request)
+            })
+            messages.removeAll { $0.id == assistantMessageID && $0.text.isEmpty }
+            // The watched turn's final history arrived as its `completed` update; anything
+            // after it (a queued follow-up starting) reaches this window the usual way.
+            followHistory()
         }
     }
 

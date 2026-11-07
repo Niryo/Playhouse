@@ -20,6 +20,8 @@ final class DaemonLifecycle: @unchecked Sendable {
     private var inFlightRequests = 0
     private var idleWorkItem: DispatchWorkItem?
     private let gracePeriod: TimeInterval
+    /// Runs before an idle exit, off the main thread, and returns once it finished.
+    var beforeIdleExit: (() -> Void)?
 
     init(gracePeriod: TimeInterval = 10) {
         self.gracePeriod = gracePeriod
@@ -73,6 +75,12 @@ final class DaemonLifecycle: @unchecked Sendable {
         let stillIdle = openConnections == 0 && inFlightRequests == 0
         lock.unlock()
         guard stillIdle else { return }
+        // Agents outlive the daemon only while they have work: idle ones are stopped first.
+        beforeIdleExit?()
+        lock.lock()
+        let idleAfterCleanup = openConnections == 0 && inFlightRequests == 0
+        lock.unlock()
+        guard idleAfterCleanup else { return }
         daemonLog("idle, exiting")
         exit(0)
     }
@@ -121,6 +129,7 @@ enum PlayhouseBridgeDaemonMain {
         // app identity the GUI process itself has — no separate Info.plist needed.
         let serviceName = environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"]
             ?? BridgeContract.serviceName(forApplication: PlayhouseAppIdentity.applicationIdentifier)
+        AgentRunService.name = serviceName
         let socketURL = environment["PLAYHOUSE_BRIDGE_SOCKET_PATH"].map { URL(fileURLWithPath: $0) }
             ?? BridgeContract.socketURL(forServiceName: serviceName)
 
@@ -150,6 +159,15 @@ enum PlayhouseBridgeDaemonMain {
         // A scheduled turn a tick starts runs on after the tick's request ends.
         BridgeBackgroundWork.onBegin = { lifecycle.requestStarted() }
         BridgeBackgroundWork.onEnd = { lifecycle.requestFinished() }
+        lifecycle.beforeIdleExit = {
+            let finished = DispatchSemaphore(value: 0)
+            Task { @MainActor in
+                await CodexAppServerClient.stopIdleSharedServersBeforeExit()
+                await ClaudeCodeClient.stopRunsBeforeExit()
+                finished.signal()
+            }
+            _ = finished.wait(timeout: .now() + 15)
+        }
         startScheduleTicker(environment: environment)
         RunLoop.current.run()
     }
