@@ -6,6 +6,7 @@ import datetime
 import errno
 import fcntl
 import json
+import re
 import plistlib
 import queue
 import os
@@ -2270,7 +2271,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "--branch", f"{self.primary}=active-shared", expected_status=2,
         )
         self.assert_failure(response, "invalid_argument")
-        self.assertIn("already assigned", response["error"]["message"])
+        self.assertIn("is already used by task \"First owner\"", response["error"]["message"])
+        self.assertIn("`active-shared`", response["error"]["message"])
         self.assertEqual(len(self.assert_success(self.call_cli("task", "list")[0])["tasks"]), 1)
         self.assertTrue(Path(first["repositoryWorktrees"][0]["worktreePath"]).is_dir())
 
@@ -2319,7 +2321,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(len(successful), 1)
         self.assertEqual(len(rejected), 1)
         self.assertEqual(rejected[0].get("error", {}).get("code"), "invalid_argument")
-        self.assertIn("already assigned", rejected[0]["error"]["message"])
+        self.assertIn("is already used by task", rejected[0]["error"]["message"])
 
         tasks = self.assert_success(self.call_cli("task", "list")[0])["tasks"]
         self.assertEqual(len(tasks), 1)
@@ -2648,7 +2650,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assertEqual(marker.read_text(encoding="utf-8"), "Playhouse bridge guard test (v1).\n")
             shutil.rmtree(unsafe)
 
-    # case-contract: test_task_worktree_preparation_serializes_auto_branch_claims | Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start. When one task has claimed the generated branch, a send from the other (through the CLI, or through the composer, which shows the error and returns the prompt to it) is rejected without creating a worktree and restores the task to Backlog with its prompt saved as a draft and no pending submitted prompt; the opt-in live provider integration sends both turns concurrently and confirms only one task claims the generated branch.
+    # case-contract: test_task_worktree_preparation_serializes_auto_branch_claims | Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start. When one task has claimed the generated branch, a send from the other (through the CLI) succeeds with its own suffixed branch and a separate worktree, leaving both tasks started; the opt-in live provider integration sends both turns concurrently and confirms each task gets a distinct branch and worktree.
     def test_task_worktree_preparation_serializes_auto_branch_claims(self):
         title = f"Concurrent auto branch {uuid.uuid4().hex[:8]}"
         existing_worktree_count = self.run_git(self.primary, "worktree", "list", "--porcelain").count("worktree ")
@@ -2668,20 +2670,42 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(claimed["isPending"])
         claimed_count = self.run_git(self.primary, "worktree", "list", "--porcelain").count("worktree ")
         self.assertEqual(claimed_count, existing_worktree_count + 1)
-        loser_prompt = "Claim the same generated branch."
-        response, _ = self.call_cli(
-            "conversation", "send", loser["id"], "--message", loser_prompt,
-            expected_status=2,
-            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture")},
+        self.complete_fixture_turn(loser["id"], message="Claim the same generated title.")
+        started = self.assert_success(self.call_cli("task", "get", loser["id"])[0])
+        loser_record = started["repositoryWorktrees"][0]
+        self.assertFalse(loser_record["isPending"])
+        self.assertNotEqual(loser_record["branch"], claimed["branch"])
+        self.assertNotEqual(loser_record["worktreePath"], claimed["worktreePath"])
+        self.assertEqual(self.run_git(self.primary, "worktree", "list", "--porcelain").count("worktree "), claimed_count + 1)
+
+    # case-contract: test_auto_branch_gets_suffix_when_name_is_taken | Two tasks with the same title and an automatic branch on one repository both start: the first gets the title slug, the second a fresh branch named like the slug plus a hyphen and four lowercase letters or digits, in a different worktree. An existing local branch named like the slug, with no task using it, is never checked out: a new automatic task gets a suffixed fresh branch started from its branch-from. The visible task conversation shows the resolved suffixed branch.
+    def test_auto_branch_gets_suffix_when_name_is_taken(self):
+        title = f"Suffix branch {uuid.uuid4().hex[:8]}"
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+        suffixed = re.compile(rf"^{re.escape(slug)}-[a-z0-9]{{4}}$")
+        first = self.create_repo_task(title, [self.primary], materialize=True)
+        second = self.create_repo_task(title, [self.primary], materialize=True)
+        first_record = first["repositoryWorktrees"][0]
+        second_record = second["repositoryWorktrees"][0]
+        self.assertEqual(first_record["branch"], slug)
+        self.assertRegex(second_record["branch"], suffixed)
+        self.assertNotEqual(first_record["worktreePath"], second_record["worktreePath"])
+        self.assertTrue(Path(second_record["worktreePath"]).is_dir())
+        self.assertEqual(self.run_git(second_record["worktreePath"], "rev-parse", "--abbrev-ref", "HEAD").strip(), second_record["branch"])
+
+        stale_title = f"Stale branch {uuid.uuid4().hex[:8]}"
+        stale_slug = re.sub(r"[^a-z0-9]+", "-", stale_title.lower()).strip("-")
+        self.run_git(self.primary, "branch", stale_slug, "HEAD")
+        stale_commit = self.run_git(self.primary, "rev-parse", stale_slug).strip()
+        self.run_git(self.primary, "branch", "branch-source-for-suffix", "HEAD")
+        third = self.create_repo_task(
+            stale_title, [self.primary], branch_from={str(self.primary): "branch-source-for-suffix"}, materialize=True,
         )
-        self.assert_failure(response, "invalid_argument")
-        rejected = self.assert_success(self.call_cli("task", "get", loser["id"])[0])
-        self.assertEqual(rejected["status"], "Backlog", "A rejected branch claim must restore the task's prior status.")
-        self.assertTrue(rejected["repositoryWorktrees"][0]["isPending"])
-        self.assertEqual(rejected["savedPrompt"], loser_prompt)
-        self.assertIsNone(rejected.get("pendingSubmittedPrompt"))
-        self.assertIsNone(rejected.get("codexThreadID"))
-        self.assertEqual(self.run_git(self.primary, "worktree", "list", "--porcelain").count("worktree "), claimed_count)
+        third_record = third["repositoryWorktrees"][0]
+        self.assertRegex(third_record["branch"], re.compile(rf"^{re.escape(stale_slug)}-[a-z0-9]{{4}}$"))
+        self.assertEqual(third_record["branchFrom"], "branch-source-for-suffix")
+        self.assertEqual(self.run_git(self.primary, "rev-parse", stale_slug).strip(), stale_commit)
+        self.assertNotIn(f"branch refs/heads/{stale_slug}\n", self.run_git(self.primary, "worktree", "list", "--porcelain") + "\n")
 
     # case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
     def test_task_done_removes_worktree_and_preserves_branch(self):
@@ -2696,7 +2720,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         started = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         record = started["repositoryWorktrees"][0]
         self.assertFalse(record["isPending"])
-        self.assertEqual(record["branch"], "generated-fixture-title")
+        # An earlier case may already have left a branch with the generated name; auto branches then get a suffix.
+        self.assertRegex(record["branch"], r"^generated-fixture-title(-[a-z0-9]{4})?$")
         worktree = Path(record["worktreePath"])
         codex_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
         self.assertEqual(codex_history["threadStartCwd"], str(worktree), "The Codex thread must start in the managed task worktree.")
@@ -2749,7 +2774,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         calls = gh_calls.read_text(encoding="utf-8").splitlines()
         self.assertEqual(sorted(calls), ["123", "123", "123", "456", "456", "456"], "The status probe and the Done verification each check both PRs once, plus the earlier move attempt.")
         self.assertFalse(worktree.exists(), "Moving a task to Done must remove its managed worktree.")
-        self.assertTrue(self.branch_exists(self.primary, "generated-fixture-title"))
+        self.assertTrue(self.branch_exists(self.primary, record["branch"]))
         self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_head, "Moving a task to Done must not merge into the local target.")
         self.assertEqual((self.primary / "target-only.txt").read_text(encoding="utf-8"), "Master advanced after this task branch was created.\n")
         self.assertFalse((self.primary / "task-result.txt").exists())
@@ -5633,10 +5658,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(titled_record["savedPrompt"], title_prompt)
         self.assertEqual(titled_record["title"], "Generated fixture title")
         generated_title_worktree = titled_record["repositoryWorktrees"][0]
-        self.assertEqual(generated_title_worktree["branch"], "generated-fixture-title")
+        self.assertRegex(generated_title_worktree["branch"], r"^generated-fixture-title(-[a-z0-9]{4})?$")
         self.assertFalse(generated_title_worktree["isPending"])
         self.assertTrue(Path(generated_title_worktree["worktreePath"]).is_dir())
-        self.assertTrue(self.branch_exists(self.primary, "generated-fixture-title"))
+        self.assertTrue(self.branch_exists(self.primary, generated_title_worktree["branch"]))
         title_events = [
             json.loads(line)
             for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()

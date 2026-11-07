@@ -1213,7 +1213,9 @@ final class PlayhouseUITests: XCTestCase {
         element("conversation-repository-branch-save").click()
         let error = element("codex-chat-error")
         XCTAssertTrue(error.waitForExistence(timeout: 10))
-        XCTAssertTrue((error.label + (error.value as? String ?? "")).contains("already assigned"))
+        let errorText = error.label + (error.value as? String ?? "")
+        XCTAssertTrue(errorText.contains("is already used by task \"Active owner\""), errorText)
+        XCTAssertTrue(errorText.contains("`\(branch)`"), errorText)
         XCTAssertTrue(branchField.exists, "The user should be able to choose another branch after the conflict.")
         XCTAssertEqual(try repositoryRecord(taskID: ownerID, repositoryPath: fixture.primary.path)?["branch"] as? String, branch)
         XCTAssertEqual(try repositoryRecord(taskID: newTaskID, repositoryPath: fixture.primary.path)?["branch"] as? String, "auto")
@@ -1253,7 +1255,7 @@ final class PlayhouseUITests: XCTestCase {
         let rejected = try XCTUnwrap(responses.first { $0["ok"] as? Bool == false })
         XCTAssertEqual(successful.count, 1)
         assertCLIError(rejected, code: "invalid_argument")
-        XCTAssertTrue(((rejected["error"] as? [String: Any])?["message"] as? String ?? "").contains("already assigned"))
+        XCTAssertTrue(((rejected["error"] as? [String: Any])?["message"] as? String ?? "").contains("is already used by task"))
 
         let tasks = try tasksFromBoardList()
         XCTAssertEqual(tasks.count, 1)
@@ -1684,7 +1686,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Conversation status and history persist after shared store contention")
     }
 
-    // case-contract: test_task_worktree_preparation_serializes_auto_branch_claims | Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start. When one task has claimed the generated branch, a send from the other (through the CLI, or through the composer, which shows the error and returns the prompt to it) is rejected without creating a worktree and restores the task to Backlog with its prompt saved as a draft and no pending submitted prompt; the opt-in live provider integration sends both turns concurrently and confirms only one task claims the generated branch.
+    // case-contract: test_task_worktree_preparation_serializes_auto_branch_claims | Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start. When one task has claimed the generated branch, a send from the other (through the CLI) succeeds with its own suffixed branch and a separate worktree, leaving both tasks started; the opt-in live provider integration sends both turns concurrently and confirms each task gets a distinct branch and worktree.
     func test_task_worktree_preparation_serializes_auto_branch_claims() throws {
         launchApp(defaultParent: fixture.parent.path)
         let existingWorktreeCount = try runGitOutput(fixture.primary, "worktree", "list", "--porcelain")
@@ -1721,11 +1723,8 @@ final class PlayhouseUITests: XCTestCase {
             barrierReleased = true
 
             let responses = try processes.map { try finishCLIProcess($0, expectedStatus: nil) }
-            XCTAssertEqual(processes.map(\.process.terminationStatus).sorted(), [0, 2])
-            let rejected = try XCTUnwrap(responses.first { $0["ok"] as? Bool == false })
-            XCTAssertEqual(responses.filter { $0["ok"] as? Bool == true }.count, 1)
-            assertCLIError(rejected, code: "invalid_argument")
-            XCTAssertTrue(((rejected["error"] as? [String: Any])?["message"] as? String ?? "").contains("already assigned"))
+            XCTAssertEqual(processes.map(\.process.terminationStatus).sorted(), [0, 0])
+            XCTAssertTrue(responses.allSatisfy { $0["ok"] as? Bool == true }, "Both live turns should start with their own branch.")
         }
 
         let tasks = try taskIDs.map { try XCTUnwrap(taskRecord(id: $0)) }
@@ -1744,8 +1743,8 @@ final class PlayhouseUITests: XCTestCase {
                 XCTAssertTrue(card.waitForExistence(timeout: 10), "Pending tasks should remain visible on the board before conversation start.")
             }
 
-            // Materialize the first task's generated branch, then let the second
-            // claim the same branch: the rejected claim must restore Backlog.
+            // Materialize the first task's generated branch, then start the second:
+            // it must get its own suffixed branch and worktree instead of a rejection.
             codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
             let winnerID = taskIDs[0]
             let loserID = taskIDs[1]
@@ -1754,58 +1753,63 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertEqual(claimed["isPending"] as? Bool, false)
             let claimedCount = try runGitOutput(fixture.primary, "worktree", "list", "--porcelain").components(separatedBy: "worktree ").count - 1
             XCTAssertEqual(claimedCount, existingWorktreeCount + 1)
-            // The composer saves the submitted prompt as In Progress before the
-            // manager runs, so the rejection must restore the status it replaced.
-            let loserPrompt = "Claim the same generated branch."
-            let loserCard = element("task-card-\(loserID.uppercased())")
-            XCTAssertTrue(loserCard.waitForExistence(timeout: 10))
-            clickTaskCardTitle(loserCard)
-            let composer = element("message-composer")
-            XCTAssertTrue(
-                waitUntil({ composer.exists && composer.isHittable }, timeout: 15),
-                "The losing task's composer should be available before its first turn."
-            )
-            composer.click()
-            composer.typeText(loserPrompt)
-            element("send-message-button").click()
-            let error = element("codex-chat-error")
-            XCTAssertTrue(error.waitForExistence(timeout: 15), "A rejected branch claim should show its error in the conversation.")
-            XCTAssertTrue(error.label.contains("already assigned") || (error.value as? String ?? "").contains("already assigned"), "The error should explain the branch is already assigned: \(error.label)")
-            XCTAssertTrue(waitUntil({ composer.value as? String == loserPrompt }, timeout: 10), "The rejected prompt should return to the composer.")
-            let rejected = try XCTUnwrap(taskRecord(id: loserID))
-            XCTAssertEqual(rejected["status"] as? String, "Backlog", "A rejected branch claim must restore the task's prior status.")
-            XCTAssertEqual((rejected["repositoryWorktrees"] as? [[String: Any]])?.first?["isPending"] as? Bool, true)
-            XCTAssertEqual(rejected["savedPrompt"] as? String, loserPrompt)
-            XCTAssertNil(rejected["pendingSubmittedPrompt"] as? String)
-            XCTAssertEqual(try runGitOutput(fixture.primary, "worktree", "list", "--porcelain").components(separatedBy: "worktree ").count - 1, claimedCount)
-            element("back-to-board-button").click()
-            let backlogColumn = element("column-backlog")
-            XCTAssertTrue(waitUntil({ loserCard.exists && backlogColumn.exists && backlogColumn.frame.contains(loserCard.frame) }, timeout: 10), "The rejected task should remain visible in Backlog.")
+            _ = try runCLI(["conversation", "send", loserID, "--message", "Claim the same generated title.", "--answer", "color=Blue", "--answer", "token=fixture-secret"])
+            let started = try XCTUnwrap((try taskRecord(id: loserID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+            XCTAssertEqual(started["isPending"] as? Bool, false)
+            XCTAssertNotEqual(started["branch"] as? String, claimed["branch"] as? String)
+            XCTAssertNotEqual(started["worktreePath"] as? String, claimed["worktreePath"] as? String)
+            XCTAssertEqual(try runGitOutput(fixture.primary, "worktree", "list", "--porcelain").components(separatedBy: "worktree ").count - 1, claimedCount + 1)
             return
         }
+    }
 
-        let prepared = try XCTUnwrap(tasks.first { (($0["repositoryWorktrees"] as? [[String: Any]])?.first?["isPending"] as? Bool) == false })
-        let pending = try XCTUnwrap(tasks.first { (($0["repositoryWorktrees"] as? [[String: Any]])?.first?["isPending"] as? Bool) == true })
-        let preparedRecord = try XCTUnwrap((prepared["repositoryWorktrees"] as? [[String: Any]])?.first)
-        let pendingRecord = try XCTUnwrap((pending["repositoryWorktrees"] as? [[String: Any]])?.first)
-        XCTAssertEqual(prepared["status"] as? String, "Review")
-        XCTAssertEqual(pending["status"] as? String, "Backlog")
-        XCTAssertEqual(pendingRecord["branch"] as? String, "auto")
-        XCTAssertEqual(pendingRecord["worktreePath"] as? String, fixture.primary.path)
-        let worktreePath = try XCTUnwrap(preparedRecord["worktreePath"] as? String)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: worktreePath))
-        let worktreeRoot = dataDirectory.appendingPathComponent("task-worktrees", isDirectory: true).standardizedFileURL.path + "/"
-        XCTAssertTrue(URL(fileURLWithPath: worktreePath).standardizedFileURL.path.hasPrefix(worktreeRoot))
-        XCTAssertEqual(
-            try runGitOutput(fixture.primary, "worktree", "list", "--porcelain").components(separatedBy: "worktree ").count - 1,
-            existingWorktreeCount + 1
-        )
+    // case-contract: test_auto_branch_gets_suffix_when_name_is_taken | Two tasks with the same title and an automatic branch on one repository both start: the first gets the title slug, the second a fresh branch named like the slug plus a hyphen and four lowercase letters or digits, in a different worktree. An existing local branch named like the slug, with no task using it, is never checked out: a new automatic task gets a suffixed fresh branch started from its branch-from. The visible task conversation shows the resolved suffixed branch.
+    func test_auto_branch_gets_suffix_when_name_is_taken() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let token = UUID().uuidString.prefix(8).lowercased()
+        let title = "Suffix branch \(token)"
+        let slug = "suffix-branch-\(token)"
+        func startTask(_ title: String, branchFrom: String? = nil) throws -> (id: String, record: [String: Any]) {
+            var command = ["task", "create", "--title", title, "--prompt", "Fixture task description.", "--repo", fixture.primary.path]
+            if let branchFrom { command += ["--branch-from", "\(fixture.primary.path)=\(branchFrom)"] }
+            let created = try XCTUnwrap(try runCLI(command)["result"] as? [String: Any])
+            let id = try XCTUnwrap(created["id"] as? String)
+            _ = try runCLI(["conversation", "send", id, "--message", "Start this task.", "--answer", "color=Blue", "--answer", "token=fixture-secret"])
+            let record = try XCTUnwrap((try taskRecord(id: id)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+            return (id, record)
+        }
+        func isSuffixed(_ branch: String, of slug: String) -> Bool {
+            branch.range(of: "^\(NSRegularExpression.escapedPattern(for: slug))-[a-z0-9]{4}$", options: .regularExpression) != nil
+        }
 
-        let visibleID = try XCTUnwrap(prepared["id"] as? String)
-        let card = element("task-card-\(visibleID.uppercased())")
-        XCTAssertTrue(waitUntil({ card.exists }, timeout: 10), "Only the task with the prepared worktree should be visible in Review.")
-        clickTaskCardTitle(card)
-        XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
+        let first = try startTask(title)
+        let second = try startTask(title)
+        XCTAssertEqual(first.record["branch"] as? String, slug)
+        let secondBranch = try XCTUnwrap(second.record["branch"] as? String)
+        XCTAssertTrue(isSuffixed(secondBranch, of: slug), "The second branch should be the slug plus a short suffix: \(secondBranch)")
+        XCTAssertNotEqual(first.record["worktreePath"] as? String, second.record["worktreePath"] as? String)
+
+        let staleSlug = "stale-branch-\(token)"
+        try runGit(fixture.primary, "branch", staleSlug, "HEAD")
+        let staleCommit = try runGitOutput(fixture.primary, "rev-parse", staleSlug)
+        try runGit(fixture.primary, "branch", "branch-source-for-suffix", "HEAD")
+        let third = try startTask("Stale branch \(token)", branchFrom: "branch-source-for-suffix")
+        let thirdBranch = try XCTUnwrap(third.record["branch"] as? String)
+        XCTAssertTrue(isSuffixed(thirdBranch, of: staleSlug), "An existing branch must not be reused: \(thirdBranch)")
+        XCTAssertEqual(third.record["branchFrom"] as? String, "branch-source-for-suffix")
+        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", staleSlug), staleCommit)
+
+        let secondCard = element("task-card-\(second.id.uppercased())")
+        XCTAssertTrue(secondCard.waitForExistence(timeout: 10), "The second task should be on the board.")
+        clickTaskCardTitle(secondCard)
+        let badge = element("conversation-repository-badge-primary")
+        XCTAssertTrue(badge.waitForExistence(timeout: 10))
+        badge.click()
+        let branchValue = element("conversation-repository-branch-value")
+        XCTAssertTrue(branchValue.waitForExistence(timeout: 5))
+        XCTAssertEqual(accessibleLabelOrValue(of: branchValue), secondBranch, "The conversation should show the second task's suffixed branch.")
+        attachScreenshot(named: "A task keeps its resolved branch when another task already used the slug")
     }
 
     // case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
@@ -1843,10 +1847,9 @@ final class PlayhouseUITests: XCTestCase {
         branch = try XCTUnwrap(startedRecord["branch"] as? String)
         XCTAssertNotEqual(path, fixture.primary.path)
         let startedTask = try taskRecord(id: taskID) ?? [:]
-        XCTAssertEqual(
-            branch,
-            generatedBranch,
-            "Auto branch must use the generated title; task=\(startedTask)"
+        XCTAssertTrue(
+            branch == generatedBranch || (branch.hasPrefix(generatedBranch + "-") && branch.count == generatedBranch.count + 5),
+            "Auto branch must use the generated title (plus a suffix when taken); task=\(startedTask)"
         )
         let codexHistoryURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
         let codexHistory = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: codexHistoryURL)) as? [String: Any])
@@ -6886,6 +6889,7 @@ final class PlayhouseUITests: XCTestCase {
 
     // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. As content is typed in short increments through successive wrapped lines after a line break, the newest insertion remains inside the visible composer viewport while its internal document follows the caret without scrolling backward. Typed straight quotes, apostrophes, and double hyphens stay literal rather than being substituted. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
+        executionTimeAllowance = 360 // This long case covers several restarts and title-generation flows.
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Blank message", roots: [fixture.primary.path])
@@ -7096,9 +7100,10 @@ final class PlayhouseUITests: XCTestCase {
             }, timeout: 20), "Sending a prompt from an empty task should persist the Codex-generated title.")
             XCTAssertTrue(waitUntil({
                 guard let repository = try? self.repositoryRecord(taskID: titleTaskID, repositoryPath: self.fixture.primary.path) else { return false }
-                return repository["branch"] as? String == "generated-fixture-title" && repository["isPending"] as? Bool == false
+                return (repository["branch"] as? String)?.hasPrefix("generated-fixture-title") == true && repository["isPending"] as? Bool == false
             }, timeout: 20), "The auto worktree should use the generated task title.")
-            try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/generated-fixture-title")
+            let generatedTitleBranch = try XCTUnwrap(repositoryRecord(taskID: titleTaskID, repositoryPath: fixture.primary.path)?["branch"] as? String)
+            try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/\(generatedTitleBranch)")
             XCTAssertTrue(waitUntil({
                 (try? self.diagnosticEvents().contains { $0["taskID"] as? String == titleTaskID && $0["event"] as? String == "task.title_apply.succeeded" }) == true
             }, timeout: 10), "The generated title application should be logged.")
@@ -7200,8 +7205,10 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertEqual(try taskRecord(id: concurrentTitleTaskID)?["title"] as? String, concurrentTitle)
             element("back-to-board-button").click()
 
+            // The send must end before reaching Codex: its branch-from is deleted while title generation is held.
+            try runGit(fixture.primary, "branch", "recovery-base", "HEAD")
             let recoveryTask = try XCTUnwrap(
-                (try runCLI(["task", "create", "--title", "Untitled task", "--prompt", "Fixture task description.", "--repo", fixture.primary.path])["result"] as? [String: Any])
+                (try runCLI(["task", "create", "--title", "Untitled task", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--branch-from", "\(fixture.primary.path)=recovery-base"])["result"] as? [String: Any])
             )
             let recoveryTaskID = try XCTUnwrap(recoveryTask["id"] as? String)
             openTask(named: "Untitled task")
@@ -7217,6 +7224,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertEqual(try taskRecord(id: recoveryTaskID)?["codexThreadID"] as? String, nil)
             XCTAssertEqual(try taskRecord(id: recoveryTaskID)?["pendingSubmittedPrompt"] as? String, recoveryPrompt)
             app.terminate()
+            try runGit(fixture.primary, "branch", "-D", "recovery-base")
             try Data("continue recovery\n".utf8).write(to: URL(fileURLWithPath: activeTitleFixtureExecutable + ".resolve-continue"))
             launchApp(defaultParent: fixture.parent.path)
             let recoveryTaskCard = element("task-card-\(recoveryTaskID.uppercased())")

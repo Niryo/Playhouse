@@ -1318,6 +1318,7 @@ enum PlayhouseManagerError: LocalizedError {
     case invalidParentFolder(String)
     case invalidMessage
     case repositoryAssigned(String)
+    case branchAssigned(branch: String, taskTitle: String)
     case invalidTransition(String)
     case unmergedPullRequests([Int])
     case uncommittedChanges([String])
@@ -1340,6 +1341,8 @@ enum PlayhouseManagerError: LocalizedError {
             "Message can't be empty."
         case .repositoryAssigned(let path):
             "This branch worktree is already assigned to another active task: \(path). Choose another branch or finish that task first."
+        case .branchAssigned(let branch, let taskTitle):
+            "Branch `\(branch)` is already used by task \"\(taskTitle)\". Choose another branch or finish that task first."
         case .invalidTransition(let message):
             message
         case .unmergedPullRequests(let numbers):
@@ -4148,7 +4151,8 @@ final class BoardTaskManager {
                                 mergeTarget: item.mergeTarget
                             ),
                             title: branchTitle,
-                            root: worktreeRoot
+                            root: worktreeRoot,
+                            reservedBranches: reservedBranches(repositoryPath: item.repositoryPath, excludingTaskID: id)
                         )
                         resolved.append(record)
                     }
@@ -4254,6 +4258,18 @@ final class BoardTaskManager {
         return fields
     }
 
+    /// Branches other active tasks use in a repository, which an auto-named branch avoids.
+    private func reservedBranches(repositoryPath: String, excludingTaskID: UUID?) -> Set<String> {
+        let repository = Self.canonicalPath(repositoryPath)
+        var names: Set<String> = []
+        for other in (try? listModels()) ?? [] where other.id != excludingTaskID && other.status != .done {
+            for record in other.repositoryWorktrees where !record.isPending && Self.canonicalPath(record.repositoryPath) == repository {
+                names.insert(record.branch)
+            }
+        }
+        return names
+    }
+
     private func validateRepositoryAssignments(
         _ candidates: [RepositoryWorktreeRecord],
         excludingTaskID: UUID?
@@ -4265,7 +4281,7 @@ final class BoardTaskManager {
                    other.repositoryWorktrees.contains(where: {
                        Self.canonicalPath($0.repositoryPath) == repositoryPath && $0.branch == candidate.branch
                    }) {
-                    throw PlayhouseManagerError.repositoryAssigned(candidate.repositoryPath)
+                    throw PlayhouseManagerError.branchAssigned(branch: candidate.branch, taskTitle: other.title)
                 }
 
                 let candidateWorkspacePath = Self.canonicalPath(
@@ -9395,7 +9411,7 @@ final class PlayhouseBridgeRuntime {
             let code: String
             switch error {
             case .taskNotFound: code = "not_found"
-            case .invalidTitle, .invalidStatus, .noWorkspaceRoots, .unavailableWorkspaceRoot, .invalidParentFolder, .invalidMessage, .repositoryAssigned: code = "invalid_argument"
+            case .invalidTitle, .invalidStatus, .noWorkspaceRoots, .unavailableWorkspaceRoot, .invalidParentFolder, .invalidMessage, .repositoryAssigned, .branchAssigned: code = "invalid_argument"
             case .invalidTransition: code = "invalid_argument"
             case .unmergedPullRequests, .uncommittedChanges: code = "invalid_transition"
             }
