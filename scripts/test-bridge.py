@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import datetime
 import errno
 import fcntl
 import json
@@ -1822,7 +1823,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(any(message["text"] == "Do not overtake Mars" for message in recovered_messages))
         self.assertIn("Another thought about Mars", [message["text"] for message in recovered_messages])
 
-    # case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a compact fixed Kanban sidebar under 200 points wide and left of the columns while they scroll, and places its placeholder button inside the sidebar below the full logo header. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
+    # case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a compact fixed Kanban sidebar under 200 points wide and left of the columns while they scroll, and places its Scheduled Tasks button inside the sidebar below the full logo header. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):
         response, _ = self.call_cli("status")
         status = self.assert_success(response)
@@ -8399,7 +8400,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         probe = self.data_directory / "codex-question-ownership-probe"
         core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
                 "ConversationModel", "ClaudeCodeClient", "ProviderRequestLog", "ProcessCPUSampler", "AgentUsage", "AgentUsageStore", "ConversationTranscriptStore",
-                "StandaloneChatStore", "SkillCatalog", "BridgeCore"]
+                "StandaloneChatStore", "SkillCatalog", "BridgeCore", "TaskSchedule"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine", "JavaScriptCore"):
             command.extend(["-framework", framework])
@@ -10191,7 +10192,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_success(response)
         assert_nudged_work(self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0]), "later turn")
 
-    # case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude, which only reports usage while a task runs, starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the placeholder button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
+    # case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude, which only reports usage while a task runs, starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the Scheduled Tasks button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
     def test_agents_info_shows_provider_usage_and_accounts(self):
         source = Path(__file__).resolve().parent / "fixtures"
         codex = self.data_directory / "codex-fixture-agents-info"
@@ -12146,6 +12147,262 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(listed["fragile"]["valid"])
         self.assertFalse(listed["unparsable"]["valid"])
         self.assertFalse(listed["runaway"]["valid"])
+
+    # Scheduled tasks. Firing goes through ConversationManager.send, the same path the
+    # composer's Send and `conversation send` use for both providers, so the schedule
+    # behavior is provider-agnostic and Claude's fixture represents both.
+    @staticmethod
+    def schedule_iso(moment):
+        return moment.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    @staticmethod
+    def parse_schedule_iso(text):
+        return datetime.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+
+    def wait_for_task_status(self, task_id, statuses, timeout=60):
+        deadline = time.monotonic() + timeout
+        task = None
+        while time.monotonic() < deadline:
+            task = self.assert_success(self.call_cli("task", "get", task_id)[0])
+            if task["status"] in statuses:
+                return task
+            time.sleep(0.25)
+        self.fail(f"Task {task_id} never reached {statuses}; last state: {task}")
+
+    def fixture_user_prompts(self, executable):
+        history = Path(str(executable) + ".history")
+        if not history.is_file():
+            return []
+        return [turn.get("userText") or "" for turn in json.loads(history.read_text(encoding="utf-8")).get("turns", [])]
+
+    # case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again, and a task that has started can't be scheduled. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
+    def test_schedule_one_time_task_fires_when_due(self):
+        environment = self.install_claude_fixture("claude-fixture-schedule-once")
+        executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
+        task_id = self.create_task("Scheduled once", provider="claude")["id"]
+        now = datetime.datetime.now(datetime.timezone.utc)
+        fire_at = (now + datetime.timedelta(hours=2)).replace(microsecond=0)
+
+        past, _ = self.call_cli("schedule", "set", task_id, "--prompt", "Tell me a story.", "--once", self.schedule_iso(now - datetime.timedelta(minutes=5)), expected_status=2)
+        self.assert_failure(past, "invalid_argument")
+        blank, _ = self.call_cli("schedule", "set", task_id, "--prompt", "  ", "--once", self.schedule_iso(fire_at), expected_status=2)
+        self.assert_failure(blank, "invalid_argument")
+        self.assertIsNone(self.assert_success(self.call_cli("task", "get", task_id)[0]).get("schedule"), "A rejected schedule saves nothing.")
+
+        scheduled = self.assert_success(self.call_cli(
+            "schedule", "set", task_id, "--prompt", "Tell me a story.", "--once", self.schedule_iso(fire_at)
+        )[0])
+        self.assertEqual(scheduled["schedule"]["kind"], "once")
+        self.assertEqual(scheduled["schedule"]["scheduledAt"], self.schedule_iso(fire_at))
+        self.assertEqual(scheduled["schedule"]["prompt"], "Tell me a story.")
+        self.assertEqual(scheduled["status"], "Backlog")
+        fresh = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(fresh["schedule"]["scheduledAt"], self.schedule_iso(fire_at), "The schedule persists across fresh reads.")
+        self.assertIn(task_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "A one-time schedule stays on the board.")
+        self.assertEqual([task["id"] for task in self.assert_success(self.call_cli("schedule", "list")[0])["tasks"]], [task_id])
+        self.assertEqual(self.fixture_user_prompts(executable), [], "Scheduling starts no turn.")
+
+        early = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(fire_at - datetime.timedelta(minutes=10)), extra_environment=environment
+        )[0])
+        self.assertEqual((early["fired"], early["dropped"]), ([], []), "Nothing runs before its time.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Backlog")
+
+        due = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(fire_at + datetime.timedelta(minutes=30)), extra_environment=environment
+        )[0])
+        self.assertEqual([run["taskID"] for run in due["fired"]], [task_id], "A run 30 minutes late is inside the grace period.")
+        self.assertEqual(due["dropped"], [])
+        finished = self.wait_for_task_status(task_id, {"Review"})
+        self.assertIsNone(finished.get("schedule"), "Firing clears the schedule.")
+        self.assertIn("Tell me a story.", self.fixture_user_prompts(executable), "The scheduled prompt reaches the provider.")
+
+        again = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(fire_at + datetime.timedelta(minutes=40)), extra_environment=environment
+        )[0])
+        self.assertEqual((again["fired"], again["dropped"]), ([], []), "A run happens once.")
+        started, _ = self.call_cli(
+            "schedule", "set", task_id, "--prompt", "Again", "--once", self.schedule_iso(fire_at + datetime.timedelta(days=1)), expected_status=1
+        )
+        self.assert_failure(started, "invalid_transition")
+
+        contents = Path(self.cli).resolve().parent.parent
+        bundle_identifier = plistlib.loads((contents / "Info.plist").read_bytes())["CFBundleIdentifier"]
+        agent = plistlib.loads((contents / "Library" / "LaunchAgents" / f"{bundle_identifier}.scheduler.plist").read_bytes())
+        self.assertEqual(agent["Label"], f"{bundle_identifier}.scheduler")
+        self.assertEqual(agent["BundleProgram"], "Contents/MacOS/playhouse-cli")
+        self.assertEqual(agent["ProgramArguments"], ["playhouse-cli", "schedule", "tick"])
+        self.assertEqual(agent["StartInterval"], 60, "The agent ticks every minute while the app is closed.")
+
+        soon_id = self.create_task("Due on the real clock", provider="claude")["id"]
+        soon = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0) + datetime.timedelta(seconds=3)
+        self.assert_success(self.call_cli("schedule", "set", soon_id, "--prompt", "Tell me a story.", "--once", self.schedule_iso(soon))[0])
+        time.sleep(max(0, (soon - datetime.datetime.now(datetime.timezone.utc)).total_seconds()) + 0.5)
+        real = self.assert_success(self.call_cli("schedule", "tick", extra_environment=environment)[0])
+        self.assertEqual([run["taskID"] for run in real["fired"]], [soon_id], "A plain tick uses the real clock.")
+        self.wait_for_task_status(soon_id, {"Review"})
+
+    # case-contract: test_schedule_missed_beyond_grace_is_blocked | A scheduled run more than one hour late is not started. A one-time task lands in Blocked with a 'Missed scheduled run' message and its prompt kept as an unsent draft, and sending that draft starts it. A recurring schedule ticked a week late creates exactly one Blocked run task linked to its schedule, skips the older missed occurrences, and moves its next run into the future. A due run whose provider can't start lands in Blocked saying the scheduled run couldn't start, with its prompt kept as the draft.
+    def test_schedule_missed_beyond_grace_is_blocked(self):
+        environment = self.install_claude_fixture("claude-fixture-schedule-missed")
+        executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
+        task_id = self.create_task("Missed once", provider="claude")["id"]
+        fire_at = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).replace(microsecond=0)
+        self.assert_success(self.call_cli("schedule", "set", task_id, "--prompt", "Tell me a story.", "--once", self.schedule_iso(fire_at))[0])
+        late = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(fire_at + datetime.timedelta(hours=2)), extra_environment=environment
+        )[0])
+        self.assertEqual(late["fired"], [])
+        self.assertEqual([run["taskID"] for run in late["dropped"]], [task_id])
+        blocked = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(blocked["status"], "Blocked")
+        self.assertTrue(blocked["statusMessage"].startswith("Missed scheduled run"), blocked["statusMessage"])
+        self.assertEqual(blocked["savedPrompt"], "Tell me a story.")
+        self.assertTrue(blocked["hasUnsentDraft"], "The missed prompt waits as the task's draft.")
+        self.assertIsNone(blocked.get("schedule"))
+        self.assertEqual(self.fixture_user_prompts(executable), [], "A missed run starts no turn.")
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Tell me a story.", extra_environment=environment)[0])
+        self.assertEqual(self.wait_for_task_status(task_id, {"Review"})["status"], "Review", "Sending the draft runs the task.")
+
+        template_id = self.create_task("Weekly template", provider="claude")["id"]
+        template = self.assert_success(self.call_cli(
+            "schedule", "set", template_id, "--prompt", "Tell me a story.", "--repeat", "weekly", "--weekday", "mon", "--time", "09:00", "--title", "Weekly report"
+        )[0])
+        next_run = self.parse_schedule_iso(template["schedule"]["scheduledAt"])
+        week_late = next_run + datetime.timedelta(days=7, hours=2)
+        missed = self.assert_success(self.call_cli("schedule", "tick", "--now", self.schedule_iso(week_late), extra_environment=environment)[0])
+        self.assertEqual(missed["fired"], [])
+        self.assertEqual(len(missed["dropped"]), 1, "Missed occurrences collapse into one run.")
+        run_id = missed["dropped"][0]["taskID"]
+        runs = [task for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"] if task.get("scheduleSourceTaskID") == template_id]
+        self.assertEqual([task["id"] for task in runs], [run_id])
+        self.assertEqual(runs[0]["status"], "Blocked")
+        self.assertEqual(runs[0]["title"], "Weekly report")
+        missed_run = self.assert_success(self.call_cli("task", "get", run_id)[0])
+        self.assertEqual(missed_run["savedPrompt"], "Tell me a story.", "The missed run keeps the prompt as its draft.")
+        self.assertTrue(missed_run["hasUnsentDraft"])
+        refreshed = self.assert_success(self.call_cli("task", "get", template_id)[0])
+        self.assertGreater(self.parse_schedule_iso(refreshed["schedule"]["scheduledAt"]), week_late, "The next run moves into the future.")
+
+        failing_id = self.create_task("Provider missing", provider="claude")["id"]
+        failing_at = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).replace(microsecond=0)
+        self.assert_success(self.call_cli("schedule", "set", failing_id, "--prompt", "Tell me a story.", "--once", self.schedule_iso(failing_at))[0])
+        unstarted = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(failing_at + datetime.timedelta(minutes=5)),
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": "none"}
+        )[0])
+        self.assertEqual([run["taskID"] for run in unstarted["fired"]], [failing_id])
+        # The send's own failure handling can show Blocked first; the scheduler's message follows it.
+        deadline = time.monotonic() + 30
+        failed = self.wait_for_task_status(failing_id, {"Blocked"})
+        while not (failed.get("statusMessage") or "").startswith("The scheduled run couldn't start") and time.monotonic() < deadline:
+            time.sleep(0.25)
+            failed = self.assert_success(self.call_cli("task", "get", failing_id)[0])
+        self.assertEqual(failed["status"], "Blocked")
+        self.assertTrue(failed["statusMessage"].startswith("The scheduled run couldn't start"), failed["statusMessage"])
+        self.assertIn("Claude Code wasn't found", failed["statusMessage"], "The message names why the run couldn't start.")
+        self.assertEqual(failed["savedPrompt"], "Tell me a story.")
+        self.assertTrue(failed["hasUnsentDraft"], "The prompt waits as the draft for a retry.")
+
+    # case-contract: test_schedule_recurring_template_hidden_and_spawns_runs | A recurring schedule needs a title, and a weekday when it repeats weekly; once confirmed, its template is absent from the board and task list but listed by schedule list and on the Scheduled Tasks page. A due tick creates a new board task with the schedule's title and context folders, linked by scheduleSourceTaskID, sends the prompt, records the run on the template and advances its next run by one day. A paused schedule doesn't fire, Run now starts a run immediately, and clearing the schedule turns the template into an ordinary Backlog task.
+    def test_schedule_recurring_template_hidden_and_spawns_runs(self):
+        environment = self.install_claude_fixture("claude-fixture-schedule-recurring")
+        executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
+        template_id = self.create_task("Recurring template", provider="claude")["id"]
+        untitled, _ = self.call_cli("schedule", "set", template_id, "--prompt", "Tell me a story.", "--repeat", "daily", "--time", "09:00", "--title", " ", expected_status=2)
+        self.assert_failure(untitled, "invalid_argument")
+        no_day, _ = self.call_cli("schedule", "set", template_id, "--prompt", "Tell me a story.", "--repeat", "weekly", "--title", "Standup", expected_status=2)
+        self.assert_failure(no_day, "invalid_argument")
+
+        template = self.assert_success(self.call_cli(
+            "schedule", "set", template_id, "--prompt", "Tell me a story.", "--repeat", "daily", "--time", "09:00", "--title", "Daily standup"
+        )[0])
+        self.assertEqual(template["title"], "Daily standup")
+        self.assertEqual(template["schedule"]["kind"], "recurring")
+        self.assertEqual(template["schedule"]["summary"], "Every day at 09:00")
+        self.assertNotIn(template_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "A recurring template isn't a board task.")
+        self.assertEqual([task["id"] for task in self.assert_success(self.call_cli("schedule", "list")[0])["tasks"]], [template_id])
+
+        first_run_at = self.parse_schedule_iso(template["schedule"]["scheduledAt"])
+        fired = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(first_run_at + datetime.timedelta(minutes=10)), extra_environment=environment
+        )[0])
+        self.assertEqual(len(fired["fired"]), 1)
+        run_id = fired["fired"][0]["taskID"]
+        self.assertNotEqual(run_id, template_id, "Each run is a new task.")
+        run = self.wait_for_task_status(run_id, {"Review"})
+        self.assertEqual(run["title"], "Daily standup")
+        self.assertEqual(run["scheduleSourceTaskID"], template_id)
+        self.assertEqual(run["contextFolders"], template["contextFolders"], "A run takes the schedule's context folders.")
+        self.assertTrue(run["contextFolders"])
+        self.assertIsNone(run.get("schedule"))
+        self.assertIn("Tell me a story.", self.fixture_user_prompts(executable))
+        self.assertIn(run_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "A run is followed on the board.")
+        after = self.assert_success(self.call_cli("task", "get", template_id)[0])
+        self.assertEqual(after["schedule"]["lastRunTaskID"], run_id)
+        next_run_at = self.parse_schedule_iso(after["schedule"]["scheduledAt"])
+        self.assertAlmostEqual((next_run_at - first_run_at).total_seconds(), 86400, delta=3600, msg="A daily schedule advances by one day.")
+
+        paused = self.assert_success(self.call_cli("schedule", "pause", template_id)[0])
+        self.assertTrue(paused["schedule"]["paused"])
+        quiet = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(next_run_at + datetime.timedelta(minutes=10)), extra_environment=environment
+        )[0])
+        self.assertEqual((quiet["fired"], quiet["dropped"]), ([], []), "A paused schedule doesn't fire.")
+        resumed = self.assert_success(self.call_cli("schedule", "resume", template_id)[0])
+        self.assertFalse(resumed["schedule"]["paused"])
+
+        now_run = self.assert_success(self.call_cli("schedule", "run-now", template_id, extra_environment=environment)[0])
+        self.assertFalse(now_run["dropped"])
+        self.assertNotIn(now_run["taskID"], {run_id, template_id})
+        self.wait_for_task_status(now_run["taskID"], {"Review"})
+
+        cleared = self.assert_success(self.call_cli("schedule", "clear", template_id)[0])
+        self.assertIsNone(cleared.get("schedule"))
+        self.assertIn(template_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "Clearing the schedule puts the task on the board.")
+        self.assertEqual(self.assert_success(self.call_cli("schedule", "list")[0])["tasks"], [])
+
+    # case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
+    def test_scheduled_task_edit_and_page_management(self):
+        environment = self.install_claude_fixture("claude-fixture-schedule-edit")
+        executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
+        task_id = self.create_task("Edited schedule", provider="claude")["id"]
+        self.assert_success(self.call_cli(
+            "schedule", "set", task_id, "--prompt", "Summarize the week.", "--repeat", "weekdays", "--time", "08:30", "--title", "Morning summary"
+        )[0])
+        edited = self.assert_success(self.call_cli(
+            "schedule", "set", task_id, "--prompt", "Summarize the week in detail.", "--repeat", "weekly", "--weekday", "fri", "--time", "17:15", "--title", "Friday summary"
+        )[0])
+        self.assertEqual(edited["title"], "Friday summary")
+        fresh = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(fresh["title"], "Friday summary")
+        self.assertEqual(fresh["schedule"]["recurrence"], {"preset": "weekly", "hour": 17, "minute": 15, "weekday": 6})
+        self.assertEqual(fresh["schedule"]["prompt"], "Summarize the week in detail.")
+        self.assertEqual(fresh["savedPrompt"], "Summarize the week in detail.", "The composer reopens on the confirmed prompt.")
+        self.assertIsNone(fresh.get("claudeSessionID"))
+        self.assertIsNone(fresh.get("codexThreadID"), "Editing a schedule starts no turn.")
+        self.assertEqual(self.parse_schedule_iso(fresh["schedule"]["scheduledAt"]).astimezone().weekday(), 4, "The next run falls on a Friday.")
+        rejected, _ = self.call_cli("conversation", "send", task_id, "--message", "Run the template.", expected_status=1, extra_environment=environment)
+        self.assert_failure(rejected, "invalid_transition")
+        self.assertEqual(self.fixture_user_prompts(executable), [], "A recurring template never runs itself.")
+        cleared = self.assert_success(self.call_cli("schedule", "clear", task_id)[0])
+        self.assertEqual(cleared["savedPrompt"], "Summarize the week in detail.", "Clearing a schedule keeps its prompt as the draft.")
+        self.assertTrue(cleared["hasUnsentDraft"])
+        self.assert_success(self.call_cli("schedule", "set", task_id, "--prompt", "Summarize the week.", "--repeat", "daily", "--title", "Friday summary")[0])
+        self.assert_success(self.call_cli("task", "delete", task_id)[0])
+        self.assertEqual(self.assert_success(self.call_cli("schedule", "list")[0])["tasks"], [])
+
+        once_id = self.create_task("Sent by hand", provider="claude")["id"]
+        fire_at = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).replace(microsecond=0)
+        self.assert_success(self.call_cli("schedule", "set", once_id, "--prompt", "Tell me a story.", "--once", self.schedule_iso(fire_at))[0])
+        self.assert_success(self.call_cli("conversation", "send", once_id, "--message", "Tell me a story.", extra_environment=environment)[0])
+        self.assertIsNone(self.wait_for_task_status(once_id, {"Review"}).get("schedule"), "Sending by hand ends a one-time schedule.")
+        sent = len(self.fixture_user_prompts(executable))
+        later = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(fire_at + datetime.timedelta(minutes=5)), extra_environment=environment
+        )[0])
+        self.assertEqual((later["fired"], later["dropped"]), ([], []), "A started task's schedule sends nothing more.")
+        self.assertEqual(len(self.fixture_user_prompts(executable)), sent)
 
 class TimedTestResult(unittest.TextTestResult):
     def startTest(self, test):

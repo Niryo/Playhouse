@@ -973,6 +973,8 @@ struct TaskConversationView: View {
     var skillFixPrompt: String? = nil
     /// Shows another task's conversation, sending it the prompt once it opens.
     var onOpenTask: (UUID, String) -> Void = { _, _ in }
+    /// Opens with the schedule hint showing, set to this kind (the Scheduled Tasks page's New Task).
+    var presentScheduleOnAppear: TaskScheduleKind? = nil
     let onBack: () -> Void
 
     /// The draft lives in an observable model, so a keystroke re-renders only views that read it
@@ -1021,6 +1023,14 @@ struct TaskConversationView: View {
     @State private var pickerModelID = ""
     @State private var pickerEffort: ConversationEffort = .medium
     @State private var isModelPickerPresented = false
+    /// The schedule confirmed in the hint. While set, Send schedules the task instead of
+    /// sending it; nothing is saved until then.
+    @State private var composerSchedule: ComposerSchedule?
+    /// What the open hint is editing.
+    @State private var scheduleDraft = ComposerSchedule()
+    @State private var isSchedulePopoverPresented = false
+    @State private var isSavingSchedule = false
+    @FocusState private var isScheduleTitleFocused: Bool
     @State private var providerBoundaries: [ConversationProviderBoundary] = []
     @State private var isSwitchingProvider = false
     @State private var providerNotice: String?
@@ -1141,6 +1151,19 @@ struct TaskConversationView: View {
 
     private var isSendDisabled: Bool {
         !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isLoadingHistory || userInputRequest != nil
+    }
+
+    /// A board task that hasn't started its conversation can be scheduled, or rescheduled.
+    private var canSchedule: Bool {
+        guard let boardTask = task as? BoardTask, !isReadOnly else { return false }
+        return boardTask.activeConversationID == nil && boardTask.pendingSubmittedPrompt == nil
+            && messages.isEmpty && !isResponding && !isEnteringGoal
+            && (boardTask.status == .backlog || boardTask.status == .blocked)
+    }
+
+    private var isScheduleSendDisabled: Bool {
+        !isRepositoryRootConfigured || isApplyingSavedRepositories || isSavingSchedule || isLoadingHistory
+            || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty)
     }
 
     private var isRepositoryRootConfigured: Bool {
@@ -1646,6 +1669,18 @@ struct TaskConversationView: View {
                let savedMode = WorkspaceSettings.preferencesStore.string(forKey: conversationModeDefaultsKey),
                let mode = ConversationMode(rawValue: savedMode) {
                 conversationMode = mode
+            }
+            if let boardTask = task as? BoardTask, let schedule = ComposerSchedule(task: boardTask) {
+                composerSchedule = schedule
+                scheduleDraft = schedule
+            }
+            if let kind = presentScheduleOnAppear, !isReadOnly {
+                scheduleDraft = composerSchedule ?? defaultScheduleDraft(kind: kind)
+                Task { @MainActor in
+                    // Let the composer lay out first, so the hint opens anchored to its button.
+                    try? await Task.sleep(for: .milliseconds(300))
+                    isSchedulePopoverPresented = true
+                }
             }
             guard isNewTask else { return }
             isShowingRepositoryPicker = false
@@ -5032,7 +5067,7 @@ struct TaskConversationView: View {
                         if isResponding {
                             queueDraftForAfterTurn()
                         } else {
-                            sendMessage()
+                            sendOrSchedule()
                         }
                     },
                     onSteerSubmit: {
@@ -5240,6 +5275,10 @@ struct TaskConversationView: View {
                         .frame(width: 320)
                     }
 
+                    if canSchedule {
+                        scheduleButton
+                    }
+
                     // A turn still finishing after its final answer can still be stopped; one
                     // that is only waiting on a question keeps the composer's send control.
                     if isDisplayingActiveResponse
@@ -5270,8 +5309,28 @@ struct TaskConversationView: View {
                         .buttonStyle(.plain)
                         .accessibilityLabel("Continue response")
                         .accessibilityIdentifier("continue-response-button")
+                    } else if composerSchedule != nil, canSchedule {
+                        Button { confirmSchedule() } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "clock")
+                                Text("Schedule")
+                            }
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .frame(height: 31)
+                            .background(Color.accentColor, in: Capsule())
+                        }
+                        .buttonHoverPointer()
+                        .nativeHelp(composerSchedule.map { "Schedule: \($0.summary())" } ?? "Schedule task")
+                        .buttonStyle(.plain)
+                        .disabled(isScheduleSendDisabled)
+                        .opacity(isScheduleSendDisabled ? 0.45 : 1)
+                        .accessibilityLabel("Schedule task")
+                        .accessibilityValue(composerSchedule?.summary() ?? "")
+                        .accessibilityIdentifier("send-message-button")
                     } else {
-                        Button { sendMessage() } label: {
+                        Button { sendOrSchedule() } label: {
                             Image(systemName: "arrow.up")
                                 .font(.system(size: 13, weight: .bold))
                                 .foregroundStyle(.white)
@@ -5719,6 +5778,222 @@ struct TaskConversationView: View {
         Task { try? conversationManager.setModelID(taskID: task.id, modelID: pickerModelID) }
         guard effortChanged else { return }
         Task { try? await conversationManager.setEffort(taskID: task.id, effort: pickerEffort) }
+    }
+
+    // MARK: Scheduling
+
+    private var scheduleButton: some View {
+        let isOn = composerSchedule != nil
+        return Button {
+            if isSchedulePopoverPresented {
+                isSchedulePopoverPresented = false
+            } else {
+                scheduleDraft = composerSchedule ?? defaultScheduleDraft(kind: .once)
+                isSchedulePopoverPresented = true
+            }
+        } label: {
+            Image(systemName: isOn ? "clock.fill" : "clock")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
+                .frame(width: 26, height: 26)
+                .background(isOn ? Color.accentColor.opacity(0.14) : Color.clear, in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .buttonHoverPointer()
+        .nativeHelp(isOn ? "Change the schedule" : "Schedule this task")
+        .accessibilityLabel("Schedule")
+        .accessibilityValue(isOn ? "On" : "Off")
+        .accessibilityIdentifier("schedule-task-button")
+        .popover(isPresented: $isSchedulePopoverPresented, arrowEdge: .top) { scheduleHint }
+    }
+
+    /// The hint for choosing when the task runs. Done only arms Send's schedule mode; the
+    /// schedule is saved when Send is pressed.
+    private var scheduleHint: some View {
+        let validation = scheduleDraft.validationMessage()
+        return VStack(alignment: .leading, spacing: 12) {
+            Picker("Schedule", selection: Binding(
+                get: { scheduleDraft.kind },
+                set: { kind in
+                    scheduleDraft.kind = kind
+                    if kind == .recurring, scheduleDraft.title.isEmpty, !Self.placeholderTitles.contains(task.title) {
+                        scheduleDraft.title = task.title
+                    }
+                }
+            )) {
+                Text("Once").tag(TaskScheduleKind.once)
+                Text("Recurring").tag(TaskScheduleKind.recurring)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .accessibilityIdentifier("schedule-kind-picker")
+
+            if scheduleDraft.kind == .recurring {
+                TextField("Title", text: $scheduleDraft.title)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($isScheduleTitleFocused)
+                    .onSubmit(confirmScheduleHint)
+                    .accessibilityIdentifier("schedule-title-field")
+                HStack(spacing: 8) {
+                    Picker("Repeat", selection: $scheduleDraft.preset) {
+                        ForEach(TaskRecurrence.Preset.allCases, id: \.self) { preset in
+                            Text(preset.label).tag(preset)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityIdentifier("schedule-repeat-picker")
+                    if scheduleDraft.preset == .weekly {
+                        Picker("Day", selection: $scheduleDraft.weekday) {
+                            ForEach(1...7, id: \.self) { day in
+                                Text(Calendar.current.weekdaySymbols[day - 1]).tag(day)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityIdentifier("schedule-weekday-picker")
+                    }
+                    Spacer(minLength: 0)
+                    if scheduleDraft.preset == .hourly {
+                        Picker("Minute", selection: $scheduleDraft.minute) {
+                            ForEach([0, 15, 30, 45], id: \.self) { minute in
+                                Text(String(format: ":%02d", minute)).tag(minute)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        .accessibilityIdentifier("schedule-minute-picker")
+                    } else {
+                        DatePicker("Time", selection: $scheduleDraft.time, displayedComponents: .hourAndMinute)
+                            .datePickerStyle(.field)
+                            .labelsHidden()
+                            .fixedSize()
+                            .accessibilityIdentifier("schedule-time-picker")
+                    }
+                }
+            } else {
+                DatePicker("Run at", selection: $scheduleDraft.fireAt, in: Date.now..., displayedComponents: [.date, .hourAndMinute])
+                    .datePickerStyle(.field)
+                    .labelsHidden()
+                    .accessibilityIdentifier("schedule-date-picker")
+            }
+
+            Text(validation ?? scheduleDraft.summary())
+                .font(.caption)
+                .foregroundStyle(validation == nil ? Color.secondary : Color.red)
+                .accessibilityIdentifier("schedule-summary")
+
+            HStack {
+                if composerSchedule != nil {
+                    Button("Remove") {
+                        composerSchedule = nil
+                        isSchedulePopoverPresented = false
+                        composerDraft.focusRequest += 1
+                    }
+                    .buttonHoverPointer()
+                    .nativeHelp("Stop scheduling; Send runs the task now")
+                    .accessibilityIdentifier("schedule-remove-button")
+                }
+                Spacer()
+                Button("Done", action: confirmScheduleHint)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(validation != nil)
+                    .buttonHoverPointer()
+                    .nativeHelp("Use this schedule; Send then schedules the task")
+                    .accessibilityIdentifier("schedule-done-button")
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 13)
+        .frame(width: 300)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("schedule-hint")
+        .onAppear {
+            if scheduleDraft.kind == .recurring { isScheduleTitleFocused = true }
+        }
+    }
+
+    private static let placeholderTitles: Set<String> = ["Untitled task", "Generating title…"]
+
+    private func defaultScheduleDraft(kind: TaskScheduleKind) -> ComposerSchedule {
+        var draft = ComposerSchedule()
+        draft.kind = kind
+        if kind == .recurring, !Self.placeholderTitles.contains(task.title) { draft.title = task.title }
+        return draft
+    }
+
+    private func confirmScheduleHint() {
+        guard scheduleDraft.validationMessage() == nil else { return }
+        composerSchedule = scheduleDraft
+        isSchedulePopoverPresented = false
+        composerDraft.focusRequest += 1
+    }
+
+    /// Send's action. A schedule armed in the hint schedules the task; with the schedule removed
+    /// in the hint, the task runs now as usual.
+    private func sendOrSchedule() {
+        if composerSchedule != nil, canSchedule {
+            confirmSchedule()
+            return
+        }
+        // Sending a one-time task ends its schedule in the shared send path. A recurring
+        // template becomes an ordinary task first, since a template never runs itself.
+        guard let boardTask = task as? BoardTask, boardTask.isRecurringScheduleTemplate, canSchedule else {
+            sendMessage()
+            return
+        }
+        Task { @MainActor in
+            do {
+                _ = try await BoardTaskManager(modelContext: modelContext).clearSchedule(boardTask.id)
+                sendMessage()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func confirmSchedule() {
+        guard let schedule = composerSchedule, !isScheduleSendDisabled else { return }
+        if let message = schedule.validationMessage() {
+            // The chosen time passed while the composer was open.
+            errorMessage = message
+            scheduleDraft = schedule
+            isSchedulePopoverPresented = true
+            return
+        }
+        draftAutosaveTask?.cancel()
+        let prompt = draft
+        let request = schedule.request(
+            prompt: prompt,
+            imageDataURLs: pendingImages.map(\.dataURL),
+            mode: conversationMode,
+            modelID: selectedModelID.isEmpty ? nil : selectedModelID
+        )
+        let taskID = task.id
+        let needsTitle = schedule.kind == .once && Self.placeholderTitles.contains(task.title)
+        isSavingSchedule = true
+        Task { @MainActor in
+            defer { isSavingSchedule = false }
+            do {
+                let manager = BoardTaskManager(modelContext: modelContext)
+                _ = try await manager.setSchedule(taskID, request)
+                composerDraft.settledText = draft
+                PlayhouseDiagnostics.record("ui.task.scheduled", fields: ["taskID": taskID.uuidString, "kind": schedule.kind.rawValue])
+                if needsTitle {
+                    // A one-time task waits on the board, so name it now as a first send would.
+                    let conversations = conversationManager
+                    Task { @MainActor in
+                        guard let generated = await conversations.generateTitle(taskID: taskID, prompt: prompt) else { return }
+                        _ = try? await manager.renameIfTitleMatches(taskID, expectedTitle: "Untitled task", title: generated.title)
+                    }
+                }
+                onBack()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     private func sendMessage(overrideText: String? = nil) {
@@ -7938,5 +8213,83 @@ private struct EffortStepSlider: View {
         guard !choices.isEmpty else { return .ignored }
         selection = choices[min(max(selectedIndex + delta, 0), choices.count - 1)]
         return .handled
+    }
+}
+
+/// The schedule chosen in the composer's hint, before Send saves it.
+struct ComposerSchedule: Equatable {
+    var kind: TaskScheduleKind = .once
+    var fireAt: Date = ComposerSchedule.nextFullHour()
+    var title = ""
+    var preset: TaskRecurrence.Preset = .daily
+    /// The hour and minute of a daily, weekday or weekly run.
+    var time: Date = Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: .now) ?? .now
+    /// The minute past the hour of an hourly run.
+    var minute = 0
+    var weekday = 2
+
+    init() {}
+
+    init?(task: BoardTask) {
+        guard let kind = task.scheduleKind else { return nil }
+        self.kind = kind
+        if kind == .once {
+            fireAt = task.scheduledAt ?? Self.nextFullHour()
+        } else if let recurrence = task.scheduleRecurrence {
+            title = task.title
+            preset = recurrence.preset
+            time = Calendar.current.date(bySettingHour: recurrence.hour, minute: recurrence.minute, second: 0, of: .now) ?? .now
+            minute = recurrence.minute
+            weekday = recurrence.weekday ?? 2
+        }
+    }
+
+    /// The next full hour at least five minutes away, so the default can't pass while the
+    /// hint is still open.
+    static func nextFullHour(after now: Date = .now) -> Date {
+        Calendar.current.nextDate(after: now.addingTimeInterval(300), matching: DateComponents(minute: 0, second: 0), matchingPolicy: .nextTime)
+            ?? now.addingTimeInterval(3600)
+    }
+
+    var recurrence: TaskRecurrence {
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: time)
+        return TaskRecurrence(
+            preset: preset,
+            hour: parts.hour ?? 9,
+            minute: preset == .hourly ? minute : (parts.minute ?? 0),
+            weekday: preset == .weekly ? weekday : nil
+        )
+    }
+
+    func validationMessage(now: Date = .now) -> String? {
+        switch kind {
+        case .once:
+            return fireAt > now ? nil : "Choose a time in the future."
+        case .recurring:
+            return title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Give the recurring task a title." : nil
+        }
+    }
+
+    func summary(now: Date = .now) -> String {
+        switch kind {
+        case .once:
+            return "Runs \(ScheduleFormatting.relativeTime(fireAt, now: now))"
+        case .recurring:
+            let next = recurrence.nextOccurrence(after: now)
+            return "\(recurrence.summary()) · next \(ScheduleFormatting.relativeTime(next, now: now))"
+        }
+    }
+
+    func request(prompt: String, imageDataURLs: [String], mode: ConversationMode, modelID: String?) -> TaskScheduleRequest {
+        TaskScheduleRequest(
+            kind: kind,
+            fireAt: kind == .once ? fireAt : nil,
+            recurrence: kind == .recurring ? recurrence : nil,
+            title: kind == .recurring ? title : nil,
+            prompt: prompt,
+            imageDataURLs: imageDataURLs,
+            mode: mode,
+            modelID: modelID
+        )
     }
 }

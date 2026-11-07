@@ -62,7 +62,13 @@ struct KanbanBoardView: View {
 
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
-    @Query(filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" }, sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
+    @Query(filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" }, sort: \BoardTask.createdAt, order: .reverse) private var allTasks: [BoardTask]
+    /// Board cards. Recurring schedule templates aren't board tasks; the Scheduled Tasks page
+    /// lists them, and each of their runs appears here as its own task.
+    private var tasks: [BoardTask] { allTasks.filter { !$0.isRecurringScheduleTemplate } }
+    @State private var isShowingScheduledTasks = false
+    /// Opens the next new task with the schedule hint already showing, set to this kind.
+    @State private var presentScheduleOnOpen: TaskScheduleKind?
     @State private var isCreatingNewTask = false
     @State private var saveError: String?
     @State private var lifecycleResetNotice: String?
@@ -129,25 +135,31 @@ struct KanbanBoardView: View {
         mainContent
     }
 
+    private func conversationView(for selectedTask: BoardTask) -> some View {
+        TaskConversationView(
+            task: selectedTask, isNewTask: isSelectedTaskNew, isReadOnly: selectedTask.status == .done,
+            conflictResolutionRequested: conflictResolutionTaskID == selectedTask.id,
+            onConflictResolutionChecked: { resolved in
+                if resolved { conflictedReviewTaskIDs.remove(selectedTask.id) }
+                else { conflictedReviewTaskIDs.insert(selectedTask.id) }
+            },
+            skillFixPrompt: skillFixPrompts[selectedTask.id],
+            onOpenTask: openTask(_:sending:),
+            presentScheduleOnAppear: presentScheduleOnOpen
+        ) {
+            self.skillFixPrompts[selectedTask.id] = nil
+            self.selectedTask = nil
+            self.isSelectedTaskNew = false
+            self.conflictResolutionTaskID = nil
+            self.presentScheduleOnOpen = nil
+        }
+        .id(selectedTask.id)
+    }
+
     private var mainContent: some View {
         Group {
             if let selectedTask {
-                TaskConversationView(
-                    task: selectedTask, isNewTask: isSelectedTaskNew, isReadOnly: selectedTask.status == .done,
-                    conflictResolutionRequested: conflictResolutionTaskID == selectedTask.id,
-                    onConflictResolutionChecked: { resolved in
-                        if resolved { conflictedReviewTaskIDs.remove(selectedTask.id) }
-                        else { conflictedReviewTaskIDs.insert(selectedTask.id) }
-                    },
-                    skillFixPrompt: skillFixPrompts[selectedTask.id],
-                    onOpenTask: openTask(_:sending:)
-                ) {
-                    self.skillFixPrompts[selectedTask.id] = nil
-                    self.selectedTask = nil
-                    self.isSelectedTaskNew = false
-                    self.conflictResolutionTaskID = nil
-                }
-                .id(selectedTask.id)
+                conversationView(for: selectedTask)
             } else {
                 boardContent
             }
@@ -156,6 +168,9 @@ struct KanbanBoardView: View {
         // The open chat adds its width to the board's minimum, so the content-sized window grows
         // to keep the pushed columns visible, as it did when the chat sat beside the board.
         .frame(minWidth: ChatSidebarLayout.minimumBoardWidth + (isChatOverlayVisible ? chatSidebarWidth : 0), minHeight: 640)
+        .task(id: allTasks.contains { $0.scheduleKind != nil && !$0.schedulePaused }) {
+            SchedulerAgent.sync(hasActiveSchedules: allTasks.contains { $0.scheduleKind != nil && !$0.schedulePaused })
+        }
         .onAppear {
             // The board renders from its own @Query, not the board.list path, so it has to
             // convert a chat still stored as a hidden task itself or that row shows as a card.
@@ -510,6 +525,7 @@ struct KanbanBoardView: View {
             }
         }
         .animation(.easeInOut(duration: 0.24), value: isShowingDoneArchive)
+        .overlay { scheduledTasksPage }
         .task(id: "\(isShowingDoneArchive)-\(archiveSearchText)") {
             guard isShowingDoneArchive else { return }
             if archiveTasks.isEmpty && archiveHasMore { loadNextArchivePage() }
@@ -714,17 +730,24 @@ struct KanbanBoardView: View {
 
     private var boardSidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Button {} label: {
-                Label("Placeholder", systemImage: "square.dashed")
+            Button {
+                isShowingScheduledTasks.toggle()
+            } label: {
+                Label("Scheduled Tasks", systemImage: "clock")
                     .font(.system(size: 12, weight: .medium))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(isShowingScheduledTasks ? Color.accentColor.opacity(0.14) : Color.clear)
+                    )
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .buttonHoverPointer()
-            .nativeHelp("Placeholder sidebar button")
+            .nativeHelp("Scheduled tasks")
+            .accessibilityIdentifier("scheduled-tasks-button")
 
             Spacer(minLength: 0)
 
@@ -1059,7 +1082,48 @@ struct KanbanBoardView: View {
         }
     }
 
+    /// Slides in over the board like the Skills page. It stays up while a task opened from it
+    /// is showing, so closing that task returns here.
+    private var scheduledTasksPage: some View {
+        ZStack {
+            if isShowingScheduledTasks {
+                ScheduledTasksPageView(
+                    scheduledTasks: allTasks.filter { $0.scheduleKind != nil },
+                    remoteConversations: remoteConversations,
+                    onNewTask: { openNewTask(presentingSchedule: .recurring) },
+                    onOpenTask: { task in
+                        isSelectedTaskNew = false
+                        conflictResolutionTaskID = nil
+                        presentScheduleOnOpen = nil
+                        selectedTask = task
+                    },
+                    onOpenRunTask: { id in
+                        if let task = try? BoardTaskManager(modelContext: modelContext).taskModel(id) {
+                            isShowingScheduledTasks = false
+                            isSelectedTaskNew = false
+                            presentScheduleOnOpen = nil
+                            selectedTask = task
+                        }
+                    }
+                ) {
+                    isShowingScheduledTasks = false
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .shadow(color: .black.opacity(0.25), radius: 16, x: -4)
+                .transition(.move(edge: .trailing))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+        .allowsHitTesting(isShowingScheduledTasks)
+        .animation(.spring(response: 0.34, dampingFraction: 0.92), value: isShowingScheduledTasks)
+    }
+
     private func openNewTask() {
+        openNewTask(presentingSchedule: nil)
+    }
+
+    private func openNewTask(presentingSchedule: TaskScheduleKind?) {
         guard !isCreatingNewTask else { return }
         isCreatingNewTask = true
         let attemptID = UUID().uuidString
@@ -1080,6 +1144,7 @@ struct KanbanBoardView: View {
                     pullRequestMode: settings.pullRequestModeDefault
                 )
                 let newTask = try manager.taskModel(created.id)
+                presentScheduleOnOpen = presentingSchedule
                 selectedTask = newTask
                 isSelectedTaskNew = true
                 PlayhouseDiagnostics.record("ui.new_task.succeeded", fields: [
@@ -1877,6 +1942,14 @@ private struct TaskCardView: View {
                 .accessibilityLabel([progressLabel, task.progressDetail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
                 .accessibilityValue("Progress icon: \(TaskProgressType(rawValue: task.progressTypeRawValue ?? "")?.symbol ?? "sparkle")")
                 .allowsHitTesting(false)
+            }
+
+            if task.scheduleKind == .once, let scheduledAt = task.scheduledAt {
+                Label(ScheduleFormatting.relativeTime(scheduledAt), systemImage: "clock")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityIdentifier("task-schedule-badge-\(task.id.uuidString)")
+                    .allowsHitTesting(false)
             }
 
             if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
