@@ -137,6 +137,16 @@ struct WorkspaceChangeInventory: Codable, Equatable {
     var count: Int { unviewed.count + viewed.count }
 }
 
+/// Whether a planned conversation can hand off to a Code-mode implementation turn.
+enum PlanImplementationHandoff {
+    /// Why a task's Start Implementing is unavailable, or nil when the task has somewhere to
+    /// implement: a repository worktree or a working folder. Planning needs neither, so a plan
+    /// can exist before the task has a place to change.
+    static func unavailableReason(workspaceRootPaths: [String]) -> String? {
+        workspaceRootPaths.isEmpty ? "Add a repository to this task to start implementing." : nil
+    }
+}
+
 /// How a task's terminal panel starts its shell. `environment` holds only the variables
 /// Playhouse sets on top of the app's own environment.
 struct TaskTerminalLaunch: Codable, Equatable {

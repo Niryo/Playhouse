@@ -1179,6 +1179,14 @@ struct TaskConversationView: View {
             && userInputRequest == nil && providerPendingUserInputRequest == nil
     }
 
+    /// Why a task's plan can't be handed off to an implementation turn yet; transient loading
+    /// states also disable the button but need no explanation. A chat never has a workspace
+    /// root or a repository picker, so it keeps its disabled button without this reason.
+    private var startImplementingUnavailableReason: String? {
+        guard !task.isStandaloneChat else { return nil }
+        return PlanImplementationHandoff.unavailableReason(workspaceRootPaths: task.workspaceRootPaths)
+    }
+
     private var isConversationTurnActive: Bool {
         conversationRuntime.isTurnActive(threadID: task.activeConversationID ?? "")
     }
@@ -2807,9 +2815,7 @@ struct TaskConversationView: View {
                 repositoryChip(repository)
             }
             Button {
-                isShowingRepositoryPicker.toggle()
-                loadRecentRepositories()
-                if suggestedRepositories.isEmpty { loadSuggestedRepositories() }
+                if isShowingRepositoryPicker { isShowingRepositoryPicker = false } else { showRepositoryPicker() }
             } label: {
                 Image(systemName: "plus").font(.system(size: 12, weight: .semibold))
                     .frame(width: 28, height: 28).background(Color.primary.opacity(0.07), in: Circle())
@@ -2823,6 +2829,12 @@ struct TaskConversationView: View {
         }
         .onAppear { loadRecentRepositories() }
         .onChange(of: attachedRepositoryPaths) { _, _ in loadRecentRepositories() }
+    }
+
+    private func showRepositoryPicker() {
+        isShowingRepositoryPicker = true
+        loadRecentRepositories()
+        if suggestedRepositories.isEmpty { loadSuggestedRepositories() }
     }
 
     private func repositoryChip(_ repository: RepositoryWorktreeRecord) -> some View {
@@ -5137,8 +5149,30 @@ struct TaskConversationView: View {
                         .buttonHoverPointer()
                         .buttonStyle(.plain)
                         .disabled(workspaceRootURLs.isEmpty || isLoadingHistory || isPreparingSubmittedMessage)
-                        .nativeHelp("Switch to Code mode and start implementing this plan")
+                        .nativeHelp(startImplementingUnavailableReason ?? "Switch to Code mode and start implementing this plan")
+                        .accessibilityValue(startImplementingUnavailableReason ?? (workspaceRootURLs.isEmpty ? "Unavailable" : "Available"))
+                        .accessibilityHint("Switches to Code mode and starts implementing this plan")
                         .accessibilityIdentifier("start-implementing-button")
+
+                        // The reason is shown, not only hovered, and opens the header's repository picker.
+                        if let reason = startImplementingUnavailableReason {
+                            Button(action: showRepositoryPicker) {
+                                Label("No repository", systemImage: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(emptyConversationRepositoryTitleColor)
+                                    .lineLimit(1)
+                                    .fixedSize()
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonHoverPointer()
+                            .buttonStyle(.plain)
+                            .disabled(isReadOnly)
+                            .nativeHelp(reason)
+                            .accessibilityLabel("No repository")
+                            .accessibilityValue(reason)
+                            .accessibilityHint("Opens the repository picker")
+                            .accessibilityIdentifier("start-implementing-unavailable-reason")
+                        }
                     }
 
                     Spacer(minLength: 0)
