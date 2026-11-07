@@ -65,13 +65,6 @@ legacy_store_seeder="${fixture_root}/seed-legacy-task-store"
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/seed-legacy-task-store.swift" \
   -o "${legacy_store_seeder}"
-# Pure-logic unit checks of the Codex CPU working-directory attribution.
-codex_cpu_attribution_tests="${test_output_dir}/codex-cpu-attribution-tests"
-xcrun swiftc -parse-as-library -swift-version 5 -O \
-  "${repository_root}/Playhouse/App/ProcessCPUSampler.swift" \
-  "${repository_root}/scripts/unit/codex-cpu-attribution-tests.swift" \
-  -o "${codex_cpu_attribution_tests}"
-"${codex_cpu_attribution_tests}"
 # Pure-logic unit checks of the agent usage payload parsing and reset rules.
 agent_usage_parsing_tests="${test_output_dir}/agent-usage-parsing-tests"
 xcrun swiftc -parse-as-library -swift-version 5 -O \

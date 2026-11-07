@@ -2094,9 +2094,8 @@ private struct TaskCardView: View {
         task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
     }
 
-    /// `nil` for a task with no running turn or no sample yet. For Codex
-    /// it's the task's working-directory share of the shared app-server
-    /// (see `TaskCPUUsageSnapshot`).
+    /// `nil` for a task with no running turn or no sample yet; otherwise the
+    /// load of the task's own provider process tree (see `TaskCPUUsageSnapshot`).
     private var cpuPercent: Double? {
         cpuUsageModel.percent(threadID: task.activeConversationID)
     }

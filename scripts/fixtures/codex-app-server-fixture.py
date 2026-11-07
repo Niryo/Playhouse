@@ -7,6 +7,7 @@ import os
 import re
 import select
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -386,7 +387,17 @@ def question_request(request_id, followup=False):
         question_contexts[request_id] = (THREAD_ID, TURN_ID)
         question_rounds[THREAD_ID] = question_rounds.get(THREAD_ID, 0) + 1
         if first_question_thread is None:
-            first_question_thread = THREAD_ID
+            # Each task has an app-server of its own, so the thread that asked
+            # first is agreed through a file every fixture process shares.
+            claim = Path(str(sys.argv[0]) + ".first-question-thread")
+            proposal = Path(f"{claim}.{os.getpid()}")
+            proposal.write_text(THREAD_ID, encoding="utf-8")
+            try:
+                os.link(proposal, claim)  # Atomic: the claim appears complete or not at all.
+            except FileExistsError:
+                pass
+            proposal.unlink(missing_ok=True)
+            first_question_thread = claim.read_text(encoding="utf-8")
         if followup:
             questions[0]["question"] = "Which color should I use next?"
     write({
@@ -512,24 +523,58 @@ CPU_ATTRIBUTION_TURN = re.compile(r"\b(burn|idle) cpu for (\d+(?:\.\d+)?) second
 
 
 def run_cpu_attribution_server():
-    """A small evented app-server for per-task CPU attribution tests.
+    """A small evented app-server for per-task app-server and CPU tests.
 
     Unlike the default fixture, which runs one held turn at a time, this one
-    keeps several threads' turns running at once on one process, the way a
-    single shared `codex app-server` does. Every thread gets its own ID. A
-    turn whose message says "burn cpu for N seconds" or "idle cpu for N
-    seconds" runs one real child process in the turn's own `cwd` (a busy
-    loop or a sleep); the turn reports its outcome and completes when that
-    child exits. Other turns (titles, outcome nudges) complete immediately.
+    can keep several threads' turns running at once on one process. Every
+    thread gets its own ID, and its items are saved beside the fixture, so a
+    later app-server process resumes it with its history, as real Codex does
+    from its rollouts. A turn whose message says "burn cpu for N seconds" or
+    "idle cpu for N seconds" runs one real child process in the turn's own
+    `cwd` (a busy loop or a sleep); the turn reports its outcome and
+    completes when that child exits. Other turns (titles, outcome nudges)
+    complete immediately.
+
+    Each process appends what it served to `<fixture>.servers.jsonl`: its
+    start, every thread it started, resumed or ran a turn on, and its exit
+    (end of input or SIGTERM), so a test can tell which process served which
+    thread and when it stopped.
     """
     threads = {}
     running = {}
     buffer = b""
+    server_log = Path(f"{sys.argv[0]}.servers.jsonl")
+
+    def log_server(event, thread_id=None):
+        with server_log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"pid": os.getpid(), "event": event, "threadId": thread_id}) + "\n")
+
+    def thread_path(thread_id):
+        return Path(f"{sys.argv[0]}.thread-{thread_id}.json")
+
+    def load_thread(thread_id):
+        if thread_id not in threads:
+            path = thread_path(thread_id)
+            threads[thread_id] = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"items": []}
+        return threads[thread_id]
+
+    def save_thread(thread_id):
+        thread_path(thread_id).write_text(json.dumps(threads[thread_id]), encoding="utf-8")
+
+    def stop(*_):
+        for _, child, _, _ in running.values():
+            child.kill()
+        log_server("exit")
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, stop)
+    log_server("start")
 
     def finish(thread_id, turn_id, text, status="completed"):
         threads[thread_id]["items"].append({"turnId": turn_id, "item": {
             "id": f"item_{turn_id}_answer", "type": "agentMessage", "phase": "final_answer", "text": text,
         }})
+        save_thread(thread_id)
         write({"jsonrpc": "2.0", "method": "item/completed", "params": {
             "threadId": thread_id, "turnId": turn_id, "item": threads[thread_id]["items"][-1]["item"],
         }})
@@ -559,18 +604,21 @@ def run_cpu_attribution_server():
                              "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]}]})
         elif method in ("thread/start", "thread/resume"):
             thread_id = params.get("threadId") or str(uuid.uuid4())
-            thread = threads.setdefault(thread_id, {"items": []})
+            thread = load_thread(thread_id)
             thread["instructions"] = params.get("developerInstructions") or thread.get("instructions")
+            save_thread(thread_id)
+            log_server(method, thread_id)
             reply({"thread": {"id": thread_id}, "model": params.get("model", "gpt-6-luna")})
         elif method == "thread/read":
             reply({"thread": {"id": params.get("threadId"), "turns": []}})
         elif method == "thread/turns/list":
             reply({"data": [], "nextCursor": None})
         elif method == "thread/items/list":
-            reply({"data": threads.get(params.get("threadId"), {}).get("items", []), "nextCursor": None})
+            reply({"data": load_thread(params.get("threadId")).get("items", []), "nextCursor": None})
         elif method == "turn/start":
             thread_id = params.get("threadId")
-            thread = threads.setdefault(thread_id, {"items": []})
+            thread = load_thread(thread_id)
+            log_server(method, thread_id)
             thread["instructions"] = (params.get("collaborationMode", {}).get("settings", {}).get("developerInstructions")
                                       or thread.get("instructions"))
             turn_id = f"turn-{uuid.uuid4()}"
@@ -578,6 +626,7 @@ def run_cpu_attribution_server():
             thread["items"].append({"turnId": turn_id, "item": {
                 "id": f"item_{turn_id}_user", "type": "userMessage", "content": [{"type": "text", "text": text}],
             }})
+            save_thread(thread_id)
             reply({"turn": {"id": turn_id, "status": "inProgress"}})
             match = CPU_ATTRIBUTION_TURN.search(text)
             if not match:
@@ -600,12 +649,12 @@ def run_cpu_attribution_server():
                 [sys.executable, "-c", code, "playhouse-cpu-attribution", match.group(1).lower(), sys.argv[0]],
                 cwd=params.get("cwd") or os.getcwd(),
             )
-            running[thread_id] = (turn_id, child, match.group(1).lower())
+            running[thread_id] = (turn_id, child, match.group(1).lower(), match.group(2))
         elif method == "turn/interrupt":
             reply({})
             thread_id = params.get("threadId")
             if thread_id in running:
-                turn_id, child, _ = running.pop(thread_id)
+                turn_id, child, _, _ = running.pop(thread_id)
                 child.kill()
                 child.wait()
                 finish(thread_id, turn_id, "Interrupted.", status="interrupted")
@@ -626,15 +675,16 @@ def run_cpu_attribution_server():
                 except json.JSONDecodeError:
                     continue
                 handle(message)
-        for thread_id, (turn_id, child, kind) in list(running.items()):
+        for thread_id, (turn_id, child, kind, seconds) in list(running.items()):
             if child.poll() is not None:
                 del running[thread_id]
                 # A record exists only while its child runs, so cleanup never signals a reused PID.
                 Path(f"{sys.argv[0]}.cpu-child-{'burn' if kind == 'burn' else 'idle'}.json").unlink(missing_ok=True)
                 report_outcome(thread_id)
-                finish(thread_id, turn_id, f"Finished the {kind} command.")
-    for _, child, _ in running.values():
+                finish(thread_id, turn_id, f"Finished the {kind} command after {seconds} seconds.")
+    for _, child, _, _ in running.values():
         child.kill()
+    log_server("exit")
     return 0
 
 
