@@ -2352,7 +2352,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Done removes the worktree and keeps the branch")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover, while hovering the card itself shows no tooltip and the card remains an openable control; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -2389,6 +2389,10 @@ final class PlayhouseUITests: XCTestCase {
         assertNativeHelpText(for: activeCreateButton, equals: "Create a pull request for each repository linked to this task")
         attachScreenshot(named: "Active task PR control shows its help text", fullScreen: true)
         dismissNativeHelpText(named: "Create a pull request for each repository linked to this task")
+        assertNoNativeHelpText(whileHovering: element("task-title-\(taskID)"), containing: "Open task")
+        XCTAssertTrue(element("task-card-\(taskID)").isHittable, "The card should still be a clickable control without its tooltip.")
+        XCTAssertEqual(element("task-card-\(taskID)").label, "PR failure UI", "The card keeps its accessibility label.")
+        attachScreenshot(named: "Hovering a task card shows no tooltip", fullScreen: true)
         moveTaskToDone(taskID: taskID)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
         element("done-archive-button").click()
@@ -18409,6 +18413,23 @@ final class PlayhouseUITests: XCTestCase {
         app.descendants(matching: .helpTag)
             .matching(Self.textPredicate(containing: text, caseInsensitive: false, includeTitle: true))
             .firstMatch.exists
+    }
+
+    /// Hovers the control with the same real mouse movement as `assertNativeHelpText` and asserts
+    /// that no tooltip containing `text` ever appears.
+    private func assertNoNativeHelpText(whileHovering element: XCUIElement, containing text: String) {
+        app.activate()
+        movePointerToHelpRunway(below: element)
+        Thread.sleep(forTimeInterval: 1.5)
+        element.hover()
+        let frame = element.frame
+        for step in 0..<6 {
+            let point = CGPoint(x: frame.midX - 4 + CGFloat(step % 3) * 4, y: frame.midY + CGFloat(step % 2) * 2)
+            CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        Thread.sleep(forTimeInterval: 2.5)
+        XCTAssertFalse(nativeHelpTextIsVisible(text), "Hovering the card should not present a ‘\(text)’ tooltip.")
     }
 
     private func dismissNativeHelpText(named expected: String) {
