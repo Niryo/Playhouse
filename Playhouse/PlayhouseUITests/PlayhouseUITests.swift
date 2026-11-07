@@ -490,7 +490,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Playhouse board opened with a healthy bridge")
     }
 
-    // case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude, which only reports usage while a task runs, starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the Scheduled Tasks button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
+    // case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude's usage is read with Claude Code's get_usage control request, which has none for this account yet, so Claude starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Because Claude Code streams rate_limit_event only when a limit's status changes, and a usage-based plan's event has no utilization, every finished Claude turn reads the plan's usage again through get_usage (skipping the local transcript scan) without a refresh: the read replaces the windows with the plan's current ones, keeps get_usage percents as percents, shows a usage-based plan's monthly extra usage as a Spend limit row with the reset time from the stream's overage event, and is persisted; a refresh reads it too, a reply without plan usage keeps the last known rows, a reached spend limit reads as the limit reached, and a usage request that is never answered times out, keeping the last known rows, so later reads work again. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the Scheduled Tasks button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account and plan together on the row beneath the provider name, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. After a Claude turn whose usage read reports the plan's spend, the open window shows Claude's Spend limit row with its percent and reset time and the updated 5h row without a relaunch. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
     func test_agents_info_shows_provider_usage_and_accounts() throws {
         let codexExecutable = try makeCodexFixture(emptyQuestions: false)
         let codexAccount = URL(fileURLWithPath: codexExecutable.path + ".account")
@@ -530,14 +530,18 @@ final class PlayhouseUITests: XCTestCase {
 
         // Codex shows its account, both windows, and credits from the app-server; Claude has no usage until a task runs.
         XCTAssertTrue(element("agents-info-codex-window-secondary").waitForExistence(timeout: 30), "Codex usage should show soon after launch.")
-        XCTAssertEqual(text("agents-info-codex-account"), "codex-fixture@example.com")
+        XCTAssertEqual(text("agents-info-codex-account"), "codex-fixture@example.com Plus", "The account and plan should share the row below the provider name.")
+        let codexName = element("agents-info-codex").staticTexts["Codex"]
+        XCTAssertGreaterThanOrEqual(element("agents-info-codex-account").frame.minY, codexName.frame.maxY, "Codex account and plan should be below the provider name.")
         let primary = text("agents-info-codex-window-primary")
         XCTAssertTrue(primary.contains("5h") && primary.contains("30%") && primary.contains("Resets in"), "Codex's 5h window should show its percent and reset time: \(primary)")
         let secondary = text("agents-info-codex-window-secondary")
         XCTAssertTrue(secondary.contains("Weekly") && secondary.contains("62%"), "Codex's weekly window should show its percent: \(secondary)")
         XCTAssertEqual(text("agents-info-codex-credits"), "Credits: 12.50")
-        XCTAssertEqual(text("agents-info-claude-account"), "claude-fixture@example.com")
-        XCTAssertTrue(element("agents-info-claude-empty").exists, "Claude should say it has no data yet.")
+        XCTAssertEqual(text("agents-info-claude-account"), "claude-fixture@example.com Max", "The account and plan should share the row below the provider name.")
+        let claudeName = element("agents-info-claude").staticTexts["Claude"]
+        XCTAssertGreaterThanOrEqual(element("agents-info-claude-account").frame.minY, claudeName.frame.maxY, "Claude account and plan should be below the provider name.")
+        XCTAssertEqual(text("agents-info-claude-empty"), "No data yet", "Claude should say it has no data yet.")
         XCTAssertTrue(element("agents-info-switch-claude").exists && element("agents-info-switch-codex").exists, "Each agent should offer a switch-account button.")
         attachScreenshot(named: "Agents info with Codex usage and Claude awaiting data")
 
@@ -569,6 +573,29 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ text("agents-info-claude-window-five_hour").contains("Reset") && text("agents-info-claude-window-five_hour").contains("0%") }, timeout: 40), "A window past its reset time should show as reset.")
         XCTAssertFalse(element("agents-info-claude-status").exists, "The limit state should lift once its window has reset.")
         XCTAssertTrue(text("agents-info-claude-window-seven_day").contains("41%"))
+
+        // Claude Code streams an event only when a limit's status changes, and a usage-based plan's event has no
+        // percent, so every finished turn reads the plan's usage through get_usage and the open window follows it.
+        let usageURL = URL(fileURLWithPath: claudeExecutable.path + ".usage")
+        defer { try? FileManager.default.removeItem(at: usageURL) }
+        func iso(_ seconds: Int) -> String { ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: TimeInterval(seconds))) }
+        try JSONSerialization.data(withJSONObject: ["rate_limits_available": true, "rate_limits": [
+            "five_hour": ["utilization": 12.0, "resets_at": iso(now + 7200)],
+            "seven_day": ["utilization": 0.5, "resets_at": iso(now + 5 * 86400)],
+            "extra_usage": ["is_enabled": true, "utilization": 51.7, "spend_limit_reached": false],
+        ]]).write(to: usageURL)
+        try claudeTurn(["status": "allowed", "rateLimitType": "overage", "resetsAt": now + 20 * 86400, "isUsingOverage": false])
+        XCTAssertTrue(waitUntil({ text("agents-info-claude-window-overage").contains("52%") }, timeout: 40), "A finished turn should read Claude's spend from get_usage.")
+        let spend = text("agents-info-claude-window-overage")
+        XCTAssertTrue(spend.contains("Spend limit") && spend.contains("Resets in"), "The spend row should be labelled and keep the stream's monthly reset: \(spend)")
+        let fiveHour = text("agents-info-claude-window-five_hour")
+        XCTAssertTrue(fiveHour.contains("12%") && fiveHour.contains("Resets in"), "The read should replace the reset 5h window with the current one: \(fiveHour)")
+        let weekly = text("agents-info-claude-window-seven_day")
+        XCTAssertTrue(weekly.contains("1%") && !weekly.contains("41%") && !weekly.contains("50%"), "get_usage's 0.5 is a percent, shown rounded as 1%: \(weekly)")
+        XCTAssertFalse(element("agents-info-claude-empty").exists)
+        attachScreenshot(named: "Agents info with Claude usage read after a turn")
+        // The account switched to below has no usage of its own.
+        try FileManager.default.removeItem(at: usageURL)
 
         // While a Codex task runs, switching asks first, and cancelling keeps the account.
         let holdMarker = URL(fileURLWithPath: codexExecutable.path + ".hold-release")
@@ -2352,7 +2379,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Done removes the worktree and keeps the branch")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover, while hovering the card itself shows no tooltip and the card remains an openable control; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -2389,6 +2416,10 @@ final class PlayhouseUITests: XCTestCase {
         assertNativeHelpText(for: activeCreateButton, equals: "Create a pull request for each repository linked to this task")
         attachScreenshot(named: "Active task PR control shows its help text", fullScreen: true)
         dismissNativeHelpText(named: "Create a pull request for each repository linked to this task")
+        assertNoNativeHelpText(whileHovering: element("task-title-\(taskID)"), containing: "Open task")
+        XCTAssertTrue(element("task-card-\(taskID)").isHittable, "The card should still be a clickable control without its tooltip.")
+        XCTAssertEqual(element("task-card-\(taskID)").label, "PR failure UI", "The card keeps its accessibility label.")
+        attachScreenshot(named: "Hovering a task card shows no tooltip", fullScreen: true)
         moveTaskToDone(taskID: taskID)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
         element("done-archive-button").click()
@@ -11238,6 +11269,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(startImplementing.waitForExistence(timeout: 5), "Plan mode should offer a dedicated implementation handoff.")
         XCTAssertEqual(element("message-composer").value as? String ?? "", "", "The handoff should be available while the composer is empty.")
         XCTAssertTrue(startImplementing.isEnabled, "Start Implementing should not require draft text.")
+        XCTAssertFalse(element("start-implementing-unavailable-reason").exists, "A task with a working folder shows no missing-repository warning.")
         startImplementing.click()
         XCTAssertTrue(waitUntil({ element("conversation-mode-menu").label.contains("Code mode") }, timeout: 5), "Starting implementation should switch the composer to Code mode.")
         XCTAssertTrue(waitUntil({
@@ -11254,6 +11286,107 @@ final class PlayhouseUITests: XCTestCase {
                 && turns.last?["conversationMode"] as? String == "default"
         }, timeout: 30), "The handoff should start an implementation turn with the plan context.")
         attachScreenshot(named: "Plan mode stays active until implementation starts")
+    }
+
+    // case-contract: test_start_implementing_explains_missing_repository | A task with neither a repository nor a working folder can still plan, but once the plan exists its Start Implementing button is disabled and explains why: its tooltip and accessibility value read "Add a repository to this task to start implementing.", and a visible No repository warning beside it carries the same reason and opens the repository picker. Bridge state for the planned task has no workspace roots and no repository worktrees. Adding a repository gives the task a workspace root; in the still-open conversation the warning disappears and Start Implementing enables without reopening the task, then switches to Code mode and starts an implementation turn recorded after the plan turn, which runs in the task's created repository worktree as its only workspace root.
+    func test_start_implementing_explains_missing_repository() throws {
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-plan-handoff-markdown")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
+        codexFixtureExecutable = executable.path
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        let created = try runCLI(["task", "create", "--title", "Plan without repository", "--prompt", "Fixture task description."])
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        func turnModes() -> [String] {
+            let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
+            let history = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            return (history?["turns"] as? [[String: Any]] ?? [])
+                .filter { !(($0["userMessage"] as? String) ?? "").lowercased().contains("playhouse internal outcome nudge:") }
+                .compactMap { $0["conversationMode"] as? String }
+        }
+        func conversationMessages() -> [[String: Any]] {
+            (try? self.runCLI(["conversation", "history", taskID])["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+        }
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Plan without repository")
+
+        let modeMenu = element("conversation-mode-menu")
+        XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
+        modeMenu.click()
+        let planMode = app.menuItems["Plan mode"]
+        XCTAssertTrue(planMode.waitForExistence(timeout: 5))
+        planMode.click()
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"))
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Plan the task.")
+        element("send-message-button").click()
+
+        let reason = "Add a repository to this task to start implementing."
+        let startImplementing = element("start-implementing-button")
+        let warning = element("start-implementing-unavailable-reason")
+        XCTAssertTrue(startImplementing.waitForExistence(timeout: 30), "Planning works without a repository, so the handoff appears once the plan turn ends.")
+        XCTAssertTrue(waitUntil({
+            conversationMessages().contains { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+        }, timeout: 30), "The plan turn completes without a repository or folder.")
+        XCTAssertEqual(turnModes(), ["plan"], "The plan turn ran in Plan mode.")
+        XCTAssertFalse(startImplementing.isEnabled, "Implementing needs somewhere to change, so the handoff stays disabled.")
+        XCTAssertEqual(startImplementing.value as? String, reason, "The button's accessibility explains why it is unavailable.")
+        XCTAssertTrue(warning.waitForExistence(timeout: 5), "The reason is visible without hovering.")
+        XCTAssertEqual(warning.label, "No repository")
+        XCTAssertEqual(warning.value as? String, reason, "The warning carries the same reason as the button.")
+        XCTAssertLessThan(abs(warning.frame.midY - startImplementing.frame.midY), 4, "The warning sits beside the button in the composer toolbar.")
+        assertNativeHelpText(for: startImplementing, equals: reason)
+        // The reason appears on screen only in the tooltip (the warning shows "No repository"),
+        // so its disappearance shows the tooltip was dismissed.
+        movePointerToHelpRunway(below: startImplementing)
+        if !waitUntil({ !self.nativeHelpTextIsVisible(reason) }, timeout: 4) {
+            movePointerToHelpRunway(below: startImplementing, horizontalShift: -60)
+        }
+        XCTAssertTrue(waitUntil({ !self.nativeHelpTextIsVisible(reason) }, timeout: 6), "Moving away dismisses the Start Implementing tooltip.")
+        let task = try XCTUnwrap(try taskRecord(id: taskID))
+        XCTAssertEqual((task["workspaceRoots"] as? [String]) ?? [], [], "The task has no workspace root to implement in.")
+        XCTAssertEqual((task["repositoryWorktrees"] as? [[String: Any]])?.count ?? 0, 0)
+        attachScreenshot(named: "Start Implementing explains the missing repository")
+
+        // The warning is the way to fix it: it opens the header's repository picker.
+        warning.click()
+        XCTAssertTrue(element("conversation-repository-search").waitForExistence(timeout: 5), "The warning opens the repository picker.")
+        chooseRepositorySuggestion("primary")
+        // The header picker adds the repository as the task's root; its worktree is named and
+        // created by the next send, so the handoff below is what creates it.
+        XCTAssertTrue(waitUntil({
+            let record = try? self.taskRecord(id: taskID)
+            let repositories = (record?["repositoryWorktrees"] as? [[String: Any]] ?? []).compactMap { $0["repositoryPath"] as? String }
+            return repositories == [self.fixture.primary.path] && !(record?["workspaceRoots"] as? [String] ?? []).isEmpty
+        }, timeout: 20), "Adding the repository gives the task a workspace root.")
+        XCTAssertTrue(waitUntil({ !warning.exists && startImplementing.isEnabled }, timeout: 10), "The open conversation drops the warning and enables the handoff without reopening.")
+        XCTAssertEqual(startImplementing.value as? String, "Available")
+        attachScreenshot(named: "Start Implementing enabled once a repository is added")
+
+        startImplementing.click()
+        XCTAssertTrue(waitUntil({ modeMenu.label.contains("Code mode") }, timeout: 5), "Starting implementation switches the composer to Code mode.")
+        XCTAssertTrue(waitUntil({
+            // The fixture reuses one user item ID per thread, so the handoff's user item replaces
+            // the plan's in history; the fixture's own turn log below records their order.
+            let history = conversationMessages()
+            let handoffIndex = history.firstIndex { $0["role"] as? String == "user" && $0["text"] as? String == "Start implementing the plan." }
+            let finalIndex = history.lastIndex { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+            return handoffIndex != nil && finalIndex != nil && finalIndex! > handoffIndex!
+        }, timeout: 30), "The handoff starts an implementation turn that answers.")
+        XCTAssertTrue(waitUntil({ turnModes() == ["plan", "default"] }, timeout: 30), "The handoff turn runs in Code mode after the plan turn.")
+        // Paths are compared resolved, since /tmp fixtures can be reported through /private/tmp.
+        func resolved(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }
+        var lastRecord: [String: Any]?
+        XCTAssertTrue(waitUntil({
+            lastRecord = try? self.taskRecord(id: taskID)
+            guard let record = lastRecord,
+                  let worktree = (record["repositoryWorktrees"] as? [[String: Any]])?.first,
+                  worktree["isPending"] as? Bool == false,
+                  let path = worktree["worktreePath"] as? String,
+                  resolved(path) != resolved(self.fixture.primary.path) else { return false }
+            return (record["workspaceRoots"] as? [String] ?? []).map(resolved) == [resolved(path)]
+        }, timeout: 20), "The implementation turn runs in the task's created worktree: \(String(describing: lastRecord?["repositoryWorktrees"])) roots \(String(describing: lastRecord?["workspaceRoots"]))")
     }
 
     // case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
@@ -11952,6 +12085,97 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(turns.last?["reasoningEffort"] as? String, "xhigh")
         let effort = try XCTUnwrap(try runCLI(["conversation", "effort", taskID])["result"] as? [String: Any])
         XCTAssertEqual(effort["effort"] as? String, "xhigh")
+    }
+
+    // case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread, and after the selection moves to another non-default model (Mini) it resumes with that selected model rather than the hardcoded default and succeeds even though Codex, still holding the thread open, reports Sol; the reply stays visible with no conversation error. A later send on Luna still confirms the model Codex reports and fails with a model mismatch instead of switching silently, without starting a turn, and the next Luna send whose model Codex confirms succeeds.
+    func test_codex_history_keeps_loaded_thread_model() throws {
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-unique-turns-success")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
+        codexFixtureExecutable = executable.path
+        let historyURL = URL(fileURLWithPath: executable.path + ".history")
+        let keptModel = URL(fileURLWithPath: executable.path + ".resume-keeps-model")
+        try? FileManager.default.removeItem(at: historyURL)
+        try? FileManager.default.removeItem(at: keptModel)
+        defer { try? FileManager.default.removeItem(at: keptModel) }
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Codex kept model UI", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Codex kept model UI")
+        openTask(named: "Codex kept model UI")
+        let picker = element("model-picker-menu")
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.click()
+        app.buttons["model-option-gpt-6-sol"].click()
+        picker.click()
+        XCTAssertTrue(app.staticTexts["Send a message to Codex · Sol."].waitForExistence(timeout: 10))
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Run on Sol.")
+        element("send-message-button").click()
+        let reply = "Answers received: Blue / fixture-secret."
+        XCTAssertTrue(transcriptMessage(reply).waitForExistence(timeout: 15), "The Sol turn's reply should arrive.")
+        XCTAssertTrue(app.staticTexts["Codex · Sol"].exists)
+        // The turn just ended with Sol still selected: reopening reuses the loaded
+        // thread instead of resuming it with the hardcoded default (Luna).
+        XCTAssertEqual((try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "gpt-6-sol")
+        try "gpt-6-sol\n".write(to: keptModel, atomically: true, encoding: .utf8)
+        returnToBoard()
+        openTask(named: "Codex kept model UI")
+        XCTAssertTrue(transcriptMessage(reply).waitForExistence(timeout: 10))
+        XCTAssertFalse(waitUntil({ !FileManager.default.fileExists(atPath: keptModel.path) }, timeout: 3),
+                       "History must not resume a thread already loaded with the task's model.")
+        XCTAssertFalse(element("codex-chat-error").exists)
+        // Codex still holds the thread on Sol while the selection moves to Mini (neither
+        // Sol nor the default), so reopening resumes with Mini and Codex reports Sol.
+        picker.click()
+        app.buttons["model-option-gpt-6-mini"].click()
+        picker.click()
+        XCTAssertTrue(waitUntil({ picker.label.contains("GPT-6 Mini") }, timeout: 10))
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["conversation", "model", taskID]))?["result"] as? [String: Any])?["modelID"] as? String == "gpt-6-mini"
+        }, timeout: 10))
+        returnToBoard()
+        openTask(named: "Codex kept model UI")
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: keptModel.path) }, timeout: 15),
+                      "Reopening the task should resume the thread and read the model Codex kept.")
+        let resumes = try XCTUnwrap(
+            (try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any])?["threadResumeKeptModels"] as? [[String: String]]
+        )
+        XCTAssertEqual(resumes.last, ["requested": "gpt-6-mini", "reported": "gpt-6-sol"],
+                       "History resumes with the task's selected model, not the hardcoded default.")
+        XCTAssertTrue(transcriptMessage(reply).waitForExistence(timeout: 10), "History still shows the Sol reply.")
+        XCTAssertTrue(app.staticTexts["Codex · Sol"].exists)
+        XCTAssertFalse(element("codex-chat-error").waitForExistence(timeout: 2),
+                       "Loading history must not fail when Codex keeps the loaded thread's model.")
+        attachScreenshot(named: "History loads after Codex keeps the Sol thread model")
+        // A send on a model the thread wasn't loaded with still has its model confirmed.
+        picker.click()
+        app.buttons["model-option-gpt-6-luna"].click()
+        picker.click()
+        XCTAssertTrue(waitUntil({ picker.label.contains("GPT-6 Luna") }, timeout: 10))
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["conversation", "model", taskID]))?["result"] as? [String: Any])?["modelID"] as? String == "gpt-6-luna"
+        }, timeout: 10))
+        try "gpt-6-sol\n".write(to: keptModel, atomically: true, encoding: .utf8)
+        composer.click()
+        composer.typeText("Run on Luna.")
+        element("send-message-button").click()
+        let error = element("codex-chat-error")
+        XCTAssertTrue(error.waitForExistence(timeout: 15), "A send whose model Codex didn't confirm must fail visibly.")
+        XCTAssertTrue(error.label.contains("Codex selected gpt-6-sol instead of gpt-6-luna"), error.label)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: keptModel.path))
+        attachScreenshot(named: "A send still reports a Codex model mismatch")
+        composer.click()
+        composer.typeText("Run on Luna again.")
+        element("send-message-button").click()
+        XCTAssertTrue(app.staticTexts["Codex · Luna"].waitForExistence(timeout: 15), "The confirmed Luna send replies on Luna.")
+        XCTAssertFalse(error.exists, "A successful send clears the mismatch error.")
+        let turns = try XCTUnwrap(
+            (try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any])?["turns"] as? [[String: Any]]
+        )
+        XCTAssertFalse(turns.contains { ($0["userMessage"] as? String)?.hasSuffix("Run on Luna.") == true },
+                       "A send whose model Codex didn't confirm must not start a turn.")
+        XCTAssertEqual(turns.last { ($0["userMessage"] as? String)?.hasSuffix("Run on Luna again.") == true }?["modelID"] as? String, "gpt-6-luna")
+        attachScreenshot(named: "The confirmed Luna send succeeds")
     }
 
     // case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 resolved from Claude Code's bare alias entry as the concrete latest choice in place of the older Opus 5. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
@@ -16351,6 +16575,10 @@ final class PlayhouseUITests: XCTestCase {
         try FileManager.default.createDirectory(at: claudeSkills, withIntermediateDirectories: true)
         try "Not a skill, just a file in the way.\n".write(to: claudeSkills.appendingPathComponent("blocked"), atomically: true, encoding: .utf8)
         launchApp(defaultParent: fixture.parent.path)
+        // The window reads Claude's plan usage once at launch, in a session of its own; count from after it.
+        let usageReadsURL = URL(fileURLWithPath: claudeExecutable.path + ".usage-reads")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: usageReadsURL.path) }, timeout: 30), "Launch reads Claude's plan usage.")
+        let sessionsAtLaunch = claudeSessions()
         let task = try createSkillsTask("Skills links", repositories: [repository])
         let taskID = try XCTUnwrap(task["id"] as? String)
         let worktree = URL(fileURLWithPath: try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String))
@@ -16363,7 +16591,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
         XCTAssertTrue(isOn(toggle))
         // The page reads Claude Code's built-ins once when it opens.
-        XCTAssertTrue(waitUntil({ claudeSessions() >= 1 }, timeout: 20), "Opening the Skills page reads Claude Code's built-ins.")
+        XCTAssertTrue(waitUntil({ claudeSessions() > sessionsAtLaunch }, timeout: 20), "Opening the Skills page reads Claude Code's built-ins.")
         let sessionsBeforeToggle = claudeSessions()
         toggle.click()
         XCTAssertTrue(waitUntil({ !self.isOn(toggle) }, timeout: 0.75), "The switch flips as soon as it is clicked.")
@@ -18811,6 +19039,23 @@ final class PlayhouseUITests: XCTestCase {
         app.descendants(matching: .helpTag)
             .matching(Self.textPredicate(containing: text, caseInsensitive: false, includeTitle: true))
             .firstMatch.exists
+    }
+
+    /// Hovers the control with the same real mouse movement as `assertNativeHelpText` and asserts
+    /// that no tooltip containing `text` ever appears.
+    private func assertNoNativeHelpText(whileHovering element: XCUIElement, containing text: String) {
+        app.activate()
+        movePointerToHelpRunway(below: element)
+        Thread.sleep(forTimeInterval: 1.5)
+        element.hover()
+        let frame = element.frame
+        for step in 0..<6 {
+            let point = CGPoint(x: frame.midX - 4 + CGFloat(step % 3) * 4, y: frame.midY + CGFloat(step % 2) * 2)
+            CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        Thread.sleep(forTimeInterval: 2.5)
+        XCTAssertFalse(nativeHelpTextIsVisible(text), "Hovering the card should not present a ‘\(text)’ tooltip.")
     }
 
     private func dismissNativeHelpText(named expected: String) {

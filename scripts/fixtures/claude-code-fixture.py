@@ -1260,6 +1260,18 @@ def main():
                             "commands": fixture_commands(), "agents": []}
             elif request.get("subtype") == "mcp_status":
                 response = {"mcpServers": []}
+            elif request.get("subtype") == "get_usage":
+                # The plan's usage as `/usage` reads it; without a seeded file the
+                # account has none, as with an API-key login.
+                with open(str(sys.argv[0]) + ".usage-reads", "a", encoding="utf-8") as reads:
+                    reads.write(json.dumps({"skipBehaviors": request.get("skip_behaviors")}) + "\n")
+                # A usage service that never answers: the request gets no reply at all.
+                if Path(str(sys.argv[0]) + ".usage-hang").exists():
+                    continue
+                usage = Path(str(sys.argv[0]) + ".usage")
+                response = json.loads(usage.read_text(encoding="utf-8")) if usage.exists() else {
+                    "rate_limits_available": False, "rate_limits": None,
+                }
             else:
                 response = {}
             write({"type": "control_response", "response": {

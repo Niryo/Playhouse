@@ -157,7 +157,10 @@ def main() -> int:
             in_menu = name in MENU_BAR_FILES or any(a < start < b for a, b in menus)
             help_modifier = r"\.help" if in_menu else r"\.nativeHelp"
             help_match = re.search(help_modifier + r"\(\s*(\"(?:\\.|[^\"\\])*\"|[^)\n]+)\s*\)", chain)
-            if not help_match:
+            if not help_match and re.search(r"//\s*no-tooltip:\s*\S", chain):
+                # Deliberate opt-out for controls whose tooltip would only restate the obvious.
+                pass
+            elif not help_match:
                 errors.append(f"{location}: {kind} is missing a help hint"
                               + ("" if in_menu else " (use .nativeHelp, not .help)"))
             else:

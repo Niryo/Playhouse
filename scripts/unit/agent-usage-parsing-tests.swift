@@ -47,6 +47,25 @@ struct AgentUsageParsingTests {
         expect(odd?.windows.last?.label, "Weird New Limit", "unknown type gets a readable label")
         expect(odd?.windows.first?.usedPercent, 50, "numeric strings are accepted")
 
+        // Claude: the get_usage reply, as Claude Code 2.1.309 sends it.
+        let usage = ClaudeUsageRead.parse(json("""
+        {"subscription_type":"max","rate_limits_available":true,"rate_limits":{
+          "five_hour":{"utilization":12.0,"resets_at":"2030-03-17T17:46:40.000Z"},"seven_day":{"utilization":0.5,"resets_at":"2030-03-20T00:00:00Z"},
+          "seven_day_opus":null,"seven_day_sonnet":{"utilization":3,"resets_at":null},"tangelo":null,
+          "extra_usage":{"is_enabled":true,"monthly_limit":65000,"used_credits":33602,"utilization":51.7,"spend_limit_reached":false},"limits":[]}}
+        """))
+        expect(usage?.windows.map(\.id), ["five_hour", "seven_day", "seven_day_sonnet", "overage"], "plan windows, then the spend; null windows are left out")
+        expect(usage?.windows.map(\.label), ["5h", "Weekly", "Weekly Sonnet", "Spend limit"], "read window labels")
+        expect(usage?.windows.map(\.usedPercent), [12, 0.5, 3, 51.7], "get_usage percents are already percents")
+        expect(usage?.windows[0].resetsAt, 1_900_000_000, "ISO reset time with fractional seconds")
+        expect(usage?.windows.last?.resetsAt, nil, "the spend has no reset time in the reply")
+        expect(usage?.limitReached, false, "spend not reached")
+        let enterprise = ClaudeUsageRead.parse(json(#"{"rate_limits_available":true,"rate_limits":{"five_hour":null,"extra_usage":{"is_enabled":true,"utilization":100,"spend_limit_reached":true}}}"#))
+        expect(enterprise?.windows.map(\.id), ["overage"], "a usage-based plan has only its spend")
+        expect(enterprise?.limitReached, true, "a reached spend limit is a reached limit")
+        expect(ClaudeUsageRead.parse(json(#"{"rate_limits_available":false,"rate_limits":null}"#)) == nil, true, "no plan usage reads as nothing")
+        expect(ClaudeUsageRead.parse(json(#"{"rate_limits":{"extra_usage":{"is_enabled":false,"utilization":null}}}"#)) == nil, true, "disabled extra usage and no windows read as nothing")
+
         // Codex: a full read with both windows, credits, and a second bucket.
         let read = json("""
         {"rateLimits":{"limitId":"codex","primary":{"usedPercent":30,"windowDurationMins":300,"resetsAt":1900000000},

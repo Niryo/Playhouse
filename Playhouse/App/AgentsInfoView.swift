@@ -120,7 +120,6 @@ struct AgentsInfoView: View {
                                     .accessibilityHidden(true)
                                 Text("Agents info")
                                     .font(.system(size: 10, weight: .semibold))
-                                    .textCase(.uppercase)
                                 Spacer(minLength: 0)
                             }
                             .foregroundStyle(.secondary)
@@ -225,7 +224,7 @@ private struct AgentUsageBlock: View {
                         .accessibilityIdentifier("agents-info-\(provider.rawValue)-updated")
                 }
             } else {
-                Text(provider == .claude ? "No data yet. Updates while a task runs." : "No data yet")
+                Text("No data yet")
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("agents-info-\(provider.rawValue)-empty")
@@ -239,21 +238,24 @@ private struct AgentUsageBlock: View {
     }
 
     private var header: some View {
-        HStack(spacing: 5) {
+        HStack(alignment: .top, spacing: 5) {
             Image(systemName: provider == .claude ? "sparkle" : "chevron.left.forwardslash.chevron.right")
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
-            Text(provider.displayName)
-                .font(.system(size: 11, weight: .semibold))
-            if let identity = [usage.account, usage.plan].compactMap({ $0 }).first {
-                Text(identity)
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .nativeHelp([usage.account, usage.plan].compactMap { $0 }.joined(separator: " · "))
-                    .accessibilityIdentifier("agents-info-\(provider.rawValue)-account")
+            VStack(alignment: .leading, spacing: 1) {
+                Text(provider.displayName)
+                    .font(.system(size: 11, weight: .semibold))
+                let identity = [usage.account, usage.plan].compactMap { $0 }
+                if !identity.isEmpty {
+                    Text(identity.joined(separator: " "))
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .nativeHelp(identity.joined(separator: " · "))
+                        .accessibilityIdentifier("agents-info-\(provider.rawValue)-account")
+                }
             }
             Spacer(minLength: 0)
             if usage.loggedIn != nil {

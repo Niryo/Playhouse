@@ -1,7 +1,7 @@
 import Foundation
 
-// Plan usage and limits for the agent CLIs, fed by what each provider already
-// pushes: Claude Code's `rate_limit_event` stream message and Codex's
+// Plan usage and limits for the agent CLIs: Claude Code's `get_usage` control
+// reply and `rate_limit_event` stream message, and Codex's
 // `account/rateLimits/*` app-server methods. This file is Foundation-only so the
 // parsing and reset rules can be unit-checked on their own
 // (scripts/unit/agent-usage-parsing-tests.swift).
@@ -182,13 +182,14 @@ enum ClaudeRateLimitEvent {
         case "seven_day": "Weekly"
         case "seven_day_opus": "Weekly Opus"
         case "seven_day_sonnet": "Weekly Sonnet"
-        case "overage": "Overage"
+        case "overage": "Spend limit"
         default: AgentUsageParsing.humanized(id)
         }
     }
 
     static func windowOrder(_ lhs: AgentUsageWindow, _ rhs: AgentUsageWindow) -> Bool {
-        func rank(_ id: String) -> Int { id == "five_hour" ? 0 : id == "seven_day" ? 1 : 2 }
+        // The spend limit, which only covers the plan's own windows, comes last.
+        func rank(_ id: String) -> Int { id == "five_hour" ? 0 : id == "seven_day" ? 1 : id == "overage" ? 3 : 2 }
         return (rank(lhs.id), lhs.id) < (rank(rhs.id), rhs.id)
     }
 
@@ -209,6 +210,47 @@ enum ClaudeRateLimitEvent {
         result.usedPercent = update.usedPercent ?? result.usedPercent
         result.resetsAt = update.resetsAt ?? result.resetsAt
         return result
+    }
+}
+
+/// Claude Code's `get_usage` control reply (CLI 2.1.309 and later), the same data
+/// `/usage` shows. Its `rate_limits` carries each subscription window as
+/// `{utilization, resets_at}` with utilization already 0...100, and
+/// `extra_usage`, the monthly spend that is the only limit a usage-based plan has.
+/// Windows keep the ids the stream's `rate_limit_event` uses, so either source
+/// updates the same rows.
+enum ClaudeUsageRead {
+    struct Parsed: Equatable {
+        var windows: [AgentUsageWindow]
+        var limitReached: Bool
+    }
+
+    static let windowIDs = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"]
+
+    /// nil when the reply has no plan usage (an API-key login, or a CLI that
+    /// could not reach the usage service), so a failed read never clears the rows.
+    static func parse(_ response: [String: Any]) -> Parsed? {
+        guard response["rate_limits_available"] as? Bool != false,
+              let limits = response["rate_limits"] as? [String: Any] else { return nil }
+        var windows: [AgentUsageWindow] = windowIDs.compactMap { id in
+            guard let object = limits[id] as? [String: Any],
+                  let percent = AgentUsageParsing.number(object["utilization"]) else { return nil }
+            return AgentUsageWindow(
+                id: id,
+                label: ClaudeRateLimitEvent.label(for: id),
+                usedPercent: max(0, percent),
+                resetsAt: AgentUsageParsing.timestamp(object["resets_at"])
+            )
+        }
+        var limitReached = false
+        if let extra = limits["extra_usage"] as? [String: Any], extra["is_enabled"] as? Bool == true,
+           let percent = AgentUsageParsing.number(extra["utilization"]) {
+            // The reply has no reset time for it; the stream's `overage` event does.
+            windows.append(AgentUsageWindow(id: "overage", label: ClaudeRateLimitEvent.label(for: "overage"), usedPercent: max(0, percent)))
+            limitReached = extra["spend_limit_reached"] as? Bool == true
+        }
+        guard !windows.isEmpty else { return nil }
+        return Parsed(windows: windows.sorted(by: ClaudeRateLimitEvent.windowOrder), limitReached: limitReached)
     }
 }
 

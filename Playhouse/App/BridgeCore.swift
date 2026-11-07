@@ -5628,6 +5628,7 @@ final class ConversationManager {
                 history = try await codex.loadThread(
                     id: threadID,
                     workspace: workspace,
+                    modelID: try? modelID(taskID: taskID),
                     developerInstructions: TaskThreadDeveloperInstructions.make(
                         taskID: taskID,
                         repositories: task.repositoryWorktrees,

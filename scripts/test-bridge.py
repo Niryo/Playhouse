@@ -2788,7 +2788,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.primary, "rev-parse", branch), branch_head, "The branch must keep its commits without merging.")
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover, while hovering the card itself shows no tooltip and the card remains an openable control; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task(
             "PR failure", [self.primary], merge_targets={self.primary: "main"}
@@ -7948,6 +7948,65 @@ class PlayhouseBridgeTests(unittest.TestCase):
                              for event in plan_diagnostics))
         self.assertNotIn(markdown_reply, json.dumps(plan_diagnostics))
 
+    # case-contract: test_start_implementing_explains_missing_repository | A task with neither a repository nor a working folder can still plan, but once the plan exists its Start Implementing button is disabled and explains why: its tooltip and accessibility value read "Add a repository to this task to start implementing.", and a visible No repository warning beside it carries the same reason and opens the repository picker. Bridge state for the planned task has no workspace roots and no repository worktrees. Adding a repository gives the task a workspace root; in the still-open conversation the warning disappears and Start Implementing enables without reopening the task, then switches to Code mode and starts an implementation turn recorded after the plan turn, which runs in the task's created repository worktree as its only workspace root.
+    def test_start_implementing_explains_missing_repository(self):
+        task_id = self.create_task(title="Plan without repository", roots=[])["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-plan-handoff-markdown"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        planned, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Plan the task.", "--mode", "plan",
+            extra_environment=env,
+        )
+        messages = self.assert_success(planned)["messages"]
+        self.assertTrue(any(message["role"] == "user" and message["text"] == "Plan the task." for message in messages))
+        self.assertTrue(any(message["role"] == "assistant" and message["phase"] == "final_answer" for message in messages),
+                        "Planning needs no repository or folder.")
+        # The handoff's availability reads these: with neither, Start Implementing explains the missing repository.
+        response, _ = self.call_cli("task", "get", task_id)
+        task = self.assert_success(response)
+        self.assertEqual(task["workspaceRoots"], [], "A task created without a folder or repository has no workspace root.")
+        self.assertEqual(task["repositoryWorktrees"], [])
+
+        repository = self.data_directory / "plan-handoff-repository"
+        repository.mkdir()
+        (repository / "README.md").write_text("Plan handoff fixture.\n", encoding="utf-8")
+        self.run_git(repository, "init", "--initial-branch=main")
+        self.run_git(repository, "config", "user.name", "Playhouse Bridge Test")
+        self.run_git(repository, "config", "user.email", "playhouse-bridge-test@example.invalid")
+        self.run_git(repository, "add", "README.md")
+        self.run_git(repository, "commit", "-m", "Baseline")
+        added, _ = self.call_cli("task", "repository", "add", task_id, "--repo", str(repository))
+        record = next(item for item in self.assert_success(added)["repositoryWorktrees"]
+                      if item["repositoryPath"] == str(repository))
+        self.assertFalse(record["isPending"], "Adding a repository to a started task creates its worktree.")
+        self.assertTrue(Path(record["worktreePath"]).is_dir())
+        response, _ = self.call_cli("task", "get", task_id)
+        self.assertIn(record["worktreePath"], self.assert_success(response)["workspaceRoots"],
+                      "A fresh read sees the worktree as the root implementation runs in.")
+
+        implementation, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Start implementing the plan.", "--mode", "default",
+            extra_environment=env,
+        )
+        self.assertEqual(self.assert_success(implementation)["messages"][-2]["text"], "Start implementing the plan.")
+        fixture_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        turn_modes = [turn["conversationMode"] for turn in fixture_history["turns"]
+                      if "playhouse internal outcome nudge:" not in (turn["userMessage"] or "").lower()]
+        self.assertEqual(turn_modes, ["plan", "default"], "The handoff runs in Code mode after the plan turn.")
+        response, _ = self.call_cli("task", "get", task_id)
+        handed_off = self.assert_success(response)
+        worktree = next(item for item in handed_off["repositoryWorktrees"] if item["repositoryPath"] == str(repository))
+        self.assertFalse(worktree["isPending"])
+        self.assertNotEqual(os.path.realpath(worktree["worktreePath"]), os.path.realpath(repository))
+        self.assertEqual([os.path.realpath(root) for root in handed_off["workspaceRoots"]], [os.path.realpath(worktree["worktreePath"])],
+                         "The implementation turn runs in the task's created worktree as its only root.")
+
     # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected model is global across conversations for the active provider, persists through fresh CLI/XPC reads and reopening, and remains isolated between providers; a saved per-conversation model migrates into the global preference on first read; effort persists per conversation. Malformed model IDs and unsupported efforts are rejected without replacing prior choices. The UI opens a second conversation and shows the global model selection; unsupported modes and malformed model IDs are rejected before creating history.
     def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):
         title = "Conversation mode validation"
@@ -8216,6 +8275,58 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(assistants[0].get("createdAt"), "Legacy provider history without a timestamp must stay timestamp-free.")
         self.assertEqual(assistants[-1]["modelID"], "gpt-6-luna")
         self.assertEqual(assistants[-1]["createdAt"], "2026-10-26T12:34:00Z")
+
+    # case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread, and after the selection moves to another non-default model (Mini) it resumes with that selected model rather than the hardcoded default and succeeds even though Codex, still holding the thread open, reports Sol; the reply stays visible with no conversation error. A later send on Luna still confirms the model Codex reports and fails with a model mismatch instead of switching silently, without starting a turn, and the next Luna send whose model Codex confirms succeeds.
+    def test_codex_history_keeps_loaded_thread_model(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-kept-model-unique-turns-success"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        kept_model = Path(str(executable) + ".resume-keeps-model")
+        task_id = self.create_task(title="Codex kept model history")["id"]
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-sol")[0])
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Run on Sol.", "--model", "gpt-6-sol", extra_environment=environment
+        )[0])
+        # The turn just ended and the selected model is still Sol: history reuses the
+        # loaded thread instead of resuming it with the hardcoded default (Luna).
+        kept_model.write_text("gpt-6-sol\n", encoding="utf-8")
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        self.assertTrue(any(message["role"] == "assistant" for message in history["messages"]))
+        self.assertTrue(kept_model.is_file(), "History must not resume a thread already loaded with the task's model.")
+        # The selection moves to Mini (neither Sol nor the default) while Codex still
+        # holds the thread on Sol: history resumes with Mini, Codex keeps Sol, and the
+        # read still succeeds.
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-mini")[0])
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        self.assertFalse(kept_model.exists(), "History must have resumed the thread and read Codex's reported model.")
+        recorded = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertEqual(recorded["threadResumeKeptModels"][-1], {"requested": "gpt-6-mini", "reported": "gpt-6-sol"},
+                         "History resumes with the task's selected model, not the hardcoded default.")
+        self.assertTrue(any(message["role"] == "assistant" for message in history["messages"]))
+        # A send still confirms its model: Codex keeping Sol fails a send on Luna.
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-luna")[0])
+        kept_model.write_text("gpt-6-sol\n", encoding="utf-8")
+        mismatch, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Run on Luna.", "--model", "gpt-6-luna",
+            expected_status=1, extra_environment=environment
+        )
+        self.assertIn("Codex selected gpt-6-sol instead of gpt-6-luna", mismatch["error"]["message"])
+        self.assertFalse(kept_model.exists())
+        recorded = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertEqual(recorded["threadResumeKeptModels"][-1], {"requested": "gpt-6-luna", "reported": "gpt-6-sol"})
+        self.assertFalse(any(turn.get("userMessage", "").endswith("Run on Luna.") for turn in recorded["turns"]),
+                         "A send whose model Codex didn't confirm must not start a turn.")
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Run on Luna again.", "--model", "gpt-6-luna", extra_environment=environment
+        )[0])
+        recorded = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        luna_turn = next(turn for turn in reversed(recorded["turns"]) if turn.get("userMessage", "").endswith("Run on Luna again."))
+        self.assertEqual(luna_turn["modelID"], "gpt-6-luna")
 
     # case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 resolved from Claude Code's bare alias entry as the concrete latest choice in place of the older Opus 5. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
     def test_conversation_effort_dispatches_to_claude(self):
@@ -10192,7 +10303,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_success(response)
         assert_nudged_work(self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0]), "later turn")
 
-    # case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude, which only reports usage while a task runs, starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the Scheduled Tasks button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
+    # case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude's usage is read with Claude Code's get_usage control request, which has none for this account yet, so Claude starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Because Claude Code streams rate_limit_event only when a limit's status changes, and a usage-based plan's event has no utilization, every finished Claude turn reads the plan's usage again through get_usage (skipping the local transcript scan) without a refresh: the read replaces the windows with the plan's current ones, keeps get_usage percents as percents, shows a usage-based plan's monthly extra usage as a Spend limit row with the reset time from the stream's overage event, and is persisted; a refresh reads it too, a reply without plan usage keeps the last known rows, a reached spend limit reads as the limit reached, and a usage request that is never answered times out, keeping the last known rows, so later reads work again. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the Scheduled Tasks button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account and plan together on the row beneath the provider name, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. After a Claude turn whose usage read reports the plan's spend, the open window shows Claude's Spend limit row with its percent and reset time and the updated 5h row without a relaunch. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
     def test_agents_info_shows_provider_usage_and_accounts(self):
         source = Path(__file__).resolve().parent / "fixtures"
         codex = self.data_directory / "codex-fixture-agents-info"
@@ -10304,6 +10415,75 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(expired.get("resetsAt"))
         self.assertEqual(claude_state["snapshot"]["status"], "allowed", "The limit lifts with the window that held it.")
         self.assertEqual(windows(claude_state)["seven_day"]["usedPercent"], 41)
+
+        # Claude Code pushes rate_limit_event only when a limit's status changes, and a
+        # usage-based plan's event names its spend limit with no utilization. So after
+        # every turn Playhouse reads the plan's usage with Claude Code's get_usage
+        # control request, without a model call and without a refresh.
+        usage_path = Path(str(claude) + ".usage")
+        usage_reads = Path(str(claude) + ".usage-reads")
+
+        def read_count():
+            return len(usage_reads.read_text(encoding="utf-8").splitlines()) if usage_reads.exists() else 0
+
+        def iso(seconds):
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+
+        usage_path.write_text(json.dumps({"rate_limits_available": True, "rate_limits": {
+            "five_hour": {"utilization": 12.0, "resets_at": iso(now + 7200)},
+            "seven_day": {"utilization": 0.5, "resets_at": iso(now + 5 * 86400)},
+            "seven_day_opus": None,
+            "extra_usage": {"is_enabled": True, "monthly_limit": 65000, "used_credits": 33602,
+                            "utilization": 51.7, "spend_limit_reached": False},
+        }}), encoding="utf-8")
+        reads_before_turn = read_count()
+        claude_turn({"status": "allowed", "rateLimitType": "overage", "resetsAt": now + 20 * 86400, "isUsingOverage": False})
+        claude_state = wait_for(
+            "claude", lambda state: windows(state).get("five_hour", {}).get("usedPercent") == 12,
+            "A finished Claude turn should read the plan's usage again.",
+        )
+        self.assertGreater(read_count(), reads_before_turn, "The turn's end reads usage through get_usage.")
+        self.assertIs(json.loads(usage_reads.read_text(encoding="utf-8").splitlines()[-1])["skipBehaviors"], True,
+                      "The read skips the local transcript scan.")
+        read_windows = windows(claude_state)
+        self.assertEqual(list(read_windows), ["five_hour", "seven_day", "overage"], "The read lists the plan's windows; null ones are left out.")
+        self.assertFalse(read_windows["five_hour"]["isReset"], "The read replaces the expired window with the current one.")
+        self.assertEqual(read_windows["five_hour"]["resetsAt"], now + 7200)
+        self.assertEqual(read_windows["seven_day"]["usedPercent"], 0.5, "get_usage reports percents, so 0.5 stays 0.5%.")
+        self.assertEqual((read_windows["overage"]["label"], read_windows["overage"]["usedPercent"]), ("Spend limit", 51.7))
+        self.assertEqual(read_windows["overage"]["resetsAt"], now + 20 * 86400, "The spend's reset time comes from the stream's overage event.")
+        self.assertEqual(claude_state["snapshot"]["status"], "allowed")
+        saved = json.loads(persisted[0].read_text(encoding="utf-8"))
+        self.assertEqual([window["usedPercent"] for window in saved["claude"]["snapshot"]["windows"]], [12, 0.5, 51.7])
+
+        # A refresh reads it too; a reply without plan usage keeps the last known rows.
+        usage_path.write_text(json.dumps({"rate_limits_available": False, "rate_limits": None}), encoding="utf-8")
+        reads_before_refresh = read_count()
+        claude_state = usage("--refresh")["claude"]
+        self.assertGreater(read_count(), reads_before_refresh, "A refresh reads Claude's usage.")
+        self.assertEqual([window["usedPercent"] for window in windows(claude_state).values()], [12, 0.5, 51.7],
+                         "An unavailable reply must not clear the rows.")
+        usage_path.write_text(json.dumps({"rate_limits_available": True, "rate_limits": {
+            "extra_usage": {"is_enabled": True, "utilization": 100.0, "spend_limit_reached": True},
+        }}), encoding="utf-8")
+        claude_state = usage("--refresh")["claude"]
+        self.assertEqual(list(windows(claude_state)), ["overage"], "A read replaces the windows a plan no longer has.")
+        self.assertEqual(claude_state["snapshot"]["status"], "rejected", "A reached spend limit is a reached limit.")
+
+        # A get_usage request that is never answered times out instead of holding
+        # every later read, and the next read works again.
+        hang_path = Path(str(claude) + ".usage-hang")
+        hang_path.write_text("hang\n", encoding="utf-8")
+        started = time.monotonic()
+        claude_state = usage("--refresh")["claude"]
+        self.assertLess(time.monotonic() - started, 45, "An unanswered usage read must time out.")
+        self.assertEqual(list(windows(claude_state)), ["overage"], "A read that timed out keeps the last known rows.")
+        hang_path.unlink()
+        usage_path.write_text(json.dumps({"rate_limits_available": True, "rate_limits": {
+            "extra_usage": {"is_enabled": True, "utilization": 40.0, "spend_limit_reached": False},
+        }}), encoding="utf-8")
+        self.assertEqual(windows(usage("--refresh")["claude"])["overage"]["usedPercent"], 40, "Reads work again after a timeout.")
+        usage_path.unlink()
 
         # Switching the Codex account signs out, clears usage, and signs in again;
         # the new account's usage arrives with the login's own notifications.
