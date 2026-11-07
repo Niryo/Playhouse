@@ -80,6 +80,13 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/unit/agent-usage-parsing-tests.swift" \
   -o "${agent_usage_parsing_tests}"
 "${agent_usage_parsing_tests}"
+# Unit checks of the process host that lets provider agents outlive their daemon.
+agent_run_host_tests="${test_output_dir}/agent-run-host-tests"
+xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/Playhouse/App/AgentRunHost.swift" \
+  "${repository_root}/scripts/unit/agent-run-host-tests.swift" \
+  -o "${agent_run_host_tests}"
+"${agent_run_host_tests}"
 if [[ ! -x "${cli_path}" ]]; then
   printf 'The app build did not produce its bundled CLI at %s.\n' "${cli_path}" >&2
   exit 1

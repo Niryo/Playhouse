@@ -495,6 +495,32 @@ struct TaskTokenUsageSummary: Codable, Equatable {
 /// provider runtime. Codex and Claude Code each implement it over their own
 /// native protocol; history composition and persistence stay in the manager.
 @MainActor
+/// The callbacks a provider reports one turn through, as `sendMessage` takes them. A turn
+/// this daemon reattached after a restart reports through the same set.
+struct ConversationTurnCallbacks {
+    let onDelta: (String) -> Void
+    let onFinalMessage: (String) -> Void
+    let onActivity: (ConversationActivity) -> Void
+    let onDiff: (ConversationTurnDiff) -> Void
+    let onHistory: (ConversationHistory) -> Void
+    let onActionRequest: () -> Void
+    let onUserInput: (ConversationUserInputRequest) async -> Void
+    let onSteerMessage: (String, [String]) -> Void
+    let onProgressMessage: (ConversationMessage) -> Void
+    let onTurnStarted: (String) -> Void
+    let onTokenUsage: (ConversationTurnUsageReport) -> Void
+}
+
+/// What a daemon found when it went back to a turn that was running when its predecessor died.
+enum ConversationReattachResult: Equatable {
+    /// The provider has no running turn for the conversation.
+    case notRunning
+    /// The turn ended, now or while no daemon was connected; its result is in history.
+    case finished
+    /// The agent that ran the turn is gone without finishing it.
+    case agentGone
+}
+
 protocol ConversationProviderClient: AnyObject {
     var provider: ConversationProvider { get }
     var wasLastTurnInterrupted: Bool { get }
@@ -537,6 +563,15 @@ protocol ConversationProviderClient: AnyObject {
         sensitiveUserInputAnswerValues: [String],
         hideSensitiveRecoveryPrompt: Bool
     ) async throws
+    /// Follows a turn of `threadID` that kept running while the daemon restarted, reporting
+    /// through `callbacks` until it ends. `onAttached` runs once the turn is registered as this
+    /// daemon's own (or was found settled), before the wait.
+    func followReattachedTurn(
+        threadID: String,
+        workspace: ConversationWorkspaceContext,
+        callbacks: ConversationTurnCallbacks,
+        onAttached: @escaping () -> Void
+    ) async throws -> ConversationReattachResult
     func interruptActiveTurn(threadID: String) async throws -> Bool
     func steerActiveTurn(threadID: String, text: String, imageDataURLs: [String]) async throws -> Bool
     func answerUserInput(requestID: String, threadID: String, answers: [String: [String]]) -> Bool
@@ -615,6 +650,10 @@ final class ProviderOutputPump: @unchecked Sendable {
     enum Item {
         case output(Data)
         case exit(Process)
+        /// A provider this daemon didn't spawn as a `Process` stopped: an agent that outlives
+        /// its daemon exited (with its wait status when it was this daemon's child), or the
+        /// connection to a shared server closed.
+        case ended(Int32?)
     }
 
     private let label: String
@@ -675,6 +714,7 @@ final class ProviderOutputPump: @unchecked Sendable {
             switch next {
             case .output(let data): head = String(decoding: data.prefix(200), as: UTF8.self)
             case .exit(let process): head = "exit status \(process.terminationStatus)"
+            case .ended(let status): head = "ended \(status.map(String.init) ?? "")"
             }
             let label = label
             let watchdog = Task { @MainActor in

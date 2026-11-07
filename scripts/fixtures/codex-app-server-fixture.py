@@ -638,6 +638,186 @@ def run_cpu_attribution_server():
     return 0
 
 
+def run_reattach_server():
+    """A small app-server for the daemon-restart cases (`-reattach` in the executable name).
+
+    A turn writes "Before restart." and then holds, so the test can kill Playhouse's daemon
+    while it runs. Marker files beside the executable drive it from there:
+    `.reattach-raise` raises an approval and a question (left pending until a client answers),
+    `.reattach-release` finishes the turn with "After restart." and its outcome, and
+    `.reattach-die` makes the server exit with the turn unfinished. Every reply a client sends
+    to a server request is logged to `.reattach-replies`, steers to `.reattach-steers`."""
+    base = str(sys.argv[0])
+    threads_path = Path(f"{base}.reattach-threads")
+    active = {}
+    buffer = b""
+
+    def save_threads():
+        # Like Codex's rollout files: a later server process reads what an earlier one wrote.
+        threads_path.write_text(json.dumps(threads), encoding="utf-8")
+
+    threads = {}
+    if threads_path.is_file():
+        threads = json.loads(threads_path.read_text(encoding="utf-8"))
+        for thread in threads.values():
+            for turn in thread["turns"]:
+                if turn["status"] == "inProgress":
+                    turn["status"] = "interrupted"
+
+    def emit_message(thread_id, turn_id, item_id, text):
+        item = {"id": item_id, "type": "agentMessage", "phase": "commentary", "text": text}
+        write({"jsonrpc": "2.0", "method": "item/started", "params": {
+            "threadId": thread_id, "turnId": turn_id, "item": {**item, "text": ""}}})
+        write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {
+            "threadId": thread_id, "turnId": turn_id, "itemId": item_id, "delta": text}})
+        write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+            "threadId": thread_id, "turnId": turn_id, "item": item}})
+        threads[thread_id]["items"].append({"turnId": turn_id, "item": item})
+        save_threads()
+
+    def set_status(thread_id, turn_id, status):
+        for turn in threads[thread_id]["turns"]:
+            if turn["id"] == turn_id:
+                turn["status"] = status
+        save_threads()
+
+    def report_outcome(thread_id):
+        """Starts the turn's outcome report. Like a real tool call it runs while the server keeps
+        answering: with no daemon up, the report starts one, which resumes this thread first."""
+        instructions = threads[thread_id].get("instructions") or ""
+        line = next((line.strip() for line in instructions.splitlines() if " task outcome " in line), None)
+        if not line:
+            return None
+        return subprocess.Popen(shlex.split(line.replace("<completed|in-progress|waiting-response>", "waiting-response")),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def complete(thread_id, status="completed"):
+        turn_id = active.pop(thread_id)["turn"]
+        set_status(thread_id, turn_id, status)
+        write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+            "threadId": thread_id, "turn": {"id": turn_id, "status": status}}})
+
+    def log(name, value):
+        with open(f"{base}.{name}", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(value) + "\n")
+
+    def handle(message):
+        method = message.get("method")
+        params = message.get("params", {})
+        if "id" in message and method is None:
+            # A client's reply to a server request.
+            log("reattach-replies", {"id": message["id"], "result": message.get("result"), "error": message.get("error")})
+            for thread_id, turn in active.items():
+                if message["id"] == turn.get("question") and message.get("result"):
+                    answers = message["result"].get("answers", {})
+                    answer = ", ".join(answers.get("color", {}).get("answers", []))
+                    emit_message(thread_id, turn["turn"], f"item_{turn['turn']}_answer", f"Answer received: {answer}.")
+            return
+        if "id" not in message:
+            return
+        reply = lambda result: write({"jsonrpc": "2.0", "id": message["id"], "result": result})
+        if method in ACCOUNT_METHODS:
+            handle_account_request(message)
+        elif method == "initialize":
+            reply({"serverInfo": {"name": "playhouse-reattach-fixture", "version": "1"}})
+        elif method == "model/list":
+            reply({"data": [{"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True,
+                             "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]}]})
+        elif method in ("thread/start", "thread/resume"):
+            thread_id = params.get("threadId") or str(uuid.uuid4())
+            thread = threads.setdefault(thread_id, {"items": [], "turns": []})
+            thread["instructions"] = params.get("developerInstructions") or thread.get("instructions")
+            if method == "thread/resume":
+                log("reattach-resumes", {"threadId": thread_id, "excludeTurns": params.get("excludeTurns")})
+            reply({"thread": {"id": thread_id, "turns": []}, "model": params.get("model", "gpt-6-luna")})
+        elif method == "thread/turns/list":
+            turns = threads.get(params.get("threadId"), {}).get("turns", [])
+            reply({"data": list(reversed(turns))[:params.get("limit") or 50], "nextCursor": None})
+        elif method == "thread/items/list":
+            reply({"data": threads.get(params.get("threadId"), {}).get("items", []), "nextCursor": None})
+        elif method == "turn/start":
+            thread_id = params.get("threadId")
+            thread = threads.setdefault(thread_id, {"items": [], "turns": []})
+            turn_id = f"turn-{uuid.uuid4()}"
+            text = next((item.get("text") for item in params.get("input", []) if item.get("type") == "text"), "") or ""
+            thread["items"].append({"turnId": turn_id, "item": {
+                "id": f"item_{turn_id}_user", "type": "userMessage", "content": [{"type": "text", "text": text}]}})
+            thread["turns"].append({"id": turn_id, "status": "inProgress"})
+            save_threads()
+            reply({"turn": {"id": turn_id, "status": "inProgress"}})
+            write({"jsonrpc": "2.0", "method": "turn/started", "params": {
+                "threadId": thread_id, "turn": {"id": turn_id, "status": "inProgress"}}})
+            if text.startswith("Write a concise task title") or "outcome nudge" in text.lower():
+                emit_message(thread_id, turn_id, f"item_{turn_id}_answer", "Reattach fixture task")
+                active[thread_id] = {"turn": turn_id, "reporting": None if text.startswith("Write") else report_outcome(thread_id)}
+                if active[thread_id]["reporting"] is None:
+                    complete(thread_id)
+                return
+            emit_message(thread_id, turn_id, f"item_{turn_id}_before", "Before restart.")
+            active[thread_id] = {"turn": turn_id}
+            Path(f"{base}.reattach-ready").write_text(json.dumps({"threadId": thread_id, "turnId": turn_id}), encoding="utf-8")
+        elif method == "turn/steer":
+            thread_id = params.get("threadId")
+            turn = active.get(thread_id)
+            if not turn or params.get("expectedTurnId") != turn["turn"]:
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32010, "message": "The expected turn ID is stale."}})
+                return
+            text = "".join(item.get("text", "") for item in params.get("input", []) if item.get("type") == "text")
+            log("reattach-steers", {"threadId": thread_id, "text": text})
+            threads[thread_id]["items"].append({"turnId": turn["turn"], "item": {
+                "id": f"item_steer_{uuid.uuid4()}", "type": "userMessage", "content": [{"type": "text", "text": text}]}})
+            save_threads()
+            reply({"turnId": turn["turn"]})
+        elif method == "turn/interrupt":
+            reply({})
+            thread_id = params.get("threadId")
+            if thread_id in active:
+                Path(f"{base}.reattach-interrupted").write_text("interrupted\n", encoding="utf-8")
+                complete(thread_id, status="interrupted")
+        else:
+            reply({})
+
+    while True:
+        ready, _, _ = select.select([sys.stdin.fileno()], [], [], 0.05)
+        if ready:
+            chunk = os.read(sys.stdin.fileno(), 65536)
+            if not chunk:
+                break
+            buffer += chunk
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                try:
+                    handle(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        for thread_id, turn in list(active.items()):
+            raise_marker = Path(f"{base}.reattach-raise")
+            if raise_marker.exists() and "question" not in turn:
+                raise_marker.unlink()
+                turn["approval"] = f"approval-{turn['turn']}"
+                turn["question"] = f"question-{turn['turn']}"
+                write({"jsonrpc": "2.0", "id": turn["approval"], "method": "item/commandExecution/requestApproval", "params": {
+                    "threadId": thread_id, "turnId": turn["turn"], "itemId": f"exec-{turn['turn']}",
+                    "command": "touch reattach-marker.txt", "cwd": os.getcwd()}})
+                write({"jsonrpc": "2.0", "id": turn["question"], "method": "item/tool/requestUserInput", "params": {
+                    "threadId": thread_id, "turnId": turn["turn"], "itemId": f"call-{turn['turn']}", "isBlocking": True,
+                    "questions": [{"id": "color", "header": "Color", "question": "Which color?", "isOther": False,
+                                   "isSecret": False, "options": [{"label": "red"}, {"label": "blue"}]}]}})
+                Path(f"{base}.reattach-raised").write_text("raised\n", encoding="utf-8")
+            if Path(f"{base}.reattach-die").exists():
+                os._exit(3)
+            release = Path(f"{base}.reattach-release")
+            if release.exists() and "reporting" not in turn:
+                release.unlink()
+                emit_message(thread_id, turn["turn"], f"item_{turn['turn']}_after", "After restart.")
+                turn["reporting"] = report_outcome(thread_id)
+                if turn["reporting"] is None:
+                    complete(thread_id)
+            elif turn.get("reporting") is not None and turn["reporting"].poll() is not None:
+                complete(thread_id)
+    return 0
+
+
 ACCOUNT_METHODS = ("account/read", "account/rateLimits/read", "account/login/start", "account/logout")
 
 
@@ -683,6 +863,8 @@ def main():
     global THREAD_ID, TURN_ID
     if "-cpu-attribution" in os.path.basename(sys.argv[0]):
         return run_cpu_attribution_server()
+    if "-reattach" in os.path.basename(sys.argv[0]):
+        return run_reattach_server()
     _ = None
     ack_deadline = None
     action_item = None
@@ -2059,6 +2241,14 @@ def main():
                 return
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": CHILD_THREAD_ID, "turns": []}}})
         elif message.get("method") == "thread/turns/list":
+            if message.get("params", {}).get("threadId") == THREAD_ID and TURN_ID:
+                # A client that reconnects mid-turn learns the turn is still running.
+                held = Path(str(sys.argv[0]) + ".interrupt-ready").exists()
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {
+                    "data": [{"id": TURN_ID, "status": "inProgress" if held else "completed"}],
+                    "nextCursor": None,
+                }})
+                return
             if message.get("params", {}).get("threadId") != CHILD_THREAD_ID:
                 write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32005, "message": "Unknown fixture child thread."}})
                 return
@@ -2413,7 +2603,7 @@ def main():
     # Requests a real, evented app-server keeps answering while another turn
     # is in progress. Anything else that arrives during a held turn is
     # deferred and handled after it, in arrival order, as before.
-    answer_while_held = {"thread/items/list", "thread/turns/list", "thread/read",
+    answer_while_held = {"initialize", "initialized", "thread/items/list", "thread/turns/list", "thread/read",
                          "thread/resume", "model/list", "thread/goal/get", *ACCOUNT_METHODS}
     deferred = []
 
@@ -2600,5 +2790,228 @@ def main():
     return 0
 
 
+def listen_path():
+    """The socket path of `--listen unix://PATH`, or None for stdio."""
+    arguments = sys.argv[1:]
+    for index, argument in enumerate(arguments):
+        value = arguments[index + 1] if argument == "--listen" and index + 1 < len(arguments) else None
+        if argument.startswith("--listen="):
+            value = argument.split("=", 1)[1]
+        if value and value.startswith("unix://"):
+            return value[len("unix://"):]
+    return None
+
+
+def serve_unix_socket(path):
+    """`--listen unix://PATH`: the real app-server's shared-server mode, as Playhouse's daemon
+    uses it. This front end speaks WebSocket (RFC 6455) on a Unix socket and runs the stdio
+    fixture as its child, so every fixture mode works unchanged over the socket. Like Codex it
+    accepts several connections and keeps running while none is open: a turn carries on, its
+    notifications are dropped, and the server requests it raised (approvals, questions) wait
+    for the next client and are sent again once that client resumes the thread."""
+    import base64
+    import hashlib
+    import signal
+    import socket
+    import struct
+
+    arguments = sys.argv[1:]
+    child_arguments, skip = [], False
+    for index, argument in enumerate(arguments):
+        if skip:
+            skip = False
+            continue
+        if argument == "--listen":
+            skip = True
+            continue
+        if argument.startswith("--listen="):
+            continue
+        child_arguments.append(argument)
+    child = subprocess.Popen([sys.executable, sys.argv[0], *child_arguments, "--listen", "stdio://"],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    signal.signal(signal.SIGTERM, lambda *_: (child.kill(), os._exit(0)))
+    log_path = Path(str(sys.argv[0]) + ".socket-log")
+
+    def log(entry):
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"time": time.time(), **entry}) + "\n")
+
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(path)
+    os.chmod(path, 0o600)
+    server.listen(8)
+    log({"event": "listening", "pid": os.getpid()})
+
+    class Connection:
+        counter = 0
+
+        def __init__(self, sock):
+            Connection.counter += 1
+            self.id = Connection.counter
+            self.sock = sock
+            self.buffer = b""
+            self.message = b""
+            self.open = False
+
+    connections = []
+    child_buffer = b""
+    next_id = [1_000_000]
+    client_requests = {}  # child request id -> (connection, client id, method, params)
+    pending_server_requests = {}  # server request id -> message, until a client answers it
+
+    def send_frame(connection, payload, opcode=1):
+        header = bytes([0x80 | opcode])
+        if len(payload) < 126:
+            header += bytes([len(payload)])
+        elif len(payload) < 65536:
+            header += bytes([126]) + struct.pack(">H", len(payload))
+        else:
+            header += bytes([127]) + struct.pack(">Q", len(payload))
+        try:
+            connection.sock.sendall(header + payload)
+        except OSError:
+            close(connection)
+
+    def send_json(connection, value):
+        send_frame(connection, json.dumps(value, separators=(",", ":")).encode())
+
+    def close(connection):
+        if connection in connections:
+            connections.remove(connection)
+            log({"event": "disconnected", "connection": connection.id})
+        try:
+            connection.sock.close()
+        except OSError:
+            pass
+
+    def from_client(connection, message):
+        if "method" in message and "id" in message:
+            child_id = next_id[0]
+            next_id[0] += 1
+            client_requests[child_id] = (connection, message["id"], message["method"], message.get("params") or {})
+            message = {**message, "id": child_id}
+        elif "id" in message and ("result" in message or "error" in message):
+            # The first answer to a server request wins; a late duplicate from another client is dropped.
+            log({"event": "client_reply", "connection": connection.id, "id": message["id"],
+                 "forwarded": message["id"] in pending_server_requests})
+            if pending_server_requests.pop(message["id"], None) is None:
+                return
+        child.stdin.write((json.dumps(message, separators=(",", ":")) + "\n").encode())
+        child.stdin.flush()
+
+    def from_child(message):
+        if "method" not in message and "id" in message and message["id"] in client_requests:
+            connection, client_id, method, params = client_requests.pop(message["id"])
+            if connection in connections:
+                send_json(connection, {**message, "id": client_id})
+            if method == "thread/resume" and connection in connections:
+                # Codex sends a resumed thread's pending requests to the new subscriber.
+                thread_id = params.get("threadId")
+                for request in pending_server_requests.values():
+                    if (request.get("params") or {}).get("threadId") in (thread_id, None):
+                        log({"event": "resent_request", "connection": connection.id, "id": request["id"]})
+                        send_json(connection, request)
+            return
+        if "method" in message and "id" in message:
+            pending_server_requests[message["id"]] = message
+        for connection in list(connections):
+            send_json(connection, message)
+
+    def handshake(connection):
+        if b"\r\n\r\n" not in connection.buffer:
+            return
+        head, connection.buffer = connection.buffer.split(b"\r\n\r\n", 1)
+        key = ""
+        for line in head.decode(errors="replace").split("\r\n"):
+            if line.lower().startswith("sec-websocket-key:"):
+                key = line.split(":", 1)[1].strip()
+        accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+        connection.sock.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                                 f"Sec-WebSocket-Accept: {accept}\r\n\r\n").encode())
+        connection.open = True
+        log({"event": "connected", "connection": connection.id})
+
+    def frames(connection):
+        while len(connection.buffer) >= 2:
+            first, second = connection.buffer[0], connection.buffer[1]
+            length, offset = second & 0x7F, 2
+            if length == 126:
+                if len(connection.buffer) < 4:
+                    return
+                length, offset = struct.unpack(">H", connection.buffer[2:4])[0], 4
+            elif length == 127:
+                if len(connection.buffer) < 10:
+                    return
+                length, offset = struct.unpack(">Q", connection.buffer[2:10])[0], 10
+            masked = second & 0x80
+            total = offset + (4 if masked else 0) + length
+            if len(connection.buffer) < total:
+                return
+            mask = connection.buffer[offset:offset + 4] if masked else b"\0\0\0\0"
+            start = offset + (4 if masked else 0)
+            payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(connection.buffer[start:total]))
+            connection.buffer = connection.buffer[total:]
+            opcode = first & 0x0F
+            if opcode == 8:
+                close(connection)
+                return
+            if opcode == 9:
+                send_frame(connection, payload, opcode=10)
+                continue
+            if opcode in (0, 1, 2):
+                connection.message += payload
+                if first & 0x80:
+                    try:
+                        message = json.loads(connection.message)
+                    except json.JSONDecodeError:
+                        message = None
+                    connection.message = b""
+                    if message is not None:
+                        from_client(connection, message)
+
+    while True:
+        readable, _, _ = select.select([server, child.stdout] + [c.sock for c in connections], [], [], 0.25)
+        if child.poll() is not None and not readable:
+            break
+        for source in readable:
+            if source is server:
+                sock, _ = server.accept()
+                connections.append(Connection(sock))
+            elif source is child.stdout:
+                chunk = os.read(child.stdout.fileno(), 65536)
+                if not chunk:
+                    child.wait()
+                    return child.returncode or 0
+                child_buffer += chunk
+                while b"\n" in child_buffer:
+                    line, child_buffer = child_buffer.split(b"\n", 1)
+                    try:
+                        from_child(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+            else:
+                connection = next(c for c in connections if c.sock is source)
+                try:
+                    chunk = source.recv(65536)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    close(connection)
+                    continue
+                connection.buffer += chunk
+                if not connection.open:
+                    handshake(connection)
+                if connection.open:
+                    frames(connection)
+    return child.returncode or 0
+
+
 if __name__ == "__main__":
+    socket_path = listen_path()
+    if socket_path:
+        raise SystemExit(serve_unix_socket(socket_path))
     raise SystemExit(main())

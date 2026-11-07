@@ -671,6 +671,9 @@ enum PlayhouseCLI {
             }
             guard let id = tail.first else { throw CLIError.usage("A task ID is required.") }
             switch operation {
+            case "watch":
+                guard tail.count == 1 else { throw CLIError.usage("Use: playhouse conversation watch <task-id>") }
+                return BridgeRequest(command: "conversation.events.subscribe", arguments: ["taskID": .string(id)])
             case "history":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--limit", "--before"])
                 var arguments: [String: BridgeValue] = ["taskID": .string(id)]
@@ -1004,6 +1007,7 @@ enum PlayhouseCLI {
       playhouse conversation queue-list <task-id>
       playhouse conversation runtime [--watch]
       playhouse conversation cpu-usage [--watch]
+      playhouse conversation watch <task-id>
       playhouse conversation answered-async <task-id>
       playhouse conversation subagent-history <task-id> --activity <activity-json>
       playhouse task reconcile <task-id>

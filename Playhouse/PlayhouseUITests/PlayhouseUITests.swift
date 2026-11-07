@@ -417,6 +417,8 @@ final class PlayhouseUITests: XCTestCase {
             XCTFail("Playhouse did not stop before UI test data cleanup; preserving the isolated data directory.")
             return
         }
+        // Shared Codex servers and Claude runs outlive the app and its daemon on purpose.
+        stopSurvivingAgents()
         clearSavedWindowFrames()
         if (testRun?.failureCount ?? 0) > 0 {
             // Keep the failed case's app data (Diagnostics.jsonl, transcripts,
@@ -7540,7 +7542,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(isRunning(secondPID))
     }
 
-    // case-contract: test_bridge_daemon_death_fails_the_turn_and_recovers_on_next_request | When the bridge daemon dies in the middle of a turn, that turn's send fails with a connection error instead of hanging. The next request starts a fresh daemon on demand, which reconciles the task out of In Progress into a resumable Waiting Response, and that daemon can run and stop a new turn.
+    // case-contract: test_bridge_daemon_death_fails_the_turn_and_recovers_on_next_request | When the bridge daemon dies in the middle of a turn, that turn's send fails with a connection error instead of hanging, but the provider keeps running in its own session. The next request starts a fresh daemon on demand, which reattaches the running turn so the task stays In Progress with no restart notice, stops that reattached turn, and can then run and stop a new turn.
     func test_bridge_daemon_death_fails_the_turn_and_recovers_on_next_request() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold-interrupt").path
         codexFixtureExecutable = executable
@@ -7554,56 +7556,363 @@ final class PlayhouseUITests: XCTestCase {
             "task", "create", "--title", "Daemon death", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(task["id"] as? String)
-        func daemonPID() throws -> Int {
-            let status = try XCTUnwrap(try runCLI(["status"], extraEnvironment: daemonEnvironment)["result"] as? [String: Any])
-            return try XCTUnwrap(status["processID"] as? Int)
-        }
 
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: daemonEnvironment)
         openTask(named: "Daemon death")
-        let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10))
-        composer.click()
-        composer.typeText("Hold until the daemon dies.")
-        element("send-message-button").click()
+        sendFromComposer("Hold until the daemon dies.")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "The turn should be running before the daemon dies.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
-        let firstPID = try daemonPID()
+        let firstPID = try XCTUnwrap(try daemonProcessID(environment: daemonEnvironment))
+        let server = try XCTUnwrap(agentManifest(kind: "codex", service: daemonEnvironment)?.manifest["process"] as? [String: Any])
 
         kill(pid_t(firstPID), SIGKILL)
-        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 20), "The window should surface the failed turn instead of hanging.")
-        XCTAssertTrue(waitUntil({
-            (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response"
-        }, timeout: 30), "A fresh daemon should settle the orphaned turn into a resumable Waiting Response.")
-        let recovered = try XCTUnwrap(taskRecord(id: taskID))
-        XCTAssertTrue((recovered["statusMessage"] as? String ?? "").contains("closed while this turn was running"))
-        // The window starts the fresh daemon itself while it reconnects.
+        // The window starts the fresh daemon itself while it reconnects, and follows the turn.
         var secondPID = firstPID
         XCTAssertTrue(waitUntil({
             secondPID = (try? self.daemonProcessID(environment: daemonEnvironment)) ?? firstPID
             return secondPID != firstPID
         }, timeout: 20), "The window should start a fresh daemon while it reconnects.")
         XCTAssertEqual(kill(pid_t(secondPID), 0), 0)
-
-        // The window follows the fresh daemon: a new turn shows Stop and stops.
-        let staleFixture = Process()
-        staleFixture.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        staleFixture.arguments = ["-f", executable]
-        try staleFixture.run()
-        staleFixture.waitUntilExit()
-        for marker in [ready, received, release] { try? FileManager.default.removeItem(at: marker) }
-        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15))
-        composer.click()
-        composer.typeText("Hold again on the fresh daemon.")
-        element("send-message-button").click()
-        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 20), "The fresh daemon should run a new turn.")
+        XCTAssertTrue(agentIsAlive(server), "The provider outlives the daemon.")
         let stop = element("pause-response-button")
+        XCTAssertTrue(waitUntil({ stop.exists && stop.isEnabled }, timeout: 20), "The window keeps showing the reattached turn as running.")
+        XCTAssertFalse(element("codex-chat-error").exists, "The turn survives, so the window shows no error.")
+        let recovered = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertEqual(recovered["status"] as? String, "In Progress")
+        XCTAssertFalse((recovered["statusMessage"] as? String ?? "").contains("closed while"))
+        attachScreenshot(named: "daemon-death-turn-survives")
+
+        // Stop the reattached turn, then run and stop a new one on the fresh daemon.
+        stop.click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10), "Stop reaches the reattached turn.")
+        try Data("acknowledge interrupt\n".utf8).write(to: release)
+        XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 15))
+        XCTAssertTrue(waitForStatus(taskID, "Waiting Response"))
+        for marker in [ready, received, release] { try? FileManager.default.removeItem(at: marker) }
+        sendFromComposer("Hold again on the fresh daemon.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 20), "The fresh daemon should run a new turn.")
         XCTAssertTrue(waitUntil({ stop.exists && stop.isEnabled }, timeout: 20), "The window should follow the fresh daemon and offer Stop.")
         stop.click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10))
         try Data("acknowledge interrupt\n".utf8).write(to: release)
         XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 15))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+    }
+
+    // case-contract: test_codex_turn_reattaches_after_daemon_restart | A Codex turn keeps running in its shared socket app-server when the daemon is killed: the next daemon reconnects to the same server (no second server, one connection per daemon), keeps the task In Progress with no restart notice, shows the output written before the restart exactly once, saves the question the server re-sends on resume and answers the re-sent approval exactly once, accepts a steered follow-up, streams the rest of the turn to a watcher, and settles it through the normal outcome path. A turn that finished while no daemon was connected settles from the server's state.
+    func test_codex_turn_reattaches_after_daemon_restart() throws {
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-reattach").path
+        codexFixtureExecutable = executable
+        clearReattachMarkers(executable)
+        let environment = restartServiceEnvironment(["PLAYHOUSE_E2E_CODEX_SERVER_IDLE_SECONDS": "3"])
+        let task = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Codex reattach", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        openTask(named: "Codex reattach")
+        sendFromComposer("Keep working across a restart.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-ready") }, timeout: 20), "The turn should be running.")
+        XCTAssertTrue(transcriptMessage("Before restart.").waitForExistence(timeout: 15))
+        let server = try XCTUnwrap(agentManifest(kind: "codex", service: environment)?.manifest["process"] as? [String: Any])
+        attachScreenshot(named: "codex-reattach-1-running-before-restart")
+
+        try killDaemon(environment: environment)
+        XCTAssertTrue(agentIsAlive(server), "The app-server outlives the daemon that started it.")
+        touch(executable + ".reattach-raise")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-raised") }, timeout: 10))
+        // The window reconnects; the fresh daemon reattaches the turn and re-receives the question.
+        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 30), "The question raised during the restart appears.")
+        XCTAssertFalse(element("codex-chat-error").exists, "A reattached turn is not a failed turn.")
+        XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment))
+        XCTAssertFalse((try taskRecord(id: taskID)?["statusMessage"] as? String ?? "").contains("restarting"))
+        XCTAssertEqual(agentManifest(kind: "codex", service: environment)?.manifest["process"] as? NSDictionary, server as NSDictionary,
+                       "The fresh daemon reconnects to the same app-server.")
+        XCTAssertTrue(transcriptMessage("Before restart.").exists)
+        attachScreenshot(named: "codex-reattach-2-question-after-restart")
+        app.buttons["blue"].click()
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(transcriptMessage("Answer received: blue.").waitForExistence(timeout: 15))
+        steerFromComposer("Also check the README.")
+        XCTAssertTrue(waitUntil({ !self.jsonLines(executable + ".reattach-steers").isEmpty }, timeout: 15), "The follow-up steers the reattached turn.")
+        touch(executable + ".reattach-release")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20), "The window follows the reattached turn to its end.")
+        XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment))
+        attachScreenshot(named: "codex-reattach-3-finished")
+        // Consecutive agent messages share one history entry, so count within the joined text.
+        let texts = try historyTexts(taskID: taskID, environment: environment)
+        let joinedHistory = texts.joined(separator: "\n")
+        for text in ["Before restart.", "Answer received: blue.", "After restart."] {
+            XCTAssertEqual(joinedHistory.components(separatedBy: text).count - 1, 1, "\(text) appears exactly once: \(texts)")
+        }
+        let replies = jsonLines(executable + ".reattach-replies").compactMap { $0 as? [String: Any] }
+        XCTAssertEqual(replies.filter { ($0["id"] as? String ?? "").hasPrefix("approval-") }.count, 1, "The re-sent approval is answered once.")
+        XCTAssertEqual(replies.filter { ($0["id"] as? String ?? "").hasPrefix("question-") }.count, 1, "The question is answered once.")
+        let connections = jsonLines(executable + ".socket-log").compactMap { $0 as? [String: Any] }.filter { $0["event"] as? String == "connected" }
+        XCTAssertGreaterThanOrEqual(connections.count, 2, "Each daemon reconnects to the same server; the CLI case asserts exactly one per daemon.")
+
+        // A turn that finishes while no daemon is connected settles once the window reconnects.
+        try? FileManager.default.removeItem(atPath: executable + ".reattach-ready")
+        sendFromComposer("Finish while Playhouse is down.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-ready") }, timeout: 20))
+        try killDaemon(environment: environment)
+        touch(executable + ".reattach-release")
+        XCTAssertTrue(waitUntil({
+            (((try? self.historyTexts(taskID: taskID, environment: environment)) ?? []).joined(separator: "\n")).components(separatedBy: "After restart.").count - 1 == 2
+        }, timeout: 40))
+        XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment, timeout: 40))
+        XCTAssertFalse(element("codex-chat-error").exists)
+    }
+
+    // case-contract: test_claude_turn_reattaches_after_daemon_restart | A Claude Code turn with file-backed stdio keeps running when the daemon is killed: the next daemon replays the handled log without repeating its writes, keeps the task In Progress, shows the output written before the restart once, restores the still unanswered question and never answers an answered request again, ignores a late reply to the old daemon's request and numbers its own requests past the old ones, delivers a steered follow-up, streams the rest of the turn to a watcher, records the turn's usage once, settles it through its outcome, and removes the finished run.
+    func test_claude_turn_reattaches_after_daemon_restart() throws {
+        let executable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-reattach").path
+        claudeFixtureExecutable = executable
+        clearReattachMarkers(executable)
+        let environment = restartServiceEnvironment()
+        let task = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude reattach", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        openTask(named: "Claude reattach")
+        sendFromComposer("Keep working across a restart.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-ready") }, timeout: 20))
+        touch(executable + ".reattach-ask")
+        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 15), "The question appears before the restart.")
+        let run = try XCTUnwrap(agentManifest(kind: "claude", service: environment))
+        let agent = try XCTUnwrap(run.manifest["process"] as? [String: Any])
+        attachScreenshot(named: "claude-reattach-1-question-before-restart")
+
+        try killDaemon(environment: environment)
+        XCTAssertTrue(agentIsAlive(agent), "Claude Code outlives the daemon that started it.")
+        touch(executable + ".reattach-late-reply")
+        // The window reconnects; the fresh daemon replays the run and restores the question once.
+        XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment))
+        XCTAssertFalse(element("codex-chat-error").exists, "A reattached turn is not a failed turn.")
+        let reconnected = try runCLI(["task", "get", taskID], extraEnvironment: environment)["result"] as? [String: Any]
+        XCTAssertFalse((reconnected?["statusMessage"] as? String ?? "").contains("restarting"), "No restart notice after reconnecting.")
+        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 15))
+        XCTAssertTrue(agentIsAlive(agent))
+        attachScreenshot(named: "claude-reattach-2-question-after-restart")
+        app.buttons["blue"].click()
+        element("submit-ai-answers-button").click()
+        steerFromComposer("Also check the README.")
+        XCTAssertTrue(waitUntil({ !self.jsonLines(executable + ".reattach-steers").isEmpty }, timeout: 15), "The follow-up reaches the running process.")
+        touch(executable + ".reattach-release")
+        XCTAssertTrue(transcriptMessage("After restart.").waitForExistence(timeout: 20), "The window streams the rest of the reattached turn.")
+        XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment))
+        attachScreenshot(named: "claude-reattach-3-finished")
+        let finalStatus = try runCLI(["task", "get", taskID], extraEnvironment: environment)["result"] as? [String: Any]
+        XCTAssertFalse((finalStatus?["statusMessage"] as? String ?? "").contains("restarting"), "A reattached turn shows no restart notice.")
+        let usage = try XCTUnwrap(try runCLI(["task", "token-usage", taskID], extraEnvironment: environment)["result"] as? [String: Any])
+        let claudeTurns = (usage["turns"] as? [[String: Any]] ?? []).filter { $0["provider"] as? String == "claude" }
+        XCTAssertEqual(claudeTurns.count, 1, "The reattached turn records its usage once.")
+        let texts = try historyTexts(taskID: taskID, environment: environment)
+        for text in ["Before restart.", "Answer received: blue.", "After restart."] {
+            XCTAssertEqual(texts.filter { $0 == text }.count, 1, "\(text) appears exactly once: \(texts)")
+        }
+        let replies = jsonLines(executable + ".reattach-replies").compactMap { ($0 as? [String: Any])?["id"] as? String }
+        XCTAssertEqual(replies.filter { $0 == "reattach-approval-1" }.count, 1, "An answered request isn't answered again.")
+        XCTAssertEqual(replies.filter { $0 == "reattach-question-1" }.count, 1)
+        let requestNumbers = jsonLines(executable + ".reattach-stdin").compactMap { $0 as? String }
+            .compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+            .filter { $0["type"] as? String == "control_request" }
+            .compactMap { ($0["request_id"] as? String)?.split(separator: "-").last.flatMap { Int($0) } }
+        // The window's own sessions (title, suggestions) also log requests 1 and 2; the strict
+        // numbering past the old daemon's is asserted by the CLI case and the stop case.
+        XCTAssertTrue(requestNumbers.allSatisfy { $0 <= 2 || $0 >= 1001 }, "A reattached run never reuses the old daemon's numbers: \(requestNumbers)")
+        XCTAssertTrue(waitUntil({ !self.agentIsAlive(agent) }, timeout: 15), "The finished run stops.")
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: run.path.deletingLastPathComponent().path) }, timeout: 10))
+    }
+
+    // case-contract: test_agent_died_without_result_is_marked_interrupted | When a Codex app-server or a Claude Code run exits without finishing its turn while no daemon is connected, the next daemon settles the task as Waiting Response with 'The agent stopped while Playhouse was restarting. Your conversation is saved; send a follow-up to continue.', keeps the conversation up to the restart, and removes the dead agent's files.
+    func test_agent_died_without_result_is_marked_interrupted() throws {
+        for (provider, marker) in [("codex", ".reattach-die"), ("claude", ".reattach-exit")] {
+            let executable = WorkspaceFixture.root.appendingPathComponent("\(provider)-fixture-reattach").path
+            if provider == "codex" { codexFixtureExecutable = executable } else { claudeFixtureExecutable = executable }
+            clearReattachMarkers(executable)
+            let environment = restartServiceEnvironment()
+            let title = "\(provider) agent died"
+            let task = try XCTUnwrap(try runCLI([
+                "task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", provider,
+            ])["result"] as? [String: Any])
+            let taskID = try XCTUnwrap(task["id"] as? String)
+            launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+            openTask(named: title)
+            sendFromComposer("Die while Playhouse is down.")
+            XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-ready") }, timeout: 20))
+            let agent = try XCTUnwrap(agentManifest(kind: provider, service: environment)?.manifest["process"] as? [String: Any])
+            XCTAssertTrue(terminateAppAndWait(app))
+            try killDaemon(environment: environment)
+            touch(executable + marker)
+            XCTAssertTrue(waitUntil({ !self.agentIsAlive(agent) }, timeout: 15), "The \(provider) agent exits without a result.")
+            launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+            XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment))
+            XCTAssertNil(agentManifest(kind: provider, service: environment), "The dead agent's files are removed.")
+            // Opening the task comes after: Codex then starts a fresh server to read its saved thread.
+            openTask(named: title)
+            let settled = try runCLI(["task", "get", taskID], extraEnvironment: environment)["result"] as? [String: Any]
+            XCTAssertEqual(settled?["statusMessage"] as? String, Self.restartMessage)
+            XCTAssertTrue(transcriptMessage("Die while Playhouse is down.").waitForExistence(timeout: 10), "The conversation up to the restart is kept.")
+            if provider == "codex" {
+                XCTAssertTrue(transcriptMessage("Before restart.").waitForExistence(timeout: 10), "Codex keeps the output its thread saved before the agent died.")
+            }
+            attachScreenshot(named: "\(provider)-agent-died-interrupted")
+            XCTAssertTrue(terminateAppAndWait(app))
+        }
+    }
+
+    // case-contract: test_stop_kills_reattached_agent | Stop works on a turn a fresh daemon reattached: for Codex it sends turn/interrupt over the reconnected socket and leaves the shared server running; for Claude it sends the interrupt with a request number past the old daemon's and then kills the run by its verified process identity and removes its folder. Either way the task settles in Waiting Response without a restart notice.
+    func test_stop_kills_reattached_agent() throws {
+        for provider in ["codex", "claude"] {
+            let executable = WorkspaceFixture.root.appendingPathComponent("\(provider)-fixture-reattach").path
+            if provider == "codex" { codexFixtureExecutable = executable } else { claudeFixtureExecutable = executable }
+            clearReattachMarkers(executable)
+            let environment = restartServiceEnvironment()
+            let title = "\(provider) reattached stop"
+            let task = try XCTUnwrap(try runCLI([
+                "task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", provider,
+            ])["result"] as? [String: Any])
+            let taskID = try XCTUnwrap(task["id"] as? String)
+            launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+            openTask(named: title)
+            sendFromComposer("Run until stopped.")
+            XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-ready") }, timeout: 20))
+            let run = try XCTUnwrap(agentManifest(kind: provider, service: environment))
+            let agent = try XCTUnwrap(run.manifest["process"] as? [String: Any])
+            try killDaemon(environment: environment)
+            let stop = element("pause-response-button")
+            XCTAssertTrue(waitUntil({ stop.exists && stop.isEnabled }, timeout: 30), "The window offers Stop for the reattached \(provider) turn.")
+            XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+            attachScreenshot(named: "\(provider)-reattached-turn-stop-offered")
+            stop.click()
+            XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-interrupted") }, timeout: 15), "Stop reaches the reattached agent.")
+            XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 20))
+            XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment))
+            if provider == "codex" {
+                XCTAssertTrue(agentIsAlive(agent), "Codex stops the turn and keeps its shared server.")
+            } else {
+                let requestID = try String(contentsOfFile: executable + ".reattach-interrupted", encoding: .utf8)
+                XCTAssertGreaterThanOrEqual(Int(requestID.split(separator: "-").last ?? "") ?? 0, 1001)
+                XCTAssertTrue(waitUntil({ !self.agentIsAlive(agent) }, timeout: 15), "The stopped Claude run is killed by its verified pid.")
+                XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: run.path.deletingLastPathComponent().path) }, timeout: 10))
+            }
+            XCTAssertTrue(terminateAppAndWait(app))
+        }
+    }
+
+    // case-contract: test_turn_events_stream_to_a_watcher_that_did_not_send | `conversation watch` (conversation.events.subscribe) on a task with no running turn returns at once with watched=false, and fails for an unknown task. While a turn another caller sent is running, a watcher receives a `watching` event, the turn's live text deltas and its final `completed` history, while the sender still gets its own stream; the window streams such a turn the same way.
+    func test_turn_events_stream_to_a_watcher_that_did_not_send() throws {
+        let executable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-reattach").path
+        claudeFixtureExecutable = executable
+        clearReattachMarkers(executable)
+        let task = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Watched turn", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let idle = try runCLI(["conversation", "watch", taskID])
+        XCTAssertEqual((idle["result"] as? [String: Any])?["watched"] as? Bool, false, "A watch on a task with no turn ends at once.")
+        let missing = try runCLI(["conversation", "watch", UUID().uuidString], expectedStatus: 3)
+        XCTAssertEqual(missing["ok"] as? Bool, false)
+        XCTAssertEqual((missing["error"] as? [String: Any])?["code"] as? String, "not_found")
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Watched turn")
+        // Another caller starts the turn while the window shows the task.
+        let sender = try startCLIProcess(["conversation", "send", taskID, "--message", "Stream to a watcher."])
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-ready") }, timeout: 20))
+        XCTAssertTrue(transcriptMessage("Stream to a watcher.").waitForExistence(timeout: 15), "The window shows the prompt of a turn it didn't send.")
+        XCTAssertTrue(waitUntil({ self.element("pause-response-button").exists }, timeout: 15), "The window shows the turn as running.")
+        attachScreenshot(named: "watched-turn-running")
+        touch(executable + ".reattach-release")
+        XCTAssertTrue(transcriptMessage("After restart.").waitForExistence(timeout: 20), "The window streams the watched turn's text.")
+        let (sent, senderEvents) = try finishCLIProcessCapturingEvents(sender)
+        XCTAssertEqual(sent["ok"] as? Bool, true)
+        let senderText = senderEvents.filter { $0["type"] as? String == "text_delta" }
+            .compactMap { ($0["payload"] as? [String: Any])?["text"] as? String }.joined()
+        XCTAssertTrue(senderText.contains("After restart."), "The sender still gets its own stream: \(senderText)")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20), "The window ends the running state when the turn completes.")
+        XCTAssertTrue(transcriptMessage("After restart.").exists, "The finished turn's answer is shown.")
+        XCTAssertEqual(try historyTexts(taskID: taskID).filter { $0 == "After restart." }.count, 1)
+        attachScreenshot(named: "watched-turn-finished")
+    }
+
+    // case-contract: test_untracked_agent_process_is_stopped_on_startup | On a daemon's first request for a data folder, a process whose standard streams point into the folder's Claude or Codex run directories but that no run or server manifest accounts for is stopped, while a process writing into a run or server whose spawn is still being recorded is left alone.
+    func test_untracked_agent_process_is_stopped_on_startup() throws {
+        let runs = dataDirectory.appendingPathComponent("provider-runs", isDirectory: true)
+        let codexRuns = dataDirectory.appendingPathComponent("codex-runs", isDirectory: true)
+        for folder in ["stray", "young"] {
+            try FileManager.default.createDirectory(at: runs.appendingPathComponent(folder), withIntermediateDirectories: true)
+        }
+        try FileManager.default.createDirectory(at: codexRuns, withIntermediateDirectories: true)
+        let environment = restartServiceEnvironment()
+        let service = try XCTUnwrap(environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"])
+        func sleeper(writingTo output: URL) throws -> Process {
+            FileManager.default.createFile(atPath: output.path, contents: Data())
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            process.arguments = ["60"]
+            process.standardOutput = try FileHandle(forWritingTo: output)
+            try process.run()
+            return process
+        }
+        let stray = try sleeper(writingTo: runs.appendingPathComponent("stray/agent.out"))
+        let young = try sleeper(writingTo: runs.appendingPathComponent("young/agent.out"))
+        let codexStray = try sleeper(writingTo: codexRuns.appendingPathComponent("stray.log"))
+        let codexYoung = try sleeper(writingTo: codexRuns.appendingPathComponent("young.log"))
+        defer {
+            for process in [stray, young, codexStray, codexYoung] where process.isRunning { process.terminate() }
+        }
+        // A spawn its daemon is still recording: a manifest with no identity yet.
+        let manifest: [String: Any] = [
+            "version": 1, "serviceName": service, "sessionID": "young",
+            "state": "spawning", "createdAt": Date().timeIntervalSinceReferenceDate, "mode": "default",
+            "consumedOffset": 0, "maxRequestID": 0, "pendingRequestIDs": [String](), "answeredRequestIDs": [String](), "writeInProgress": false,
+        ]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: runs.appendingPathComponent("young/run.json"))
+        // The same for a Codex server: its log is named by the manifest's key hash.
+        let codexManifest: [String: Any] = [
+            "version": 1, "serviceName": service, "keyHash": "young", "keyParts": [String](), "state": "spawning",
+            "createdAt": Date().timeIntervalSinceReferenceDate, "socketPath": codexRuns.appendingPathComponent("young.sock").path,
+            "resolvedExecutablePath": "/usr/bin/true", "flags": [String](), "threads": [String: Any](),
+        ]
+        try JSONSerialization.data(withJSONObject: codexManifest).write(to: codexRuns.appendingPathComponent("young.json"))
+        // The window's first requests start the daemon, which sweeps the run folders.
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 15))
+        XCTAssertTrue(waitUntil({ !stray.isRunning }, timeout: 20), "A Claude run process no manifest accounts for is stopped.")
+        XCTAssertTrue(waitUntil({ !codexStray.isRunning }, timeout: 20), "A Codex server process no manifest accounts for is stopped.")
+        XCTAssertTrue(young.isRunning, "A Claude spawn still being recorded is left alone.")
+        XCTAssertTrue(codexYoung.isRunning, "A Codex spawn still being recorded is left alone.")
+    }
+
+    // case-contract: test_agent_finished_while_daemon_was_down_shows_result | A Claude Code turn that writes its result while no daemon is running is finished by the next daemon from the run's log: the task leaves In Progress through the normal outcome path without a restart notice, and the result written during the downtime appears exactly once.
+    func test_agent_finished_while_daemon_was_down_shows_result() throws {
+        let executable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-reattach").path
+        claudeFixtureExecutable = executable
+        clearReattachMarkers(executable)
+        let environment = restartServiceEnvironment()
+        let task = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude finished while down", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        openTask(named: "Claude finished while down")
+        sendFromComposer("Finish while Playhouse is down.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-ready") }, timeout: 20))
+        let run = try XCTUnwrap(agentManifest(kind: "claude", service: environment))
+        XCTAssertTrue(terminateAppAndWait(app))
+        try killDaemon(environment: environment)
+        touch(executable + ".reattach-release-quiet")
+        let log = run.path.deletingLastPathComponent().appendingPathComponent("agent.out").path
+        XCTAssertTrue(waitUntil({ ((try? String(contentsOfFile: log, encoding: .utf8)) ?? "").contains("\"type\": \"result\"") }, timeout: 15))
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        openTask(named: "Claude finished while down")
+        XCTAssertTrue(transcriptMessage("After restart.").waitForExistence(timeout: 30), "The result written during the restart is shown.")
+        XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment, timeout: 40))
+        XCTAssertFalse((try taskRecord(id: taskID)?["statusMessage"] as? String ?? "").contains("restarting"))
+        XCTAssertEqual(try historyTexts(taskID: taskID, environment: environment).filter { $0 == "After restart." }.count, 1)
+        attachScreenshot(named: "claude-finished-while-down")
     }
 
     private func exerciseRejectedStop(provider: String, title: String) throws {
@@ -19567,6 +19876,118 @@ final class PlayhouseUITests: XCTestCase {
         return try XCTUnwrap(result["tasks"] as? [[String: Any]])
     }
 
+    // MARK: - Agents that outlive the daemon
+
+    /// The shared Codex servers and Claude runs this case's data folder recorded, with their
+    /// manifests' paths.
+    private func agentManifests() -> [(kind: String, path: URL, manifest: [String: Any])] {
+        var manifests: [(String, URL, [String: Any])] = []
+        let codexRuns = dataDirectory.appendingPathComponent("codex-runs", isDirectory: true)
+        for url in ((try? FileManager.default.contentsOfDirectory(at: codexRuns, includingPropertiesForKeys: nil)) ?? [])
+        where url.pathExtension == "json" && !url.lastPathComponent.hasPrefix(".") {
+            if let object = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any] {
+                manifests.append(("codex", url, object))
+            }
+        }
+        let claudeRuns = dataDirectory.appendingPathComponent("provider-runs", isDirectory: true)
+        for folder in ((try? FileManager.default.contentsOfDirectory(at: claudeRuns, includingPropertiesForKeys: nil)) ?? []) {
+            let url = folder.appendingPathComponent("run.json")
+            if let object = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any] {
+                manifests.append(("claude", url, object))
+            }
+        }
+        return manifests
+    }
+
+    /// The process a manifest recorded, while it still runs as that process (same start time).
+    private func agentIsAlive(_ process: [String: Any]?) -> Bool {
+        guard let pid = (process?["pid"] as? NSNumber)?.int32Value,
+              let startTime = (process?["startTime"] as? NSNumber)?.int64Value else { return false }
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0, info.kp_proc.p_stat != SZOMB else { return false }
+        let start = info.kp_proc.p_un.__p_starttime
+        return Int64(start.tv_sec) * 1_000_000 + Int64(start.tv_usec) == startTime
+    }
+
+    private func stopSurvivingAgents() {
+        for entry in agentManifests() where agentIsAlive(entry.manifest["process"] as? [String: Any]) {
+            if let pid = ((entry.manifest["process"] as? [String: Any])?["pid"] as? NSNumber)?.int32Value {
+                killpg(pid, SIGKILL)
+            }
+        }
+    }
+
+    /// A private bridge service, so a case can kill its daemon without touching the UI runner's.
+    private func restartServiceEnvironment(_ extra: [String: String] = [:]) -> [String: String] {
+        ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).restart-\(UUID().uuidString.prefix(8))"].merging(extra) { _, new in new }
+    }
+
+    private func agentManifest(kind: String, service: [String: String]) -> (path: URL, manifest: [String: Any])? {
+        agentManifests().first { $0.kind == kind && $0.manifest["serviceName"] as? String == service["PLAYHOUSE_BRIDGE_SERVICE_NAME"] }
+            .map { ($0.path, $0.manifest) }
+    }
+
+    private func killDaemon(environment: [String: String]) throws {
+        let pid = try XCTUnwrap(try daemonProcessID(environment: environment), "The private daemon should be running.")
+        kill(pid_t(pid), SIGKILL)
+        XCTAssertTrue(waitUntil({ kill(pid_t(pid), 0) != 0 }, timeout: 10), "The killed daemon should exit.")
+    }
+
+    private func clearReattachMarkers(_ executable: String) {
+        let folder = URL(fileURLWithPath: executable).deletingLastPathComponent()
+        let name = URL(fileURLWithPath: executable).lastPathComponent
+        for file in (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [] where file.hasPrefix(name + ".") {
+            try? FileManager.default.removeItem(at: folder.appendingPathComponent(file))
+        }
+    }
+
+    private func jsonLines(_ path: String) -> [Any] {
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+        return text.split(whereSeparator: \.isNewline).compactMap {
+            try? JSONSerialization.jsonObject(with: Data($0.utf8), options: [.fragmentsAllowed])
+        }
+    }
+
+    private func historyTexts(taskID: String, environment: [String: String] = [:]) throws -> [String] {
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID], extraEnvironment: environment)["result"] as? [String: Any])
+        return (history["messages"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+    }
+
+    private func sendFromComposer(_ text: String) {
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15))
+        composer.click()
+        composer.typeText(text)
+        // A task waiting on a response offers Continue as its send action.
+        let send = element("send-message-button")
+        if send.waitForExistence(timeout: 3) { send.click() } else { element("continue-response-button").click() }
+    }
+
+    /// Command-Return steers the running turn with the composer's text.
+    private func steerFromComposer(_ text: String) {
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15))
+        composer.click()
+        composer.typeText(text)
+        composer.typeKey(.return, modifierFlags: .command)
+    }
+
+    private func touch(_ path: String) {
+        FileManager.default.createFile(atPath: path, contents: Data())
+    }
+
+    private func waitForStatus(_ taskID: String, _ status: String, environment: [String: String] = [:], timeout: TimeInterval = 30) -> Bool {
+        waitUntil({
+            let record = (try? self.runCLI(["task", "get", taskID], extraEnvironment: environment))?["result"] as? [String: Any]
+            return record?["status"] as? String == status
+        }, timeout: timeout)
+    }
+
+    private static let restartMessage = "The agent stopped while Playhouse was restarting. Your conversation is saved; send a follow-up to continue."
+
+
     private func taskRecord(named title: String) throws -> [String: Any]? {
         try tasksFromBoardList().first { $0["title"] as? String == title }
     }
@@ -19857,6 +20278,7 @@ final class PlayhouseUITests: XCTestCase {
         environment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = serviceName
+        environment.merge(providerExecutableEnvironment, uniquingKeysWith: { _, new in new })
         environment.merge(extraEnvironment) { _, override in override }
         process.environment = environment
         let stdout = Pipe()
@@ -19868,6 +20290,14 @@ final class PlayhouseUITests: XCTestCase {
     }
 
     private func finishCLIProcess(_ running: RunningCLIProcess, expectedStatus: Int32? = 0) throws -> [String: Any] {
+        try finishCLIProcessCapturingEvents(running, expectedStatus: expectedStatus).response
+    }
+
+    /// The final response plus every streamed event line printed before it.
+    private func finishCLIProcessCapturingEvents(
+        _ running: RunningCLIProcess,
+        expectedStatus: Int32? = 0
+    ) throws -> (response: [String: Any], events: [[String: Any]]) {
         running.process.waitUntilExit()
         let output = String(data: running.stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let errorOutput = String(data: running.stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -19880,7 +20310,10 @@ final class PlayhouseUITests: XCTestCase {
             "CLI response was not a JSON object."
         )
         XCTAssertEqual(response["version"] as? Int, 1)
-        return response
+        let events = output.split(whereSeparator: \.isNewline).dropLast().compactMap {
+            try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        }
+        return (response, events)
     }
 
     private func startProgressFixtureTurn(

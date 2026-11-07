@@ -1687,12 +1687,27 @@ final class BoardTaskManager {
         }
         let marker = try conversationTurnActiveURL(id)
         try FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data().write(to: marker, options: .atomic)
+        // The service whose daemon runs the turn: after a restart, only that service's next
+        // daemon goes back to it, even when another service shares this data folder.
+        try Data(AgentRunService.name.utf8).write(to: marker, options: .atomic)
     }
 
     func clearConversationTurnOutcome(_ id: UUID) {
         try? FileManager.default.removeItem(at: try conversationTurnOutcomeURL(id))
         try? FileManager.default.removeItem(at: try conversationTurnActiveURL(id))
+    }
+
+    /// Tasks whose turn was running when the daemon running it exited: the turn's active marker
+    /// outlived it, and no process holds the task's turn reservation any more.
+    func tasksWithCutOffTurns() -> [UUID] {
+        guard let conversationTurnLockDirectory,
+              let names = try? FileManager.default.contentsOfDirectory(atPath: conversationTurnLockDirectory.path) else { return [] }
+        return names.compactMap { name -> UUID? in
+            guard name.hasSuffix(".active") else { return nil }
+            let owner = (try? String(contentsOf: conversationTurnLockDirectory.appendingPathComponent(name), encoding: .utf8)) ?? ""
+            guard owner.isEmpty || owner == AgentRunService.name else { return nil }
+            return UUID(uuidString: String(name.dropLast(".active".count)))
+        }.filter { (try? hasConversationTurnReservation($0)) == false }
     }
 
     func finishConversationTurnOutcome(_ id: UUID) async throws -> String? {
@@ -3438,7 +3453,7 @@ final class BoardTaskManager {
             let message: String
             switch task.status {
             case .inProgress:
-                message = "Playhouse closed while this turn was running. Your conversation is saved; review it and send a follow-up to continue."
+                message = ConversationManager.interruptedByRestartMessage
             default:
                 // Waiting Response without a saved question is a finished turn waiting for the user.
                 return BoardTaskRecord(task: task)
@@ -4999,6 +5014,68 @@ struct ConversationUpdate: Codable {
     var taskStatus: String?
 }
 
+/// The live updates of every turn a task runs, for callers that didn't start it: a window
+/// watching a CLI send, a scheduled turn, or a turn this daemon reattached after a restart.
+/// A turn's own sender still gets its updates directly; this is a copy of the same stream.
+@MainActor
+enum ConversationTurnEvents {
+    private static var activeTurns: [UUID: Int] = [:]
+    private static var watchers: [UUID: [UUID: AsyncStream<ConversationUpdate>.Continuation]] = [:]
+
+    static func isActive(_ taskID: UUID) -> Bool { activeTurns[taskID, default: 0] > 0 }
+
+    /// Turns can nest (a reminder continuation inside a send), so watchers stay until the
+    /// outermost one ends.
+    static func begin(_ taskID: UUID) { activeTurns[taskID, default: 0] += 1 }
+
+    static func end(_ taskID: UUID) {
+        let remaining = activeTurns[taskID, default: 0] - 1
+        guard remaining <= 0 else {
+            activeTurns[taskID] = remaining
+            return
+        }
+        activeTurns.removeValue(forKey: taskID)
+        for continuation in (watchers.removeValue(forKey: taskID) ?? [:]).values { continuation.finish() }
+    }
+
+    static func publish(_ taskID: UUID, _ update: ConversationUpdate) {
+        for continuation in watchers[taskID, default: [:]].values { continuation.yield(update) }
+    }
+
+    /// The task's updates until its turns end, or nil when no turn is running.
+    static func watch(_ taskID: UUID) -> AsyncStream<ConversationUpdate>? {
+        guard isActive(taskID) else { return nil }
+        let id = UUID()
+        let (stream, continuation) = AsyncStream.makeStream(of: ConversationUpdate.self, bufferingPolicy: .unbounded)
+        continuation.onTermination = { _ in
+            Task { @MainActor in _ = ConversationTurnEvents.watchers[taskID]?.removeValue(forKey: id) }
+        }
+        watchers[taskID, default: [:]][id] = continuation
+        return stream
+    }
+}
+
+/// A one-time answer an async caller waits for; the first `set` wins.
+@MainActor
+final class AsyncFlag {
+    private var result: Bool?
+    private var waiters: [CheckedContinuation<Bool, Never>] = []
+
+    func set(_ value: Bool) {
+        guard result == nil else { return }
+        result = value
+        for waiter in waiters { waiter.resume(returning: value) }
+        waiters.removeAll()
+    }
+
+    var value: Bool {
+        get async {
+            if let result { return result }
+            return await withCheckedContinuation { waiters.append($0) }
+        }
+    }
+}
+
 @MainActor
 final class ConversationManager {
     private var lastReportedTurnOutcomeByTaskID: [UUID: String] = [:]
@@ -6495,6 +6572,7 @@ final class ConversationManager {
         let onUpdate: (ConversationUpdate) -> Void = { update in
             if Self.historyVisibleUpdateTypes.contains(update.type) { Self.bumpVisibleRevision(taskID) }
             streamUpdate(update)
+            ConversationTurnEvents.publish(taskID, update)
         }
         defer { Self.bumpVisibleRevision(taskID) }
         let task = try tasks.conversationSubject(taskID)
@@ -6520,6 +6598,8 @@ final class ConversationManager {
         let history: ConversationHistory
         do {
             history = try await tasks.withConversationTurnReservation(taskID) {
+                ConversationTurnEvents.begin(taskID)
+                defer { ConversationTurnEvents.end(taskID) }
                 // Only the reservation holder owns the applying marker: take it for
                 // a recovery, or drop one a crashed recovery left behind.
                 try self.transcripts.mutate(taskID, turns: .none) { transcript in
@@ -6589,83 +6669,10 @@ final class ConversationManager {
                         // must hold the whole turn rather than the newest page.
                         historyMessageLimit: task.isStandaloneChat ? nil : historyMessageLimit
                     )
-                    // A turn that ends unsettled is driven forward privately rather
-                    // than dropped on the board: `in-progress` asks for a
-                    // continuation outright, and a turn that reported nothing is
-                    // nudged to say where it stands.
-                    var continuations = 0
-                    var stoppedForUser = false
-                    var continuationFailed = false
-                    // A standalone chat is told never to report a task outcome, so it can
-                    // never settle one: driving it would spend provider turns and bury the
-                    // user's next message under private turns that answer nobody.
-                    let drivesUnsettledTurns = !isStandaloneChat
-                    while drivesUnsettledTurns, continuations < TurnOutcome.maxContinuations {
-                        // A question the model raised settles the turn on the
-                        // user; nudging past it would talk over them.
-                        guard (try? self.transcripts.readState(taskID).pendingUserInputRequest) == nil else { break }
-                        // The user taking over ends Playhouse's private driving.
-                        // A continuation tells the model to resume working, so
-                        // without this it could undo a Stop or run ahead of a
-                        // queued follow-up up to the continuation limit.
-                        if self.userTookOverConversation(taskID: taskID, client: operationClient) {
-                            stoppedForUser = true
-                            break
-                        }
-                        let reported = self.lastReportedTurnOutcomeByTaskID[taskID].flatMap(TurnOutcome.init(rawValue:))
-                        guard reported == nil || reported == .inProgress else { break }
-                        continuations += 1
-                        let prompt = reported == .inProgress
-                            ? Self.outcomeContinuationPrompt(attempt: continuations)
-                            : Self.outcomeNudgePrompt(attempt: continuations)
-                        do {
-                            _ = try await self.sendReserved(
-                                taskID: taskID,
-                                text: prompt,
-                                imageDataURLs: [],
-                                mode: mode,
-                                requestedModelID: modelID,
-                                userInputAnswers: [:],
-                                sensitiveUserInputAnswerValues: [],
-                                hideSensitiveRecoveryPrompt: false,
-                                isPlayhouseNudge: true,
-                                deferMissingOutcomeStatus: true,
-                                statusBeforeSubmission: nil,
-                                // An internal reminder quotes no chat page of its own.
-                                contextPageIDs: [],
-                                onTurnStarting: nil,
-                                onUpdate: onUpdate,
-                                onUserInput: onUserInput
-                            )
-                        } catch {
-                            // A Stop lands as a thrown turn, so the throw alone
-                            // can't tell a user takeover from a provider failure.
-                            // Only the latter is Playhouse's to report.
-                            if self.userTookOverConversation(taskID: taskID, client: operationClient) {
-                                stoppedForUser = true
-                            } else {
-                                continuationFailed = true
-                            }
-                            break
-                        }
-                    }
-                    let settled = self.lastReportedTurnOutcomeByTaskID[taskID].flatMap(TurnOutcome.init(rawValue:))
-                    let waitingOnUser = (try? self.transcripts.readState(taskID).pendingUserInputRequest) != nil
-                    if drivesUnsettledTurns, !stoppedForUser, !waitingOnUser, settled == nil || settled == .inProgress {
-                        // The work is unsettled and the user was never asked
-                        // anything, so Waiting Response would misreport this.
-                        // Blocked says Playhouse stopped driving, and the reason
-                        // says why.
-                        let reason: String
-                        if continuationFailed {
-                            reason = "Playhouse couldn't run the private turn that would continue this work. Send a message to pick the work up again."
-                        } else if settled == .inProgress {
-                            reason = "Still working after \(TurnOutcome.maxContinuations) continuation turns. Send a message to pick the work up again."
-                        } else {
-                            reason = "The turn ended without reporting an outcome, and \(TurnOutcome.maxContinuations) status nudges went unanswered. Send a message to pick the work up again."
-                        }
-                        _ = try await self.tasks.setLifecycleStatus(taskID, to: .blocked, message: reason)
-                    }
+                    try await self.driveUnsettledTurns(
+                        taskID: taskID, isStandaloneChat: isStandaloneChat, mode: mode, modelID: modelID,
+                        client: operationClient, onUpdate: onUpdate, onUserInput: onUserInput
+                    )
                     try onUserInputApplied?()
                     self.lastReportedTurnOutcomeByTaskID.removeValue(forKey: taskID)
                     try? await self.tasks.clearPendingSubmittedPrompt(taskID)
@@ -6697,6 +6704,347 @@ final class ConversationManager {
             await dispatchQueuedMessages(taskID: taskID, mode: mode, modelID: modelID, onUpdate: onUpdate, onUserInput: onUserInput)
         }
         return history
+    }
+
+    /// The message a turn gets when its agent didn't survive a daemon restart.
+    static let interruptedByRestartMessage = "The agent stopped while Playhouse was restarting. Your conversation is saved; send a follow-up to continue."
+
+    /// Each data folder is scanned once per daemon. Every request waits for that scan, so no
+    /// request can settle a task as stopped while its turn is still being reattached.
+    private static var reattachScans: [String: Task<Void, Never>] = [:]
+
+    /// Goes back to the turns that were running when this service's previous daemon exited:
+    /// agents keep running across a daemon restart, so each such turn is followed again by this
+    /// daemon, and a turn whose agent is gone is settled as interrupted.
+    func resumeReattachedRuns(storeDirectory: String?) async {
+        guard let storeDirectory else { return }
+        if let scan = Self.reattachScans[storeDirectory] {
+            await scan.value
+            return
+        }
+        let scan = Task { @MainActor in await self.reattachCutOffTurns(storeDirectory: URL(fileURLWithPath: storeDirectory, isDirectory: true)) }
+        Self.reattachScans[storeDirectory] = scan
+        await scan.value
+    }
+
+    private func reattachCutOffTurns(storeDirectory: URL) async {
+        let codexRuns = CodexSharedServer.runsDirectory(dataDirectory: storeDirectory)
+        await Self.stopUntrackedAgents(storeDirectory: storeDirectory)
+        // A dead server leaves only its files.
+        var liveServers: [(server: CodexSharedServer, manifest: CodexServerManifest)] = []
+        for entry in CodexSharedServer.manifests(in: codexRuns, serviceName: AgentRunService.name) {
+            if entry.manifest.process?.isAlive == true {
+                liveServers.append(entry)
+            } else if entry.manifest.state != "spawning" || Date().timeIntervalSince(entry.manifest.createdAt) > 30 {
+                entry.server.removeFiles(socketPath: entry.manifest.socketPath)
+            }
+        }
+        for taskID in tasks.tasksWithCutOffTurns() {
+            guard let task = try? tasks.conversationSubject(taskID) else {
+                tasks.clearConversationTurnOutcome(taskID)
+                continue
+            }
+            var attached = false
+            if task.conversationProvider == .codex, let threadID = task.codexThreadID,
+               let live = liveServers.first(where: { $0.manifest.threads[threadID] != nil }),
+               let client = CodexAppServerClient.sharedClient(for: live.server, runDirectory: storeDirectory) {
+                attached = await reattachTurn(taskID: taskID, client: client, threadID: threadID)
+            } else if task.conversationProvider == .claude, let sessionID = task.claudeSessionID {
+                attached = await reattachTurn(taskID: taskID, client: clients.claude, threadID: sessionID)
+            }
+            if !attached { await settleTurnLostInRestart(taskID: taskID) }
+        }
+        for live in liveServers {
+            await CodexAppServerClient.sharedClient(for: live.server, runDirectory: storeDirectory)?.adoptSharedServer()
+        }
+        // A run whose task has no cut-off turn left is one whose turn already settled.
+        let claudeRuns = ClaudeRunFiles.runsDirectory(dataDirectory: storeDirectory)
+        for run in ClaudeRunFiles.runs(in: claudeRuns) where !ClaudeCodeClient.hasActiveRunner(sessionID: run.manifest.sessionID) {
+            await ClaudeAgentRun.attach(directory: run.directory)?.terminateAndRemove()
+        }
+    }
+
+    /// Stops agent processes of this data folder that no run or server manifest accounts for:
+    /// a daemon killed between starting an agent and recording it would leave it running unseen.
+    private static func stopUntrackedAgents(storeDirectory: URL) async {
+        let codexRuns = CodexSharedServer.runsDirectory(dataDirectory: storeDirectory)
+        let claudeRuns = ClaudeRunFiles.runsDirectory(dataDirectory: storeDirectory)
+        var known = Set<AgentProcessIdentity>()
+        // A spawn still being recorded has no identity yet; what writes into its files is its own.
+        var spawning: [String] = []
+        // Every service's manifests count: a process another service recorded is not untracked.
+        for entry in CodexSharedServer.manifests(in: codexRuns, serviceName: nil) {
+            if let process = entry.manifest.process { known.insert(process) }
+            if entry.manifest.process == nil, Date().timeIntervalSince(entry.manifest.createdAt) < 30 {
+                spawning.append(entry.server.logURL.resolvingSymlinksInPath().path)
+            }
+        }
+        for run in ClaudeRunFiles.runs(in: claudeRuns, serviceName: nil) {
+            if let process = run.manifest.process { known.insert(process) }
+            if run.manifest.process == nil, Date().timeIntervalSince(run.manifest.createdAt) < 30 {
+                spawning.append(run.directory.resolvingSymlinksInPath().path + "/")
+            }
+        }
+        let found = await Task.detached {
+            AgentProcessSweep.processes(withStandardStreamsUnder: [codexRuns.path, claudeRuns.path])
+        }.value.filter { process in
+            !spawning.contains { process.path == $0 || process.path.hasPrefix($0) }
+        }
+        // A helper a recorded agent started shares its log and is that agent's to stop.
+        var trackedPIDs = Set(known.map(\.pid))
+        var untracked = found.filter { !known.contains($0.identity) }
+        var grew = true
+        while grew {
+            grew = false
+            for process in untracked where trackedPIDs.contains(process.parentPID) {
+                trackedPIDs.insert(process.identity.pid)
+                grew = true
+            }
+            untracked.removeAll { trackedPIDs.contains($0.identity.pid) }
+        }
+        for process in untracked {
+            PlayhouseDiagnostics.record("agent.untracked.stopped", fields: [
+                "processID": String(process.identity.pid),
+                "path": process.path,
+            ])
+            await AgentRunHost.terminate(process.identity)
+        }
+    }
+
+    /// A cut-off turn whose agent didn't survive: it waits for the user, with its conversation
+    /// kept, rather than staying In Progress with nothing behind it.
+    private func settleTurnLostInRestart(taskID: UUID) async {
+        defer { tasks.clearConversationTurnOutcome(taskID) }
+        guard let task = try? tasks.conversationSubject(taskID), task.status == .inProgress else { return }
+        if let pending = try? transcripts.readState(taskID).pendingUserInputRequest, pending.threadID == task.activeConversationID {
+            // A saved question stays answerable, as when the task is reconciled on open.
+            return
+        }
+        _ = try? await tasks.setLifecycleStatus(taskID, to: .waitingResponse, message: Self.interruptedByRestartMessage)
+        try? await tasks.clearPendingSubmittedPrompt(taskID)
+        PlayhouseDiagnostics.record("conversation.turn.lost_in_restart", fields: ["taskID": taskID.uuidString])
+        Self.bumpVisibleRevision(taskID)
+    }
+
+    /// Follows one cut-off turn in the background, holding its turn reservation as a send would,
+    /// and returns once the turn is this daemon's own (true) or turned out to have no agent (false).
+    private func reattachTurn(taskID: UUID, client: ConversationProviderClient, threadID: String) async -> Bool {
+        guard let task = try? tasks.conversationSubject(taskID),
+              let workspace = try? launchWorkspace(for: task, roots: task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }) else {
+            return false
+        }
+        let provider = task.conversationProvider
+        let attached = AsyncFlag()
+        BridgeBackgroundWork.start {
+            let onUpdate: (ConversationUpdate) -> Void = { update in
+                if Self.historyVisibleUpdateTypes.contains(update.type) { Self.bumpVisibleRevision(taskID) }
+                ConversationTurnEvents.publish(taskID, update)
+            }
+            var followed = false
+            do {
+                try await self.tasks.withConversationTurnReservation(taskID) {
+                    ConversationTurnEvents.begin(taskID)
+                    defer { ConversationTurnEvents.end(taskID) }
+                    defer { Self.bumpVisibleRevision(taskID) }
+                    followed = try await self.followReattachedTurn(
+                        taskID: taskID, provider: provider, client: client, threadID: threadID,
+                        workspace: workspace, attached: attached, onUpdate: onUpdate
+                    )
+                }
+            } catch {
+                var fields = PlayhouseDiagnostics.errorFields(error)
+                fields["taskID"] = taskID.uuidString
+                PlayhouseDiagnostics.record("conversation.turn.reattach_failed", fields: fields)
+            }
+            attached.set(false)
+            if followed, !Self.dispatchingQueuedTaskIDs.contains(taskID) {
+                await self.dispatchQueuedMessages(taskID: taskID, mode: .code, modelID: nil, onUpdate: onUpdate, onUserInput: { _ in })
+            }
+        }
+        return await attached.value
+    }
+
+    /// Runs inside the task's turn reservation. Returns whether a turn was followed to its end.
+    private func followReattachedTurn(
+        taskID: UUID,
+        provider: ConversationProvider,
+        client: ConversationProviderClient,
+        threadID: String,
+        workspace: ConversationWorkspaceContext,
+        attached: AsyncFlag,
+        onUpdate: @escaping (ConversationUpdate) -> Void
+    ) async throws -> Bool {
+        try tasks.activateConversationTurnOutcome(taskID)
+        defer { tasks.clearConversationTurnOutcome(taskID) }
+        let transcript = try transcripts.readState(taskID)
+        let segment = transcript.segments.last.map { (segmentID: $0.id, handoff: String?.none) }
+        // Claude records its turn locally; the reattached run carries on in the turn it started,
+        // the transcript's newest, since a task runs one turn at a time.
+        let claudeTurn = provider == .claude ? try transcripts.read(taskID, turns: .all, includeImages: false).turns.last : nil
+        let claudeTurnID = claudeTurn?.id
+        let recording = TurnRecording()
+        // Final answers are numbered within their turn; carry on after the ones already recorded.
+        recording.finalMessageCount = claudeTurn.map { turn in
+            turn.messages.filter { $0.id.hasPrefix("\(turn.id)-final-") }.count
+        } ?? 0
+        let modelID = (try? modelID(taskID: taskID)) ?? nil
+        let callbacks = turnCallbacks(
+            taskID: taskID, provider: provider, client: client, threadID: threadID,
+            modelID: modelID ?? provider.defaultModelID,
+            segment: segment, claudeTurnID: claudeTurnID,
+            hideSensitiveRecoveryPrompt: false, sensitiveUserInputAnswerValues: [],
+            isPlayhouseNudge: false, userInputAnswers: [:], recording: recording,
+            onUpdate: onUpdate, onUserInput: { _ in }
+        )
+        let result: ConversationReattachResult
+        var phase = "\(provider.rawValue)-reattached-turn"
+        do {
+            result = try await client.followReattachedTurn(
+                threadID: threadID, workspace: workspace, callbacks: callbacks,
+                onAttached: { attached.set(true) }
+            )
+        } catch {
+            attached.set(true)
+            for (activityID, durationMs) in client.lastTurnActivityDurations(threadID: threadID) {
+                try? await tasks.recordConversationActivityDuration(taskID: taskID, activityID: activityID, durationMs: durationMs)
+            }
+            let pendingQuestion = try? transcripts.readState(taskID).pendingUserInputRequest
+            let status: TaskStatus
+            let message: String?
+            if client.wasLastTurnInterrupted(threadID: threadID) {
+                (status, message) = (.waitingResponse, nil)
+            } else if let pendingQuestion {
+                (status, message) = pendingQuestion.isBlocking
+                    ? (.waitingResponse, "Waiting for your saved question to be answered.")
+                    : (.inProgress, "A saved question is available for your response.")
+            } else {
+                (status, message) = (.waitingResponse, Self.interruptedByRestartMessage)
+            }
+            _ = try? await tasks.setLifecycleStatus(taskID, to: status, message: message)
+            try? await tasks.clearPendingSubmittedPrompt(taskID)
+            var fields = PlayhouseDiagnostics.errorFields(error)
+            fields["taskID"] = taskID.uuidString
+            fields["phase"] = phase
+            PlayhouseDiagnostics.record("conversation.reattached_turn.failed", fields: fields)
+            onUpdate(ConversationUpdate(type: "completed", history: try? await history(taskID: taskID, includesImageData: true)))
+            return false
+        }
+        switch result {
+        case .agentGone, .notRunning:
+            return false
+        case .finished:
+            break
+        }
+        PlayhouseDiagnostics.record("conversation.reattached_turn.finished", fields: [
+            "taskID": taskID.uuidString,
+            "provider": provider.rawValue,
+        ])
+        lastReportedTurnOutcomeByTaskID.removeValue(forKey: taskID)
+        try await settleFinishedTurn(
+            taskID: taskID, client: client, threadID: threadID, recording: recording,
+            deferMissingOutcomeStatus: true, phase: &phase
+        )
+        let isStandaloneChat = (try? tasks.conversationSubject(taskID))?.isStandaloneChat ?? false
+        try await driveUnsettledTurns(
+            taskID: taskID, isStandaloneChat: isStandaloneChat, mode: .code, modelID: nil,
+            client: client, onUpdate: onUpdate, onUserInput: { _ in }
+        )
+        lastReportedTurnOutcomeByTaskID.removeValue(forKey: taskID)
+        try? await tasks.clearPendingSubmittedPrompt(taskID)
+        let finalHistory = try await history(taskID: taskID, includesImageData: true)
+        onUpdate(ConversationUpdate(type: "completed", history: standaloneChatDisplayHistory(taskID: taskID, finalHistory)))
+        return true
+    }
+
+    /// A turn that ends unsettled is driven forward privately: `in-progress` asks for a
+    /// continuation, and a turn that reported nothing is nudged to say where it stands. Shared by
+    /// a sent turn and a turn this daemon reattached after a restart.
+    private func driveUnsettledTurns(
+        taskID: UUID,
+        isStandaloneChat: Bool,
+        mode: ConversationMode,
+        modelID: String?,
+        client operationClient: ConversationProviderClient,
+        onUpdate: @escaping (ConversationUpdate) -> Void,
+        onUserInput: @escaping (ConversationUserInputRequest) async -> Void
+    ) async throws {
+        // A turn that ends unsettled is driven forward privately rather
+        // than dropped on the board: `in-progress` asks for a
+        // continuation outright, and a turn that reported nothing is
+        // nudged to say where it stands.
+        var continuations = 0
+        var stoppedForUser = false
+        var continuationFailed = false
+        // A standalone chat is told never to report a task outcome, so it can
+        // never settle one: driving it would spend provider turns and bury the
+        // user's next message under private turns that answer nobody.
+        let drivesUnsettledTurns = !isStandaloneChat
+        while drivesUnsettledTurns, continuations < TurnOutcome.maxContinuations {
+            // A question the model raised settles the turn on the
+            // user; nudging past it would talk over them.
+            guard (try? self.transcripts.readState(taskID).pendingUserInputRequest) == nil else { break }
+            // The user taking over ends Playhouse's private driving.
+            // A continuation tells the model to resume working, so
+            // without this it could undo a Stop or run ahead of a
+            // queued follow-up up to the continuation limit.
+            if self.userTookOverConversation(taskID: taskID, client: operationClient) {
+                stoppedForUser = true
+                break
+            }
+            let reported = self.lastReportedTurnOutcomeByTaskID[taskID].flatMap(TurnOutcome.init(rawValue:))
+            guard reported == nil || reported == .inProgress else { break }
+            continuations += 1
+            let prompt = reported == .inProgress
+                ? Self.outcomeContinuationPrompt(attempt: continuations)
+                : Self.outcomeNudgePrompt(attempt: continuations)
+            do {
+                _ = try await self.sendReserved(
+                    taskID: taskID,
+                    text: prompt,
+                    imageDataURLs: [],
+                    mode: mode,
+                    requestedModelID: modelID,
+                    userInputAnswers: [:],
+                    sensitiveUserInputAnswerValues: [],
+                    hideSensitiveRecoveryPrompt: false,
+                    isPlayhouseNudge: true,
+                    deferMissingOutcomeStatus: true,
+                    statusBeforeSubmission: nil,
+                    // An internal reminder quotes no chat page of its own.
+                    contextPageIDs: [],
+                    onTurnStarting: nil,
+                    onUpdate: onUpdate,
+                    onUserInput: onUserInput
+                )
+            } catch {
+                // A Stop lands as a thrown turn, so the throw alone
+                // can't tell a user takeover from a provider failure.
+                // Only the latter is Playhouse's to report.
+                if self.userTookOverConversation(taskID: taskID, client: operationClient) {
+                    stoppedForUser = true
+                } else {
+                    continuationFailed = true
+                }
+                break
+            }
+        }
+        let settled = self.lastReportedTurnOutcomeByTaskID[taskID].flatMap(TurnOutcome.init(rawValue:))
+        let waitingOnUser = (try? self.transcripts.readState(taskID).pendingUserInputRequest) != nil
+        if drivesUnsettledTurns, !stoppedForUser, !waitingOnUser, settled == nil || settled == .inProgress {
+            // The work is unsettled and the user was never asked
+            // anything, so Waiting Response would misreport this.
+            // Blocked says Playhouse stopped driving, and the reason
+            // says why.
+            let reason: String
+            if continuationFailed {
+                reason = "Playhouse couldn't run the private turn that would continue this work. Send a message to pick the work up again."
+            } else if settled == .inProgress {
+                reason = "Still working after \(TurnOutcome.maxContinuations) continuation turns. Send a message to pick the work up again."
+            } else {
+                reason = "The turn ended without reporting an outcome, and \(TurnOutcome.maxContinuations) status nudges went unanswered. Send a message to pick the work up again."
+            }
+            _ = try await self.tasks.setLifecycleStatus(taskID, to: .blocked, message: reason)
+        }
     }
 
     /// Whether the user has taken this conversation back from Playhouse's private
@@ -7206,6 +7554,402 @@ final class ConversationManager {
         return (segment.id, ConversationHandoff.context(for: provider, messages: Array(unseen)))
     }
 
+    /// What one turn records while it runs. A reminder continuation and a reattached turn each
+    /// get their own.
+    private final class TurnRecording {
+        var finalMessageCount = 0
+        var leakedOutcome: String?
+        var pendingQuestionLifecycleRevision: Int?
+    }
+
+    /// The callbacks a provider reports one turn through: they record its transcript, usage and
+    /// questions and stream its updates. A sent turn and a turn this daemon reattached after a
+    /// restart use the same set, so both land the same way.
+    private func turnCallbacks(
+        taskID: UUID,
+        provider: ConversationProvider,
+        client: ConversationProviderClient,
+        threadID: String,
+        modelID: String,
+        segment: (segmentID: String, handoff: String?)?,
+        claudeTurnID: String?,
+        hideSensitiveRecoveryPrompt: Bool,
+        sensitiveUserInputAnswerValues: [String],
+        isPlayhouseNudge: Bool,
+        userInputAnswers: [String: [String]],
+        recording: TurnRecording,
+        onUpdate: @escaping (ConversationUpdate) -> Void,
+        onUserInput: @escaping (ConversationUserInputRequest) async -> Void
+    ) -> ConversationTurnCallbacks {
+        // Only a private answer's recovery turn hides its output; a status nudge is shown.
+        let hidesRecoveryOutput = hideSensitiveRecoveryPrompt
+        let streamTurnUpdate = onUpdate
+        let approvalNotice = "\(provider.displayName) requested an approval. Playhouse denied it because approval prompts are disabled."
+        return ConversationTurnCallbacks(
+            onDelta: { delta in
+                // Deltas are many and superseded by the recorded message, so a
+                // turn not shown yet drops them instead of withholding them.
+                guard !hidesRecoveryOutput else { return }
+                onUpdate(ConversationUpdate(type: "text_delta", text: delta))
+            },
+            onFinalMessage: { answer in
+                let split = LeakedTurnOutcome.split(answer)
+                if split.taskID == taskID { recording.leakedOutcome = split.outcome }
+                let message = Self.redactingSensitiveText(split.text, values: sensitiveUserInputAnswerValues)
+                // An answer that was only the echo still replaces the streamed text.
+                if let claudeTurnID, !message.isEmpty {
+                    recording.finalMessageCount += 1
+                    self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, ConversationMessage(
+                        id: "\(claudeTurnID)-final-\(recording.finalMessageCount)", role: .assistant, text: message, phase: "final_answer"
+                    ))
+                }
+                streamTurnUpdate(ConversationUpdate(type: "assistant_final", text: message))
+            },
+            onActivity: { activity in
+                guard !hidesRecoveryOutput else { return }
+                if let claudeTurnID { self.recordClaudeActivity(taskID: taskID, turnID: claudeTurnID, activity) }
+                if let durationMs = activity.durationMs {
+                    Task { @MainActor in
+                        try? await self.tasks.recordConversationActivityDuration(
+                            taskID: taskID,
+                            activityID: activity.id,
+                            durationMs: durationMs
+                        )
+                    }
+                }
+                streamTurnUpdate(ConversationUpdate(type: "activity", activity: activity))
+            },
+            onDiff: { diff in
+                guard !hidesRecoveryOutput else { return }
+                streamTurnUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff))
+            },
+            onHistory: { history in
+                if provider == .codex, let segment { self.claimCodexTurns(taskID: taskID, segmentID: segment.segmentID, history.messages) }
+                var history = history
+                let matchedPrivateRecoveryTurnIDs = Set(history.messages.filter { message in
+                    guard message.role == .user else { return false }
+                    let containsPrivatePrompt = hideSensitiveRecoveryPrompt
+                        && Self.isPrivateTaskPrompt(message.text)
+                        && !Self.isPrivateOutcomeReminderPrompt(message.text)
+                    let containsSecretAnswer = sensitiveUserInputAnswerValues.contains {
+                        !$0.isEmpty && message.text.contains($0)
+                    }
+                    return containsPrivatePrompt || containsSecretAnswer
+                }.compactMap(\.turnID))
+                let privateOutcomeReminderTurnIDs = Set(history.messages.filter {
+                    $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text)
+                }.compactMap(\.turnID))
+                let previousTranscript = try? self.transcripts.readState(taskID)
+                let previouslyPrivateTurnIDs = Set(previousTranscript?.sensitiveCodexTurnIDs ?? [])
+                let previouslySecretRecoveryTurnIDs = Set(previousTranscript?.sensitiveCodexSecretTurnIDs ?? [])
+                let currentSecretRecoveryTurnIDs = Set(history.messages.filter { message in
+                    guard message.role == .user else { return false }
+                    return sensitiveUserInputAnswerValues.contains { !$0.isEmpty && message.text.contains($0) }
+                }.compactMap(\.turnID))
+                let privateSecretRecoveryTurnIDs = previouslySecretRecoveryTurnIDs.union(currentSecretRecoveryTurnIDs)
+                let previouslyPrivateReminderTurnIDs = Set((previousTranscript?.sensitiveCodexTurnMessages ?? [:]).compactMap { turnID, messages in
+                    messages.contains { $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text) } ? turnID : nil
+                })
+                let allPrivateTurnIDs = matchedPrivateRecoveryTurnIDs
+                    .union(previouslyPrivateTurnIDs)
+                    .union(privateOutcomeReminderTurnIDs)
+                let allPrivateReminderTurnIDs = privateOutcomeReminderTurnIDs.union(previouslyPrivateReminderTurnIDs)
+                if !matchedPrivateRecoveryTurnIDs.isEmpty, previousTranscript != nil {
+                    do {
+                        var safeCodexMessages: [String: [ConversationMessage]] = [:]
+                        if provider == .codex {
+                            for turnID in matchedPrivateRecoveryTurnIDs {
+                                safeCodexMessages[turnID] = history.messages
+                                    .filter { $0.turnID == turnID }
+                                    .map { message -> ConversationMessage in
+                                        var safe = Self.redactingSensitiveMessages(
+                                            [message], turnIDs: matchedPrivateRecoveryTurnIDs, values: sensitiveUserInputAnswerValues
+                                        )[0]
+                                        if message.role == .user {
+                                            safe.text = Self.privatePromptPlaceholder(for: message.text)
+                                            safe.asyncQuestions = nil
+                                        } else {
+                                            let redactedText = Self.redactingSensitiveText(message.text, values: sensitiveUserInputAnswerValues)
+                                            let stillContainsSecret = sensitiveUserInputAnswerValues.contains {
+                                                !$0.isEmpty && redactedText.contains($0)
+                                            }
+                                            safe.text = privateSecretRecoveryTurnIDs.contains(turnID) || stillContainsSecret
+                                                ? "[Response to private answer hidden]"
+                                                : redactedText
+                                            safe.asyncQuestions = nil
+                                        }
+                                        return safe
+                                    }
+                            }
+                        }
+                        try self.transcripts.mutate(taskID, turns: .none) { transcript in
+                            transcript.sensitiveTurnIDs = Array(Set(transcript.sensitiveTurnIDs ?? []).union(matchedPrivateRecoveryTurnIDs)).sorted()
+                            if provider == .codex {
+                                transcript.sensitiveCodexTurnIDs = Array(Set(transcript.sensitiveCodexTurnIDs ?? []).union(matchedPrivateRecoveryTurnIDs)).sorted()
+                                transcript.sensitiveCodexSecretTurnIDs = Array(Set(transcript.sensitiveCodexSecretTurnIDs ?? []).union(currentSecretRecoveryTurnIDs)).sorted()
+                                var storedMessages = transcript.sensitiveCodexTurnMessages ?? [:]
+                                storedMessages.merge(safeCodexMessages) { _, new in new }
+                                transcript.sensitiveCodexTurnMessages = storedMessages
+                            }
+                            transcript.pendingSensitiveUserInputRedaction = false
+                        }
+                    } catch {
+                        // Keep the pending marker so later reads redact conservatively.
+                    }
+                }
+                let currentTranscript = try? self.transcripts.readState(taskID)
+                let safeMessages = history.messages.filter { message in
+                    guard let turnID = message.turnID else { return true }
+                    return !privateOutcomeReminderTurnIDs.contains(turnID)
+                }.map { message -> ConversationMessage in
+                    if let turnID = message.turnID, allPrivateTurnIDs.contains(turnID) {
+                        var privateMessage = message
+                        privateMessage.text = message.role == .user
+                            ? Self.privatePromptPlaceholder(for: message.text)
+                            : (allPrivateReminderTurnIDs.contains(turnID)
+                                ? Self.privateOutcomeReminderResponsePlaceholder
+                                : "[Response to private answer hidden]")
+                        privateMessage.asyncQuestions = nil
+                        return privateMessage
+                    }
+                    if hideSensitiveRecoveryPrompt,
+                       message.role == .user,
+                       Self.isPrivateTaskPrompt(message.text) {
+                        var privatePrompt = message
+                        privatePrompt.text = Self.privatePromptPlaceholder(for: message.text)
+                        privatePrompt.asyncQuestions = nil
+                        return privatePrompt
+                    }
+                    return Self.redactingSensitiveMessages(
+                        [message], turnIDs: [], values: sensitiveUserInputAnswerValues,
+                        redactAllMessages: currentTranscript?.pendingSensitiveUserInputRedaction == true
+                    )[0]
+                }
+                let hideProviderDetails = hidesRecoveryOutput
+                    || currentTranscript?.pendingSensitiveUserInputRedaction == true
+                let modelIDs = currentTranscript?.segments.reduce(into: [String: String]()) { result, segment in
+                    result.merge(segment.codexTurnModelIDs) { existing, _ in existing }
+                } ?? [:]
+                let attributedMessages = safeMessages.map { message -> ConversationMessage in
+                    var message = message
+                    if provider == .codex {
+                        message.provider = message.provider ?? .codex
+                        if message.modelID == nil, let turnID = message.turnID { message.modelID = modelIDs[turnID] }
+                    }
+                    return message
+                }
+                history = ConversationHistory(
+                    messages: attributedMessages,
+                    activities: hideProviderDetails
+                        ? []
+                        : history.activities.filter { activity in
+                            activity.turnID.map { !allPrivateTurnIDs.contains($0) } ?? true
+                        },
+                    timelineActivities: hideProviderDetails
+                        ? []
+                        : ConversationActivity.visibleTimelineActivities(
+                            history.timelineActivities,
+                            visibleMessageIDs: Set(attributedMessages.map(\.id)),
+                            excludedTurnIDs: allPrivateTurnIDs
+                        ),
+                    diff: hideProviderDetails ? nil : history.diff,
+                    answeredAsyncQuestionIDs: (try? self.tasks.answeredAsyncQuestionIDs(taskID: taskID)) ?? [],
+                    pendingUserInputRequest: history.pendingUserInputRequest,
+                    providerBoundaries: history.providerBoundaries
+                )
+                onUpdate(ConversationUpdate(type: "history", history: self.standaloneChatDisplayHistory(taskID: taskID, history)))
+            },
+            onActionRequest: {
+                onUpdate(ConversationUpdate(type: "action_notice", message: approvalNotice))
+            },
+            onUserInput: { request async in
+                if isPlayhouseNudge {
+                    client.rejectUserInput(
+                        requestID: request.id,
+                        threadID: request.threadID,
+                        message: "This is a private Playhouse status nudge. Do not ask the user here; report `waiting-response` if you need an answer, `in-progress` if work remains, or `completed` if the work is finished."
+                    )
+                    return
+                }
+                do {
+                    try self.persistPendingUserInputRequest(request, taskID: taskID)
+                } catch {
+                    client.rejectUserInput(requestID: request.id, threadID: request.threadID, message: "Playhouse couldn't save this question for recovery. Please try again.")
+                    onUpdate(ConversationUpdate(type: "action_notice", message: "Couldn't save the pending question. The provider turn was stopped so the question isn't lost."))
+                    return
+                }
+                // A blocking provider question pauses the conversation until
+                // the user answers. Reflect that pause on the board even
+                // though the provider turn remains reserved in the background.
+                let lifecycle = request.isBlocking
+                    ? try? await self.tasks.transitionLifecycleStatus(taskID, from: .inProgress, to: .waitingResponse)
+                    : nil
+                if let revision = lifecycle ?? nil {
+                    recording.pendingQuestionLifecycleRevision = revision
+                }
+                let status = try? await self.tasks.clearProgressReport(taskID)
+                onUpdate(ConversationUpdate(
+                    type: "user_input",
+                    userInputRequest: request,
+                    taskStatus: lifecycle != nil ? TaskStatus.waitingResponse.rawValue : status?.status
+                ))
+                if !userInputAnswers.isEmpty {
+                    let answersAccepted = client.answerUserInput(requestID: request.id, threadID: request.threadID, answers: userInputAnswers)
+                    if !answersAccepted {
+                        onUpdate(ConversationUpdate(type: "action_notice", message: "The supplied answers didn't match \(provider.displayName)'s questions."))
+                    } else {
+                        try? self.clearPendingUserInputRequest(taskID: taskID, requestID: request.id)
+                        if request.isBlocking,
+                           let resumed = try? await self.tasks.resumeWaitingResponseAfterUserInput(taskID) {
+                            onUpdate(ConversationUpdate(type: "task_status", taskStatus: resumed.status))
+                        }
+                    }
+                }
+                await onUserInput(request)
+            },
+            onSteerMessage: { message, images in
+                if claudeTurnID != nil {
+                    self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, ConversationMessage(
+                        id: UUID().uuidString.lowercased(), role: .user, text: message, imageDataURLs: images
+                    ))
+                }
+                onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
+            },
+            onProgressMessage: { message in
+                var safeMessage = message
+                safeMessage.text = Self.redactingSensitiveText(message.text, values: sensitiveUserInputAnswerValues)
+                safeMessage.asyncQuestions = message.asyncQuestions?.map { question in
+                    ConversationAsyncQuestion(
+                        title: Self.redactingSensitiveText(question.title, values: sensitiveUserInputAnswerValues),
+                        options: question.options?.map { Self.redactingSensitiveText($0, values: sensitiveUserInputAnswerValues) }
+                    )
+                }
+                if let claudeTurnID {
+                    self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, safeMessage)
+                }
+                streamTurnUpdate(ConversationUpdate(
+                    type: "assistant_progress",
+                    text: safeMessage.text,
+                    itemID: safeMessage.id,
+                    phase: safeMessage.phase,
+                    asyncQuestions: safeMessage.asyncQuestions
+                ))
+            },
+            onTurnStarted: { turnID in
+                if provider == .codex, let segment {
+                    self.recordCodexTurnStarted(taskID: taskID, segmentID: segment.segmentID, turnID: turnID, modelID: modelID)
+                }
+            },
+            onTokenUsage: { report in
+                // A private recovery turn still costs tokens, so the task's
+                // totals include it, but its per-turn row is withheld for the
+                // same reason its activity and messages are.
+                let isHidden = hidesRecoveryOutput
+                let attributed = ConversationTurnUsageReport(
+                    turnID: isHidden ? nil : (provider == .claude ? claudeTurnID : report.turnID),
+                    usage: report.usage,
+                    toolLabels: isHidden ? [] : report.toolLabels,
+                    liveCall: report.liveCall
+                )
+                let claudeConfigDirectory = (client as? ClaudeCodeClient)?.configDirectory
+                Task { @MainActor in
+                    do {
+                        try await self.tasks.recordTokenUsage(taskID: taskID, provider: provider, sourceID: threadID, report: attributed)
+                        // A Claude result closes a turn: settle the live counts against the session files.
+                        if provider == .claude, attributed.liveCall == nil, let claudeConfigDirectory {
+                            try await self.tasks.refreshClaudeCallUsage(taskID: taskID, sessionID: threadID, configDirectory: claudeConfigDirectory)
+                        }
+                    } catch {
+                        var fields = PlayhouseDiagnostics.errorFields(error)
+                        fields["taskID"] = taskID.uuidString
+                        PlayhouseDiagnostics.record("task.token_usage.record_failed", fields: fields)
+                    }
+                }
+            }
+        )
+    }
+
+    /// Settles a turn that ended: its activity durations, the outcome it reported and the
+    /// status that outcome decides, and the auto-PR on Review. A sent turn and a turn this daemon
+    /// reattached after a restart both finish here.
+    private func settleFinishedTurn(
+        taskID: UUID,
+        client: ConversationProviderClient,
+        threadID persistedThreadID: String?,
+        recording: TurnRecording,
+        deferMissingOutcomeStatus: Bool,
+        phase: inout String
+    ) async throws {
+        for (activityID, durationMs) in persistedThreadID.map({ client.lastTurnActivityDurations(threadID: $0) }) ?? [:] {
+            try await tasks.recordConversationActivityDuration(
+                taskID: taskID,
+                activityID: activityID,
+                durationMs: durationMs
+            )
+        }
+        phase = "worktree-finalization"
+        phase = "review-status-persistence"
+        let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID) ?? recording.leakedOutcome
+        lastReportedTurnOutcomeByTaskID[taskID] = reportedOutcome
+        if reportedOutcome == nil, deferMissingOutcomeStatus, let revision = recording.pendingQuestionLifecycleRevision,
+           let stillPending = try? transcripts.readState(taskID).pendingUserInputRequest {
+            // The turn completed without reporting an outcome while a structured
+            // question it raised is still unanswered. Undo the immediate
+            // waiting-response flip so the outcome reminder loop — not a stray
+            // unanswered question — decides this task's fate, and downgrade the
+            // saved request so reopening the conversation doesn't re-force it.
+            _ = try? await tasks.restoreLifecycleStatus(taskID, to: .inProgress, ifRevision: revision)
+            if stillPending.isBlocking {
+                try? transcripts.mutate(taskID, turns: .none) { transcript in
+                    guard transcript.pendingUserInputRequest?.id == stillPending.id else { return }
+                    transcript.pendingUserInputRequest = ConversationUserInputRequest(
+                        id: stillPending.id,
+                        threadID: stillPending.threadID,
+                        questions: stillPending.questions,
+                        isBlocking: false,
+                        mode: stillPending.mode
+                    )
+                }
+            }
+        } else if let outcome = reportedOutcome.flatMap(TurnOutcome.init(rawValue:)) {
+            switch outcome {
+            case .inProgress:
+                // `in-progress` settles on no status: the task stays In
+                // Progress while the caller drives the next continuation turn.
+                break
+            case .completed:
+                // A reviewed task must hold no local-only pull request changes:
+                // sync them first, and block instead of resting partially pushed.
+                phase = "review-sync"
+                var syncError: Error?
+                do {
+                    _ = try await tasks.syncPullRequestChanges(taskID, clients: clients)
+                } catch {
+                    syncError = error
+                }
+                if let syncError {
+                    PlayhouseDiagnostics.record("task.review.sync.failed", fields: [
+                        "taskID": taskID.uuidString,
+                        "error": syncError.localizedDescription
+                    ])
+                    _ = try await tasks.setLifecycleStatus(
+                        taskID,
+                        to: .blocked,
+                        message: BoardTaskManager.reviewSyncBlockedMessage(syncError)
+                    )
+                } else {
+                    let reviewRecord = try await tasks.setLifecycleStatus(taskID, to: .review)
+                    phase = "review-auto-pr"
+                    await tasks.createPullRequestsOnReviewIfNeeded(reviewRecord, clients: clients, settingsManager: settingsManager)
+                }
+            case .waitingResponse:
+                _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse)
+            }
+        } else if !deferMissingOutcomeStatus {
+            _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse)
+        }
+    }
+
     private func sendReserved(
         taskID: UUID,
         text: String,
@@ -7475,12 +8219,15 @@ final class ConversationManager {
                     )]))
                 }
             }
-            var finalMessageCount = 0
-            var leakedOutcome: String?
-            var pendingQuestionLifecycleRevision: Int?
-            // A status nudge turn is shown like any other turn; the prompt renders as
-            // an automatic Playhouse message.
-            let streamTurnUpdate = onUpdate
+            let recording = TurnRecording()
+            let callbacks = turnCallbacks(
+                taskID: taskID, provider: provider, client: client, threadID: threadID, modelID: modelID,
+                segment: segment, claudeTurnID: claudeTurnID,
+                hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt,
+                sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
+                isPlayhouseNudge: isPlayhouseNudge, userInputAnswers: userInputAnswers,
+                recording: recording, onUpdate: onUpdate, onUserInput: onUserInput
+            )
             if onTurnStarting != nil {
                 client.markTurnStarting(threadID: threadID)
                 onTurnStarting?()
@@ -7519,286 +8266,17 @@ final class ConversationManager {
 
                     missedPreviousPageSignal: task.isStandaloneChat ? ((try? tasks.standaloneChatManager().lastTurnMissedSignal()) ?? false) : false
                 ),
-                onDelta: { delta in
-                    // Deltas are many and superseded by the recorded message, so a
-                    // turn not shown yet drops them instead of withholding them.
-                    guard !hidesRecoveryOutput else { return }
-                    onUpdate(ConversationUpdate(type: "text_delta", text: delta))
-                },
-                onFinalMessage: { answer in
-                    let split = LeakedTurnOutcome.split(answer)
-                    if split.taskID == taskID { leakedOutcome = split.outcome }
-                    let message = Self.redactingSensitiveText(split.text, values: sensitiveUserInputAnswerValues)
-                    // An answer that was only the echo still replaces the streamed text.
-                    if let claudeTurnID, !message.isEmpty {
-                        finalMessageCount += 1
-                        self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, ConversationMessage(
-                            id: "\(claudeTurnID)-final-\(finalMessageCount)", role: .assistant, text: message, phase: "final_answer"
-                        ))
-                    }
-                    streamTurnUpdate(ConversationUpdate(type: "assistant_final", text: message))
-                },
-                onActivity: { activity in
-                    guard !hidesRecoveryOutput else { return }
-                    if let claudeTurnID { self.recordClaudeActivity(taskID: taskID, turnID: claudeTurnID, activity) }
-                    if let durationMs = activity.durationMs {
-                        Task { @MainActor in
-                            try? await self.tasks.recordConversationActivityDuration(
-                                taskID: taskID,
-                                activityID: activity.id,
-                                durationMs: durationMs
-                            )
-                        }
-                    }
-                    streamTurnUpdate(ConversationUpdate(type: "activity", activity: activity))
-                },
-                onDiff: { diff in
-                    guard !hidesRecoveryOutput else { return }
-                    streamTurnUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff))
-                },
-                onHistory: { history in
-                    if provider == .codex, let segment { self.claimCodexTurns(taskID: taskID, segmentID: segment.segmentID, history.messages) }
-                    var history = history
-                    let matchedPrivateRecoveryTurnIDs = Set(history.messages.filter { message in
-                        guard message.role == .user else { return false }
-                        let containsPrivatePrompt = hideSensitiveRecoveryPrompt
-                            && Self.isPrivateTaskPrompt(message.text)
-                            && !Self.isPrivateOutcomeReminderPrompt(message.text)
-                        let containsSecretAnswer = sensitiveUserInputAnswerValues.contains {
-                            !$0.isEmpty && message.text.contains($0)
-                        }
-                        return containsPrivatePrompt || containsSecretAnswer
-                    }.compactMap(\.turnID))
-                    let privateOutcomeReminderTurnIDs = Set(history.messages.filter {
-                        $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text)
-                    }.compactMap(\.turnID))
-                    let previousTranscript = try? self.transcripts.readState(taskID)
-                    let previouslyPrivateTurnIDs = Set(previousTranscript?.sensitiveCodexTurnIDs ?? [])
-                    let previouslySecretRecoveryTurnIDs = Set(previousTranscript?.sensitiveCodexSecretTurnIDs ?? [])
-                    let currentSecretRecoveryTurnIDs = Set(history.messages.filter { message in
-                        guard message.role == .user else { return false }
-                        return sensitiveUserInputAnswerValues.contains { !$0.isEmpty && message.text.contains($0) }
-                    }.compactMap(\.turnID))
-                    let privateSecretRecoveryTurnIDs = previouslySecretRecoveryTurnIDs.union(currentSecretRecoveryTurnIDs)
-                    let previouslyPrivateReminderTurnIDs = Set((previousTranscript?.sensitiveCodexTurnMessages ?? [:]).compactMap { turnID, messages in
-                        messages.contains { $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text) } ? turnID : nil
-                    })
-                    let allPrivateTurnIDs = matchedPrivateRecoveryTurnIDs
-                        .union(previouslyPrivateTurnIDs)
-                        .union(privateOutcomeReminderTurnIDs)
-                    let allPrivateReminderTurnIDs = privateOutcomeReminderTurnIDs.union(previouslyPrivateReminderTurnIDs)
-                    if !matchedPrivateRecoveryTurnIDs.isEmpty, previousTranscript != nil {
-                        do {
-                            var safeCodexMessages: [String: [ConversationMessage]] = [:]
-                            if provider == .codex {
-                                for turnID in matchedPrivateRecoveryTurnIDs {
-                                    safeCodexMessages[turnID] = history.messages
-                                        .filter { $0.turnID == turnID }
-                                        .map { message -> ConversationMessage in
-                                            var safe = Self.redactingSensitiveMessages(
-                                                [message], turnIDs: matchedPrivateRecoveryTurnIDs, values: sensitiveUserInputAnswerValues
-                                            )[0]
-                                            if message.role == .user {
-                                                safe.text = Self.privatePromptPlaceholder(for: message.text)
-                                                safe.asyncQuestions = nil
-                                            } else {
-                                                let redactedText = Self.redactingSensitiveText(message.text, values: sensitiveUserInputAnswerValues)
-                                                let stillContainsSecret = sensitiveUserInputAnswerValues.contains {
-                                                    !$0.isEmpty && redactedText.contains($0)
-                                                }
-                                                safe.text = privateSecretRecoveryTurnIDs.contains(turnID) || stillContainsSecret
-                                                    ? "[Response to private answer hidden]"
-                                                    : redactedText
-                                                safe.asyncQuestions = nil
-                                            }
-                                            return safe
-                                        }
-                                }
-                            }
-                            try self.transcripts.mutate(taskID, turns: .none) { transcript in
-                                transcript.sensitiveTurnIDs = Array(Set(transcript.sensitiveTurnIDs ?? []).union(matchedPrivateRecoveryTurnIDs)).sorted()
-                                if provider == .codex {
-                                    transcript.sensitiveCodexTurnIDs = Array(Set(transcript.sensitiveCodexTurnIDs ?? []).union(matchedPrivateRecoveryTurnIDs)).sorted()
-                                    transcript.sensitiveCodexSecretTurnIDs = Array(Set(transcript.sensitiveCodexSecretTurnIDs ?? []).union(currentSecretRecoveryTurnIDs)).sorted()
-                                    var storedMessages = transcript.sensitiveCodexTurnMessages ?? [:]
-                                    storedMessages.merge(safeCodexMessages) { _, new in new }
-                                    transcript.sensitiveCodexTurnMessages = storedMessages
-                                }
-                                transcript.pendingSensitiveUserInputRedaction = false
-                            }
-                        } catch {
-                            // Keep the pending marker so later reads redact conservatively.
-                        }
-                    }
-                    let currentTranscript = try? self.transcripts.readState(taskID)
-                    let safeMessages = history.messages.filter { message in
-                        guard let turnID = message.turnID else { return true }
-                        return !privateOutcomeReminderTurnIDs.contains(turnID)
-                    }.map { message -> ConversationMessage in
-                        if let turnID = message.turnID, allPrivateTurnIDs.contains(turnID) {
-                            var privateMessage = message
-                            privateMessage.text = message.role == .user
-                                ? Self.privatePromptPlaceholder(for: message.text)
-                                : (allPrivateReminderTurnIDs.contains(turnID)
-                                    ? Self.privateOutcomeReminderResponsePlaceholder
-                                    : "[Response to private answer hidden]")
-                            privateMessage.asyncQuestions = nil
-                            return privateMessage
-                        }
-                        if hideSensitiveRecoveryPrompt,
-                           message.role == .user,
-                           Self.isPrivateTaskPrompt(message.text) {
-                            var privatePrompt = message
-                            privatePrompt.text = Self.privatePromptPlaceholder(for: message.text)
-                            privatePrompt.asyncQuestions = nil
-                            return privatePrompt
-                        }
-                        return Self.redactingSensitiveMessages(
-                            [message], turnIDs: [], values: sensitiveUserInputAnswerValues,
-                            redactAllMessages: currentTranscript?.pendingSensitiveUserInputRedaction == true
-                        )[0]
-                    }
-                    let hideProviderDetails = hidesRecoveryOutput
-                        || currentTranscript?.pendingSensitiveUserInputRedaction == true
-                    let modelIDs = currentTranscript?.segments.reduce(into: [String: String]()) { result, segment in
-                        result.merge(segment.codexTurnModelIDs) { existing, _ in existing }
-                    } ?? [:]
-                    let attributedMessages = safeMessages.map { message -> ConversationMessage in
-                        var message = message
-                        if provider == .codex {
-                            message.provider = message.provider ?? .codex
-                            if message.modelID == nil, let turnID = message.turnID { message.modelID = modelIDs[turnID] }
-                        }
-                        return message
-                    }
-                    history = ConversationHistory(
-                        messages: attributedMessages,
-                        activities: hideProviderDetails
-                            ? []
-                            : history.activities.filter { activity in
-                                activity.turnID.map { !allPrivateTurnIDs.contains($0) } ?? true
-                            },
-                        timelineActivities: hideProviderDetails
-                            ? []
-                            : ConversationActivity.visibleTimelineActivities(
-                                history.timelineActivities,
-                                visibleMessageIDs: Set(attributedMessages.map(\.id)),
-                                excludedTurnIDs: allPrivateTurnIDs
-                            ),
-                        diff: hideProviderDetails ? nil : history.diff,
-                        answeredAsyncQuestionIDs: (try? self.tasks.answeredAsyncQuestionIDs(taskID: taskID)) ?? [],
-                        pendingUserInputRequest: history.pendingUserInputRequest,
-                        providerBoundaries: history.providerBoundaries
-                    )
-                    onUpdate(ConversationUpdate(type: "history", history: self.standaloneChatDisplayHistory(taskID: taskID, history)))
-                },
-                onActionRequest: {
-                    onUpdate(ConversationUpdate(type: "action_notice", message: approvalNotice))
-                },
-                onUserInput: { request async in
-                    if isPlayhouseNudge {
-                        client.rejectUserInput(
-                            requestID: request.id,
-                            threadID: request.threadID,
-                            message: "This is a private Playhouse status nudge. Do not ask the user here; report `waiting-response` if you need an answer, `in-progress` if work remains, or `completed` if the work is finished."
-                        )
-                        return
-                    }
-                    do {
-                        try self.persistPendingUserInputRequest(request, taskID: taskID)
-                    } catch {
-                        client.rejectUserInput(requestID: request.id, threadID: request.threadID, message: "Playhouse couldn't save this question for recovery. Please try again.")
-                        onUpdate(ConversationUpdate(type: "action_notice", message: "Couldn't save the pending question. The provider turn was stopped so the question isn't lost."))
-                        return
-                    }
-                    // A blocking provider question pauses the conversation until
-                    // the user answers. Reflect that pause on the board even
-                    // though the provider turn remains reserved in the background.
-                    let lifecycle = request.isBlocking
-                        ? try? await self.tasks.transitionLifecycleStatus(taskID, from: .inProgress, to: .waitingResponse)
-                        : nil
-                    if let revision = lifecycle ?? nil {
-                        pendingQuestionLifecycleRevision = revision
-                    }
-                    let status = try? await self.tasks.clearProgressReport(taskID)
-                    onUpdate(ConversationUpdate(
-                        type: "user_input",
-                        userInputRequest: request,
-                        taskStatus: lifecycle != nil ? TaskStatus.waitingResponse.rawValue : status?.status
-                    ))
-                    if !userInputAnswers.isEmpty {
-                        let answersAccepted = client.answerUserInput(requestID: request.id, threadID: request.threadID, answers: userInputAnswers)
-                        if !answersAccepted {
-                            onUpdate(ConversationUpdate(type: "action_notice", message: "The supplied answers didn't match \(provider.displayName)'s questions."))
-                        } else {
-                            try? self.clearPendingUserInputRequest(taskID: taskID, requestID: request.id)
-                            if request.isBlocking,
-                               let resumed = try? await self.tasks.resumeWaitingResponseAfterUserInput(taskID) {
-                                onUpdate(ConversationUpdate(type: "task_status", taskStatus: resumed.status))
-                            }
-                        }
-                    }
-                    await onUserInput(request)
-                },
-                onSteerMessage: { message, images in
-                    if claudeTurnID != nil {
-                        self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, ConversationMessage(
-                            id: UUID().uuidString.lowercased(), role: .user, text: message, imageDataURLs: images
-                        ))
-                    }
-                    onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
-                },
-                onProgressMessage: { message in
-                    var safeMessage = message
-                    safeMessage.text = Self.redactingSensitiveText(message.text, values: sensitiveUserInputAnswerValues)
-                    safeMessage.asyncQuestions = message.asyncQuestions?.map { question in
-                        ConversationAsyncQuestion(
-                            title: Self.redactingSensitiveText(question.title, values: sensitiveUserInputAnswerValues),
-                            options: question.options?.map { Self.redactingSensitiveText($0, values: sensitiveUserInputAnswerValues) }
-                        )
-                    }
-                    if let claudeTurnID {
-                        self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, safeMessage)
-                    }
-                    streamTurnUpdate(ConversationUpdate(
-                        type: "assistant_progress",
-                        text: safeMessage.text,
-                        itemID: safeMessage.id,
-                        phase: safeMessage.phase,
-                        asyncQuestions: safeMessage.asyncQuestions
-                    ))
-                },
-                onTurnStarted: { turnID in
-                    if provider == .codex, let segment {
-                        self.recordCodexTurnStarted(taskID: taskID, segmentID: segment.segmentID, turnID: turnID, modelID: modelID)
-                    }
-                },
-                onTokenUsage: { report in
-                    // A private recovery turn still costs tokens, so the task's
-                    // totals include it, but its per-turn row is withheld for the
-                    // same reason its activity and messages are.
-                    let isHidden = hidesRecoveryOutput
-                    let attributed = ConversationTurnUsageReport(
-                        turnID: isHidden ? nil : (provider == .claude ? claudeTurnID : report.turnID),
-                        usage: report.usage,
-                        toolLabels: isHidden ? [] : report.toolLabels,
-                        liveCall: report.liveCall
-                    )
-                    let claudeConfigDirectory = (client as? ClaudeCodeClient)?.configDirectory
-                    Task { @MainActor in
-                        do {
-                            try await self.tasks.recordTokenUsage(taskID: taskID, provider: provider, sourceID: threadID, report: attributed)
-                            // A Claude result closes a turn: settle the live counts against the session files.
-                            if provider == .claude, attributed.liveCall == nil, let claudeConfigDirectory {
-                                try await self.tasks.refreshClaudeCallUsage(taskID: taskID, sessionID: threadID, configDirectory: claudeConfigDirectory)
-                            }
-                        } catch {
-                            var fields = PlayhouseDiagnostics.errorFields(error)
-                            fields["taskID"] = taskID.uuidString
-                            PlayhouseDiagnostics.record("task.token_usage.record_failed", fields: fields)
-                        }
-                    }
-                },
+                onDelta: callbacks.onDelta,
+                onFinalMessage: callbacks.onFinalMessage,
+                onActivity: callbacks.onActivity,
+                onDiff: callbacks.onDiff,
+                onHistory: callbacks.onHistory,
+                onActionRequest: callbacks.onActionRequest,
+                onUserInput: callbacks.onUserInput,
+                onSteerMessage: callbacks.onSteerMessage,
+                onProgressMessage: callbacks.onProgressMessage,
+                onTurnStarted: callbacks.onTurnStarted,
+                onTokenUsage: callbacks.onTokenUsage,
                 sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
                 hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt
             )
@@ -7815,74 +8293,10 @@ final class ConversationManager {
                     transcript.segments[index].handoffDelivered = true
                 }
             }
-            for (activityID, durationMs) in persistedThreadID.map({ client.lastTurnActivityDurations(threadID: $0) }) ?? [:] {
-                try await tasks.recordConversationActivityDuration(
-                    taskID: taskID,
-                    activityID: activityID,
-                    durationMs: durationMs
-                )
-            }
-            phase = "worktree-finalization"
-            phase = "review-status-persistence"
-            let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID) ?? leakedOutcome
-            lastReportedTurnOutcomeByTaskID[taskID] = reportedOutcome
-            if reportedOutcome == nil, deferMissingOutcomeStatus, let revision = pendingQuestionLifecycleRevision,
-               let stillPending = try? transcripts.readState(taskID).pendingUserInputRequest {
-                // The turn completed without reporting an outcome while a structured
-                // question it raised is still unanswered. Undo the immediate
-                // waiting-response flip so the outcome reminder loop — not a stray
-                // unanswered question — decides this task's fate, and downgrade the
-                // saved request so reopening the conversation doesn't re-force it.
-                _ = try? await tasks.restoreLifecycleStatus(taskID, to: .inProgress, ifRevision: revision)
-                if stillPending.isBlocking {
-                    try? transcripts.mutate(taskID, turns: .none) { transcript in
-                        guard transcript.pendingUserInputRequest?.id == stillPending.id else { return }
-                        transcript.pendingUserInputRequest = ConversationUserInputRequest(
-                            id: stillPending.id,
-                            threadID: stillPending.threadID,
-                            questions: stillPending.questions,
-                            isBlocking: false,
-                            mode: stillPending.mode
-                        )
-                    }
-                }
-            } else if let outcome = reportedOutcome.flatMap(TurnOutcome.init(rawValue:)) {
-                switch outcome {
-                case .inProgress:
-                    // `in-progress` settles on no status: the task stays In
-                    // Progress while the caller drives the next continuation turn.
-                    break
-                case .completed:
-                    // A reviewed task must hold no local-only pull request changes:
-                    // sync them first, and block instead of resting partially pushed.
-                    phase = "review-sync"
-                    var syncError: Error?
-                    do {
-                        _ = try await tasks.syncPullRequestChanges(taskID, clients: clients)
-                    } catch {
-                        syncError = error
-                    }
-                    if let syncError {
-                        PlayhouseDiagnostics.record("task.review.sync.failed", fields: [
-                            "taskID": taskID.uuidString,
-                            "error": syncError.localizedDescription
-                        ])
-                        _ = try await tasks.setLifecycleStatus(
-                            taskID,
-                            to: .blocked,
-                            message: BoardTaskManager.reviewSyncBlockedMessage(syncError)
-                        )
-                    } else {
-                        let reviewRecord = try await tasks.setLifecycleStatus(taskID, to: .review)
-                        phase = "review-auto-pr"
-                        await tasks.createPullRequestsOnReviewIfNeeded(reviewRecord, clients: clients, settingsManager: settingsManager)
-                    }
-                case .waitingResponse:
-                    _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse)
-                }
-            } else if !deferMissingOutcomeStatus {
-                _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse)
-            }
+            try await settleFinishedTurn(
+                taskID: taskID, client: client, threadID: persistedThreadID, recording: recording,
+                deferMissingOutcomeStatus: deferMissingOutcomeStatus, phase: &phase
+            )
         } catch {
             await titleGeneration?.value
             for (activityID, durationMs) in persistedThreadID.map({ client.lastTurnActivityDurations(threadID: $0) }) ?? [:] {
@@ -7905,10 +8319,8 @@ final class ConversationManager {
             fields["phase"] = phase
             fields["storePath"] = PlayhouseDiagnostics.storeURL.path
             fields.merge(client.diagnosticFields(forThread: persistedThreadID ?? "", [:])) { _, new in new }
-            let shutdownMessage = "Playhouse closed while this turn was running. Your conversation is saved; review it and send a follow-up to continue."
-            let shouldKeepResumable = client.isPreparingForApplicationTermination
             let wasUserInterrupted = persistedThreadID.map { client.wasLastTurnInterrupted(threadID: $0) } ?? false
-            let shouldKeepWaiting = shouldKeepResumable || wasUserInterrupted
+            let shouldKeepWaiting = wasUserInterrupted
             let safeFailureMessage = hideSensitiveRecoveryPrompt || isPlayhouseNudge
                 ? (isPlayhouseNudge
                     ? "The private status nudge could not be completed."
@@ -7930,9 +8342,7 @@ final class ConversationManager {
             _ = try? await tasks.setLifecycleStatus(
                 taskID,
                 to: failureStatus,
-                message: shouldKeepResumable
-                    ? shutdownMessage
-                    : (wasUserInterrupted ? nil : (hasPendingBlockingQuestion ? "Waiting for your saved question to be answered." : (hasPendingNonBlockingQuestion ? "A saved question is available for your response." : safeFailureMessage)))
+                message: wasUserInterrupted ? nil : (hasPendingBlockingQuestion ? "Waiting for your saved question to be answered." : (hasPendingNonBlockingQuestion ? "A saved question is available for your response." : safeFailureMessage))
             )
             PlayhouseDiagnostics.record("conversation.send.failed", fields: fields)
             if hideSensitiveRecoveryPrompt || isPlayhouseNudge || !sensitiveUserInputAnswerValues.isEmpty {
@@ -8514,8 +8924,8 @@ final class PlayhouseBridgeRuntime {
             let rules = RuleCatalogManager(environment: agentEnvironment, preferences: preferences)
             func conversationClients(codexHome: String? = nil, goalFeatureEnabled: Bool = false) -> ConversationClients {
                 ConversationClients(
-                    codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: codexHome ?? callerCodexHome, goalFeatureEnabled: goalFeatureEnabled, goalRuntimeEnabled: guiRuntime, dataDirectory: dataDirectory),
-                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, configDirectoryOverride: claudeConfigDirectory, dataDirectory: dataDirectory),
+                    codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: codexHome ?? callerCodexHome, goalFeatureEnabled: goalFeatureEnabled, goalRuntimeEnabled: guiRuntime, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
+                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, configDirectoryOverride: claudeConfigDirectory, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
                     skills: skills,
                     rules: rules
                 )
@@ -8572,6 +8982,10 @@ final class PlayhouseBridgeRuntime {
             if let storeDirectory {
                 AgentUsageStore.shared(scope: dataDirectory).configurePersistence(directory: URL(fileURLWithPath: storeDirectory, isDirectory: true))
             }
+            // Agents outlive their daemon: before this daemon answers anything, it goes back to the
+            // turns its predecessor was running, so no request sees them as stopped.
+            await ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                .resumeReattachedRuns(storeDirectory: storeDirectory)
 
             let result: BridgeValue
             switch request.command {
@@ -9388,6 +9802,22 @@ final class PlayhouseBridgeRuntime {
                     historyMessageLimit: try request.optionalHistoryLimit()
                 )
                 result = try Self.value(history)
+            case "conversation.events.subscribe":
+                // Follows the task's running turn, whoever started it, until that turn ends.
+                let taskID = try request.requiredUUID("taskID")
+                _ = try taskManager.taskModel(taskID)
+                guard let updates = ConversationTurnEvents.watch(taskID) else {
+                    result = .object(["watched": .boolean(false)])
+                    break
+                }
+                eventHandler(BridgeEvent(requestID: request.id, type: "watching", payload: .object([:])))
+                for await update in updates {
+                    if Task.isCancelled { break }
+                    if let payload = try? Self.value(update) {
+                        eventHandler(BridgeEvent(requestID: request.id, type: update.type, payload: payload))
+                    }
+                }
+                result = .object(["watched": .boolean(true)])
             default:
                 throw BridgeCommandError(code: "unknown_command", message: "Unknown command '\(request.command)'. Run 'playhouse help' to list commands.")
             }

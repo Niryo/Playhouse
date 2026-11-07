@@ -114,8 +114,35 @@ struct RemoteConversationManager {
             return try result.decoded(ConversationHistory.self)
         } catch {
             await recoverFromFailedTurn(taskID: taskID, error: error)
+            // The agent outlives its daemon: the fresh daemon that just reconciled the task
+            // reattached a turn that is still running, so this send continues by following it.
+            if error is DaemonClientError,
+               (try? await watch(taskID: taskID, onUpdate: onUpdate, onUserInput: onUserInput)) == true,
+               let history = try? await history(taskID: taskID, messageLimit: TaskConversationView.historyPageSize) {
+                return history
+            }
             throw error
         }
+    }
+
+    /// Streams the task's running turn, whoever started it (another window, the CLI,
+    /// a schedule, or a turn the daemon reattached after a restart), until it ends.
+    /// Returns false when no turn was running.
+    func watch(
+        taskID: UUID,
+        onUpdate: @escaping (ConversationUpdate) -> Void,
+        onUserInput: @escaping (ConversationUserInputRequest) -> Void = { _ in }
+    ) async throws -> Bool {
+        let forward = forwardUpdates(onUpdate)
+        let result = try await daemon.call("conversation.events.subscribe", ["taskID": id(taskID)]) { event in
+            guard event.type != "watching" else { return }
+            forward(event)
+            if event.type == "user_input",
+               let request = (try? event.payload.decoded(ConversationUpdate.self))?.userInputRequest {
+                onUserInput(request)
+            }
+        }
+        return result.object?["watched"]?.bool ?? false
     }
 
     /// The failure may be a pause, which the window reads from the daemon's state.

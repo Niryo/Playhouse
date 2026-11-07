@@ -25,6 +25,7 @@
 		A100000000000000000000E2 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000004 /* SwiftTerm */; };
 		A10000000000000000000006 /* TaskConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* TaskConversationView.swift */; };
 		A10000000000000000000007 /* CodexAppServerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* CodexAppServerClient.swift */; };
+		A1000000000000000000F404 /* CodexSocketConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F404 /* CodexSocketConnection.swift */; };
 		A10000000000000000000012 /* ConversationModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* ConversationModel.swift */; };
 		A10000000000000000000013 /* ClaudeCodeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* ClaudeCodeClient.swift */; };
 		A10000000000000000000014 /* ConversationTranscriptStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* ConversationTranscriptStore.swift */; };
@@ -47,6 +48,7 @@
 		A10000000000000000000017 /* RemoteConversationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* RemoteConversationManager.swift */; };
 		A10000000000000000000018 /* BridgeSocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* BridgeSocket.swift */; };
 		A1000000000000000000001B /* ProcessCPUSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001B /* ProcessCPUSampler.swift */; };
+		A1000000000000000000F403 /* AgentRunHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F403 /* AgentRunHost.swift */; };
 		A1000000000000000000001C /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002 /* GRDB */; };
 		A100000000000000000000DB /* DebugConversationImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000000000000000000DB /* DebugConversationImport.swift */; };
 /* End PBXBuildFile section */
@@ -79,6 +81,7 @@
 		A20000000000000000000006 /* Playhouse.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Playhouse.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000008 /* TaskConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskConversationView.swift; sourceTree = "<group>"; };
 		A20000000000000000000009 /* CodexAppServerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexAppServerClient.swift; sourceTree = "<group>"; };
+		A2000000000000000000F404 /* CodexSocketConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexSocketConnection.swift; sourceTree = "<group>"; };
 		A20000000000000000000012 /* ConversationModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationModel.swift; sourceTree = "<group>"; };
 		A20000000000000000000013 /* ClaudeCodeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeCodeClient.swift; sourceTree = "<group>"; };
 		A20000000000000000000014 /* ConversationTranscriptStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscriptStore.swift; sourceTree = "<group>"; };
@@ -103,6 +106,7 @@
 		A20000000000000000000017 /* RemoteConversationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteConversationManager.swift; sourceTree = "<group>"; };
 		A20000000000000000000018 /* BridgeSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/BridgeSocket.swift; sourceTree = "<group>"; };
 		A2000000000000000000001B /* ProcessCPUSampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessCPUSampler.swift; sourceTree = "<group>"; };
+		A2000000000000000000F403 /* AgentRunHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentRunHost.swift; sourceTree = "<group>"; };
 		A200000000000000000000DB /* DebugConversationImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugConversationImport/DebugConversationImport.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -192,6 +196,7 @@
 				A2000000000000000000F101 /* AgentUsage.swift */,
 				A20000000000000000000008 /* TaskConversationView.swift */,
 				A20000000000000000000009 /* CodexAppServerClient.swift */,
+				A2000000000000000000F404 /* CodexSocketConnection.swift */,
 				A20000000000000000000012 /* ConversationModel.swift */,
 				A20000000000000000000013 /* ClaudeCodeClient.swift */,
 				A20000000000000000000014 /* ConversationTranscriptStore.swift */,
@@ -208,6 +213,7 @@
 				A20000000000000000000017 /* RemoteConversationManager.swift */,
 				A20000000000000000000016 /* DaemonClient.swift */,
 				A2000000000000000000001B /* ProcessCPUSampler.swift */,
+				A2000000000000000000F403 /* AgentRunHost.swift */,
 				A200000000000000000000DB /* DebugConversationImport.swift */,
 				A200000000000000000000F1 /* Plugins */,
 			);
@@ -417,9 +423,11 @@
 				"$(SRCROOT)/Playhouse/App/WorkspaceSupport.swift",
 				"$(SRCROOT)/Playhouse/App/WorkspaceChanges.swift",
 				"$(SRCROOT)/Playhouse/App/CodexAppServerClient.swift",
+				"$(SRCROOT)/Playhouse/App/CodexSocketConnection.swift",
 				"$(SRCROOT)/Playhouse/App/ConversationModel.swift",
 				"$(SRCROOT)/Playhouse/App/ClaudeCodeClient.swift",
 				"$(SRCROOT)/Playhouse/App/ProcessCPUSampler.swift",
+				"$(SRCROOT)/Playhouse/App/AgentRunHost.swift",
 				"$(SRCROOT)/Playhouse/App/AgentUsage.swift",
 				"$(SRCROOT)/Playhouse/App/AgentUsageStore.swift",
 				"$(SRCROOT)/Playhouse/App/ConversationTranscriptStore.swift",
@@ -477,6 +485,7 @@
 				A1000000000000000000F101 /* AgentUsage.swift in Sources */,
 				A10000000000000000000006 /* TaskConversationView.swift in Sources */,
 				A10000000000000000000007 /* CodexAppServerClient.swift in Sources */,
+				A1000000000000000000F404 /* CodexSocketConnection.swift in Sources */,
 				A10000000000000000000012 /* ConversationModel.swift in Sources */,
 				A10000000000000000000013 /* ClaudeCodeClient.swift in Sources */,
 				A10000000000000000000014 /* ConversationTranscriptStore.swift in Sources */,
@@ -493,6 +502,7 @@
 				A10000000000000000000017 /* RemoteConversationManager.swift in Sources */,
 				A10000000000000000000016 /* DaemonClient.swift in Sources */,
 				A1000000000000000000001B /* ProcessCPUSampler.swift in Sources */,
+				A1000000000000000000F403 /* AgentRunHost.swift in Sources */,
 				A100000000000000000000DB /* DebugConversationImport.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

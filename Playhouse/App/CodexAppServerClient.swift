@@ -79,6 +79,18 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     private var outputPump: ProviderOutputPump?
     private var stdoutBuffer = Data()
     private var process: Process?
+    /// Set for the long-lived shared clients: their app-server listens on a Unix socket and
+    /// outlives this daemon, so the next daemon of the same service reconnects to it and the
+    /// turns it runs keep going across a restart. Short-lived clients keep a stdio child.
+    private let persistentServer: CodexSharedServer?
+    private var socketConnection: CodexSocketConnection?
+    private var serverManifest: CodexServerManifest?
+    private var serverExitSource: DispatchSourceProcess?
+    private var serverOwnership: AgentOwnershipLock?
+    /// A server started by another Codex version or with other flags: kept while it runs a
+    /// turn, stopped as soon as it is idle.
+    private(set) var isRetiringServer = false
+    private var idleShutdownTask: Task<Void, Never>?
     private var inputPipe: Pipe?
     private var outputPipe: Pipe?
     private var stderrPipe: Pipe?
@@ -166,9 +178,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     private struct PendingUserInput {
         let nativeID: Any
         let request: ConversationUserInputRequest
-        /// The app-server process that asked. Only that process, while it is
-        /// still the running one, can receive a live answer.
-        weak var asker: Process?
+        /// The app-server process (or socket connection) that asked. Only that one,
+        /// while it is still the running one, can receive a live answer.
+        weak var asker: AnyObject?
     }
     private var userInputContexts: [String: UserInputContext] = [:]
     @Published private var pendingUserInputs: [String: PendingUserInput] = [:]
@@ -187,7 +199,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     private var completedTurns: [String: Result<Void, Error>] = [:]
     private var rejectedTurnKeys = Set<String>()
 
-    init(codexExecutableOverride: String? = nil, codexHomeOverride: String? = nil, goalFeatureEnabled: Bool = false, goalRuntimeEnabled: Bool = false, dataDirectory: String? = nil) {
+    init(codexExecutableOverride: String? = nil, codexHomeOverride: String? = nil, goalFeatureEnabled: Bool = false, goalRuntimeEnabled: Bool = false, dataDirectory: String? = nil, persistentServer: CodexSharedServer? = nil) {
         self.codexExecutableOverride = ConversationProviderFixture.ownedExecutable(
             codexExecutableOverride,
             providerMarker: (".playhouse-codex-fixture-owner", "Playhouse test owns this Codex protocol fixture (v1).\n")
@@ -196,6 +208,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         self.goalFeatureEnabled = goalFeatureEnabled
         self.goalRuntimeEnabled = goalRuntimeEnabled
         self.dataDirectoryOverride = dataDirectory
+        self.persistentServer = persistentServer
     }
 
     /// One Codex client per distinct configuration, shared across every caller in
@@ -219,22 +232,35 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         codexHomeOverride: String? = nil,
         goalFeatureEnabled: Bool = false,
         goalRuntimeEnabled: Bool = false,
-        dataDirectory: String? = nil
+        dataDirectory: String? = nil,
+        runDirectory: URL? = nil
     ) -> CodexAppServerClient {
-        let key = [
+        let parts = [
             executableOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "__default__",
             codexHomeOverride ?? "",
             String(goalFeatureEnabled),
             String(goalRuntimeEnabled),
             dataDirectory.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "",
-        ].joined(separator: "\u{1}")
+        ]
+        let key = parts.joined(separator: "\u{1}")
         if let client = sharedClients[key] { return client }
+        // The server's files sit beside the store this data directory opens, and its key
+        // includes the service, so two services sharing a data folder never share a server.
+        let persistentServer = runDirectory.map {
+            CodexSharedServer(
+                runDirectory: CodexSharedServer.runsDirectory(dataDirectory: $0),
+                keyHash: CodexSharedServer.keyHash(parts: parts, serviceName: AgentRunService.name),
+                serviceName: AgentRunService.name,
+                keyParts: parts
+            )
+        }
         let client = CodexAppServerClient(
             codexExecutableOverride: executableOverride,
             codexHomeOverride: codexHomeOverride,
             goalFeatureEnabled: goalFeatureEnabled,
             goalRuntimeEnabled: goalRuntimeEnabled,
-            dataDirectory: dataDirectory
+            dataDirectory: dataDirectory,
+            persistentServer: persistentServer
         )
         sharedClients[key] = client
         return client
@@ -243,7 +269,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     func diagnosticFields(_ additionalFields: [String: String]) -> [String: String] {
         var fields = additionalFields
         fields["clientPID"] = String(ProcessInfo.processInfo.processIdentifier)
-        fields["codexPID"] = String(process?.processIdentifier ?? -1)
+        fields["codexPID"] = String(process?.processIdentifier ?? serverManifest?.process?.pid ?? -1)
         fields["activeThreadID"] = activeThreadID ?? ""
         fields["activeTurnID"] = activeTurnID ?? ""
         fields["isTurnActive"] = String(isTurnActive)
@@ -346,9 +372,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             throw ClientError.protocolFailure("Codex did not return a thread ID.")
         }
         try confirmModel(response["model"] as? String, expected: modelID)
-        resumedThreadParameters[threadID] = ResumeParameters(
+        let parameters = ResumeParameters(
             modelID: modelID, cwd: workspace.cwd.path, roots: workspace.roots.map(\.path), developerInstructions: developerInstructions
         )
+        resumedThreadParameters[threadID] = parameters
+        recordServedThread(threadID, parameters)
         return threadID
     }
 
@@ -547,6 +575,10 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     func shutdown() {
+        if persistentServer != nil, serverManifest != nil {
+            Task { await stopSharedServer(reason: "shutdown") }
+            return
+        }
         guard let process else {
             PlayhouseDiagnostics.record("codex.app_server.shutdown.skipped", fields: ["reason": "no_process"])
             return
@@ -845,6 +877,140 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
     }
 
+    /// Connects to a live server a previous daemon left with no turn for this one to follow, so
+    /// its idle timer (and this daemon's exit) can stop it rather than leave it running unseen.
+    func adoptSharedServer() async {
+        guard socketConnection == nil, let manifest = persistentServer?.readManifest(), manifest.process?.isAlive == true else { return }
+        let cwd = manifest.threads.values.first?.cwd ?? NSHomeDirectory()
+        guard let workspace = try? ConversationWorkspaceContext(roots: [URL(fileURLWithPath: cwd, isDirectory: true)]) else { return }
+        try? await ensureInitialized(workspace: workspace)
+    }
+
+    /// The shared client a server's manifest belongs to, as `sharedClient` would build it.
+    static func sharedClient(for server: CodexSharedServer, runDirectory: URL) -> CodexAppServerClient? {
+        let parts = server.keyParts
+        guard parts.count == 5 else { return nil }
+        return sharedClient(
+            executableOverride: parts[0] == "__default__" ? nil : parts[0],
+            codexHomeOverride: parts[1].isEmpty ? nil : parts[1],
+            goalFeatureEnabled: parts[2] == "true",
+            goalRuntimeEnabled: parts[3] == "true",
+            dataDirectory: parts[4].isEmpty ? nil : parts[4],
+            runDirectory: runDirectory
+        )
+    }
+
+    /// Whether a shared server this service started is still running, from its manifest.
+    var hasLiveSharedServer: Bool {
+        if transportIsRunning, socketConnection != nil { return true }
+        return persistentServer?.readManifest()?.process?.isAlive == true
+    }
+
+    /// The threads the shared server has loaded, as its manifest records them.
+    var sharedServerThreadIDs: Set<String> {
+        Set((serverManifest ?? persistentServer?.readManifest())?.threads.keys.map { $0 } ?? [])
+    }
+
+    /// Reconnects to the shared server that kept running while the daemon restarted and follows
+    /// the thread's running turn. Codex doesn't replay notifications missed while nothing was
+    /// connected, so `thread/resume` and the thread's paginated history are the source of truth:
+    /// the resume re-sends any pending approval or question, and the turn list says whether the
+    /// turn is still running or finished in the meantime.
+    func followReattachedTurn(
+        threadID: String,
+        workspace: ConversationWorkspaceContext,
+        callbacks: ConversationTurnCallbacks,
+        onAttached: @escaping () -> Void
+    ) async throws -> ConversationReattachResult {
+        guard let persistentServer, hasLiveSharedServer else { return .agentGone }
+        guard turnContexts[threadID] == nil else { return .notRunning }
+        let context = TurnContext(onDelta: callbacks.onDelta, onFinal: callbacks.onFinalMessage, onProgress: callbacks.onProgressMessage,
+                                  onSteer: callbacks.onSteerMessage, onActivity: callbacks.onActivity, onDiff: callbacks.onDiff,
+                                  onAction: callbacks.onActionRequest, onTokenUsage: callbacks.onTokenUsage)
+        turnContexts[threadID] = context
+        userInputContexts[threadID] = UserInputContext(mode: .code, handler: callbacks.onUserInput)
+        defer {
+            completedActivityDurations[threadID] = context.durations
+            turnContexts.removeValue(forKey: threadID)
+            userInputContexts.removeValue(forKey: threadID)
+            Self.processActiveThreadIDs.remove(threadID)
+            ConversationSteerMailbox.clearActiveTurn(threadID: threadID)
+            if Self.activeClientsByThreadID[threadID] === self {
+                Self.activeClientsByThreadID.removeValue(forKey: threadID)
+            }
+            if activeThreadID == threadID {
+                activeThreadID = turnContexts.first(where: { $0.value.turnID != nil })?.key
+                activeTurnID = activeThreadID.flatMap { turnContexts[$0]?.turnID }
+                activeConversationMode = .code
+            }
+            isTurnActive = turnContexts.values.contains { $0.turnID != nil }
+        }
+        try await ensureInitialized(workspace: workspace)
+        let saved = serverManifest?.threads[threadID] ?? persistentServer.readManifest()?.threads[threadID]
+        let parameters = ResumeParameters(
+            modelID: saved?.modelID ?? Self.modelID,
+            cwd: saved?.cwd ?? workspace.cwd.path,
+            roots: saved?.roots ?? workspace.roots.map(\.path),
+            developerInstructions: saved?.developerInstructions
+        )
+        var resumeParameters: [String: Any] = [
+            "threadId": threadID,
+            "excludeTurns": true,
+            "model": parameters.modelID,
+            "cwd": parameters.cwd,
+            "sandbox": "danger-full-access",
+            "approvalPolicy": "never",
+            "approvalsReviewer": "user",
+            "runtimeWorkspaceRoots": parameters.roots,
+        ]
+        if let developerInstructions = parameters.developerInstructions { resumeParameters["developerInstructions"] = developerInstructions }
+        if let config = workspace.skillBridge?.codexThreadConfig { resumeParameters["config"] = config }
+        _ = try await request(method: "thread/resume", params: resumeParameters)
+        resumedThreadParameters[threadID] = parameters
+        let turns = try await request(method: "thread/turns/list", params: ["threadId": threadID, "limit": 1, "sortDirection": "desc"])
+        guard let latest = (turns["data"] as? [[String: Any]])?.first, let turnID = latest["id"] as? String else {
+            onAttached()
+            return .notRunning
+        }
+        let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
+        PlayhouseDiagnostics.record("codex.turn.reattached", fields: diagnosticFields([
+            "threadID": threadID,
+            "turnID": turnID,
+            "turnStatus": latest["status"] as? String ?? "unknown",
+        ]))
+        if latest["status"] as? String == "inProgress", completedTurns[turnKey] == nil {
+            context.turnID = turnID
+            activeThreadID = threadID
+            activeTurnID = turnID
+            activeConversationMode = .code
+            Self.activeClientsByThreadID[threadID] = self
+            Self.processActiveThreadIDs.insert(threadID)
+            isTurnActive = true
+            ConversationSteerMailbox.publishActiveTurn(threadID: threadID, turnID: turnID)
+            onAttached()
+            let mailboxTask = Task { @MainActor [weak self] in
+                while let self, !Task.isCancelled, self.turnContexts[threadID]?.turnID == turnID {
+                    await self.serviceSteerMailbox(threadID: threadID, turnID: turnID)
+                    try? await Task.sleep(for: .milliseconds(75))
+                }
+            }
+            defer { mailboxTask.cancel() }
+            try await waitForTurn(turnKey)
+        } else {
+            onAttached()
+            completedTurns.removeValue(forKey: turnKey)
+            if latest["status"] as? String != "completed" {
+                if latest["status"] as? String == "interrupted" { interruptedThreadIDs.insert(threadID) }
+                if let history = try? await readMessages(threadID: threadID) { callbacks.onHistory(history) }
+                throw ClientError.turnFailed(Self.turnFailureDescription(latest))
+            }
+        }
+        if let history = try? await readMessages(threadID: threadID) {
+            callbacks.onHistory(history)
+        }
+        return .finished
+    }
+
     func answerUserInput(requestID: String, threadID: String, answers: [String: [String]]) -> Bool {
         PlayhouseDiagnostics.record("codex.user_input.answer.started", fields: [
             "requestID": requestID,
@@ -860,7 +1026,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         // the running one. Its exit can be handled before its last output is,
         // and a later call may already have launched a replacement, so check
         // the asker itself; otherwise the saved copy recovers it as a new turn.
-        guard let asker = pending.asker, asker === process, asker.isRunning else {
+        guard let asker = pending.asker, asker === transportToken, transportIsRunning else {
             clearPendingUserInput(threadID: threadID)
             return false
         }
@@ -971,6 +1137,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     /// shares it, so CPU is attributed per thread from its descendants'
     /// working directories (see `CodexProcessAttribution`), not from this PID.
     var appServerProcessIdentifier: pid_t? {
+        if let server = serverManifest?.process, socketConnection != nil, server.isAlive { return server.pid }
         guard let process, process.isRunning, process.processIdentifier > 0 else { return nil }
         return process.processIdentifier
     }
@@ -1010,7 +1177,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     /// and a client for another home cannot answer for it.
     static func sharedClient(loading threadID: String, compatibleWith reference: CodexAppServerClient) -> CodexAppServerClient? {
         let holdsThread: (CodexAppServerClient) -> Bool = {
-            $0.resumedThreadParameters[threadID] != nil && $0.process?.isRunning == true
+            $0.resumedThreadParameters[threadID] != nil && $0.transportIsRunning
         }
         // The caller's own client first: when it runs the thread's turn, another client that
         // also opened the thread earlier has an app-server that never saw that turn.
@@ -1081,7 +1248,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     private func ensureInitialized(workspace: ConversationWorkspaceContext) async throws {
-        if initialized, process?.isRunning == true { return }
+        if initialized, transportIsRunning { return }
         if let initializationTask { return try await initializationTask.value }
         let initialization = Task { @MainActor in try await self.initializeProcess(workspace: workspace) }
         initializationTask = initialization
@@ -1091,7 +1258,12 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
 
     private func initializeProcess(workspace: ConversationWorkspaceContext) async throws {
 
-        if process?.isRunning != true {
+        if let persistentServer {
+            if !transportIsRunning {
+                if let token = transportToken { transportDidStop(token, detail: "The connection to the Codex app-server closed.", fields: [:]) }
+                try await connectSharedServer(persistentServer, workspaceURL: workspace.cwd)
+            }
+        } else if process?.isRunning != true {
             if let stoppedProcess = process {
                 processDidTerminate(stoppedProcess)
             }
@@ -1168,6 +1340,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 switch item {
                 case .output(let data): await self?.consumeOutput(data, from: child)
                 case .exit(let terminated): self?.processDidTerminate(terminated)
+                case .ended: break
                 }
             }
         }
@@ -1235,7 +1408,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         // copy serves them. Resuming again would also fail for a thread started
         // in this process that has no rollout yet.
         if let loaded = resumedThreadParameters[threadID], reusingLoadedThread || loaded == currentParameters,
-           process?.isRunning == true, initialized {
+           transportIsRunning, initialized {
             return
         }
 
@@ -1286,6 +1459,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             )
         }
         resumedThreadParameters[threadID] = currentParameters
+        recordServedThread(threadID, currentParameters)
         PlayhouseDiagnostics.record("codex.thread.resumed", fields: diagnosticFields([
             "threadID": threadID,
         ]))
@@ -1513,6 +1687,16 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     private func sendJSON(_ object: [String: Any]) throws {
+        lastServerActivity = Date()
+        if let socketConnection {
+            guard socketConnection.isOpen else { throw ClientError.processExited("The connection to the Codex app-server closed.") }
+            do {
+                try socketConnection.send(try JSONSerialization.data(withJSONObject: object))
+            } catch {
+                throw ClientError.protocolFailure(error.localizedDescription)
+            }
+            return
+        }
         guard let process, process.isRunning, let inputPipe else {
             throw ClientError.processExited("Restart Playhouse and try again.")
         }
@@ -1526,7 +1710,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
     }
 
-    private func consumeOutput(_ data: Data, from source: Process?) async {
+    private func consumeOutput(_ data: Data, from source: AnyObject?) async {
         stdoutBuffer.append(data)
         let newline = Data([0x0A])
         while let range = stdoutBuffer.range(of: newline) {
@@ -1536,7 +1720,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
     }
 
-    private func consume(line: Data, from source: Process?) async {
+    private func consume(line: Data, from source: AnyObject?) async {
+        lastServerActivity = Date()
         guard !line.isEmpty,
               let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else {
             return
@@ -1911,7 +2096,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
     }
 
-    private func handleServerRequest(method: String, params: [String: Any], requestID: Any, from source: Process?) async {
+    private func handleServerRequest(method: String, params: [String: Any], requestID: Any, from source: AnyObject?) async {
         let normalizedMethod = method.lowercased()
         if normalizedMethod.contains("approval") || normalizedMethod.contains("item/tool/") ||
             normalizedMethod.contains("elicitation"),
@@ -2025,18 +2210,232 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     /// of the child can keep the write end open after the child itself exits.
     private func processDidTerminate(_ terminatedProcess: Process) {
         guard process === terminatedProcess else { return }
+        transportDidStop(terminatedProcess, detail: "Codex CLI exited with status \(terminatedProcess.terminationStatus).", fields: [
+            "codexPID": String(terminatedProcess.processIdentifier),
+            "exitStatus": String(terminatedProcess.terminationStatus),
+        ])
+    }
+
+    /// Whether this client can talk to its app-server now: its stdio child runs, or its socket
+    /// connection is open to a live shared server.
+    private var transportIsRunning: Bool {
+        if let socketConnection {
+            return socketConnection.isOpen && serverManifest?.process?.isAlive == true
+        }
+        return process?.isRunning == true
+    }
+
+    /// What a question's asker is compared against: the stdio child or the socket connection.
+    private var transportToken: AnyObject? { socketConnection ?? process }
+
+    /// Connects to this key's shared app-server, starting one when none runs. A server left by
+    /// a previous daemon of this service is reused, so its running turns carry on.
+    private func connectSharedServer(_ server: CodexSharedServer, workspaceURL: URL) async throws {
+        guard let executablePath = Self.findCodexExecutable(override: codexExecutableOverride) else {
+            throw ClientError.cliNotFound
+        }
+        appliedSkillExtraRoots = []
+        if serverOwnership == nil {
+            // Waits only for a predecessor daemon that is still exiting.
+            serverOwnership = try await AgentOwnershipLock.acquire(path: server.lockPath, timeout: 15)
+        }
+        let flags = sharedServerFlags
+        let resolvedExecutable = URL(fileURLWithPath: executablePath).resolvingSymlinksInPath().path
+        var manifest = server.readManifest()
+        if let existing = manifest, existing.process?.isAlive != true {
+            // A server that died (or a spawn its daemon never finished) leaves only files.
+            if let process = existing.process { await AgentRunHost.terminate(process) }
+            server.removeFiles(socketPath: existing.socketPath)
+            manifest = nil
+        }
+        if manifest == nil {
+            let command = ConversationProviderFixture.launchCommand(executable: executablePath, arguments: ["app-server"] + flags)
+            do {
+                manifest = try server.spawn(
+                    executable: command.executable, arguments: command.arguments, environment: launchEnvironment(),
+                    workingDirectory: workspaceURL.path, resolvedExecutablePath: resolvedExecutable,
+                    flags: flags, codexHome: codexHomeOverride
+                )
+            } catch {
+                throw ClientError.processStart(error.localizedDescription)
+            }
+            PlayhouseDiagnostics.record("codex.app_server.started", fields: diagnosticFields([
+                "executable": executablePath,
+                "workingDirectory": workspaceURL.path,
+                "processID": String(manifest?.process?.pid ?? -1),
+                "transport": "socket",
+            ]))
+        }
+        guard let manifest, let identity = manifest.process else { throw ClientError.processStart("The Codex app-server did not start.") }
+        isRetiringServer = manifest.resolvedExecutablePath != resolvedExecutable || manifest.flags != flags
+        let connection: CodexSocketConnection
+        do {
+            connection = try await CodexSharedServer.connect(to: manifest, timeout: 20)
+        } catch {
+            if !identity.isAlive { server.removeFiles(socketPath: manifest.socketPath) }
+            throw ClientError.processStart(error.localizedDescription)
+        }
+        serverManifest = manifest
+        socketConnection = connection
+        stdoutBuffer.removeAll(keepingCapacity: true)
+        let requestContext = PlayhouseRequestContext.capture()
+        let pump = ProviderOutputPump(label: "codex") { [weak self, weak connection] item in
+            await requestContext.run {
+                switch item {
+                case .output(let data): await self?.consumeOutput(data, from: connection)
+                case .exit: break
+                case .ended:
+                    guard let self, let connection else { return }
+                    let serverAlive = self.serverManifest?.process?.isAlive == true
+                    self.transportDidStop(connection, detail: serverAlive
+                        ? "The connection to the Codex app-server closed."
+                        : "The Codex app-server stopped.", fields: ["codexPID": String(identity.pid)])
+                    if !serverAlive { self.serverDidExit(identity) }
+                }
+            }
+        }
+        outputPump = pump
+        connection.start(onMessage: { message in
+            pump.push(.output(message + Data([0x0A])))
+        }, onClose: {
+            pump.push(.ended(nil))
+        })
+        serverExitSource?.cancel()
+        serverExitSource = AgentRunHost.onExit(identity) { _ in
+            // The server's exit closes the socket too; the connection's close reports it.
+            connection.shutdownConnection()
+        }
+        lastServerActivity = Date()
+        startIdleServerWatch()
+        PlayhouseDiagnostics.record("codex.app_server.connected", fields: diagnosticFields([
+            "processID": String(identity.pid),
+            "retiring": String(isRetiringServer),
+        ]))
+    }
+
+    /// How long a shared server may sit with nothing to do before it is stopped.
+    private static var idleServerSeconds: TimeInterval {
+        // Tests shorten it through the one variable family a test request forwards.
+        let environment = PlayhouseProcessEnvironment.current
+        return (environment["PLAYHOUSE_E2E_CODEX_SERVER_IDLE_SECONDS"] ?? environment["PLAYHOUSE_CODEX_SERVER_IDLE_SECONDS"])
+            .flatMap(TimeInterval.init) ?? 600
+    }
+    private var lastServerActivity = Date()
+
+    /// Nothing a user waits on: no turn running or starting, no question, no operation, and
+    /// no Goal this client follows. An active Goal nobody follows is checked with the server.
+    private var serverHasLocalWork: Bool {
+        !turnContexts.isEmpty || !startingThreadIDs.isEmpty || !pendingUserInputs.isEmpty
+            || goalObservationThreadID != nil || conversationOperationsInFlight > 0 || initializationTask != nil
+    }
+
+    private func serverHasActiveGoal() async -> Bool {
+        for threadID in serverManifest?.threads.keys.sorted() ?? [] {
+            guard let response = try? await request(method: "thread/goal/get", params: ["threadId": threadID]) else { continue }
+            if (response["goal"] as? [String: Any]).flatMap(Self.decodeGoal)?.status == "active" { return true }
+        }
+        return false
+    }
+
+    /// Stops the shared server when it has been idle long enough, or right away when it is
+    /// retiring (or `force`). A server with work keeps running. Returns whether it stopped.
+    @discardableResult
+    func stopSharedServerIfIdle(force: Bool = false) async -> Bool {
+        guard persistentServer != nil, serverManifest != nil, !serverHasLocalWork else { return false }
+        let idleFor = Date().timeIntervalSince(lastServerActivity)
+        guard force || isRetiringServer || idleFor >= Self.idleServerSeconds else { return false }
+        guard transportIsRunning, !(await serverHasActiveGoal()) else { return false }
+        guard !serverHasLocalWork else { return false }
+        await stopSharedServer(reason: isRetiringServer ? "retiring" : (force ? "daemon_exit" : "idle"))
+        return true
+    }
+
+    private func stopSharedServer(reason: String) async {
+        guard let persistentServer, let manifest = serverManifest else { return }
+        PlayhouseDiagnostics.record("codex.app_server.stopping", fields: diagnosticFields(["reason": reason]))
+        if let token = transportToken { transportDidStop(token, detail: "The Codex app-server was stopped.", fields: ["reason": reason]) }
+        if let identity = manifest.process { await AgentRunHost.terminate(identity) }
+        persistentServer.removeFiles(socketPath: manifest.socketPath)
+        serverManifest = nil
+        serverExitSource?.cancel()
+        serverExitSource = nil
+        serverOwnership?.release()
+        serverOwnership = nil
+    }
+
+    private func startIdleServerWatch() {
+        idleShutdownTask?.cancel()
+        let interval = max(1, min(30, Self.idleServerSeconds / 4))
+        idleShutdownTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(interval))
+                guard let self, self.serverManifest != nil else { return }
+                if await self.stopSharedServerIfIdle() { return }
+            }
+        }
+    }
+
+    /// Before an idle daemon exits: every shared server with nothing to do stops, so none is
+    /// left behind. One running a turn, a question or an active Goal keeps going, and the
+    /// next daemon reconnects to it.
+    static func stopIdleSharedServersBeforeExit() async {
+        for client in allSharedClients { await client.stopSharedServerIfIdle(force: true) }
+    }
+
+    /// The flags every app-server of this client starts with.
+    private var sharedServerFlags: [String] {
+        var flags = ["--disable", "apps", "--disable", "remote_plugin", "--disable", "hooks", "-c", "mcp_servers={}"]
+        if goalFeatureEnabled || goalRuntimeEnabled { flags += ["-c", "features.goals=true"] }
+        return flags
+    }
+
+    private func launchEnvironment() -> [String: String] {
+        var environment = PlayhouseProcessEnvironment.current
+        environment["PATH"] = Self.expandedSearchPath(environment["PATH"])
+        ConversationProcessEnvironment.forwardPlayhouseBridgeEnvironment(&environment, dataDirectoryOverride: dataDirectoryOverride)
+        if let codexHomeOverride {
+            // Codex refuses to start with a home that doesn't exist yet.
+            try? FileManager.default.createDirectory(atPath: codexHomeOverride, withIntermediateDirectories: true)
+            environment["CODEX_HOME"] = codexHomeOverride
+        }
+        return environment
+    }
+
+    /// The shared server exited: its files go, and the next call starts a fresh one.
+    private func serverDidExit(_ identity: AgentProcessIdentity) {
+        guard let persistentServer, serverManifest?.process == identity || serverManifest == nil else { return }
+        persistentServer.removeFiles(socketPath: serverManifest?.socketPath)
+        serverManifest = nil
+        serverExitSource?.cancel()
+        serverExitSource = nil
+    }
+
+    /// Records the threads this server has open, so a later daemon knows what it serves.
+    private func recordServedThread(_ threadID: String, _ parameters: ResumeParameters) {
+        guard let persistentServer, var manifest = serverManifest else { return }
+        let thread = CodexServerManifest.Thread(
+            modelID: parameters.modelID, cwd: parameters.cwd, roots: parameters.roots,
+            developerInstructions: parameters.developerInstructions
+        )
+        guard manifest.threads[threadID] != thread else { return }
+        manifest.threads[threadID] = thread
+        serverManifest = manifest
+        try? persistentServer.writeManifest(manifest)
+    }
+
+    /// The connection or child this client used stopped: everything waiting on it fails.
+    private func transportDidStop(_ token: AnyObject, detail: String, fields extraFields: [String: String]) {
+        guard token === transportToken else { return }
 
         for key in Array(deltaLogSummaries.keys) { flushDeltaLogSummary(for: key, reason: "app_server_exit") }
 
-        let exitDetail = "Codex CLI exited with status \(terminatedProcess.terminationStatus)."
+        let exitDetail = detail
         pendingUserInputs.removeAll()
         pendingUserInputRequest = nil
-        PlayhouseDiagnostics.record("codex.app_server.exited", fields: diagnosticFields([
-            "codexPID": String(terminatedProcess.processIdentifier),
-            "exitStatus": String(terminatedProcess.terminationStatus),
+        PlayhouseDiagnostics.record("codex.app_server.exited", fields: diagnosticFields(extraFields.merging([
             "activeThreadID": activeThreadID ?? "",
             "activeTurnID": activeTurnID ?? "",
-        ]))
+        ]) { _, new in new }))
         let error = ClientError.processExited(exitDetail)
         process = nil
         inputPipe = nil
@@ -2044,6 +2443,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         outputPipe = nil
         stderrPipe = nil
+        socketConnection?.shutdownConnection()
+        socketConnection = nil
         initialized = false
         resumedThreadParameters.removeAll()
         activeThreadID = nil

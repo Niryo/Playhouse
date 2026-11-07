@@ -497,7 +497,35 @@
   },
   {
     "id": "test_bridge_daemon_death_fails_the_turn_and_recovers_on_next_request",
-    "expectation": "When the bridge daemon dies in the middle of a turn, that turn's send fails with a connection error instead of hanging. The next request starts a fresh daemon on demand, which reconciles the task out of In Progress into a resumable Waiting Response, and that daemon can run and stop a new turn."
+    "expectation": "When the bridge daemon dies in the middle of a turn, that turn's send fails with a connection error instead of hanging, but the provider keeps running in its own session. The next request starts a fresh daemon on demand, which reattaches the running turn so the task stays In Progress with no restart notice, stops that reattached turn, and can then run and stop a new turn."
+  },
+  {
+    "id": "test_agent_finished_while_daemon_was_down_shows_result",
+    "expectation": "A Claude Code turn that writes its result while no daemon is running is finished by the next daemon from the run's log: the task leaves In Progress through the normal outcome path without a restart notice, and the result written during the downtime appears exactly once."
+  },
+  {
+    "id": "test_untracked_agent_process_is_stopped_on_startup",
+    "expectation": "On a daemon's first request for a data folder, a process whose standard streams point into the folder's Claude or Codex run directories but that no run or server manifest accounts for is stopped, while a process writing into a run or server whose spawn is still being recorded is left alone."
+  },
+  {
+    "id": "test_turn_events_stream_to_a_watcher_that_did_not_send",
+    "expectation": "`conversation watch` (conversation.events.subscribe) on a task with no running turn returns at once with watched=false, and fails for an unknown task. While a turn another caller sent is running, a watcher receives a `watching` event, the turn's live text deltas and its final `completed` history, while the sender still gets its own stream; the window streams such a turn the same way."
+  },
+  {
+    "id": "test_stop_kills_reattached_agent",
+    "expectation": "Stop works on a turn a fresh daemon reattached: for Codex it sends turn/interrupt over the reconnected socket and leaves the shared server running; for Claude it sends the interrupt with a request number past the old daemon's and then kills the run by its verified process identity and removes its folder. Either way the task settles in Waiting Response without a restart notice."
+  },
+  {
+    "id": "test_agent_died_without_result_is_marked_interrupted",
+    "expectation": "When a Codex app-server or a Claude Code run exits without finishing its turn while no daemon is connected, the next daemon settles the task as Waiting Response with 'The agent stopped while Playhouse was restarting. Your conversation is saved; send a follow-up to continue.', keeps the conversation up to the restart, and removes the dead agent's files."
+  },
+  {
+    "id": "test_claude_turn_reattaches_after_daemon_restart",
+    "expectation": "A Claude Code turn with file-backed stdio keeps running when the daemon is killed: the next daemon replays the handled log without repeating its writes, keeps the task In Progress, shows the output written before the restart once, restores the still unanswered question and never answers an answered request again, ignores a late reply to the old daemon's request and numbers its own requests past the old ones, delivers a steered follow-up, streams the rest of the turn to a watcher, records the turn's usage once, settles it through its outcome, and removes the finished run."
+  },
+  {
+    "id": "test_codex_turn_reattaches_after_daemon_restart",
+    "expectation": "A Codex turn keeps running in its shared socket app-server when the daemon is killed: the next daemon reconnects to the same server (no second server, one connection per daemon), keeps the task In Progress with no restart notice, shows the output written before the restart exactly once, saves the question the server re-sends on resume and answers the re-sent approval exactly once, accepts a steered follow-up, streams the rest of the turn to a watcher, and settles it through the normal outcome path. A turn that finished while no daemon was connected settles from the server's state."
   },
   {
     "id": "test_task_token_usage_records_claude_turn_breakdown",

@@ -22,6 +22,209 @@ struct ConversationProviderCapabilities: Codable, Equatable {
     var error: String?
 }
 
+/// One `claude -p` process with file-backed stdio that outlives the daemon that started it.
+/// Its stdin is a FIFO the process itself also holds open, so it never reads end of input while
+/// no daemon is writing; stdout and stderr go to append-only files the daemon tails. The run's
+/// manifest records how far the log was handled and which requests were answered, so the next
+/// daemon of the service picks the turn up where this one left it.
+@MainActor
+final class ClaudeAgentRun {
+    let directory: URL
+    private(set) var manifest: ClaudeRunManifest
+    var identity: AgentProcessIdentity? { manifest.process }
+    private var writer: Int32 = -1
+    private var tailer: LineTailer
+    private var reader: Int32 = -1
+    private var outputSource: DispatchSourceFileSystemObject?
+    private var pollTask: Task<Void, Never>?
+    private var exitSource: DispatchSourceProcess?
+    private var answeredSinceCommit: [String] = []
+    private var pendingSinceCommit: [String] = []
+    private(set) var hasExited = false
+
+    private init(directory: URL, manifest: ClaudeRunManifest) {
+        self.directory = directory
+        self.manifest = manifest
+        tailer = LineTailer(offset: manifest.consumedOffset)
+    }
+
+    deinit {
+        if writer >= 0 { close(writer) }
+        if reader >= 0 { close(reader) }
+    }
+
+    /// Starts a run in a new folder under `runsDirectory`.
+    static func start(
+        runsDirectory: URL,
+        sessionID: String,
+        mode: ConversationMode,
+        executable: String,
+        arguments: [String],
+        environment: [String: String],
+        workingDirectory: String
+    ) throws -> ClaudeAgentRun {
+        try FileManager.default.createDirectory(at: runsDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let directory = runsDirectory.appendingPathComponent("\(sessionID)-\(UUID().uuidString.lowercased())", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        guard mkfifo(ClaudeRunFiles.inputPath(directory), 0o600) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSFilePathErrorKey: ClaudeRunFiles.inputPath(directory)])
+        }
+        var manifest = ClaudeRunManifest(
+            serviceName: AgentRunService.name, sessionID: sessionID, state: "spawning", process: nil,
+            createdAt: Date(), mode: mode.rawValue
+        )
+        // Recorded before the spawn, so an agent whose daemon dies right after starting it is
+        // still matched to this folder.
+        try AgentManifestFile.write(manifest, to: ClaudeRunFiles.manifestURL(directory))
+        let identity = try AgentRunHost.spawn(
+            executable: executable,
+            arguments: arguments,
+            environment: environment,
+            workingDirectory: workingDirectory,
+            // The child holds its own writer, so its input never ends between daemons.
+            stdin: .path(ClaudeRunFiles.inputPath(directory), flags: O_RDWR),
+            stdout: .path(ClaudeRunFiles.outputPath(directory), flags: O_WRONLY | O_CREAT | O_APPEND),
+            stderr: .path(ClaudeRunFiles.errorPath(directory), flags: O_WRONLY | O_CREAT | O_APPEND)
+        )
+        manifest.process = identity
+        manifest.state = "running"
+        try AgentManifestFile.write(manifest, to: ClaudeRunFiles.manifestURL(directory))
+        return ClaudeAgentRun(directory: directory, manifest: manifest)
+    }
+
+    /// The run recorded in `directory`, for a daemon carrying it on.
+    static func attach(directory: URL) -> ClaudeAgentRun? {
+        guard let manifest = AgentManifestFile.read(ClaudeRunManifest.self, from: ClaudeRunFiles.manifestURL(directory)) else { return nil }
+        return ClaudeAgentRun(directory: directory, manifest: manifest)
+    }
+
+    var isRunning: Bool { !hasExited && identity?.isAlive == true }
+
+    /// Writes one JSON line to the agent's input. A line is written whole or the turn is lost,
+    /// so the manifest marks the write while it is in flight.
+    func write(_ line: Data) throws {
+        if writer < 0 {
+            let descriptor = open(ClaudeRunFiles.inputPath(directory), O_WRONLY | O_NONBLOCK | O_CLOEXEC)
+            guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+            _ = fcntl(descriptor, F_SETFL, fcntl(descriptor, F_GETFL) & ~O_NONBLOCK)
+            writer = descriptor
+        }
+        manifest.writeInProgress = true
+        try saveManifest()
+        var offset = 0
+        try line.withUnsafeBytes { bytes in
+            while offset < bytes.count {
+                let written = Darwin.write(writer, bytes.baseAddress! + offset, bytes.count - offset)
+                if written < 0, errno == EINTR || errno == EAGAIN { continue }
+                guard written > 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+                offset += written
+            }
+        }
+        manifest.writeInProgress = false
+        try saveManifest()
+    }
+
+    /// Lines up to the committed offset: what this run's previous daemon already handled.
+    func handledLines() -> [Data] {
+        guard let data = FileManager.default.contents(atPath: ClaudeRunFiles.outputPath(directory)) else { return [] }
+        let prefix = data.prefix(Int(manifest.consumedOffset))
+        return prefix.split(separator: 0x0A, omittingEmptySubsequences: false).dropLast(prefix.last == 0x0A ? 1 : 0).map { Data($0) }
+    }
+
+    /// Follows the log from the committed offset: `onLines` gets each batch of complete lines,
+    /// and `onExit` runs once after the process exits and the log is read to its end.
+    func follow(onLines: @escaping @MainActor ([Data], UInt64) async -> Void, onExit: @escaping @MainActor (Int32?) async -> Void) {
+        reader = open(ClaudeRunFiles.outputPath(directory), O_RDONLY | O_CLOEXEC | O_CREAT, 0o600)
+        let pump = ProviderOutputPump(label: "claude") { [weak self] item in
+            guard let self else { return }
+            switch item {
+            case .output:
+                let lines = self.tailer.read(from: self.reader)
+                guard let end = lines.last?.endOffset else { return }
+                await onLines(lines.map(\.line), end)
+            case .ended(let status):
+                let lines = self.tailer.read(from: self.reader)
+                if let end = lines.last?.endOffset { await onLines(lines.map(\.line), end) }
+                self.hasExited = true
+                self.stopFollowing()
+                await onExit(status)
+            case .exit:
+                break
+            }
+        }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: reader, eventMask: [.extend, .write], queue: .global())
+        source.setEventHandler { pump.push(.output(Data())) }
+        source.resume()
+        outputSource = source
+        // A file event can be missed; a slow poll backs it up.
+        pollTask = Task { @MainActor in
+            while !Task.isCancelled {
+                pump.push(.output(Data()))
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+        pump.push(.output(Data()))
+        if let identity {
+            exitSource = AgentRunHost.onExit(identity) { status in pump.push(.ended(status)) }
+        } else {
+            pump.push(.ended(nil))
+        }
+    }
+
+    private func stopFollowing() {
+        outputSource?.cancel()
+        outputSource = nil
+        pollTask?.cancel()
+        pollTask = nil
+    }
+
+    func noteAnswered(_ requestID: String) { answeredSinceCommit.append(requestID) }
+    func notePending(_ requestID: String) { pendingSinceCommit.append(requestID) }
+
+    /// Records that everything before `offset` was handled, with the answers written for it.
+    func commit(offset: UInt64) {
+        manifest.commit(answered: answeredSinceCommit, pending: pendingSinceCommit, offset: offset)
+        answeredSinceCommit.removeAll()
+        pendingSinceCommit.removeAll()
+        try? saveManifest()
+    }
+
+    /// An answer written outside the log's handling (a user's answer to a question).
+    func commitAnswer(_ requestID: String) {
+        manifest.commit(answered: [requestID], offset: manifest.consumedOffset)
+        try? saveManifest()
+    }
+
+    func recordRequestID(_ number: Int) {
+        guard number > manifest.maxRequestID else { return }
+        manifest.maxRequestID = number
+        try? saveManifest()
+    }
+
+    var stderrTail: String {
+        guard let handle = FileHandle(forReadingAtPath: ClaudeRunFiles.errorPath(directory)) else { return "" }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        try? handle.seek(toOffset: size > 4_000 ? size - 4_000 : 0)
+        return String(decoding: handle.readDataToEndOfFile(), as: UTF8.self)
+    }
+
+    private func saveManifest() throws {
+        try AgentManifestFile.write(manifest, to: ClaudeRunFiles.manifestURL(directory))
+    }
+
+    /// Stops the agent (verified by identity) and removes its folder once it is gone.
+    func terminateAndRemove() async {
+        stopFollowing()
+        exitSource?.cancel()
+        exitSource = nil
+        if writer >= 0 { close(writer); writer = -1 }
+        if let identity { await AgentRunHost.terminate(identity) }
+        if reader >= 0 { close(reader); reader = -1 }
+        try? FileManager.default.removeItem(at: directory)
+    }
+}
+
 /// Owns the Claude Code CLI process for one turn of one session.
 ///
 /// Claude Code starts a fresh process per turn and resumes a conversation by
@@ -100,6 +303,13 @@ final class ClaudeSessionRunner {
     private var stderrTail = ""
     private var process: Process?
     private var inputPipe: Pipe?
+    /// The run with file-backed stdio a runner of a daemon's shared client uses instead of a
+    /// piped child, so its turn outlives the daemon.
+    private var agentRun: ClaudeAgentRun?
+    private let runsDirectory: URL?
+    /// Set while rebuilding the turn from log lines a previous daemon already handled: nothing
+    /// is written, recorded or reported again.
+    private var isReplaying = false
     private var nextControlRequestID = 1
     private var pendingControlRequests: [String: CheckedContinuation<[String: Any], Error>] = [:]
     private var activeMode: ConversationMode = .code
@@ -171,16 +381,20 @@ final class ClaudeSessionRunner {
         executable: String,
         configDirectoryOverride: String?,
         persistsSessions: Bool,
-        owner: ClaudeCodeClient?
+        owner: ClaudeCodeClient?,
+        runsDirectory: URL? = nil
     ) {
         self.sessionID = sessionID
         self.executable = executable
         self.configDirectoryOverride = configDirectoryOverride
         self.persistsSessions = persistsSessions
         self.owner = owner
+        self.runsDirectory = runsDirectory
     }
 
-    var processIdentifier: Int32 { process?.processIdentifier ?? -1 }
+    var processIdentifier: Int32 { agentRun?.identity?.pid ?? process?.processIdentifier ?? -1 }
+
+    private var isAgentRunning: Bool { agentRun?.isRunning ?? (process?.isRunning == true) }
 
     var canInterrupt: Bool { activeTurnID != nil }
 
@@ -313,7 +527,7 @@ final class ClaudeSessionRunner {
     }
 
     func interrupt() async throws -> Bool {
-        guard activeTurnID != nil, process?.isRunning == true else { return false }
+        guard activeTurnID != nil, isAgentRunning else { return false }
         wasInterrupted = true
         do {
             _ = try await controlRequest(["subtype": "interrupt"])
@@ -331,7 +545,7 @@ final class ClaudeSessionRunner {
     /// wake — is as steerable as one still streaming: Playhouse keeps showing it
     /// as the active turn, so its input must still reach the running process.
     func sendSteerInput(text: String, imageDataURLs: [String]) throws -> Bool {
-        guard isTurnActive, activeTurnID != nil, process?.isRunning == true,
+        guard isTurnActive, activeTurnID != nil, isAgentRunning,
               !isTurnSettled || !turnCompletion.resultReceived || !pendingCommandUUIDs.isEmpty else {
             // A refusal is invisible to the user — the follow-up just stays
             // queued — so record why the runtime turned it down.
@@ -339,7 +553,7 @@ final class ClaudeSessionRunner {
                 "isTurnSettled": String(isTurnSettled),
                 "resultReceived": String(turnCompletion.resultReceived),
                 "pendingCommandCount": String(pendingCommandUUIDs.count),
-                "processRunning": String(process?.isRunning == true),
+                "processRunning": String(isAgentRunning),
                 "outstandingBackgroundTaskCount": String(outstandingBackgroundTaskIDs.count),
                 "pendingBackgroundNotificationCount": String(pendingBackgroundTaskNotificationIDs.count),
                 "awaitingParentWake": String(turnCompletion.awaitingParentWake),
@@ -388,6 +602,7 @@ final class ClaudeSessionRunner {
             actionRequestHandler?()
             return false
         }
+        agentRun?.commitAnswer(requestID)
         clearPendingQuestion()
         PlayhouseDiagnostics.record("claude.user_input.answer.succeeded", fields: [
             "requestID": requestID, "threadID": sessionID, "questionCount": String(answers.count)
@@ -399,6 +614,7 @@ final class ClaudeSessionRunner {
         guard let pending = pendingQuestion, pending.controlRequestID == requestID else { return }
         clearPendingQuestion()
         try? sendControlResponse(requestID: requestID, response: ["behavior": "deny", "message": message, "interrupt": true])
+        agentRun?.commitAnswer(requestID)
         finishTurn(.failure(ClientError.turnFailed(message)))
     }
 
@@ -469,6 +685,35 @@ final class ClaudeSessionRunner {
         environment.removeValue(forKey: "CLAUDECODE")
         environment.removeValue(forKey: "CLAUDE_CODE_ENTRYPOINT")
 
+        if let runsDirectory {
+            let command = ConversationProviderFixture.launchCommand(executable: executable, arguments: arguments)
+            stdoutBuffer.removeAll(keepingCapacity: true)
+            stderrTail = ""
+            sessionWasMissing = false
+            let run: ClaudeAgentRun
+            do {
+                run = try ClaudeAgentRun.start(
+                    runsDirectory: runsDirectory, sessionID: sessionID, mode: mode,
+                    executable: command.executable, arguments: command.arguments,
+                    environment: environment, workingDirectory: workspace.cwd.path
+                )
+            } catch {
+                throw ClientError.processStart(error.localizedDescription)
+            }
+            agentRun = run
+            followAgentRun(run)
+            PlayhouseDiagnostics.record("claude.process.started", fields: diagnosticFields([
+                "executable": executable,
+                "workingDirectory": workspace.cwd.path,
+                "processID": String(run.identity?.pid ?? -1),
+                "resume": String(resume),
+                "mode": mode.rawValue,
+                "transport": "files",
+                "environmentNames": environment.keys.sorted().joined(separator: ",")
+            ]))
+            return try await controlRequest(["subtype": "initialize"])
+        }
+
         let child = Process()
         let stdin = Pipe()
         let stdout = Pipe()
@@ -494,6 +739,7 @@ final class ClaudeSessionRunner {
                 switch item {
                 case .output(let data): await self?.consumeOutput(data)
                 case .exit(let terminated): self?.processDidTerminate(terminated)
+                case .ended: break // A piped child reports its exit as `.exit`.
                 }
             }
         }
@@ -552,6 +798,8 @@ final class ClaudeSessionRunner {
 
     func controlRequest(_ request: [String: Any]) async throws -> [String: Any] {
         let requestID = "playhouse-\(nextControlRequestID)"
+        // Recorded before it is sent, so a later daemon never reuses the number.
+        agentRun?.recordRequestID(nextControlRequestID)
         nextControlRequestID += 1
         return try await withCheckedThrowingContinuation { continuation in
             pendingControlRequests[requestID] = continuation
@@ -566,10 +814,12 @@ final class ClaudeSessionRunner {
 
     private func sendControlResponse(requestID: String, response: [String: Any]) throws {
         try sendJSON(["type": "control_response", "response": ["subtype": "success", "request_id": requestID, "response": response]])
+        agentRun?.noteAnswered(requestID)
     }
 
     private func sendControlError(requestID: String, message: String) {
         try? sendJSON(["type": "control_response", "response": ["subtype": "error", "request_id": requestID, "error": message]])
+        agentRun?.noteAnswered(requestID)
     }
 
     private func writeUserMessage(text: String, imageDataURLs: [String], uuid: String, priority: String?) throws {
@@ -594,6 +844,18 @@ final class ClaudeSessionRunner {
     }
 
     private func sendJSON(_ object: [String: Any]) throws {
+        guard !isReplaying else { return }
+        if let agentRun {
+            guard agentRun.isRunning else { throw ClientError.processExited(stderrSummary()) }
+            do {
+                var data = try JSONSerialization.data(withJSONObject: object)
+                data.append(0x0A)
+                try agentRun.write(data)
+            } catch {
+                throw ClientError.protocolFailure(error.localizedDescription)
+            }
+            return
+        }
         guard let process, process.isRunning, let inputPipe else {
             throw ClientError.processExited(stderrSummary())
         }
@@ -643,6 +905,18 @@ final class ClaudeSessionRunner {
     }
 
     private func stopProcess() {
+        if let agentRun {
+            self.agentRun = nil
+            let threadID = sessionID
+            Task { await TaskCPUUsageSampler.shared.forget(threadID: threadID) }
+            let stopped = ClientError.processExited("Playhouse stopped Claude Code.")
+            for continuation in pendingControlRequests.values { continuation.resume(throwing: stopped) }
+            pendingControlRequests.removeAll()
+            if turnWaiter != nil { finishTurn(.failure(stopped)) }
+            // Its input never ends while it holds its own writer, so it is stopped by signal.
+            Task { await agentRun.terminateAndRemove() }
+            return
+        }
         guard let process else { return }
         self.process = nil
         let threadID = sessionID
@@ -683,6 +957,121 @@ final class ClaudeSessionRunner {
         }
         process = nil
         inputPipe = nil
+    }
+
+    private func followAgentRun(_ run: ClaudeAgentRun) {
+        let requestContext = PlayhouseRequestContext.capture()
+        run.follow(onLines: { [weak self, weak run] lines, end in
+            await requestContext.run {
+                guard let self else { return }
+                for line in lines {
+                    guard !line.isEmpty, let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
+                    await self.handle(message)
+                }
+                // Committed once the batch's transcript writes and replies are done.
+                run?.commit(offset: end)
+            }
+        }, onExit: { [weak self, weak run] status in
+            await requestContext.run {
+                guard let self, let run else { return }
+                self.agentRunDidExit(run, status: status)
+            }
+        })
+    }
+
+    private func agentRunDidExit(_ run: ClaudeAgentRun, status: Int32?) {
+        guard agentRun === run else { return }
+        stderrTail = run.stderrTail
+        let exitCode = status.map { ($0 >> 8) & 0xFF }
+        PlayhouseDiagnostics.record("claude.process.exited", fields: diagnosticFields([
+            "processID": String(run.identity?.pid ?? -1),
+            "exitStatus": exitCode.map(String.init) ?? "unknown",
+        ]))
+        let error: Error = sessionWasMissing || stderrTail.contains("No conversation found with session ID")
+            ? ClientError.sessionNotFound
+            : ClaudeCodeClient.classifyFailure(ClientError.processExited(stderrSummary(status: exitCode)), text: stderrTail)
+        for continuation in pendingControlRequests.values { continuation.resume(throwing: error) }
+        pendingControlRequests.removeAll()
+        if !turnCompletion.resultReceived || turnWaiter != nil {
+            finishTurn(.failure(error))
+        }
+    }
+
+    /// Carries on a turn whose run outlived the daemon that started it. The lines that daemon
+    /// already handled are replayed without side effects to rebuild this turn's state (its
+    /// result, activities, background tasks, and any unanswered question); the rest of the log
+    /// is handled live, and the run is followed to the turn's end.
+    func reattach(
+        _ run: ClaudeAgentRun,
+        onAttached: () -> Void
+    ) async throws -> ConversationReattachResult {
+        activeMode = ConversationMode(rawValue: run.manifest.mode) ?? .code
+        wakeGrace = ClaudeSessionRunner.graceOverride(
+            "PLAYHOUSE_E2E_CLAUDE_WAKE_GRACE_SECONDS", default: ClaudeSessionRunner.parentWakeGracePeriod
+        )
+        wokenSilenceGrace = ClaudeSessionRunner.graceOverride(
+            "PLAYHOUSE_E2E_CLAUDE_WOKEN_SILENCE_GRACE_SECONDS", default: ClaudeSessionRunner.wokenTurnSilenceGracePeriod
+        )
+        agentRun = run
+        nextControlRequestID = ClaudeRunFiles.firstRequestID(afterReattaching: run.manifest.maxRequestID)
+        sessionExists = true
+        turnCompletion = TurnCompletion()
+        parentWakeBackstopGeneration += 1
+        let handlers = (deltaHandler, finalMessageHandler, progressMessageHandler, steerMessageHandler,
+                        activityHandler, actionRequestHandler, userInputHandler, tokenUsageHandler)
+        (deltaHandler, finalMessageHandler, progressMessageHandler, steerMessageHandler) = (nil, nil, nil, nil)
+        (activityHandler, actionRequestHandler, userInputHandler, tokenUsageHandler) = (nil, nil, nil, nil)
+        isReplaying = true
+        for line in run.handledLines() {
+            guard !line.isEmpty, let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
+            await handle(message)
+        }
+        isReplaying = false
+        (deltaHandler, finalMessageHandler, progressMessageHandler, steerMessageHandler,
+         activityHandler, actionRequestHandler, userInputHandler, tokenUsageHandler) = handlers
+        // A line cut off mid-write ends the run at its next input, so the turn can't go on.
+        if run.manifest.writeInProgress {
+            PlayhouseDiagnostics.record("claude.turn.reattach_cut_off_write", fields: diagnosticFields([:]))
+            agentRun = nil
+            await run.terminateAndRemove()
+            return .agentGone
+        }
+        let turnID = UUID().uuidString.lowercased()
+        activeTurnID = turnID
+        isTurnActive = true
+        owner?.runnerStateChanged(self)
+        ClaudeCodeClient.markProcessActive(sessionID: sessionID)
+        ConversationSteerMailbox.publishActiveTurn(threadID: sessionID, turnID: turnID)
+        PlayhouseDiagnostics.record("claude.turn.reattached", fields: diagnosticFields([
+            "threadID": sessionID,
+            "turnID": turnID,
+            "processAlive": String(run.isRunning),
+            "consumedOffset": String(run.manifest.consumedOffset),
+        ]))
+        if let request = pendingUserInputRequest {
+            let handler = userInputHandler
+            Task { @MainActor in await handler?(request) }
+        }
+        onAttached()
+        followAgentRun(run)
+        let mailboxTask = Task { @MainActor [weak self] in
+            while let self, !Task.isCancelled, self.activeTurnID == turnID {
+                await ConversationSteerMailbox.service(threadID: self.sessionID, turnID: turnID) { text, images in
+                    let accepted = try self.sendSteerInput(text: text, imageDataURLs: images)
+                    if accepted { self.steerMessageHandler?(text, images) }
+                    return accepted
+                } interrupt: {
+                    try await self.interrupt()
+                }
+                try? await Task.sleep(for: .milliseconds(75))
+            }
+        }
+        defer { mailboxTask.cancel() }
+        try await waitForTurnCompletion()
+        PlayhouseDiagnostics.record("claude.turn.ended", fields: diagnosticFields([
+            "threadID": sessionID, "turnID": turnID, "turnStatus": "completed"
+        ]))
+        return .finished
     }
 
     private func stderrSummary(status: Int32? = nil) -> String {
@@ -748,6 +1137,7 @@ final class ClaudeSessionRunner {
             handleResult(message)
         case "rate_limit_event":
             // Account-wide, so it feeds the shared store rather than this turn.
+            guard !isReplaying else { return }
             AgentUsageStore.shared(scope: owner?.runtimeScope).recordClaudeEvent(message)
         default:
             break
@@ -755,6 +1145,15 @@ final class ClaudeSessionRunner {
     }
 
     private func handleControlRequest(requestID: String, request: [String: Any]) async {
+        // A previous daemon of this run already answered it.
+        if let agentRun, agentRun.manifest.hasAnswered(requestID) { return }
+        if isReplaying {
+            // Only a question still waiting for the user carries over from handled lines.
+            guard agentRun?.manifest.pendingRequestIDs.contains(requestID) == true,
+                  request["tool_name"] as? String == "AskUserQuestion" else { return }
+            presentQuestions(requestID: requestID, input: request["input"] as? [String: Any] ?? [:])
+            return
+        }
         guard request["subtype"] as? String == "can_use_tool" else {
             if request["subtype"] as? String == "elicitation" { actionRequestHandler?() }
             sendControlError(requestID: requestID, message: "Playhouse does not provide this optional integration.")
@@ -810,6 +1209,7 @@ final class ClaudeSessionRunner {
             self.pendingAssistantText = nil
         }
         pendingQuestion = PendingQuestion(controlRequestID: requestID, sessionID: sessionID, input: input, questions: questions)
+        if !isReplaying { agentRun?.notePending(requestID) }
         let request = ConversationUserInputRequest(id: requestID, threadID: sessionID, questions: questions, isBlocking: true, mode: activeMode)
         pendingUserInputRequest = request
         owner?.runnerStateChanged(self)
@@ -1286,6 +1686,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     /// The data directory this client serves (debug/test isolation); nil in production.
     var runtimeScope: String? { dataDirectoryOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } }
     private var runners: [String: ClaudeSessionRunner] = [:]
+    private var runsDirectory: URL?
     private var newSessionIDs = Set<String>()
     private var startingSessionIDs = Set<String>()
     private var interruptedThreadIDs = Set<String>()
@@ -1318,7 +1719,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             ?? NSHomeDirectory() + "/.claude"
     }
 
-    static func sharedPrimaryClient(executableOverride: String?, configDirectoryOverride: String? = nil, dataDirectory: String? = nil) -> ClaudeCodeClient {
+    static func sharedPrimaryClient(executableOverride: String?, configDirectoryOverride: String? = nil, dataDirectory: String? = nil, runDirectory: URL? = nil) -> ClaudeCodeClient {
         let key = [
             executableOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "__default__",
             dataDirectory.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "",
@@ -1326,6 +1727,9 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         ].joined(separator: "\u{1}")
         if let client = sharedPrimaryClients[key] { return client }
         let client = ClaudeCodeClient(executableOverride: executableOverride, configDirectoryOverride: configDirectoryOverride, dataDirectory: dataDirectory)
+        // A daemon's shared client runs each turn with file-backed stdio beside its store, so the
+        // turn outlives the daemon. Other clients keep piped children that end with them.
+        client.runsDirectory = runDirectory.map { ClaudeRunFiles.runsDirectory(dataDirectory: $0) }
         sharedPrimaryClients[key] = client
         return client
     }
@@ -1500,7 +1904,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             executable: executable,
             configDirectoryOverride: configDirectoryOverride,
             persistsSessions: persistsSessions,
-            owner: self
+            owner: self,
+            runsDirectory: runsDirectory
         )
         runner.deltaHandler = onDelta
         runner.finalMessageHandler = onFinalMessage
@@ -1553,6 +1958,69 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
             hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt
         )
+    }
+
+    func followReattachedTurn(
+        threadID: String,
+        workspace: ConversationWorkspaceContext,
+        callbacks: ConversationTurnCallbacks,
+        onAttached: @escaping () -> Void
+    ) async throws -> ConversationReattachResult {
+        guard let runsDirectory, let executable = executablePath else { return .agentGone }
+        let sessionID = threadID
+        guard Self.activeRunnersBySessionID[sessionID] == nil else { return .notRunning }
+        let candidates = ClaudeRunFiles.runs(in: runsDirectory)
+            .filter { $0.manifest.sessionID == sessionID }
+            .sorted { $0.manifest.createdAt < $1.manifest.createdAt }
+        guard let newest = candidates.last, let run = ClaudeAgentRun.attach(directory: newest.directory) else { return .agentGone }
+        // An older run of the session can only be one its daemon never finished stopping.
+        for stale in candidates.dropLast() {
+            await ClaudeAgentRun.attach(directory: stale.directory)?.terminateAndRemove()
+        }
+        let runner = ClaudeSessionRunner(
+            sessionID: sessionID,
+            executable: executable,
+            configDirectoryOverride: configDirectoryOverride,
+            persistsSessions: persistsSessions,
+            owner: self,
+            runsDirectory: runsDirectory
+        )
+        runner.deltaHandler = callbacks.onDelta
+        runner.finalMessageHandler = callbacks.onFinalMessage
+        runner.progressMessageHandler = callbacks.onProgressMessage
+        runner.steerMessageHandler = callbacks.onSteerMessage
+        runner.activityHandler = callbacks.onActivity
+        runner.actionRequestHandler = callbacks.onActionRequest
+        runner.userInputHandler = callbacks.onUserInput
+        runner.tokenUsageHandler = callbacks.onTokenUsage
+        runners[sessionID] = runner
+        Self.activeRunnersBySessionID[sessionID] = runner
+        newSessionIDs.remove(sessionID)
+        activityDurationsByThread[sessionID] = [:]
+        lastFinishedThreadID = sessionID
+        defer {
+            lastTurnDiagnosticsByThread[sessionID] = runner.diagnosticFields([:])
+                .filter { $0.key != "isTurnActive" }
+            runner.finishTurnCleanup()
+            interruptedThreadIDs.formUnion(runner.wasInterrupted ? [sessionID] : [])
+            activityDurationsByThread[sessionID] = runner.activityDurations
+            lastFinishedThreadID = sessionID
+            if Self.activeRunnersBySessionID[sessionID] === runner {
+                Self.activeRunnersBySessionID.removeValue(forKey: sessionID)
+            }
+            if runners[sessionID] === runner { runners.removeValue(forKey: sessionID) }
+            runnerStateChanged(runner)
+        }
+        return try await runner.reattach(run, onAttached: onAttached)
+    }
+
+    static func hasActiveRunner(sessionID: String) -> Bool { activeRunnersBySessionID[sessionID] != nil }
+
+    /// Before an idle daemon exits: a run left after its turn ended has nothing more to do.
+    static func stopRunsBeforeExit() async {
+        for client in allSharedPrimaryClients {
+            for runner in client.runners.values where !runner.isTurnActive { runner.shutdown() }
+        }
     }
 
     func interruptActiveTurn(threadID: String) async throws -> Bool {
