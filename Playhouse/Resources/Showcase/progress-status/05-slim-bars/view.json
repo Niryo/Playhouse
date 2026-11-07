@@ -1,0 +1,93 @@
+{
+  "main": {
+    "type": "hstack",
+    "props": {
+      "spacing": 30
+    },
+    "children": [
+      {
+        "type": "vstack",
+        "props": {
+          "spacing": 10
+        },
+        "children": [
+          {
+            "type": "progress-bar",
+            "props": {
+              "value": 70,
+              "thickness": 6,
+              "color": "success",
+              "width": 180
+            }
+          },
+          {
+            "type": "progress-bar",
+            "props": {
+              "value": 40,
+              "thickness": 6,
+              "color": "warning",
+              "width": 180
+            }
+          },
+          {
+            "type": "progress-bar",
+            "props": {
+              "value": 90,
+              "thickness": 3,
+              "color": "danger",
+              "width": 180
+            }
+          },
+          {
+            "type": "progress-bar",
+            "props": {
+              "value": 55,
+              "color": "purple",
+              "showValue": true,
+              "label": "Tinted system bar",
+              "width": 180
+            }
+          }
+        ]
+      },
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 8
+        },
+        "children": [
+          {
+            "type": "progress-bar",
+            "props": {
+              "value": 25,
+              "thickness": 4,
+              "axis": "vertical",
+              "color": "info",
+              "height": 60
+            }
+          },
+          {
+            "type": "progress-bar",
+            "props": {
+              "value": 60,
+              "thickness": 4,
+              "axis": "vertical",
+              "color": "warning",
+              "height": 60
+            }
+          },
+          {
+            "type": "progress-bar",
+            "props": {
+              "value": 90,
+              "thickness": 4,
+              "axis": "vertical",
+              "color": "danger",
+              "height": 60
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

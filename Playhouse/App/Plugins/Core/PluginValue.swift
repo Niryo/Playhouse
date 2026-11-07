@@ -56,3 +56,14 @@ extension BridgeValue {
         }
     }
 }
+
+/// Resolves a plugin's relative file props (`src`) against its folder.
+enum PluginFiles {
+    /// The file `path` names inside `directory`, or nil when it is absolute or climbs out of the folder.
+    static func resolve(_ path: String, in directory: URL) -> URL? {
+        guard !path.isEmpty, !path.hasPrefix("/"), !path.hasPrefix("~") else { return nil }
+        let root = directory.standardizedFileURL.resolvingSymlinksInPath()
+        let url = root.appendingPathComponent(path).standardizedFileURL.resolvingSymlinksInPath()
+        return url.path.hasPrefix(root.path + "/") ? url : nil
+    }
+}

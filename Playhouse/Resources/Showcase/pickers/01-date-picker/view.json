@@ -1,0 +1,76 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 8
+    },
+    "children": [
+      {
+        "type": "date-picker",
+        "props": {
+          "label": "Date",
+          "value": "{{day}}",
+          "mode": "date",
+          "onChange": {
+            "action": "set",
+            "payload": {
+              "field": "day"
+            }
+          }
+        }
+      },
+      {
+        "type": "date-picker",
+        "props": {
+          "label": "Time",
+          "value": "{{when}}",
+          "mode": "time",
+          "onChange": {
+            "action": "set",
+            "payload": {
+              "field": "when"
+            }
+          }
+        }
+      },
+      {
+        "type": "date-picker",
+        "props": {
+          "label": "Both",
+          "value": "{{both}}",
+          "mode": "datetime",
+          "onChange": {
+            "action": "set",
+            "payload": {
+              "field": "both"
+            }
+          }
+        }
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "day = {{day}}",
+          "style": "caption",
+          "color": "secondary"
+        }
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "time = {{when}}",
+          "style": "caption",
+          "color": "secondary"
+        }
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "both = {{both}}",
+          "style": "caption",
+          "color": "secondary"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "id": "images-avatars",
+  "name": "Images, avatars and image icons",
+  "version": "1.0.0",
+  "description": "Images load from the plugin folder; avatars show initials or a picture; an icon can use an image file as a tinted template.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Images, avatars and image icons"
+      }
+    ]
+  }
+}

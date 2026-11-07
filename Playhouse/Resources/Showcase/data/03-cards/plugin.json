@@ -1,0 +1,14 @@
+{
+  "id": "cards",
+  "name": "Cards",
+  "version": "1.0.0",
+  "description": "Surfaces that group content.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Cards"
+      }
+    ]
+  }
+}

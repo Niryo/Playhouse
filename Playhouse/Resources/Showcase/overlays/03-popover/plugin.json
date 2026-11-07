@@ -1,0 +1,14 @@
+{
+  "id": "popover",
+  "name": "Popover",
+  "version": "1.0.0",
+  "description": "Floating content anchored to its first child.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Popover"
+      }
+    ]
+  }
+}

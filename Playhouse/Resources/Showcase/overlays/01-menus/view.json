@@ -1,0 +1,126 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 10
+    },
+    "children": [
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 16
+        },
+        "children": [
+          {
+            "type": "menu",
+            "props": {
+              "title": "Sort",
+              "icon": "arrow.up.arrow.down"
+            },
+            "children": [
+              {
+                "type": "menu-item",
+                "props": {
+                  "title": "Name",
+                  "checked": "{{byName}}",
+                  "onTap": {
+                    "action": "sort",
+                    "payload": {
+                      "by": "name"
+                    }
+                  }
+                }
+              },
+              {
+                "type": "menu-item",
+                "props": {
+                  "title": "Date",
+                  "checked": "{{byDate}}",
+                  "onTap": {
+                    "action": "sort",
+                    "payload": {
+                      "by": "date"
+                    }
+                  }
+                }
+              },
+              {
+                "type": "divider"
+              },
+              {
+                "type": "menu-item",
+                "props": {
+                  "title": "Reverse order",
+                  "icon": "arrow.left.arrow.right",
+                  "onTap": {
+                    "action": "act",
+                    "payload": {
+                      "what": "Reversed"
+                    }
+                  }
+                }
+              },
+              {
+                "type": "menu-item",
+                "props": {
+                  "title": "Delete all",
+                  "icon": "trash",
+                  "destructive": true,
+                  "onTap": {
+                    "action": "act",
+                    "payload": {
+                      "what": "Deleted all"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "type": "menu",
+            "props": {
+              "icon": "ellipsis",
+              "indicator": false,
+              "tooltip": "More"
+            },
+            "children": [
+              {
+                "type": "menu-item",
+                "props": {
+                  "title": "Rename\u2026",
+                  "onTap": {
+                    "action": "act",
+                    "payload": {
+                      "what": "Renamed"
+                    }
+                  }
+                }
+              },
+              {
+                "type": "menu-item",
+                "props": {
+                  "title": "Duplicate",
+                  "icon": "plus.square.on.square",
+                  "onTap": {
+                    "action": "act",
+                    "payload": {
+                      "what": "Duplicated"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "Last action: {{last}}",
+          "style": "caption",
+          "color": "secondary"
+        }
+      }
+    ]
+  }
+}

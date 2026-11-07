@@ -1,0 +1,133 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 16
+    },
+    "children": [
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 16
+        },
+        "children": [
+          {
+            "type": "image",
+            "props": {
+              "src": "logo.png",
+              "width": 56,
+              "height": 56,
+              "alt": "Logo"
+            }
+          },
+          {
+            "type": "image",
+            "props": {
+              "src": "logo.png",
+              "width": 56,
+              "height": 56,
+              "fit": "fill",
+              "cornerRadius": 12
+            }
+          },
+          {
+            "type": "icon",
+            "props": {
+              "src": "logo.png",
+              "size": 40,
+              "color": "accent"
+            }
+          },
+          {
+            "type": "icon",
+            "props": {
+              "src": "logo.png",
+              "size": 40,
+              "color": "danger"
+            }
+          }
+        ]
+      },
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 16
+        },
+        "children": [
+          {
+            "type": "avatar",
+            "props": {
+              "text": "Ada Lovelace"
+            }
+          },
+          {
+            "type": "avatar",
+            "props": {
+              "text": "Grace Hopper",
+              "color": "purple",
+              "size": 40
+            }
+          },
+          {
+            "type": "avatar",
+            "props": {
+              "text": "Linus",
+              "color": "success",
+              "size": 48
+            }
+          },
+          {
+            "type": "avatar",
+            "props": {
+              "src": "logo.png",
+              "size": 40
+            }
+          }
+        ]
+      },
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 16
+        },
+        "children": [
+          {
+            "type": "icon",
+            "props": {
+              "name": "cloud.sun.fill",
+              "size": 28,
+              "rendering": "multicolor"
+            }
+          },
+          {
+            "type": "icon",
+            "props": {
+              "name": "cloud.sun.fill",
+              "size": 28,
+              "rendering": "hierarchical",
+              "color": "info"
+            }
+          },
+          {
+            "type": "icon",
+            "props": {
+              "name": "star.fill",
+              "size": 28,
+              "weight": "bold",
+              "color": "warning"
+            }
+          },
+          {
+            "type": "icon",
+            "props": {
+              "name": "star",
+              "size": 28,
+              "weight": "regular",
+              "color": "warning"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

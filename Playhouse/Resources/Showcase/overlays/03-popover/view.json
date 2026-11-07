@@ -1,0 +1,63 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 10
+    },
+    "children": [
+      {
+        "type": "popover",
+        "props": {
+          "open": "{{open}}",
+          "onDismiss": {
+            "action": "close"
+          }
+        },
+        "children": [
+          {
+            "type": "button",
+            "props": {
+              "title": "Show details",
+              "icon": "info.circle",
+              "onTap": {
+                "action": "toggle"
+              }
+            }
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "Details",
+              "weight": "semibold"
+            }
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "Popovers close when you click away.",
+              "style": "caption",
+              "color": "secondary"
+            }
+          },
+          {
+            "type": "button",
+            "props": {
+              "title": "Got it",
+              "onTap": {
+                "action": "close"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "Popover is {{open}}",
+          "style": "caption",
+          "color": "secondary"
+        }
+      }
+    ]
+  }
+}

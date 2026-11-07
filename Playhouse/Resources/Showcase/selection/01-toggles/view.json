@@ -1,0 +1,45 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 10
+    },
+    "children": [
+      {
+        "type": "toggle",
+        "props": {
+          "label": "Notifications",
+          "value": "{{notify}}",
+          "onChange": {
+            "action": "set",
+            "payload": {
+              "field": "notify"
+            }
+          }
+        }
+      },
+      {
+        "type": "toggle",
+        "props": {
+          "label": "Save drafts automatically",
+          "value": "{{autosave}}",
+          "style": "checkbox",
+          "onChange": {
+            "action": "set",
+            "payload": {
+              "field": "autosave"
+            }
+          }
+        }
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "notify = {{notify}}, autosave = {{autosave}}",
+          "style": "caption",
+          "color": "secondary"
+        }
+      }
+    ]
+  }
+}

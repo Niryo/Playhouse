@@ -12,7 +12,11 @@ enum PlayhouseDevRunner {
     Loads the plugin and reads one command per line from stdin:
       view               Print the resolved view tree with each element's number
       tap <id>           Run element <id>'s onTap action and wait for it to settle
-      type <id> <text>   Run element <id>'s onChange action with { value: <text> }
+      type <id> <text>   Run element <id>'s onChange action with { value: <text> }; the text is read
+                         as the control's value kind (true/false for a toggle, a number for a slider)
+      fire <id> <event> [json]
+                         Run element <id>'s <event> action, with { value: <json> } when given
+      components         Print the component catalog as JSON
       state              Print the current state as JSON
       log [n]            Print the last n log lines (console, exceptions, api calls)
       reload             Load the plugin folder again (state resets)
@@ -195,9 +199,23 @@ final class Runner {
         case "reload":
             session.reload()
             output.reply(command, [:], text: "reloading")
-        case "tap", "type":
+        case "components":
+            let catalog = PluginComponentCatalog.catalogValue()
+            output.reply(command, ["catalog": catalog], text: catalog.jsonText)
+        case "tap", "type", "fire":
             guard parts.count >= 2, let nodeID = Int(parts[1]) else {
-                return output.failure(command, command == "tap" ? "Use: tap <id>" : "Use: type <id> <text>")
+                return output.failure(command, command == "tap" ? "Use: tap <id>" : command == "type" ? "Use: type <id> <text>" : "Use: fire <id> <event> [json]")
+            }
+            var fireEvent = ""
+            var fireValue: BridgeValue?
+            if command == "fire" {
+                let rest = (parts.count > 2 ? parts[2] : "").split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).map(String.init)
+                guard let name = rest.first else { return output.failure(command, "Use: fire <id> <event> [json]") }
+                fireEvent = name
+                if rest.count > 1 {
+                    guard let parsed = try? BridgeValue.parsingJSON(rest[1]) else { return output.failure(command, "The value must be JSON, for example true, 3 or \"text\".") }
+                    fireValue = parsed
+                }
             }
             let finished = DispatchSemaphore(value: 0)
             let outcomeLock = NSLock()
@@ -210,6 +228,8 @@ final class Runner {
             }
             if command == "tap" {
                 session.tap(nodeID: nodeID, completion: completion)
+            } else if command == "fire" {
+                session.fire(nodeID: nodeID, event: fireEvent, value: fireValue, completion: completion)
             } else {
                 session.input(nodeID: nodeID, text: parts.count > 2 ? parts[2] : "", completion: completion)
             }

@@ -1,0 +1,72 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 10
+    },
+    "children": [
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 8
+        },
+        "children": [
+          {
+            "type": "text",
+            "props": {
+              "text": "window",
+              "padding": 10,
+              "background": "window",
+              "foreground": "primary",
+              "radius": 6,
+              "border": "muted"
+            }
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "panel",
+              "padding": 10,
+              "background": "panel",
+              "foreground": "primary",
+              "radius": 6,
+              "border": "muted"
+            }
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "input",
+              "padding": 10,
+              "background": "input",
+              "foreground": "primary",
+              "radius": 6,
+              "border": "muted"
+            }
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "purple",
+              "padding": 10,
+              "background": "purple",
+              "foreground": "primary",
+              "radius": 6,
+              "border": "muted"
+            }
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "Hover for the pointer cursor",
+          "padding": 10,
+          "background": "panel",
+          "radius": 6,
+          "cursor": "pointer"
+        }
+      }
+    ]
+  }
+}

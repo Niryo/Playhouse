@@ -1,0 +1,14 @@
+{
+  "id": "labeled-dividers",
+  "name": "Labeled dividers",
+  "version": "1.0.0",
+  "description": "A divider can carry a label, like the page separator between chats.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Labeled dividers"
+      }
+    ]
+  }
+}

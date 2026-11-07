@@ -23,6 +23,7 @@ enum PluginComponentRegistry {
         VStackComponent.self,
         HStackComponent.self,
         ZStackComponent.self,
+        ScrollComponent.self,
         SpacerComponent.self,
         DividerComponent.self,
         TextComponent.self,
@@ -32,6 +33,35 @@ enum PluginComponentRegistry {
         TextFieldComponent.self,
         ProgressBarComponent.self,
         SpinnerComponent.self,
+        LabelComponent.self,
+        CodeComponent.self,
+        KbdComponent.self,
+        LinkComponent.self,
+        ImageComponent.self,
+        AvatarComponent.self,
+        IconButtonComponent.self,
+        CopyButtonComponent.self,
+        SecureFieldComponent.self,
+        TextEditorComponent.self,
+        SearchFieldComponent.self,
+        ToggleComponent.self,
+        SegmentedComponent.self,
+        PickerComponent.self,
+        SliderComponent.self,
+        DatePickerComponent.self,
+        BadgeComponent.self,
+        ChipComponent.self,
+        CardComponent.self,
+        StatusDotComponent.self,
+        EmptyStateComponent.self,
+        HintComponent.self,
+        MenuComponent.self,
+        MenuItemComponent.self,
+        ContextMenuComponent.self,
+        PopoverComponent.self,
+        SheetComponent.self,
+        AlertComponent.self,
+        ConfirmDialogComponent.self,
     ]
 
     private static let byType: [String: PluginComponent.Type] = Dictionary(
@@ -45,6 +75,10 @@ enum PluginComponentRegistry {
 struct PluginNodeActions {
     var tap: (Int) -> Void
     var input: (Int, String) -> Void
+    /// Runs any event of a node with an optional value (`onChange` of a toggle, `onDismiss` of a sheet).
+    var fire: (Int, String, BridgeValue?) -> Void = { _, _, _ in }
+    /// The plugin's folder, for `src` props.
+    var directory: URL?
 
     static let inert = PluginNodeActions(tap: { _ in }, input: { _, _ in })
 }
@@ -106,11 +140,38 @@ struct PluginRenderContext {
 
     var children: PluginChildrenView { PluginChildrenView(nodes: node.children, actions: actions, showNodeIDs: showNodeIDs) }
 
+    /// A subset of the children, for components that treat some of them specially (a menu's entries, a popover's anchor).
+    func view(of nodes: [PluginResolvedNode]) -> PluginChildrenView { PluginChildrenView(nodes: nodes, actions: actions, showNodeIDs: showNodeIDs) }
+
     var hasTap: Bool { node.events["onTap"] != nil }
 
     func tap() { actions.tap(node.id) }
 
     func input(_ text: String) { actions.input(node.id, text) }
+
+    func fire(_ event: String, value: BridgeValue? = nil) { actions.fire(node.id, event, value) }
+
+    func has(_ event: String) -> Bool { node.events[event] != nil }
+
+    /// A file prop resolved inside the plugin's folder.
+    func fileURL(_ name: String) -> URL? {
+        guard let path = string(name), let directory = actions.directory else { return nil }
+        return PluginFiles.resolve(path, in: directory)
+    }
+
+    /// The `options` of a picker or segmented control as (value, title, icon).
+    var options: [(value: String, title: String, icon: String?)] {
+        (node.props["options"]?.array ?? []).compactMap { option in
+            if let text = option.string { return (text, text, nil) }
+            guard let object = option.object, let value = object["value"]?.string ?? object["value"]?.number.map({ BridgeValue.decimal($0).interpolatedText }) else { return nil }
+            return (value, object["title"]?.string ?? value, object["icon"]?.string)
+        }
+    }
+
+    /// The children that aren't menu entries, for a context menu's content.
+    var contentChildren: [PluginResolvedNode] { node.children.filter { !Self.menuEntryTypes.contains($0.type) } }
+    var menuChildren: [PluginResolvedNode] { node.children.filter { Self.menuEntryTypes.contains($0.type) } }
+    private static let menuEntryTypes = Set(PluginComponentCatalog.spec("menu")?.childTypes ?? [])
 }
 
 struct PluginChildrenView: View {
@@ -170,6 +231,7 @@ struct PluginNodeView: View {
             .disabled(ctx.bool("disabled"))
             .pluginTooltip(tooltip)
             .pluginTapTarget(ctx.hasTap && !handlesOwnInput ? { ctx.tap() } : nil)
+            .pluginCursor(ctx.string("cursor"))
             .pluginContainer(isContainer)
             .accessibilityIdentifier("plugin-node-\(node.id)")
             .overlay(alignment: .topLeading) {
@@ -212,6 +274,11 @@ private extension View {
     }
 
     @ViewBuilder
+    func pluginCursor(_ name: String?) -> some View {
+        if name == "pointer" { hoverCursor(.pointingHand) } else { self }
+    }
+
+    @ViewBuilder
     func pluginContainer(_ isContainer: Bool) -> some View {
         if isContainer { accessibilityElement(children: .contain) } else { self }
     }
@@ -244,6 +311,10 @@ enum PluginColor {
         case "warning": return .orange
         case "danger": return .red
         case "info": return .blue
+        case "purple": return .purple
+        case "window": return WorkspaceTheme.windowBackground
+        case "panel": return WorkspaceTheme.panelBackground
+        case "input": return WorkspaceTheme.inputBackground
         case "clear": return .clear
         default: break
         }

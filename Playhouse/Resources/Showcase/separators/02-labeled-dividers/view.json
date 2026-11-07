@@ -1,0 +1,35 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 8,
+      "width": 320
+    },
+    "children": [
+      {
+        "type": "text",
+        "props": {
+          "text": "Earlier today"
+        }
+      },
+      {
+        "type": "divider",
+        "props": {
+          "label": "Yesterday"
+        }
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "Older messages"
+        }
+      },
+      {
+        "type": "divider",
+        "props": {
+          "label": "Last week"
+        }
+      }
+    ]
+  }
+}

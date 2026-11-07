@@ -1,0 +1,14 @@
+{
+  "id": "status-dots",
+  "name": "Status dots",
+  "version": "1.0.0",
+  "description": "Small colored dots for a state.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Status dots"
+      }
+    ]
+  }
+}

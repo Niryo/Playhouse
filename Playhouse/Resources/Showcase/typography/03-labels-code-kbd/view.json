@@ -1,0 +1,105 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 10
+    },
+    "children": [
+      {
+        "type": "label",
+        "props": {
+          "text": "Pull request merged",
+          "icon": "arrow.triangle.merge",
+          "color": "success"
+        }
+      },
+      {
+        "type": "label",
+        "props": {
+          "text": "Headline label",
+          "icon": "star.fill",
+          "style": "headline",
+          "color": "warning"
+        }
+      },
+      {
+        "type": "label",
+        "props": {
+          "text": "Icon-only label",
+          "icon": "gearshape",
+          "iconOnly": true
+        }
+      },
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 6
+        },
+        "children": [
+          {
+            "type": "text",
+            "props": {
+              "text": "Run"
+            }
+          },
+          {
+            "type": "code",
+            "props": {
+              "text": "scripts/test-e2e.sh"
+            }
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "before you push."
+            }
+          }
+        ]
+      },
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 8
+        },
+        "children": [
+          {
+            "type": "text",
+            "props": {
+              "text": "Save"
+            }
+          },
+          {
+            "type": "kbd",
+            "props": {
+              "keys": "cmd+s"
+            }
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "Quit"
+            }
+          },
+          {
+            "type": "kbd",
+            "props": {
+              "keys": "\u2318Q"
+            }
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "Find"
+            }
+          },
+          {
+            "type": "kbd",
+            "props": {
+              "keys": "cmd+shift+f"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

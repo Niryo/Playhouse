@@ -5,6 +5,7 @@ enum SpinnerComponent: PluginComponent {
 
     static func render(_ ctx: PluginRenderContext) -> AnyView {
         let size: ControlSize = switch ctx.string("size") {
+        case "mini": .mini
         case "small": .small
         case "large": .large
         default: .regular

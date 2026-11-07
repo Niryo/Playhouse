@@ -1,0 +1,46 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 10
+    },
+    "children": [
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 16
+        },
+        "children": [
+          {
+            "type": "link",
+            "props": {
+              "text": "Open the Playhouse docs",
+              "url": "https://example.com/docs",
+              "onTap": {
+                "action": "clicked"
+              }
+            }
+          },
+          {
+            "type": "link",
+            "props": {
+              "text": "Email the team",
+              "url": "mailto:team@example.com",
+              "onTap": {
+                "action": "clicked"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "Link clicks: {{clicks}}",
+          "style": "caption",
+          "color": "secondary"
+        }
+      }
+    ]
+  }
+}
