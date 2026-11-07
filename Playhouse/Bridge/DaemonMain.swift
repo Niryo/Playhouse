@@ -152,7 +152,31 @@ enum PlayhouseBridgeDaemonMain {
         }
         acceptThread.name = "playhouse-daemon.accept"
         acceptThread.start()
+        // A scheduled turn a tick starts runs on after the tick's request ends.
+        BridgeBackgroundWork.onBegin = { lifecycle.requestStarted() }
+        BridgeBackgroundWork.onEnd = { lifecycle.requestFinished() }
+        startScheduleTicker(environment: environment)
         RunLoop.current.run()
+    }
+
+    /// While the daemon is up, fires due schedules of the default store every 30
+    /// seconds. The ticker itself never keeps the daemon alive: with the app closed,
+    /// the scheduler LaunchAgent starts a `schedule tick` each minute instead. Test
+    /// bundles keep isolated stores per case and drive ticks explicitly, so they
+    /// don't tick here.
+    private static func startScheduleTicker(environment: [String: String]) {
+        let interval: TimeInterval = 30
+        guard !BridgeContract.isTestBundle(PlayhouseAppIdentity.applicationIdentifier) else { return }
+        Task { @MainActor in
+            while true {
+                let request = BridgeRequest(command: "schedule.tick", environment: environment)
+                let context = PlayhouseRequestContext(environment: environment, scope: PlayhouseDiagnosticsScope())
+                _ = await context.run {
+                    await PlayhouseBridgeRuntime().perform(request) { _ in }
+                }
+                try? await Task.sleep(for: .seconds(interval))
+            }
+        }
     }
 
     /// Runs on its own dedicated thread for the life of one connection: one

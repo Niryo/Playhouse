@@ -352,6 +352,11 @@ struct RemoteConversationManager {
         try await daemon.call("task.delete", ["taskID": id(taskID)])
     }
 
+    /// Starts one run of a schedule now. The turn runs in the daemon.
+    func runScheduleNow(taskID: UUID) async throws -> ScheduledRunOutcome {
+        try await daemon.call("schedule.run-now", ["taskID": id(taskID)]).decoded(ScheduledRunOutcome.self)
+    }
+
     func searchArchive(query: String) async throws -> [BoardTaskRecord] {
         try await daemon.call("archive.search", ["query": .string(query)]).decoded([BoardTaskRecord].self)
     }

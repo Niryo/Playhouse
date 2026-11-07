@@ -215,6 +215,24 @@ final class BoardTask {
     /// convert them to `StandaloneChat`. The original column name is preserved so the migration
     /// can still see data written before the split.
     @Attribute(originalName: "isStandaloneChat") var legacyStandaloneChatMarker: Bool = false
+    /// Nil for an ordinary task; otherwise a `TaskScheduleKind`. A one-time schedule is a
+    /// Backlog task whose first prompt is sent at `scheduledAt`. A recurring schedule is a
+    /// template that stays off the board and starts a new task at each occurrence.
+    var scheduleKindRawValue: String?
+    /// When a one-time schedule fires, or a recurring schedule's next occurrence.
+    var scheduledAt: Date?
+    var scheduleRecurrenceData: Data?
+    /// The confirmed prompt a schedule sends. Kept apart from `savedPrompt`, which the
+    /// composer autosaves while the user edits, so an unconfirmed edit never fires.
+    var scheduledPrompt: String?
+    var scheduledImageDataURLsData: Data?
+    var scheduledModeRawValue: String?
+    var scheduledModelID: String?
+    var schedulePaused: Bool = false
+    var lastScheduledRunAt: Date?
+    var lastScheduledRunTaskID: UUID?
+    /// The recurring schedule that started this task, if any.
+    var scheduleSourceTaskID: UUID?
 
     var workspaceRootPaths: [String] {
         get {
@@ -288,6 +306,113 @@ enum PullRequestMode: String, CaseIterable, Codable, Sendable {
         case .autopilot: "Green: open the PR, then fix failing checks and review comments until it's green"
         case .merge: "Merge: like Green, then merge the PR once it's green"
         }
+    }
+}
+
+enum TaskScheduleKind: String, Codable, CaseIterable, Sendable {
+    case once
+    case recurring
+}
+
+/// A recurring schedule's preset. Times are wall-clock times in the user's calendar, so a
+/// daily run stays at 09:00 across daylight-saving changes.
+struct TaskRecurrence: Codable, Equatable, Sendable {
+    enum Preset: String, Codable, CaseIterable, Sendable {
+        case hourly
+        case daily
+        case weekdays
+        case weekly
+
+        var label: String {
+            switch self {
+            case .hourly: "Every hour"
+            case .daily: "Every day"
+            case .weekdays: "Weekdays"
+            case .weekly: "Weekly"
+            }
+        }
+    }
+
+    var preset: Preset
+    var hour: Int
+    var minute: Int
+    /// `Calendar` weekday (1 = Sunday … 7 = Saturday); used by `.weekly`.
+    var weekday: Int?
+
+    init(preset: Preset, hour: Int = 9, minute: Int = 0, weekday: Int? = nil) {
+        self.preset = preset
+        self.hour = hour
+        self.minute = minute
+        self.weekday = weekday
+    }
+
+    var isValid: Bool {
+        (0...23).contains(hour) && (0...59).contains(minute)
+            && (preset != .weekly || (weekday.map { (1...7).contains($0) } ?? false))
+    }
+
+    /// The first occurrence strictly after `date`.
+    func nextOccurrence(after date: Date, calendar: Calendar = .current) -> Date {
+        let candidates: [DateComponents]
+        switch preset {
+        case .hourly:
+            candidates = [DateComponents(minute: minute, second: 0)]
+        case .daily:
+            candidates = [DateComponents(hour: hour, minute: minute, second: 0)]
+        case .weekdays:
+            candidates = (2...6).map { DateComponents(hour: hour, minute: minute, second: 0, weekday: $0) }
+        case .weekly:
+            candidates = [DateComponents(hour: hour, minute: minute, second: 0, weekday: weekday ?? 2)]
+        }
+        return candidates
+            .compactMap { calendar.nextDate(after: date, matching: $0, matchingPolicy: .nextTime) }
+            .min() ?? date.addingTimeInterval(3600)
+    }
+
+    /// The latest occurrence at or before `date`, searched no further back than `floor`.
+    func latestOccurrence(atOrBefore date: Date, notBefore floor: Date, calendar: Calendar = .current) -> Date? {
+        var latest: Date?
+        var cursor = floor.addingTimeInterval(-1)
+        // A week of hourly runs is the most a sleeping Mac can owe; stop well past that.
+        for _ in 0..<2000 {
+            let next = nextOccurrence(after: cursor, calendar: calendar)
+            guard next <= date else { break }
+            latest = next
+            cursor = next
+        }
+        return latest
+    }
+
+    func summary(calendar: Calendar = .current) -> String {
+        let time = String(format: "%02d:%02d", hour, minute)
+        switch preset {
+        case .hourly: return String(format: "Every hour at :%02d", minute)
+        case .daily: return "Every day at \(time)"
+        case .weekdays: return "Weekdays at \(time)"
+        case .weekly:
+            let names = calendar.weekdaySymbols
+            let index = max(1, min(7, weekday ?? 2)) - 1
+            return "\(names[index])s at \(time)"
+        }
+    }
+}
+
+extension BoardTask {
+    var scheduleKind: TaskScheduleKind? {
+        get { scheduleKindRawValue.flatMap(TaskScheduleKind.init(rawValue:)) }
+        set { scheduleKindRawValue = newValue?.rawValue }
+    }
+
+    var isRecurringScheduleTemplate: Bool { scheduleKind == .recurring }
+
+    var scheduleRecurrence: TaskRecurrence? {
+        get { scheduleRecurrenceData.flatMap { try? JSONDecoder().decode(TaskRecurrence.self, from: $0) } }
+        set { scheduleRecurrenceData = newValue.flatMap { try? JSONEncoder().encode($0) } }
+    }
+
+    var scheduledImageDataURLs: [String] {
+        get { scheduledImageDataURLsData.flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? [] }
+        set { scheduledImageDataURLsData = newValue.isEmpty ? nil : try? JSONEncoder().encode(newValue) }
     }
 }
 

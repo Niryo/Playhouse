@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import datetime
 import errno
 import fcntl
 import json
@@ -220,6 +221,43 @@ class RepositoryAllocationLockBarrier:
         fcntl.lockf(self.descriptor, fcntl.LOCK_UN, 0, 0, os.SEEK_SET)
         os.close(self.descriptor)
         self.descriptor = None
+
+
+def ordinary_messages(messages):
+    """History without the status nudges Playhouse sent and the agent's replies to them."""
+    kept, in_nudge = [], False
+    for message in messages:
+        if message["role"] == "user":
+            in_nudge = "Playhouse internal outcome nudge:" in message["text"]
+        if not in_nudge:
+            kept.append(message)
+    return kept
+
+
+class DrainedPopen(subprocess.Popen):
+    """A Popen whose output pipes are read while it runs.
+
+    A held turn streams every event to its CLI, and a nudge shown in the conversation streams its
+    own, so an unread pipe fills and blocks the CLI, which in turn blocks the daemon's socket write.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._drained = {}
+        self._drain_threads = []
+        for name in ("stdout", "stderr"):
+            stream = getattr(self, name)
+            if stream is None:
+                continue
+            thread = threading.Thread(target=lambda n=name, s=stream: self._drained.__setitem__(n, s.read()), daemon=True)
+            thread.start()
+            self._drain_threads.append(thread)
+
+    def communicate(self, input=None, timeout=None):
+        self.wait(timeout=timeout)
+        for thread in self._drain_threads:
+            thread.join(timeout=timeout)
+        return self._drained.get("stdout", ""), self._drained.get("stderr", "")
 
 
 class PlayhouseBridgeTests(unittest.TestCase):
@@ -1822,7 +1860,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(any(message["text"] == "Do not overtake Mars" for message in recovered_messages))
         self.assertIn("Another thought about Mars", [message["text"] for message in recovered_messages])
 
-    # case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a compact fixed Kanban sidebar under 200 points wide and left of the columns while they scroll, and places its placeholder button inside the sidebar below the full logo header. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
+    # case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a compact fixed Kanban sidebar under 200 points wide and left of the columns while they scroll, and places its Scheduled Tasks button inside the sidebar below the full logo header. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):
         response, _ = self.call_cli("status")
         status = self.assert_success(response)
@@ -3890,7 +3928,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         done = self.assert_success(self.call_cli("task", "move", task["id"], "Done", "--allow-unmerged")[0])
         self.assertEqual(done["status"], "Done")
 
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A private nudge that only reports status keeps its prompt, reply, and bookkeeping activities out of Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A status nudge Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while showing the nudge replies.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -3913,7 +3951,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "PLAYHOUSE_BRIDGE_SERVICE_NAME": arguments.service_name,
             "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable),
         })
-        turn = subprocess.Popen(
+        turn = DrainedPopen(
             [str(self.cli), "conversation", "send", task_id, "--message", "Work on this task."],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
         )
@@ -3970,7 +4008,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             finished_record = self.assert_success(finished)
             self.assertEqual(finished_record["status"], "Review")
             self.assertIsNone(finished_record.get("progressLabel"))
-            follow_up = subprocess.Popen(
+            follow_up = DrainedPopen(
                 [str(self.cli), "conversation", "send", task_id, "--message", "Continue on this task."],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
             )
@@ -3992,7 +4030,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
                 if follow_up.poll() is None:
                     release_marker.write_text("Release the resumed turn.\n", encoding="utf-8")
                     follow_up.communicate(timeout=20)
-            omitted_follow_up = subprocess.Popen(
+            omitted_follow_up = DrainedPopen(
                 [str(self.cli), "conversation", "send", task_id, "--message", "A turn without an outcome."],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
             )
@@ -4024,14 +4062,14 @@ class PlayhouseBridgeTests(unittest.TestCase):
                 )
                 visible_history_record = self.assert_success(visible_history)
                 visible_messages = visible_history_record["messages"]
-                self.assertFalse(any("ended without reporting a task outcome" in item.get("text", "") for item in visible_messages), "Private reminder text must not appear in conversation history.")
-                self.assertFalse(any("Fixture internal reminder reply." in item.get("text", "") for item in visible_messages), "Private reminder replies must not appear in conversation history.")
+                self.assertTrue(any(item["role"] == "user" and "ended without reporting a task outcome" in item.get("text", "") for item in visible_messages), "The nudge Playhouse sent appears in conversation history.")
+                self.assertTrue(any("Fixture internal reminder reply." in item.get("text", "") for item in visible_messages), "The agent's reply to the nudge appears in conversation history.")
                 self.assertIn("ordinary-turn-diff-after-reminders", visible_history_record["diff"]["unifiedDiff"], "Private reminders must not replace the latest ordinary-turn diff.")
             finally:
                 if omitted_follow_up.poll() is None:
                     release_marker.write_text("Release the no-outcome turn.\n", encoding="utf-8")
                     omitted_follow_up.communicate(timeout=20)
-            recovered_follow_up = subprocess.Popen(
+            recovered_follow_up = DrainedPopen(
                 [str(self.cli), "conversation", "send", task_id, "--message", "Report the outcome after a reminder."],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
             )
@@ -4060,7 +4098,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
                 if recovered_follow_up.poll() is None:
                     release_marker.write_text("Release the reminder recovery turn.\n", encoding="utf-8")
                     recovered_follow_up.communicate(timeout=20)
-            waiting_follow_up = subprocess.Popen(
+            waiting_follow_up = DrainedPopen(
                 [str(self.cli), "conversation", "send", task_id, "--message", "Report waiting after a reminder."],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
             )
@@ -4092,7 +4130,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             # A model can write its outcome command as answer text instead of running
             # it. The echo is hidden, and it counts only when it names this task.
             for echoed_task_id, expected_status in [(str(uuid.uuid4()).upper(), "Blocked"), (task_id, "Review")]:
-                echoed_turn = subprocess.Popen(
+                echoed_turn = DrainedPopen(
                     [str(self.cli), "conversation", "send", task_id, "--message", f"Echo the outcome command for {echoed_task_id}."],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
                 )
@@ -4122,11 +4160,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
                     self.assertEqual(self.assert_success(echoed_record)["status"], expected_status)
                     echoed_history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)})[0])
                     self.assertTrue(any(item["text"] == "Fixture answer with an echoed outcome." for item in echoed_history["messages"]))
-                    self.assertFalse(any("task outcome" in message["text"] for message in echoed_history["messages"]), "A fresh history read must hide the echoed outcome command.")
+                    self.assertFalse(any("task outcome" in message["text"] for message in echoed_history["messages"] if message["role"] == "assistant"), "A fresh history read must hide the echoed outcome command.")
                     self.assertFalse(any(item.get("text") == "[Playhouse private outcome reminder hidden]" for item in echoed_history["messages"]), "A later Codex history refresh must omit earlier private reminders.")
                     self.assertFalse(any(item.get("text") == "[Playhouse private outcome response hidden]" for item in echoed_history["messages"]), "A later Codex history refresh must omit earlier private reminder replies.")
-                    self.assertFalse(any("ended without reporting a task outcome" in item.get("text", "") or "Fixture internal reminder reply." in item.get("text", "") for item in echoed_history["messages"]), "Later history refreshes must not reveal prior reminder prompts or replies.")
-                    self.assertFalse(any(item.get("id", "").startswith("item_private_reminder_activity_") for item in echoed_history.get("activities", [])), "Later ordinary Codex history must omit activities owned by private reminders.")
+                    self.assertTrue(any(item["role"] == "user" and "ended without reporting a task outcome" in item.get("text", "") for item in echoed_history["messages"]), "Later history refreshes keep the nudges Playhouse sent.")
+                    self.assertTrue(any("Fixture internal reminder reply." in item.get("text", "") for item in echoed_history["messages"]), "Later history refreshes keep the replies to those nudges.")
                 finally:
                     if echoed_turn.poll() is None:
                         release_marker.write_text("Release the echoed-outcome turn.\n", encoding="utf-8")
@@ -4170,7 +4208,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             active_marker.unlink(missing_ok=True)
             release_marker.unlink(missing_ok=True)
 
-    # case-contract: test_task_outcome_in_progress_drives_continuations_until_blocked | An in-progress outcome is accepted during an active turn, leaves the task In Progress, and makes Playhouse send a private continuation turn that names the in-progress report; a completed report during that continuation stops the loop at Review. When every turn reports in-progress, Playhouse sends exactly five continuation turns, keeps the task In Progress throughout, and then marks it Blocked with a continuation-limit reason instead of Waiting Response, since the user was never asked anything. Continuation prompts and replies stay out of the visible conversation history. The user taking the work back ends Playhouse's private driving: stopping a continuation keeps the Stop's Waiting Response with no failure reason, and a queued follow-up runs next instead of being buried under further continuations.
+    # case-contract: test_task_outcome_in_progress_drives_continuations_until_blocked | An in-progress outcome is accepted during an active turn, leaves the task In Progress, and makes Playhouse send a private continuation turn that names the in-progress report; a completed report during that continuation stops the loop at Review. When every turn reports in-progress, Playhouse sends exactly five continuation turns, keeps the task In Progress throughout, and then marks it Blocked with a continuation-limit reason instead of Waiting Response, since the user was never asked anything. Continuation prompts and replies appear in the conversation history as Playhouse-sent messages and their replies. The user taking the work back ends Playhouse's private driving: stopping a continuation keeps the Stop's Waiting Response with no failure reason, and a queued follow-up runs next instead of being buried under further continuations.
     def test_task_outcome_in_progress_drives_continuations_until_blocked(self):
         task_id = self.create_task("Continue in progress", roots=[self.primary])["id"]
         process, executable, active, release = self.start_progress_fixture_turn(
@@ -4321,17 +4359,21 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "conversation", "history", capped_id,
             extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(capped_executable)},
         )[0])
-        self.assertFalse(
-            any("You reported `in-progress`" in message.get("text", "") for message in capped_history["messages"]),
-            "Private continuation prompts must not appear in conversation history.",
+        self.assertTrue(
+            any(message["role"] == "user" and "You reported `in-progress`" in message.get("text", "") for message in capped_history["messages"]),
+            "Continuation prompts Playhouse sent appear in conversation history.",
+        )
+        self.assertTrue(
+            any("Fixture internal reminder reply." in message.get("text", "") for message in capped_history["messages"]),
+            "Replies to continuations appear in conversation history.",
         )
         self.assertFalse(
             any(
                 hidden in message.get("text", "")
                 for message in capped_history["messages"]
-                for hidden in ("Fixture internal reminder reply.", "private outcome reminder hidden", "private outcome response hidden")
+                for hidden in ("private outcome reminder hidden", "private outcome response hidden")
             ),
-            "Private continuation replies must not appear in conversation history.",
+            "No placeholder replaces a continuation or its reply.",
         )
 
     # case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or In Progress. A blocking structured question appears inline and moves the task to Waiting Response; its answer resumes the active turn in In Progress, and the answered turn finishes in Waiting Response. First-thread instructions distinguish source repository paths from active task worktree paths, allow read-only inspection without attaching a repo, and reserve repository add APIs for changes that need a worktree.
@@ -5812,7 +5854,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn("Done tasks are closed", done_switch["error"]["message"])
         self.assertEqual(self.assert_success(self.call_cli("task", "get", done_task["id"])[0])["conversationProvider"], "codex")
 
-    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its Playhouse progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn that leaves every status nudge unanswered ends in Blocked. The fixture records all five private nudge attempts for each unreported turn; fresh history hides nudge prompts and replies completely. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private nudge prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
+    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its Playhouse progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn that leaves every status nudge unanswered ends in Blocked. The fixture records all five private nudge attempts for each unreported turn; fresh history shows the nudge prompts and their replies. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private nudge prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
     def test_claude_answer_stays_final_around_outcome_report(self):
         story = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
         story_answer = story + "\n\nThe story is above."
@@ -5846,13 +5888,16 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
         sent, events = self.call_cli("conversation", "send", task_id, "--message", "Please inspect the workspace.", extra_environment=fixtures)
         self.assert_success(sent)
-        self.assertEqual([event["payload"]["text"] for event in events if event["type"] == "assistant_final"], ["Inspection done: the workspace is ready."])
+        finals = [event["payload"]["text"] for event in events if event["type"] == "assistant_final"]
+        self.assertEqual(finals[0], "Inspection done: the workspace is ready.", "The answer is the first final, ahead of the nudge replies.")
+        self.assertEqual(set(finals[1:]), {"OK."}, "Each nudge's reply streams after the answer.")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Blocked",
                          "This fixture leaves every nudge unanswered, so the turn settles in Blocked.")
 
         sent, events = self.call_cli("conversation", "send", task_id, "--message", "Start the checks.", extra_environment=fixtures)
         self.assert_success(sent)
-        self.assertEqual([event for event in events if event["type"] == "assistant_final"], [], "This turn records only commentary.")
+        self.assertEqual({event["payload"]["text"] for event in events if event["type"] == "assistant_final"} - {"OK."}, set(),
+                         "This turn records only commentary; the only finals are the replies to its nudges.")
 
         history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=fixtures)[0])
         assistant = [(message["phase"], message["text"]) for message in history["messages"] if message["role"] == "assistant"]
@@ -5860,10 +5905,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
             ("final_answer", story_answer),
             ("commentary", "I'll inspect the workspace first."),
             ("final_answer", "Inspection done: the workspace is ready."),
+            *[("final_answer", "OK.")] * MAX_OUTCOME_CONTINUATIONS,
             ("commentary", "Starting the checks."),
             ("commentary", "Checks are running; results will follow."),
+            *[("final_answer", "OK.")] * MAX_OUTCOME_CONTINUATIONS,
         ], "A fresh history read keeps the story as one final answer and the pre-tool text as commentary.")
-        self.assertFalse(any("Playhouse internal outcome nudge:" in message["text"] for message in history["messages"]))
+        self.assertTrue(any(message["role"] == "user" and "Playhouse internal outcome nudge:" in message["text"] for message in history["messages"]),
+                        "Nudges Playhouse sent are shown in history.")
         self.assertFalse(any("private outcome reminder hidden" in message["text"] for message in history["messages"]))
         self.assertFalse(any("private outcome response hidden" in message["text"] for message in history["messages"]))
 
@@ -6102,7 +6150,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn(ordinary_text, user_messages[-1]["text"])
         current_goal, _ = self.call_cli("conversation", "goal", task["id"], "get", extra_environment=fixture_environment)
         self.assertIsNone(self.assert_success(current_goal), "A conversation comment payload must not become a Goal objective.")
-        assistant_messages = [message for message in self.assert_success(history)["messages"] if message["role"] == "assistant"]
+        assistant_messages = [message for message in ordinary_messages(self.assert_success(history)["messages"]) if message["role"] == "assistant"]
         self.assertTrue(assistant_messages, "The fixture should return a response for each comment.")
         response_lines = assistant_messages[-1]["text"].splitlines()
         self.assertEqual(len(response_lines), 2)
@@ -6126,7 +6174,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_success(legacy_sent)
         legacy_history, _ = self.call_cli("conversation", "history", task["id"], extra_environment=fixture_environment)
         legacy_assistant = next(
-            message for message in reversed(self.assert_success(legacy_history)["messages"])
+            message for message in reversed(ordinary_messages(self.assert_success(legacy_history)["messages"]))
             if message["role"] == "assistant"
         )
         self.assertIn("legacy highlighted words", legacy_assistant["text"])
@@ -6147,12 +6195,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "conversation", "history", task["id"], extra_environment=fixture_environment,
         )[0])
         self.assertEqual(
-            [item for item in comment_only_history["messages"] if item["role"] == "user"][-1]["text"],
+            [item for item in ordinary_messages(comment_only_history["messages"]) if item["role"] == "user"][-1]["text"],
             comment_only_prompt,
         )
         self.assertIn(
             ':playhouse-annotation{index="0"}',
-            [item for item in comment_only_history["messages"] if item["role"] == "assistant"][-1]["text"],
+            [item for item in ordinary_messages(comment_only_history["messages"]) if item["role"] == "assistant"][-1]["text"],
         )
 
     # case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged.
@@ -6908,7 +6956,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         followed_history = self.assert_success(followup)
-        restored_messages = [message for message in followed_history["messages"] if message["role"] == "user"]
+        restored_messages = [message for message in ordinary_messages(followed_history["messages"]) if message["role"] == "user"]
         self.assertEqual(len(restored_messages), 4)
         self.assertTrue(all(message["imageDataURLs"] for message in restored_messages[:3]), "History refresh after a later text turn must retain every earlier image.")
         self.assertEqual(restored_messages[2]["text"], text_prompt)
@@ -7264,7 +7312,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         closing = "Tell me if you want the upgrade command."
         self.assert_success(self.call_cli("conversation", "send", task_id, "--message", follow_up, extra_environment=environment)[0])
         page = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80", extra_environment=environment)[0])
-        page_messages = page["messages"]
+        page_messages = ordinary_messages(page["messages"])
         last_user = max(index for index, message in enumerate(page_messages) if message["role"] == "user")
         self.assertEqual(page_messages[last_user]["text"], follow_up, "The follow-up should be the newest question.")
         self.assertEqual(page_messages[-1]["text"], closing, "The newest page should end with the follow-up's answer.")
@@ -7665,7 +7713,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assert_success(self.call_cli("conversation", "send", task_id, "--message", message, extra_environment=fixtures)[0])
 
         full = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
-        messages = full["messages"]
+        messages = ordinary_messages(full["messages"])
         self.assertIsNone(full.get("earlierMessageCount"), "Default history is complete, not a page.")
         self.assertEqual(len(messages), 95)
         self.assertEqual([message["text"] for message in messages[:2]], ["Long history turn 1.", "Long history turn 1, message 1."])
@@ -7699,8 +7747,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
             return pages
 
         pages = read_pages(full)
-        self.assertEqual([len(page["messages"]) for page in pages], [15, 40, 40])
-        self.assertEqual([page["earlierMessageCount"] for page in pages], [0, 15, 55])
+        # The status nudges Playhouse sent are messages too: 95 ordinary ones plus 4 nudge prompts and replies.
+        self.assertEqual(len(full["messages"]), 99)
+        self.assertEqual([len(page["messages"]) for page in pages], [19, 40, 40])
+        self.assertEqual([page["earlierMessageCount"] for page in pages], [0, 19, 59])
 
         for limit in ("0", "-3", "many"):
             rejected, _ = self.call_cli("conversation", "history", task_id, "--limit", limit, expected_status=2)
@@ -7711,10 +7761,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
         # Another completed turn leaves the earlier pages joinable and the first image intact.
         self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Say hello again.", extra_environment=fixtures)[0])
         grown = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
-        self.assertEqual(len(grown["messages"]), 97)
-        self.assertEqual(grown["messages"][:95], messages, "A later turn does not change earlier messages.")
+        grown_ordinary = ordinary_messages(grown["messages"])
+        self.assertEqual(len(grown_ordinary), 97)
+        self.assertEqual(grown_ordinary[:95], messages, "A later turn does not change earlier messages.")
         pages = read_pages(grown)
-        self.assertEqual([page["earlierMessageCount"] for page in pages], [0, 17, 57])
+        total = len(grown["messages"])
+        self.assertEqual([page["earlierMessageCount"] for page in pages], [0, total - 80, total - 40])
 
     # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, Working for renders open and active agents appear as individual named rows, each with an arrow that opens it, outside it, with available path/model/reasoning metadata and started-working wording; a mid-turn collapse the reader performs is honored. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
     def test_conversation_shows_subagent_delegation(self):
@@ -8278,7 +8330,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-luna")[0])
         self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Check the next model.", "--model", "gpt-6-luna", extra_environment=environment)[0])
         history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
-        assistants = [message for message in history["messages"] if message["role"] == "assistant"]
+        assistants = [message for message in ordinary_messages(history["messages"]) if message["role"] == "assistant"]
         self.assertGreaterEqual(len(assistants), 2)
         self.assertIsNone(assistants[0].get("modelID"), "Legacy replies without stored model attribution must remain provider-only.")
         self.assertIsNone(assistants[0].get("createdAt"), "Legacy provider history without a timestamp must stay timestamp-free.")
@@ -8520,7 +8572,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         probe = self.data_directory / "codex-question-ownership-probe"
         core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
                 "ConversationModel", "ClaudeCodeClient", "ProviderRequestLog", "ProcessCPUSampler", "AgentUsage", "AgentUsageStore", "ConversationTranscriptStore",
-                "StandaloneChatStore", "SkillCatalog", "BridgeCore"]
+                "StandaloneChatStore", "SkillCatalog", "BridgeCore", "TaskSchedule"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine", "JavaScriptCore"):
             command.extend(["-framework", framework])
@@ -10149,7 +10201,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "changes", "list", task_id)
         self.assertEqual(len(self.assert_success(response)["unviewed"]), 1000)
 
-    # case-contract: test_claude_nudged_turn_work_stays_in_conversation | A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt and every private placeholder stay hidden.
+    # case-contract: test_claude_nudged_turn_work_stays_in_conversation | A Claude turn answers while a background review runs, the review's notification arrives right after that answer, and the woken turn adds nothing and reports no outcome; the review's report and the answer both stay in history. Playhouse's private status nudge then starts a turn that keeps working, and a message the user steers into it is kept too: its commentary, its shell call, the background suite it launches, that suite's report delivered in a notification-driven woken turn, the screenshot it presents, and its final answer are streamed and recorded in order, and the completed outcome it reports moves the task to Review. Fresh history, a paged history read, and a later ordinary turn all keep that work, with the final report as the latest message before the later turn, while the nudge prompt Playhouse sent is shown once as its own message and no placeholder replaces it.
     def test_claude_nudged_turn_work_stays_in_conversation(self):
         env = self.install_claude_fixture("claude-fixture-nudged-work")
         executable = Path(env["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
@@ -10212,9 +10264,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
             tail = [entry for entry in assistant if entry != race_report][-len(expected_tail):]
             self.assertEqual(tail, expected_tail, f"{label}: the nudged turn's work should be in order.")
             serialized = json.dumps(messages)
-            for hidden in ("Playhouse internal outcome nudge:", "ended without reporting a task outcome",
-                           "private outcome reminder hidden", "private outcome response hidden"):
-                self.assertNotIn(hidden, serialized, f"{label}: the private nudge prompt must stay hidden.")
+            self.assertEqual(sum(1 for m in messages if m["role"] == "user" and "Playhouse internal outcome nudge:" in m["text"]), 1,
+                             f"{label}: the nudge Playhouse sent is shown once, as its own message.")
+            for hidden in ("private outcome reminder hidden", "private outcome response hidden"):
+                self.assertNotIn(hidden, serialized, f"{label}: no placeholder replaces the nudge.")
             self.assertIn("Also double check the docs.", [m["text"] for m in messages if m["role"] == "user"],
                           f"{label}: the steered message that joined the nudge turn should stay in the conversation.")
             image = next(m for m in messages if m.get("phase") == "agent_image")
@@ -10241,11 +10294,15 @@ class PlayhouseBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("conversation", "send", task_id, "--message", "Thanks, that's all.", extra_environment=env)
         self.assert_success(response)
         later = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
-        later_turn = [m for m in later["messages"] if m.get("turnID") == later["messages"][-1].get("turnID")]
-        self.assertEqual([m["text"] for m in later_turn], ["Thanks, that's all.", "OK."], "The later turn follows the nudged work.")
-        assert_nudged_work([m for m in later["messages"] if m not in later_turn], "after a later turn")
+        later_start = next(index for index, m in enumerate(later["messages"]) if m["role"] == "user" and m["text"] == "Thanks, that's all.")
+        later_turn = later["messages"][later_start:]
+        self.assertEqual(later_turn[1]["text"], "OK.", "The later turn follows the nudged work.")
+        self.assertTrue(all(m["text"] == "OK." for m in later_turn[1:] if m["role"] == "assistant"))
+        self.assertTrue(any("Playhouse internal outcome nudge:" in m["text"] for m in later_turn[1:] if m["role"] == "user"),
+                        "The later turn reported no outcome, so it got its own shown nudge.")
+        assert_nudged_work(later["messages"][:later_start], "after a later turn")
 
-    # case-contract: test_codex_nudged_turn_work_stays_in_conversation | A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. The nudge prompt and every private placeholder stay out of history, including after a later ordinary turn.
+    # case-contract: test_codex_nudged_turn_work_stays_in_conversation | A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. The nudge prompt Playhouse sent is shown once as its own message and no placeholder replaces it, including after a later ordinary turn.
     def test_codex_nudged_turn_work_stays_in_conversation(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-nudged-work-success"
@@ -10298,9 +10355,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assertEqual(assistant[1:3], [("commentary", commentary), ("final_answer", final_report)],
                              f"{label}: the nudged work should follow the earlier answer in order.")
             serialized = json.dumps(history["messages"])
-            for hidden in ("Playhouse internal outcome nudge:", "ended without reporting a task outcome",
-                           "private outcome reminder hidden", "private outcome response hidden"):
-                self.assertNotIn(hidden, serialized, f"{label}: the private nudge prompt must stay hidden.")
+            nudges_shown = sum(1 for m in history["messages"] if m["role"] == "user" and "Playhouse internal outcome nudge:" in m["text"])
+            self.assertTrue(nudges_shown == 1 if label == "fresh history" else nudges_shown >= 1,
+                            f"{label}: the nudge Playhouse sent is shown as its own message.")
+            for hidden in ("private outcome reminder hidden", "private outcome response hidden"):
+                self.assertNotIn(hidden, serialized, f"{label}: no placeholder replaces the nudge.")
             timeline = [activity for activity in history.get("timelineActivities", []) if activity["id"] == "item_nudged_check_1"]
             self.assertEqual(len(timeline), 1, f"{label}: the nudged shell command should be a timeline tool row.")
             self.assertEqual(timeline[0]["input"], "echo NUDGED CHECK PASSED")
@@ -10312,7 +10371,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_success(response)
         assert_nudged_work(self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0]), "later turn")
 
-    # case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude's usage is read with Claude Code's get_usage control request, which has none for this account yet, so Claude starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Because Claude Code streams rate_limit_event only when a limit's status changes, and a usage-based plan's event has no utilization, every finished Claude turn reads the plan's usage again through get_usage (skipping the local transcript scan) without a refresh: the read replaces the windows with the plan's current ones, keeps get_usage percents as percents, shows a usage-based plan's monthly extra usage as a Spend limit row with the reset time from the stream's overage event, and is persisted; a refresh reads it too, a reply without plan usage keeps the last known rows, a reached spend limit reads as the limit reached, and a usage request that is never answered times out, keeping the last known rows, so later reads work again. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the placeholder button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account and plan together on the row beneath the provider name, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. After a Claude turn whose usage read reports the plan's spend, the open window shows Claude's Spend limit row with its percent and reset time and the updated 5h row without a relaunch. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
+    # case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude's usage is read with Claude Code's get_usage control request, which has none for this account yet, so Claude starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Because Claude Code streams rate_limit_event only when a limit's status changes, and a usage-based plan's event has no utilization, every finished Claude turn reads the plan's usage again through get_usage (skipping the local transcript scan) without a refresh: the read replaces the windows with the plan's current ones, keeps get_usage percents as percents, shows a usage-based plan's monthly extra usage as a Spend limit row with the reset time from the stream's overage event, and is persisted; a refresh reads it too, a reply without plan usage keeps the last known rows, a reached spend limit reads as the limit reached, and a usage request that is never answered times out, keeping the last known rows, so later reads work again. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the Scheduled Tasks button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account and plan together on the row beneath the provider name, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. After a Claude turn whose usage read reports the plan's spend, the open window shows Claude's Spend limit row with its percent and reset time and the updated 5h row without a relaunch. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
     def test_agents_info_shows_provider_usage_and_accounts(self):
         source = Path(__file__).resolve().parent / "fixtures"
         codex = self.data_directory / "codex-fixture-agents-info"
@@ -12464,6 +12523,262 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(listed["fragile"]["valid"])
         self.assertFalse(listed["unparsable"]["valid"])
         self.assertFalse(listed["runaway"]["valid"])
+
+    # Scheduled tasks. Firing goes through ConversationManager.send, the same path the
+    # composer's Send and `conversation send` use for both providers, so the schedule
+    # behavior is provider-agnostic and Claude's fixture represents both.
+    @staticmethod
+    def schedule_iso(moment):
+        return moment.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    @staticmethod
+    def parse_schedule_iso(text):
+        return datetime.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+
+    def wait_for_task_status(self, task_id, statuses, timeout=60):
+        deadline = time.monotonic() + timeout
+        task = None
+        while time.monotonic() < deadline:
+            task = self.assert_success(self.call_cli("task", "get", task_id)[0])
+            if task["status"] in statuses:
+                return task
+            time.sleep(0.25)
+        self.fail(f"Task {task_id} never reached {statuses}; last state: {task}")
+
+    def fixture_user_prompts(self, executable):
+        history = Path(str(executable) + ".history")
+        if not history.is_file():
+            return []
+        return [turn.get("userText") or "" for turn in json.loads(history.read_text(encoding="utf-8")).get("turns", [])]
+
+    # case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again, and a task that has started can't be scheduled. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
+    def test_schedule_one_time_task_fires_when_due(self):
+        environment = self.install_claude_fixture("claude-fixture-schedule-once")
+        executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
+        task_id = self.create_task("Scheduled once", provider="claude")["id"]
+        now = datetime.datetime.now(datetime.timezone.utc)
+        fire_at = (now + datetime.timedelta(hours=2)).replace(microsecond=0)
+
+        past, _ = self.call_cli("schedule", "set", task_id, "--prompt", "Tell me a story.", "--once", self.schedule_iso(now - datetime.timedelta(minutes=5)), expected_status=2)
+        self.assert_failure(past, "invalid_argument")
+        blank, _ = self.call_cli("schedule", "set", task_id, "--prompt", "  ", "--once", self.schedule_iso(fire_at), expected_status=2)
+        self.assert_failure(blank, "invalid_argument")
+        self.assertIsNone(self.assert_success(self.call_cli("task", "get", task_id)[0]).get("schedule"), "A rejected schedule saves nothing.")
+
+        scheduled = self.assert_success(self.call_cli(
+            "schedule", "set", task_id, "--prompt", "Tell me a story.", "--once", self.schedule_iso(fire_at)
+        )[0])
+        self.assertEqual(scheduled["schedule"]["kind"], "once")
+        self.assertEqual(scheduled["schedule"]["scheduledAt"], self.schedule_iso(fire_at))
+        self.assertEqual(scheduled["schedule"]["prompt"], "Tell me a story.")
+        self.assertEqual(scheduled["status"], "Backlog")
+        fresh = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(fresh["schedule"]["scheduledAt"], self.schedule_iso(fire_at), "The schedule persists across fresh reads.")
+        self.assertIn(task_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "A one-time schedule stays on the board.")
+        self.assertEqual([task["id"] for task in self.assert_success(self.call_cli("schedule", "list")[0])["tasks"]], [task_id])
+        self.assertEqual(self.fixture_user_prompts(executable), [], "Scheduling starts no turn.")
+
+        early = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(fire_at - datetime.timedelta(minutes=10)), extra_environment=environment
+        )[0])
+        self.assertEqual((early["fired"], early["dropped"]), ([], []), "Nothing runs before its time.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Backlog")
+
+        due = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(fire_at + datetime.timedelta(minutes=30)), extra_environment=environment
+        )[0])
+        self.assertEqual([run["taskID"] for run in due["fired"]], [task_id], "A run 30 minutes late is inside the grace period.")
+        self.assertEqual(due["dropped"], [])
+        finished = self.wait_for_task_status(task_id, {"Review"})
+        self.assertIsNone(finished.get("schedule"), "Firing clears the schedule.")
+        self.assertIn("Tell me a story.", self.fixture_user_prompts(executable), "The scheduled prompt reaches the provider.")
+
+        again = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(fire_at + datetime.timedelta(minutes=40)), extra_environment=environment
+        )[0])
+        self.assertEqual((again["fired"], again["dropped"]), ([], []), "A run happens once.")
+        started, _ = self.call_cli(
+            "schedule", "set", task_id, "--prompt", "Again", "--once", self.schedule_iso(fire_at + datetime.timedelta(days=1)), expected_status=1
+        )
+        self.assert_failure(started, "invalid_transition")
+
+        contents = Path(self.cli).resolve().parent.parent
+        bundle_identifier = plistlib.loads((contents / "Info.plist").read_bytes())["CFBundleIdentifier"]
+        agent = plistlib.loads((contents / "Library" / "LaunchAgents" / f"{bundle_identifier}.scheduler.plist").read_bytes())
+        self.assertEqual(agent["Label"], f"{bundle_identifier}.scheduler")
+        self.assertEqual(agent["BundleProgram"], "Contents/MacOS/playhouse-cli")
+        self.assertEqual(agent["ProgramArguments"], ["playhouse-cli", "schedule", "tick"])
+        self.assertEqual(agent["StartInterval"], 60, "The agent ticks every minute while the app is closed.")
+
+        soon_id = self.create_task("Due on the real clock", provider="claude")["id"]
+        soon = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0) + datetime.timedelta(seconds=3)
+        self.assert_success(self.call_cli("schedule", "set", soon_id, "--prompt", "Tell me a story.", "--once", self.schedule_iso(soon))[0])
+        time.sleep(max(0, (soon - datetime.datetime.now(datetime.timezone.utc)).total_seconds()) + 0.5)
+        real = self.assert_success(self.call_cli("schedule", "tick", extra_environment=environment)[0])
+        self.assertEqual([run["taskID"] for run in real["fired"]], [soon_id], "A plain tick uses the real clock.")
+        self.wait_for_task_status(soon_id, {"Review"})
+
+    # case-contract: test_schedule_missed_beyond_grace_is_blocked | A scheduled run more than one hour late is not started. A one-time task lands in Blocked with a 'Missed scheduled run' message and its prompt kept as an unsent draft, and sending that draft starts it. A recurring schedule ticked a week late creates exactly one Blocked run task linked to its schedule, skips the older missed occurrences, and moves its next run into the future. A due run whose provider can't start lands in Blocked saying the scheduled run couldn't start, with its prompt kept as the draft.
+    def test_schedule_missed_beyond_grace_is_blocked(self):
+        environment = self.install_claude_fixture("claude-fixture-schedule-missed")
+        executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
+        task_id = self.create_task("Missed once", provider="claude")["id"]
+        fire_at = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).replace(microsecond=0)
+        self.assert_success(self.call_cli("schedule", "set", task_id, "--prompt", "Tell me a story.", "--once", self.schedule_iso(fire_at))[0])
+        late = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(fire_at + datetime.timedelta(hours=2)), extra_environment=environment
+        )[0])
+        self.assertEqual(late["fired"], [])
+        self.assertEqual([run["taskID"] for run in late["dropped"]], [task_id])
+        blocked = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(blocked["status"], "Blocked")
+        self.assertTrue(blocked["statusMessage"].startswith("Missed scheduled run"), blocked["statusMessage"])
+        self.assertEqual(blocked["savedPrompt"], "Tell me a story.")
+        self.assertTrue(blocked["hasUnsentDraft"], "The missed prompt waits as the task's draft.")
+        self.assertIsNone(blocked.get("schedule"))
+        self.assertEqual(self.fixture_user_prompts(executable), [], "A missed run starts no turn.")
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Tell me a story.", extra_environment=environment)[0])
+        self.assertEqual(self.wait_for_task_status(task_id, {"Review"})["status"], "Review", "Sending the draft runs the task.")
+
+        template_id = self.create_task("Weekly template", provider="claude")["id"]
+        template = self.assert_success(self.call_cli(
+            "schedule", "set", template_id, "--prompt", "Tell me a story.", "--repeat", "weekly", "--weekday", "mon", "--time", "09:00", "--title", "Weekly report"
+        )[0])
+        next_run = self.parse_schedule_iso(template["schedule"]["scheduledAt"])
+        week_late = next_run + datetime.timedelta(days=7, hours=2)
+        missed = self.assert_success(self.call_cli("schedule", "tick", "--now", self.schedule_iso(week_late), extra_environment=environment)[0])
+        self.assertEqual(missed["fired"], [])
+        self.assertEqual(len(missed["dropped"]), 1, "Missed occurrences collapse into one run.")
+        run_id = missed["dropped"][0]["taskID"]
+        runs = [task for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"] if task.get("scheduleSourceTaskID") == template_id]
+        self.assertEqual([task["id"] for task in runs], [run_id])
+        self.assertEqual(runs[0]["status"], "Blocked")
+        self.assertEqual(runs[0]["title"], "Weekly report")
+        missed_run = self.assert_success(self.call_cli("task", "get", run_id)[0])
+        self.assertEqual(missed_run["savedPrompt"], "Tell me a story.", "The missed run keeps the prompt as its draft.")
+        self.assertTrue(missed_run["hasUnsentDraft"])
+        refreshed = self.assert_success(self.call_cli("task", "get", template_id)[0])
+        self.assertGreater(self.parse_schedule_iso(refreshed["schedule"]["scheduledAt"]), week_late, "The next run moves into the future.")
+
+        failing_id = self.create_task("Provider missing", provider="claude")["id"]
+        failing_at = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).replace(microsecond=0)
+        self.assert_success(self.call_cli("schedule", "set", failing_id, "--prompt", "Tell me a story.", "--once", self.schedule_iso(failing_at))[0])
+        unstarted = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(failing_at + datetime.timedelta(minutes=5)),
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": "none"}
+        )[0])
+        self.assertEqual([run["taskID"] for run in unstarted["fired"]], [failing_id])
+        # The send's own failure handling can show Blocked first; the scheduler's message follows it.
+        deadline = time.monotonic() + 30
+        failed = self.wait_for_task_status(failing_id, {"Blocked"})
+        while not (failed.get("statusMessage") or "").startswith("The scheduled run couldn't start") and time.monotonic() < deadline:
+            time.sleep(0.25)
+            failed = self.assert_success(self.call_cli("task", "get", failing_id)[0])
+        self.assertEqual(failed["status"], "Blocked")
+        self.assertTrue(failed["statusMessage"].startswith("The scheduled run couldn't start"), failed["statusMessage"])
+        self.assertIn("Claude Code wasn't found", failed["statusMessage"], "The message names why the run couldn't start.")
+        self.assertEqual(failed["savedPrompt"], "Tell me a story.")
+        self.assertTrue(failed["hasUnsentDraft"], "The prompt waits as the draft for a retry.")
+
+    # case-contract: test_schedule_recurring_template_hidden_and_spawns_runs | A recurring schedule needs a title, and a weekday when it repeats weekly; once confirmed, its template is absent from the board and task list but listed by schedule list and on the Scheduled Tasks page. A due tick creates a new board task with the schedule's title and context folders, linked by scheduleSourceTaskID, sends the prompt, records the run on the template and advances its next run by one day. A paused schedule doesn't fire, Run now starts a run immediately, and clearing the schedule turns the template into an ordinary Backlog task.
+    def test_schedule_recurring_template_hidden_and_spawns_runs(self):
+        environment = self.install_claude_fixture("claude-fixture-schedule-recurring")
+        executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
+        template_id = self.create_task("Recurring template", provider="claude")["id"]
+        untitled, _ = self.call_cli("schedule", "set", template_id, "--prompt", "Tell me a story.", "--repeat", "daily", "--time", "09:00", "--title", " ", expected_status=2)
+        self.assert_failure(untitled, "invalid_argument")
+        no_day, _ = self.call_cli("schedule", "set", template_id, "--prompt", "Tell me a story.", "--repeat", "weekly", "--title", "Standup", expected_status=2)
+        self.assert_failure(no_day, "invalid_argument")
+
+        template = self.assert_success(self.call_cli(
+            "schedule", "set", template_id, "--prompt", "Tell me a story.", "--repeat", "daily", "--time", "09:00", "--title", "Daily standup"
+        )[0])
+        self.assertEqual(template["title"], "Daily standup")
+        self.assertEqual(template["schedule"]["kind"], "recurring")
+        self.assertEqual(template["schedule"]["summary"], "Every day at 09:00")
+        self.assertNotIn(template_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "A recurring template isn't a board task.")
+        self.assertEqual([task["id"] for task in self.assert_success(self.call_cli("schedule", "list")[0])["tasks"]], [template_id])
+
+        first_run_at = self.parse_schedule_iso(template["schedule"]["scheduledAt"])
+        fired = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(first_run_at + datetime.timedelta(minutes=10)), extra_environment=environment
+        )[0])
+        self.assertEqual(len(fired["fired"]), 1)
+        run_id = fired["fired"][0]["taskID"]
+        self.assertNotEqual(run_id, template_id, "Each run is a new task.")
+        run = self.wait_for_task_status(run_id, {"Review"})
+        self.assertEqual(run["title"], "Daily standup")
+        self.assertEqual(run["scheduleSourceTaskID"], template_id)
+        self.assertEqual(run["contextFolders"], template["contextFolders"], "A run takes the schedule's context folders.")
+        self.assertTrue(run["contextFolders"])
+        self.assertIsNone(run.get("schedule"))
+        self.assertIn("Tell me a story.", self.fixture_user_prompts(executable))
+        self.assertIn(run_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "A run is followed on the board.")
+        after = self.assert_success(self.call_cli("task", "get", template_id)[0])
+        self.assertEqual(after["schedule"]["lastRunTaskID"], run_id)
+        next_run_at = self.parse_schedule_iso(after["schedule"]["scheduledAt"])
+        self.assertAlmostEqual((next_run_at - first_run_at).total_seconds(), 86400, delta=3600, msg="A daily schedule advances by one day.")
+
+        paused = self.assert_success(self.call_cli("schedule", "pause", template_id)[0])
+        self.assertTrue(paused["schedule"]["paused"])
+        quiet = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(next_run_at + datetime.timedelta(minutes=10)), extra_environment=environment
+        )[0])
+        self.assertEqual((quiet["fired"], quiet["dropped"]), ([], []), "A paused schedule doesn't fire.")
+        resumed = self.assert_success(self.call_cli("schedule", "resume", template_id)[0])
+        self.assertFalse(resumed["schedule"]["paused"])
+
+        now_run = self.assert_success(self.call_cli("schedule", "run-now", template_id, extra_environment=environment)[0])
+        self.assertFalse(now_run["dropped"])
+        self.assertNotIn(now_run["taskID"], {run_id, template_id})
+        self.wait_for_task_status(now_run["taskID"], {"Review"})
+
+        cleared = self.assert_success(self.call_cli("schedule", "clear", template_id)[0])
+        self.assertIsNone(cleared.get("schedule"))
+        self.assertIn(template_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "Clearing the schedule puts the task on the board.")
+        self.assertEqual(self.assert_success(self.call_cli("schedule", "list")[0])["tasks"], [])
+
+    # case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
+    def test_scheduled_task_edit_and_page_management(self):
+        environment = self.install_claude_fixture("claude-fixture-schedule-edit")
+        executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
+        task_id = self.create_task("Edited schedule", provider="claude")["id"]
+        self.assert_success(self.call_cli(
+            "schedule", "set", task_id, "--prompt", "Summarize the week.", "--repeat", "weekdays", "--time", "08:30", "--title", "Morning summary"
+        )[0])
+        edited = self.assert_success(self.call_cli(
+            "schedule", "set", task_id, "--prompt", "Summarize the week in detail.", "--repeat", "weekly", "--weekday", "fri", "--time", "17:15", "--title", "Friday summary"
+        )[0])
+        self.assertEqual(edited["title"], "Friday summary")
+        fresh = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(fresh["title"], "Friday summary")
+        self.assertEqual(fresh["schedule"]["recurrence"], {"preset": "weekly", "hour": 17, "minute": 15, "weekday": 6})
+        self.assertEqual(fresh["schedule"]["prompt"], "Summarize the week in detail.")
+        self.assertEqual(fresh["savedPrompt"], "Summarize the week in detail.", "The composer reopens on the confirmed prompt.")
+        self.assertIsNone(fresh.get("claudeSessionID"))
+        self.assertIsNone(fresh.get("codexThreadID"), "Editing a schedule starts no turn.")
+        self.assertEqual(self.parse_schedule_iso(fresh["schedule"]["scheduledAt"]).astimezone().weekday(), 4, "The next run falls on a Friday.")
+        rejected, _ = self.call_cli("conversation", "send", task_id, "--message", "Run the template.", expected_status=1, extra_environment=environment)
+        self.assert_failure(rejected, "invalid_transition")
+        self.assertEqual(self.fixture_user_prompts(executable), [], "A recurring template never runs itself.")
+        cleared = self.assert_success(self.call_cli("schedule", "clear", task_id)[0])
+        self.assertEqual(cleared["savedPrompt"], "Summarize the week in detail.", "Clearing a schedule keeps its prompt as the draft.")
+        self.assertTrue(cleared["hasUnsentDraft"])
+        self.assert_success(self.call_cli("schedule", "set", task_id, "--prompt", "Summarize the week.", "--repeat", "daily", "--title", "Friday summary")[0])
+        self.assert_success(self.call_cli("task", "delete", task_id)[0])
+        self.assertEqual(self.assert_success(self.call_cli("schedule", "list")[0])["tasks"], [])
+
+        once_id = self.create_task("Sent by hand", provider="claude")["id"]
+        fire_at = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).replace(microsecond=0)
+        self.assert_success(self.call_cli("schedule", "set", once_id, "--prompt", "Tell me a story.", "--once", self.schedule_iso(fire_at))[0])
+        self.assert_success(self.call_cli("conversation", "send", once_id, "--message", "Tell me a story.", extra_environment=environment)[0])
+        self.assertIsNone(self.wait_for_task_status(once_id, {"Review"}).get("schedule"), "Sending by hand ends a one-time schedule.")
+        sent = len(self.fixture_user_prompts(executable))
+        later = self.assert_success(self.call_cli(
+            "schedule", "tick", "--now", self.schedule_iso(fire_at + datetime.timedelta(minutes=5)), extra_environment=environment
+        )[0])
+        self.assertEqual((later["fired"], later["dropped"]), ([], []), "A started task's schedule sends nothing more.")
+        self.assertEqual(len(self.fixture_user_prompts(executable)), sent)
 
 class TimedTestResult(unittest.TextTestResult):
     def startTest(self, test):

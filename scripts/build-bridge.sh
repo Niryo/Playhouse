@@ -37,6 +37,37 @@ fi
 
 mkdir -p "${app_macos}"
 
+# The scheduler LaunchAgent fires scheduled tasks while the app is closed. The app
+# registers it with SMAppService only while a schedule exists. Each minute it runs a
+# short-lived `playhouse-cli schedule tick`, which starts the daemon on demand. The
+# label follows the bundle identifier so worktree profiles never share an agent.
+launch_agents="${app_contents}/Library/LaunchAgents"
+mkdir -p "${launch_agents}"
+find "${launch_agents}" -name '*.scheduler.plist' ! -name "${PRODUCT_BUNDLE_IDENTIFIER:-com.playhouse.app}.scheduler.plist" -delete
+python3 - "${launch_agents}/${PRODUCT_BUNDLE_IDENTIFIER:-com.playhouse.app}.scheduler.plist" "${PRODUCT_BUNDLE_IDENTIFIER:-com.playhouse.app}" <<'PYAGENT'
+import plistlib
+import sys
+path, bundle_identifier = sys.argv[1:3]
+agent = {
+    'Label': bundle_identifier + '.scheduler',
+    'BundleProgram': 'Contents/MacOS/playhouse-cli',
+    'ProgramArguments': ['playhouse-cli', 'schedule', 'tick'],
+    'AssociatedBundleIdentifiers': [bundle_identifier],
+    'StartInterval': 60,
+    'ProcessType': 'Background',
+    'StandardOutPath': '/dev/null',
+    'StandardErrorPath': '/dev/null',
+}
+try:
+    with open(path, 'rb') as stream:
+        if plistlib.load(stream) == agent:
+            sys.exit(0)
+except (OSError, plistlib.InvalidFileException):
+    pass
+with open(path, 'wb') as stream:
+    plistlib.dump(agent, stream)
+PYAGENT
+
 if [[ ! -x "${app_executable}" ]]; then
   printf 'The Playhouse app executable is missing before the bridge tools are embedded: %s\n' "${app_executable}" >&2
   exit 1
@@ -69,6 +100,7 @@ shared_sources=(
   "${repository_root}/Playhouse/App/StandaloneChatStore.swift"
   "${repository_root}/Playhouse/App/SkillCatalog.swift"
   "${repository_root}/Playhouse/App/BridgeCore.swift"
+  "${repository_root}/Playhouse/App/TaskSchedule.swift"
   "${repository_root}/Playhouse/Bridge/BridgeContract.swift"
   "${repository_root}/Playhouse/Bridge/BridgeSocket.swift"
   "${plugin_core_sources[@]}"

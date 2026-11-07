@@ -3,9 +3,9 @@ import SwiftData
 import Darwin
 import SQLite3
 
-/// Marker line Playhouse puts at the top of the private turns it sends itself.
-/// Every provider's history reader matches on it, so these turns never surface
-/// as conversation content.
+/// Marker line Playhouse puts at the top of the status nudges it sends itself.
+/// The conversation shows these turns like any other, but renders the prompt as
+/// an automatic Playhouse message (`PlayhouseSentMessage`) rather than the user's.
 enum PrivateOutcomeNudgeMarker {
     static let current = "Playhouse internal outcome nudge:"
     /// Threads and transcripts written before the nudge rename.
@@ -862,10 +862,17 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let draftImageDataURLs: [String]?
     let autoCreatePullRequestOnReview: Bool
     let pullRequestMode: String
+    /// Present for a scheduled task (one-time or a recurring template).
+    let schedule: TaskScheduleRecord?
+    /// The recurring schedule that started this task, if any.
+    let scheduleSourceTaskID: UUID?
 
     /// Accepts any conversation owner: a board task, or the standalone chat, which reports
     /// empty workspace roots and worktrees because it has none.
     init(task: any ConversationSubject, includeDraftImages: Bool = true) {
+        let boardTask = task as? BoardTask
+        schedule = boardTask.flatMap(TaskScheduleRecord.init(task:))
+        scheduleSourceTaskID = boardTask?.scheduleSourceTaskID
         id = task.id
         title = task.title
         status = task.status.rawValue
@@ -887,6 +894,35 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         draftImageDataURLs = includeDraftImages ? task.draftImageDataURLs : nil
         autoCreatePullRequestOnReview = task.autoCreatePullRequestOnReview
         pullRequestMode = task.pullRequestMode.rawValue
+    }
+}
+
+struct TaskScheduleRecord: Codable, Equatable {
+    let kind: String
+    let scheduledAt: Date?
+    let recurrence: TaskRecurrence?
+    let summary: String
+    let prompt: String?
+    let imageCount: Int
+    let mode: String?
+    let model: String?
+    let paused: Bool
+    let lastRunAt: Date?
+    let lastRunTaskID: UUID?
+
+    init?(task: BoardTask) {
+        guard let kind = task.scheduleKind else { return nil }
+        self.kind = kind.rawValue
+        scheduledAt = task.scheduledAt
+        recurrence = task.scheduleRecurrence
+        summary = kind == .recurring ? (task.scheduleRecurrence?.summary() ?? "") : "Once"
+        prompt = task.scheduledPrompt
+        imageCount = task.scheduledImageDataURLs.count
+        mode = task.scheduledModeRawValue
+        model = task.scheduledModelID
+        paused = task.schedulePaused
+        lastRunAt = task.lastScheduledRunAt
+        lastRunTaskID = task.lastScheduledRunTaskID
     }
 }
 
@@ -1748,6 +1784,8 @@ final class BoardTaskManager {
         return try await operation()
     }
 
+    /// Board tasks. Recurring schedule templates are not board tasks, so they're left out;
+    /// `scheduledTasks()` lists them.
     func list(status: TaskStatus? = nil) throws -> [BoardTaskRecord] {
         // A chat left over as a hidden task would otherwise list as an ordinary card. This is
         // best-effort maintenance on a read path: if the store itself is unreadable, the fetch
@@ -1773,7 +1811,9 @@ final class BoardTaskManager {
         let readStartedAt = DispatchTime.now().uptimeNanoseconds
         PlayhouseDiagnostics.record("persistence.read.started", fields: readFields)
         do {
-            let tasks = try modelContext.fetch(descriptor).map { BoardTaskRecord(task: $0, includeDraftImages: false) }
+            let tasks = try modelContext.fetch(descriptor)
+                .filter { !$0.isRecurringScheduleTemplate }
+                .map { BoardTaskRecord(task: $0, includeDraftImages: false) }
             var fields = readFields
             fields["resultCount"] = String(tasks.count)
             fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
@@ -3498,6 +3538,17 @@ final class BoardTaskManager {
         }
         return try await withTaskOperationLock(id) {
             let task = try requireSubject(id)
+            if submitted, let boardTask = task as? BoardTask {
+                // A recurring schedule is a template; each run is its own task.
+                if boardTask.isRecurringScheduleTemplate {
+                    throw BridgeCommandError(
+                        code: "invalid_transition",
+                        message: "This task is a recurring schedule. Run it from Scheduled Tasks, or remove its schedule first."
+                    )
+                }
+                // Sending a one-time scheduled task by hand starts it now, so its schedule is done.
+                if boardTask.scheduleKind == .once { Self.resetSchedule(boardTask) }
+            }
             let normalizedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
             // A prompt sent from elsewhere (a queued follow-up, the CLI) must not replace an
             // unsent composer draft holding different text.
@@ -3571,6 +3622,262 @@ final class BoardTaskManager {
             task.pendingSubmittedPrompt = nil
             try await saveTaskContext(taskID: id)
         }
+    }
+
+    // MARK: Scheduling
+
+    /// Every scheduled task: one-time schedules still waiting to fire and recurring
+    /// templates, soonest first.
+    func scheduledTasks() throws -> [BoardTaskRecord] {
+        try listModels()
+            .filter { $0.scheduleKind != nil }
+            .sorted { ($0.scheduledAt ?? .distantFuture) < ($1.scheduledAt ?? .distantFuture) }
+            .map { BoardTaskRecord(task: $0, includeDraftImages: false) }
+    }
+
+    /// Confirms a schedule for a task whose conversation hasn't started. The prompt is
+    /// stored as the schedule's own payload; nothing is sent until it fires.
+    @discardableResult
+    func setSchedule(_ id: UUID, _ request: TaskScheduleRequest, now: Date = .now) async throws -> BoardTaskRecord {
+        let prompt = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty || !request.imageDataURLs.isEmpty else {
+            throw BridgeCommandError(code: "invalid_argument", message: "A scheduled task needs a prompt.")
+        }
+        if request.imageDataURLs.count > 8 || request.imageDataURLs.contains(where: { !ConversationManager.isValidImageDataURL($0) }) {
+            throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
+        }
+        let title = request.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let nextRun: Date
+        switch request.kind {
+        case .once:
+            guard let fireAt = request.fireAt else {
+                throw BridgeCommandError(code: "invalid_argument", message: "Choose when the task should run.")
+            }
+            guard fireAt > now else {
+                throw BridgeCommandError(code: "invalid_argument", message: "Choose a time in the future.")
+            }
+            nextRun = fireAt
+        case .recurring:
+            guard !title.isEmpty else {
+                throw BridgeCommandError(code: "invalid_argument", message: "A recurring task needs a title.")
+            }
+            guard let recurrence = request.recurrence, recurrence.isValid else {
+                throw BridgeCommandError(code: "invalid_argument", message: "Choose how often the task should repeat.")
+            }
+            nextRun = recurrence.nextOccurrence(after: now)
+        }
+        return try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.codexThreadID == nil, task.claudeSessionID == nil, task.pendingSubmittedPrompt == nil,
+                  task.status == .backlog || task.status == .blocked else {
+                throw BridgeCommandError(code: "invalid_transition", message: "Only a task that hasn't started can be scheduled.")
+            }
+            if !title.isEmpty { task.title = title }
+            task.scheduleKind = request.kind
+            task.scheduledAt = nextRun
+            task.scheduleRecurrence = request.kind == .recurring ? request.recurrence : nil
+            task.scheduledPrompt = prompt.isEmpty ? nil : request.prompt
+            task.scheduledImageDataURLs = request.imageDataURLs
+            task.scheduledModeRawValue = request.mode.rawValue
+            task.scheduledModelID = request.modelID
+            task.schedulePaused = false
+            // The composer shows the confirmed prompt when the task is opened again.
+            task.savedPrompt = prompt.isEmpty ? nil : request.prompt
+            task.draftImageDataURLs = request.imageDataURLs
+            task.hasUnsentDraft = false
+            if task.status != .backlog {
+                task.status = .backlog
+                task.statusMessage = nil
+            }
+            try await saveTaskContext(taskID: id)
+            PlayhouseDiagnostics.record("task.schedule.set", fields: [
+                "taskID": id.uuidString,
+                "kind": request.kind.rawValue,
+                "scheduledAt": ISO8601DateFormatter().string(from: nextRun)
+            ])
+            return BoardTaskRecord(task: task)
+        }
+    }
+
+    /// Removes a task's schedule. A recurring template becomes an ordinary Backlog task.
+    @discardableResult
+    func clearSchedule(_ id: UUID) async throws -> BoardTaskRecord {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.scheduleKind != nil else {
+                throw BridgeCommandError(code: "invalid_transition", message: "This task isn't scheduled.")
+            }
+            if !task.hasUnsentDraft, let prompt = task.scheduledPrompt {
+                task.savedPrompt = prompt
+                task.draftImageDataURLs = task.scheduledImageDataURLs
+                task.hasUnsentDraft = true
+            }
+            Self.resetSchedule(task)
+            try await saveTaskContext(taskID: id)
+            PlayhouseDiagnostics.record("task.schedule.cleared", fields: ["taskID": id.uuidString])
+            return BoardTaskRecord(task: task)
+        }
+    }
+
+    @discardableResult
+    func setSchedulePaused(_ id: UUID, paused: Bool, now: Date = .now) async throws -> BoardTaskRecord {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.scheduleKind == .recurring, let recurrence = task.scheduleRecurrence else {
+                throw BridgeCommandError(code: "invalid_transition", message: "Only a recurring task can be paused.")
+            }
+            task.schedulePaused = paused
+            // Resuming starts from the next occurrence rather than catching up the pause.
+            if !paused { task.scheduledAt = recurrence.nextOccurrence(after: now) }
+            try await saveTaskContext(taskID: id)
+            return BoardTaskRecord(task: task)
+        }
+    }
+
+    func dueScheduledTaskIDs(at now: Date) throws -> [UUID] {
+        try listModels()
+            .filter { $0.scheduleKind != nil && !$0.schedulePaused && ($0.scheduledAt.map { $0 <= now } ?? false) }
+            .sorted { ($0.scheduledAt ?? now) < ($1.scheduledAt ?? now) }
+            .map(\.id)
+    }
+
+    /// Takes one due run of a schedule, saving the schedule's next state before anything is
+    /// sent, so a second tick (another process, or a retry) can't run it twice.
+    /// `runNow` takes a run immediately regardless of the schedule's time.
+    func claimScheduledRun(_ id: UUID, now: Date, gracePeriod: TimeInterval, runNow: Bool = false) async throws -> ScheduledRunClaim? {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard let kind = task.scheduleKind, let scheduledAt = task.scheduledAt else {
+                if runNow { throw BridgeCommandError(code: "invalid_transition", message: "This task isn't scheduled.") }
+                return nil
+            }
+            guard runNow || (!task.schedulePaused && scheduledAt <= now) else { return nil }
+            var payload = ScheduledRunClaim(
+                scheduleTaskID: id,
+                kind: kind,
+                occurrence: runNow ? now : scheduledAt,
+                dropped: false,
+                title: task.title,
+                prompt: task.scheduledPrompt ?? "",
+                imageDataURLs: task.scheduledImageDataURLs,
+                mode: task.scheduledModeRawValue.flatMap(ConversationMode.init(rawValue:)) ?? .code,
+                modelID: task.scheduledModelID,
+                provider: task.conversationProvider,
+                effort: task.conversationEffortRawValue,
+                pullRequestMode: task.pullRequestMode,
+                repositories: task.repositoryWorktrees.map {
+                    RepositoryWorktreeSpec(
+                        repositoryPath: $0.repositoryPath,
+                        branch: nil,
+                        branchFrom: $0.branchFrom,
+                        mergeTarget: $0.mergeTarget
+                    )
+                },
+                contextFolders: task.contextFolderPaths
+            )
+            switch kind {
+            case .once:
+                let hasStarted = task.codexThreadID != nil || task.claudeSessionID != nil || task.pendingSubmittedPrompt != nil
+                    || !(task.status == .backlog || task.status == .blocked)
+                payload.dropped = !runNow && now.timeIntervalSince(scheduledAt) > gracePeriod
+                Self.resetSchedule(task)
+                if hasStarted {
+                    // The conversation already started some other way; the schedule has nothing left to send.
+                    try await saveTaskContext(taskID: id)
+                    PlayhouseDiagnostics.record("task.schedule.discarded_started", fields: ["taskID": id.uuidString])
+                    return nil
+                }
+                if payload.dropped {
+                    Self.markMissedScheduledRun(task, occurrence: scheduledAt, prompt: payload.prompt, imageDataURLs: payload.imageDataURLs)
+                } else {
+                    // Until the send records the prompt, it waits as a draft, so a daemon that stops
+                    // in between leaves it in the composer rather than losing it.
+                    task.savedPrompt = payload.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : payload.prompt
+                    task.draftImageDataURLs = payload.imageDataURLs
+                    task.hasUnsentDraft = task.savedPrompt != nil || !payload.imageDataURLs.isEmpty
+                }
+            case .recurring:
+                guard let recurrence = task.scheduleRecurrence else { return nil }
+                if !runNow {
+                    // Missed occurrences collapse into the newest one; older ones are skipped.
+                    let occurrence = recurrence.latestOccurrence(atOrBefore: now, notBefore: scheduledAt) ?? scheduledAt
+                    payload.occurrence = occurrence
+                    payload.dropped = now.timeIntervalSince(occurrence) > gracePeriod
+                    task.scheduledAt = recurrence.nextOccurrence(after: now)
+                }
+                task.lastScheduledRunAt = payload.occurrence
+            }
+            try await saveTaskContext(taskID: id)
+            PlayhouseDiagnostics.record("task.schedule.claimed", fields: [
+                "taskID": id.uuidString,
+                "kind": kind.rawValue,
+                "dropped": String(payload.dropped),
+                "runNow": String(runNow)
+            ])
+            return payload
+        }
+    }
+
+    /// Creates the board task for one run of a recurring schedule. A dropped run lands in
+    /// Blocked with the prompt as its draft, so the user decides whether to run it.
+    func createScheduledRunTask(for claim: ScheduledRunClaim) async throws -> BoardTaskRecord {
+        let created = try await create(
+            title: claim.title,
+            repositories: claim.repositories,
+            contextFolders: claim.contextFolders,
+            provider: claim.provider,
+            pullRequestMode: claim.pullRequestMode,
+            prompt: claim.prompt
+        )
+        let record = try await withTaskOperationLock(created.id) {
+            let task = try requireTask(created.id)
+            task.scheduleSourceTaskID = claim.scheduleTaskID
+            task.conversationEffortRawValue = claim.effort
+            if claim.dropped {
+                Self.markMissedScheduledRun(task, occurrence: claim.occurrence, prompt: claim.prompt, imageDataURLs: claim.imageDataURLs)
+            }
+            try await saveTaskContext(taskID: created.id)
+            return BoardTaskRecord(task: task)
+        }
+        try await withTaskOperationLock(claim.scheduleTaskID) {
+            guard let template = try? requireTask(claim.scheduleTaskID) else { return }
+            template.lastScheduledRunTaskID = created.id
+            try await saveTaskContext(taskID: claim.scheduleTaskID)
+        }
+        return record
+    }
+
+    /// A scheduled run that couldn't start is left Blocked with its prompt as the draft.
+    func markScheduledRunFailed(_ id: UUID, reason: String) async throws {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.codexThreadID == nil, task.claudeSessionID == nil else { return }
+            task.status = .blocked
+            task.statusMessage = "The scheduled run couldn't start: \(reason)"
+            if task.savedPrompt != nil || !task.draftImageDataURLs.isEmpty { task.hasUnsentDraft = true }
+            try await saveTaskContext(taskID: id)
+        }
+    }
+
+    private static func resetSchedule(_ task: BoardTask) {
+        task.scheduleKind = nil
+        task.scheduledAt = nil
+        task.scheduleRecurrence = nil
+        task.scheduledPrompt = nil
+        task.scheduledImageDataURLs = []
+        task.scheduledModeRawValue = nil
+        task.scheduledModelID = nil
+        task.schedulePaused = false
+    }
+
+    private static func markMissedScheduledRun(_ task: BoardTask, occurrence: Date, prompt: String, imageDataURLs: [String]) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE d MMM, HH:mm"
+        task.status = .blocked
+        task.statusMessage = "Missed scheduled run (\(formatter.string(from: occurrence))) — not started"
+        task.savedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : prompt
+        task.draftImageDataURLs = imageDataURLs
+        task.hasUnsentDraft = task.savedPrompt != nil || !imageDataURLs.isEmpty
     }
 
     func persistConversationID(_ id: UUID, provider: ConversationProvider, id conversationID: String) async throws -> BoardTaskRecord {
@@ -4886,10 +5193,15 @@ final class ConversationManager {
             }
             offset = range.upperBound
         }
+        // The latest turn is the latest one the user started; status nudges after it only add their work.
+        let latestIndex = visibleTurns.lastIndex { !$0.userTexts.contains(where: PrivateOutcomeNudgeMarker.matches) } ?? (visibleTurns.endIndex - 1)
+        let activityTurns = latestIndex >= 0 ? Array(visibleTurns[latestIndex...]) : []
         var selection = ConversationTranscriptStore.TurnSelection(turnIDs: Set(covered))
-        if let latest = visibleTurns.last { selection.turnIDs.insert(latest.id) }
+        selection.turnIDs.formUnion(activityTurns.map(\.id))
         var partial = try store.read(taskID, turns: selection, includeImages: false)
-        let latestTurn = partial.turns.last { $0.id == visibleTurns.last?.id }
+        let latestTurn = partial.turns.last { $0.id == activityTurns.first?.id }
+        let nudgeWork = partial.turns.filter { turn in activityTurns.dropFirst().contains { $0.id == turn.id } }
+            .flatMap { $0.activities.filter { $0.isSubagent || $0.isTimelineToolCall } }
         partial.turns = partial.turns.filter { covered.contains($0.id) }
         let composed = Self.compose(transcript: partial, codex: nil)
         let modelIDs = state.segments.reduce(into: [String: String]()) { result, segment in
@@ -4905,11 +5217,11 @@ final class ConversationManager {
             if message.modelID == nil, let turnID = message.turnID { message.modelID = modelIDs[turnID] }
             return message
         }
-        let earlierTurnIDs = visibleTurns.dropLast().map(\.id)
+        let earlierTurnIDs = visibleTurns.prefix(max(latestIndex, 0)).map(\.id)
         let pageMessageIDs = Set(pageMessages.map(\.id))
         return ConversationHistory(
             messages: Array(pageMessages),
-            activities: try store.subagentActivities(taskID, turnIDs: earlierTurnIDs) + (latestTurn?.activities ?? []),
+            activities: try store.subagentActivities(taskID, turnIDs: earlierTurnIDs) + (latestTurn?.activities ?? []) + nudgeWork,
             timelineActivities: ConversationActivity.visibleTimelineActivities(
                 composed.timelineActivities, visibleMessageIDs: pageMessageIDs, excludedTurnIDs: []
             ),
@@ -5276,9 +5588,6 @@ final class ConversationManager {
                 var attributed = message
                 attributed.turnID = transcript.turns[index].id
                 transcript.turns[index].messages.append(attributed)
-                // Presenting an image is work the user must see, even from a
-                // private status nudge turn.
-                Self.dropPrivateReminderPrompt(from: &transcript.turns[index])
             } else {
                 transcript.turns.append(.init(id: "agent-image-\(message.id)", segmentID: segment.id, messages: [message]))
             }
@@ -5506,9 +5815,16 @@ final class ConversationManager {
         let diff: ConversationTurnDiff?
         if segments.last?.provider == .claude {
             let visibleTurns = transcript.turns.filter { !privateTranscriptReminderTurnIDs.contains($0.id) }
-            let latestTurn = visibleTurns.last
-            let subagents = visibleTurns.dropLast().flatMap { $0.activities.filter(\.isSubagent) }
-            activities = subagents + (latestTurn?.activities ?? []) + compactions
+            // The latest turn is the latest one the user started. Status nudges Playhouse sent
+            // after it are shown as messages, but only the work they did joins its activities.
+            let latestTurnIndex = visibleTurns.lastIndex { turn in
+                !turn.messages.contains { $0.role == .user && PrivateOutcomeNudgeMarker.matches($0.text) }
+            } ?? visibleTurns.endIndex - 1
+            let latestTurn = latestTurnIndex >= 0 ? visibleTurns[latestTurnIndex] : nil
+            let nudgeWork = visibleTurns.suffix(from: min(latestTurnIndex + 1, visibleTurns.endIndex))
+                .flatMap { $0.activities.filter { $0.isSubagent || $0.isTimelineToolCall } }
+            let subagents = visibleTurns.enumerated().filter { $0.offset < latestTurnIndex }.flatMap { $0.element.activities.filter(\.isSubagent) }
+            activities = subagents + (latestTurn?.activities ?? []) + nudgeWork + compactions
             diff = nil
         } else {
             activities = codexActivities.filter { !$0.isContextCompaction } + compactions
@@ -6158,7 +6474,7 @@ final class ConversationManager {
         sensitiveUserInputAnswerValues: [String] = [],
         requiresSensitiveAnswerRedaction: Bool = false,
         hideSensitiveRecoveryPrompt: Bool = false,
-        hideInternalOutcomeReminder: Bool = false,
+        isPlayhouseNudge: Bool = false,
         applyingUserInputRequestID: String? = nil,
         onUserInputApplied: (() throws -> Void)? = nil,
         historyMessageLimit: Int? = nil
@@ -6170,7 +6486,7 @@ final class ConversationManager {
         }
         defer { Self.bumpVisibleRevision(taskID) }
         let task = try tasks.conversationSubject(taskID)
-        if !task.isStandaloneChat, !hideInternalOutcomeReminder, !text.hasPrefix(Self.pullRequestAutopilotPromptMarker) {
+        if !task.isStandaloneChat, !isPlayhouseNudge, !text.hasPrefix(Self.pullRequestAutopilotPromptMarker) {
             try await tasks.clearPullRequestAutopilotSignature(taskID)
         }
         guard contextPageIDs.isEmpty || task.isStandaloneChat else {
@@ -6250,7 +6566,7 @@ final class ConversationManager {
                         sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
                         requiresSensitiveAnswerRedaction: requiresSensitiveAnswerRedaction,
                         hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt,
-                        hideInternalOutcomeReminder: hideInternalOutcomeReminder,
+                        isPlayhouseNudge: isPlayhouseNudge,
                         deferMissingOutcomeStatus: true,
                         statusBeforeSubmission: statusBeforeSubmission,
                         contextPageIDs: contextPageIDs,
@@ -6299,8 +6615,8 @@ final class ConversationManager {
                                 requestedModelID: modelID,
                                 userInputAnswers: [:],
                                 sensitiveUserInputAnswerValues: [],
-                                hideSensitiveRecoveryPrompt: true,
-                                hideInternalOutcomeReminder: true,
+                                hideSensitiveRecoveryPrompt: false,
+                                isPlayhouseNudge: true,
                                 deferMissingOutcomeStatus: true,
                                 statusBeforeSubmission: nil,
                                 // An internal reminder quotes no chat page of its own.
@@ -6708,29 +7024,6 @@ final class ConversationManager {
         }
     }
 
-    /// Shows a private status nudge turn that went on to do work. Every history
-    /// path hides a turn by its private prompt, so dropping that prompt row
-    /// leaves the rest of the turn as an ordinary one, prompt still unseen.
-    private func revealPrivateReminderTurn(taskID: UUID, turnID: String) {
-        do {
-            try transcripts.mutate(taskID, turns: .turn(turnID)) { transcript in
-                guard let index = transcript.turns.lastIndex(where: { $0.id == turnID }) else { return }
-                Self.dropPrivateReminderPrompt(from: &transcript.turns[index])
-            }
-            PlayhouseDiagnostics.record("conversation.private_reminder.revealed", fields: [
-                "taskID": taskID.uuidString, "turnID": turnID
-            ])
-        } catch {
-            var fields = PlayhouseDiagnostics.errorFields(error)
-            fields["taskID"] = taskID.uuidString
-            PlayhouseDiagnostics.record("conversation.transcript.write_failed", fields: fields)
-        }
-    }
-
-    private static func dropPrivateReminderPrompt(from turn: inout ConversationTranscript.Turn) {
-        turn.messages.removeAll { $0.role == .user && isPrivateOutcomeReminderPrompt($0.text) }
-    }
-
     private func recordClaudeActivity(taskID: UUID, turnID: String, _ activity: ConversationActivity) {
         // Loads only the turns this update can touch: its own turn, wherever an
         // activity with the same background task lives, and wherever that
@@ -6894,7 +7187,7 @@ final class ConversationManager {
             let ownTurnIDs = Set(transcript.turns(in: transcript.segments[index]).map(\.id) + transcript.segments[index].codexTurnIDs)
             return (history.messages.lastIndex { $0.turnID.map(ownTurnIDs.contains) == true } ?? -1) + 1
         } ?? 0
-        let unseen = history.messages.dropFirst(unseenStart).filter {
+        let unseen = Self.withoutNudgeTurns(Array(history.messages.dropFirst(unseenStart))).filter {
             $0.provider != provider && !Self.isPrivateOutcomeReminderPrompt($0.text)
                 && $0.text != Self.privateOutcomeReminderResponsePlaceholder
         }
@@ -6911,7 +7204,7 @@ final class ConversationManager {
         sensitiveUserInputAnswerValues: [String],
         requiresSensitiveAnswerRedaction: Bool = false,
         hideSensitiveRecoveryPrompt: Bool,
-        hideInternalOutcomeReminder: Bool,
+        isPlayhouseNudge: Bool,
         deferMissingOutcomeStatus: Bool,
         statusBeforeSubmission: TaskStatus?,
         contextPageIDs: [String],
@@ -6964,14 +7257,14 @@ final class ConversationManager {
         let repositoryRoot: URL? = task.isStandaloneChat ? nil : try (task.workspaceRootPaths
             .compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
             .first ?? settingsManager.requireRepositoryRootFolder())
-        let shouldGenerateTitle = !hideInternalOutcomeReminder
+        let shouldGenerateTitle = !isPlayhouseNudge
             && !normalizedText.isEmpty
             && ["Untitled task", "Generating title…"].contains(task.title)
         // A caller that already saved the submitted prompt (the composer does,
         // so it survives navigation) supplies the status it replaced.
         let priorStatus = statusBeforeSubmission ?? task.status
         let priorStatusMessage = task.statusMessage
-        if !hideInternalOutcomeReminder {
+        if !isPlayhouseNudge {
             _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
         }
         let resolveTitleBeforeWorktree: Bool
@@ -7019,11 +7312,11 @@ final class ConversationManager {
             if !task.isStandaloneChat {
                 task = try await tasks.prepareRepositoryWorktrees(
                     taskID,
-                    fallbackPrompt: hideInternalOutcomeReminder && !task.hasUnsentDraft ? (task.savedPrompt ?? persistedText) : persistedText,
+                    fallbackPrompt: isPlayhouseNudge && !task.hasUnsentDraft ? (task.savedPrompt ?? persistedText) : persistedText,
                     resolvedTitle: resolvedWorktreeTitle ?? persistedText
                 )
             }
-            if !hideInternalOutcomeReminder, !normalizedText.isEmpty {
+            if !isPlayhouseNudge, !normalizedText.isEmpty {
                 _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
             }
             let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
@@ -7082,7 +7375,7 @@ final class ConversationManager {
             if let standaloneChatPage {
                 sessionRecoveryContext = standaloneChatPageContext(taskID: taskID, pageIDs: [standaloneChatPage.id])
             } else if provider == .claude {
-                sessionRecoveryContext = ConversationHandoff.context(for: .claude, messages: try await history(taskID: taskID).messages)
+                sessionRecoveryContext = ConversationHandoff.context(for: .claude, messages: Self.withoutNudgeTurns(try await history(taskID: taskID).messages))
             } else {
                 sessionRecoveryContext = nil
             }
@@ -7152,10 +7445,8 @@ final class ConversationManager {
                 persistedThreadID = threadID
             }
             let claudeTurnID = provider == .claude ? UUID().uuidString.lowercased() : nil
-            // A status nudge passes `hideSensitiveRecoveryPrompt` only to store its
-            // prompt as a placeholder; it carries no secret, so its output follows
-            // the reminder rule below rather than being hidden as a private answer's.
-            let hidesRecoveryOutput = hideSensitiveRecoveryPrompt && !hideInternalOutcomeReminder
+            // Only a private answer's recovery turn hides its output; a status nudge is shown.
+            let hidesRecoveryOutput = hideSensitiveRecoveryPrompt
             if let claudeTurnID, let segment {
                 try transcripts.mutate(taskID, turns: .none) { transcript in
                     if hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty {
@@ -7175,30 +7466,14 @@ final class ConversationManager {
             var finalMessageCount = 0
             var leakedOutcome: String?
             var pendingQuestionLifecycleRevision: Int?
-            // A private status nudge keeps its prompt private, and so does a reply
-            // that only reports status. The nudge also tells the agent to keep
-            // working when work remains, and Claude delivers every background
-            // result inside the turn that is running, so once this turn does work
-            // (a tool call, a subagent, a steered message) it is shown like any
-            // other turn. Until then its output is recorded but not streamed.
-            var reminderTurnRevealed = !hideInternalOutcomeReminder
-            var withheldReminderUpdates: [ConversationUpdate] = []
-            let streamTurnUpdate: (ConversationUpdate) -> Void = { update in
-                if reminderTurnRevealed { onUpdate(update) } else { withheldReminderUpdates.append(update) }
-            }
-            let revealReminderTurn: () -> Void = {
-                guard !reminderTurnRevealed else { return }
-                reminderTurnRevealed = true
-                if let claudeTurnID { self.revealPrivateReminderTurn(taskID: taskID, turnID: claudeTurnID) }
-                let withheld = withheldReminderUpdates
-                withheldReminderUpdates = []
-                withheld.forEach(onUpdate)
-            }
+            // A status nudge turn is shown like any other turn; the prompt renders as
+            // an automatic Playhouse message.
+            let streamTurnUpdate = onUpdate
             if onTurnStarting != nil {
                 client.markTurnStarting(threadID: threadID)
                 onTurnStarting?()
             }
-            if !hideInternalOutcomeReminder, !imageDataURLs.isEmpty {
+            if !isPlayhouseNudge, !imageDataURLs.isEmpty {
                 // Leftover images stay safely in the draft, so a failed cleanup must not fail the turn.
                 do {
                     try await tasks.clearSentDraftImages(taskID, sentImageDataURLs: imageDataURLs)
@@ -7235,7 +7510,7 @@ final class ConversationManager {
                 onDelta: { delta in
                     // Deltas are many and superseded by the recorded message, so a
                     // turn not shown yet drops them instead of withholding them.
-                    guard !hidesRecoveryOutput, reminderTurnRevealed else { return }
+                    guard !hidesRecoveryOutput else { return }
                     onUpdate(ConversationUpdate(type: "text_delta", text: delta))
                 },
                 onFinalMessage: { answer in
@@ -7254,7 +7529,6 @@ final class ConversationManager {
                 onActivity: { activity in
                     guard !hidesRecoveryOutput else { return }
                     if let claudeTurnID { self.recordClaudeActivity(taskID: taskID, turnID: claudeTurnID, activity) }
-                    if activity.isAgentWork { revealReminderTurn() }
                     if let durationMs = activity.durationMs {
                         Task { @MainActor in
                             try? await self.tasks.recordConversationActivityDuration(
@@ -7372,7 +7646,7 @@ final class ConversationManager {
                             redactAllMessages: currentTranscript?.pendingSensitiveUserInputRedaction == true
                         )[0]
                     }
-                    let hideProviderDetails = hidesRecoveryOutput || !reminderTurnRevealed
+                    let hideProviderDetails = hidesRecoveryOutput
                         || currentTranscript?.pendingSensitiveUserInputRedaction == true
                     let modelIDs = currentTranscript?.segments.reduce(into: [String: String]()) { result, segment in
                         result.merge(segment.codexTurnModelIDs) { existing, _ in existing }
@@ -7410,7 +7684,7 @@ final class ConversationManager {
                     onUpdate(ConversationUpdate(type: "action_notice", message: approvalNotice))
                 },
                 onUserInput: { request async in
-                    if hideInternalOutcomeReminder {
+                    if isPlayhouseNudge {
                         client.rejectUserInput(
                             requestID: request.id,
                             threadID: request.threadID,
@@ -7460,8 +7734,6 @@ final class ConversationManager {
                             id: UUID().uuidString.lowercased(), role: .user, text: message, imageDataURLs: images
                         ))
                     }
-                    // The user wrote this, so the turn it joined can't stay private.
-                    revealReminderTurn()
                     onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
                 },
                 onProgressMessage: { message in
@@ -7493,7 +7765,7 @@ final class ConversationManager {
                     // A private recovery turn still costs tokens, so the task's
                     // totals include it, but its per-turn row is withheld for the
                     // same reason its activity and messages are.
-                    let isHidden = hidesRecoveryOutput || !reminderTurnRevealed
+                    let isHidden = hidesRecoveryOutput
                     let attributed = ConversationTurnUsageReport(
                         turnID: isHidden ? nil : (provider == .claude ? claudeTurnID : report.turnID),
                         usage: report.usage,
@@ -7608,7 +7880,7 @@ final class ConversationManager {
                     durationMs: durationMs
                 )
             }
-            let hideInternalReminderDetails = hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder
+            let hideInternalReminderDetails = hideSensitiveRecoveryPrompt || isPlayhouseNudge
             var fields = hideInternalReminderDetails
                 ? ["error": "Private conversation recovery turn failed."]
                 : PlayhouseDiagnostics.errorFields(
@@ -7625,8 +7897,8 @@ final class ConversationManager {
             let shouldKeepResumable = client.isPreparingForApplicationTermination
             let wasUserInterrupted = persistedThreadID.map { client.wasLastTurnInterrupted(threadID: $0) } ?? false
             let shouldKeepWaiting = shouldKeepResumable || wasUserInterrupted
-            let safeFailureMessage = hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder
-                ? (hideInternalOutcomeReminder
+            let safeFailureMessage = hideSensitiveRecoveryPrompt || isPlayhouseNudge
+                ? (isPlayhouseNudge
                     ? "The private status nudge could not be completed."
                     : "The private answer could not be applied. Please answer the question again.")
                 : Self.redactingSensitiveText(error.localizedDescription, values: sensitiveUserInputAnswerValues)
@@ -7638,7 +7910,7 @@ final class ConversationManager {
             let failureStatus: TaskStatus
             if hasPendingBlockingQuestion || shouldKeepWaiting {
                 failureStatus = .waitingResponse
-            } else if hasPendingNonBlockingQuestion || hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder {
+            } else if hasPendingNonBlockingQuestion || hideSensitiveRecoveryPrompt || isPlayhouseNudge {
                 failureStatus = .inProgress
             } else {
                 failureStatus = .blocked
@@ -7651,7 +7923,7 @@ final class ConversationManager {
                     : (wasUserInterrupted ? nil : (hasPendingBlockingQuestion ? "Waiting for your saved question to be answered." : (hasPendingNonBlockingQuestion ? "A saved question is available for your response." : safeFailureMessage)))
             )
             PlayhouseDiagnostics.record("conversation.send.failed", fields: fields)
-            if hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder || !sensitiveUserInputAnswerValues.isEmpty {
+            if hideSensitiveRecoveryPrompt || isPlayhouseNudge || !sensitiveUserInputAnswerValues.isEmpty {
                 throw BridgeCommandError(code: "operation_failed", message: safeFailureMessage)
             }
             throw error
@@ -7882,7 +8154,7 @@ final class ConversationManager {
 
     private static var autopilotRunningTaskIDs = Set<UUID>()
 
-    static let pullRequestAutopilotPromptMarker = "Playhouse autopilot:"
+    static let pullRequestAutopilotPromptMarker = PlayhouseSentMessage.pullRequestAutopilotMarker
 
     static func pullRequestAutopilotPrompt(_ states: [PullRequestReviewState]) -> String {
         let problems = states.filter { !$0.merged }.compactMap { state -> String? in
@@ -7918,6 +8190,17 @@ final class ConversationManager {
         """
     }
 
+    /// A status nudge, and the agent's reply to it, only mean something in the session they were sent to,
+    /// so neither is replayed to another provider or into a fresh session. A message the user steered
+    /// into a nudge turn is theirs and stays.
+    static func withoutNudgeTurns(_ messages: [ConversationMessage]) -> [ConversationMessage] {
+        let nudgeTurnIDs = Set(messages.filter { $0.role == .user && PrivateOutcomeNudgeMarker.matches($0.text) }.compactMap(\.turnID))
+        return messages.filter { message in
+            guard let turnID = message.turnID, nudgeTurnIDs.contains(turnID) else { return true }
+            return message.role == .user && !PrivateOutcomeNudgeMarker.matches(message.text)
+        }
+    }
+
     private static func isPrivateTaskPrompt(_ text: String) -> Bool {
         text.contains(privateRecoveryPromptMarker) || isPrivateOutcomeReminderPrompt(text)
     }
@@ -7928,8 +8211,10 @@ final class ConversationManager {
             : PrivatePromptPlaceholder.recoveryAnswer
     }
 
+    /// Only transcripts written before nudges were shown still hold a nudge as the hidden-prompt
+    /// placeholder; those turns stay hidden. A nudge sent today is stored and shown as sent.
     private static func isPrivateOutcomeReminderPrompt(_ text: String) -> Bool {
-        PrivateOutcomeNudgeMarker.matches(text) || text.contains(privateOutcomeReminderPlaceholder)
+        text.contains(privateOutcomeReminderPlaceholder)
     }
 
     private static func redactingSensitiveText(_ text: String, values: [String]) -> String {
@@ -8298,6 +8583,33 @@ final class PlayhouseBridgeRuntime {
                     pullRequestMode: settings.pullRequestModeDefault,
                     prompt: prompt
                 ))
+            case "schedule.list":
+                result = try Self.value(["tasks": taskManager.scheduledTasks()])
+            case "schedule.set":
+                let taskID = try request.requiredUUID("taskID")
+                result = try Self.value(await taskManager.setSchedule(taskID, request.scheduleRequest()))
+            case "schedule.clear":
+                result = try Self.value(await taskManager.clearSchedule(request.requiredUUID("taskID")))
+            case "schedule.pause", "schedule.resume":
+                result = try Self.value(await taskManager.setSchedulePaused(
+                    request.requiredUUID("taskID"),
+                    paused: request.command == "schedule.pause"
+                ))
+            case "schedule.run-now", "schedule.tick":
+                let scheduler = TaskScheduler(
+                    tasks: taskManager,
+                    conversations: ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                )
+                if request.command == "schedule.tick" {
+                    // Only the test harness may move the clock; a real tick always uses now.
+                    let now = try request.optionalDate("now")
+                    if now != nil, !BridgeContract.isTestBundle(PlayhouseAppIdentity.applicationIdentifier) {
+                        throw BridgeCommandError(code: "invalid_argument", message: "schedule tick takes no --now outside the test harness.")
+                    }
+                    result = try Self.value(await scheduler.tick(now: now ?? .now))
+                } else {
+                    result = try Self.value(await scheduler.runNow(request.requiredUUID("taskID")))
+                }
             case "task.get", "task.show":
                 let taskID = try request.requiredUUID("taskID")
                 result = try Self.value(taskManager.get(taskID))
@@ -9428,6 +9740,74 @@ private extension BridgeRequest {
             throw BridgeCommandError(code: "invalid_argument", message: "Argument \(name) must be a task UUID.")
         }
         return id
+    }
+
+    /// An ISO 8601 date-time such as `2026-11-09T09:00:00Z`, when one was given.
+    func optionalDate(_ name: String) throws -> Date? {
+        guard let raw = arguments[name]?.string, !raw.isEmpty else { return nil }
+        let formatter = ISO8601DateFormatter()
+        if let date = formatter.date(from: raw) { return date }
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = formatter.date(from: raw) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Argument \(name) must be an ISO 8601 date-time, such as 2026-11-09T09:00:00Z.")
+        }
+        return date
+    }
+
+    /// `schedule.set`'s arguments: `kind` (once/recurring), `at` for once; `repeat`,
+    /// `time` (HH:MM), `minute` and `weekday` for recurring; then `title`, `prompt`,
+    /// `images`, `mode` and `model`.
+    @MainActor func scheduleRequest() throws -> TaskScheduleRequest {
+        let kind: TaskScheduleKind = try optionalChoice("kind", default: .once)
+        var recurrence: TaskRecurrence?
+        if kind == .recurring {
+            let preset: TaskRecurrence.Preset = try optionalChoice("repeat", default: .daily)
+            var hour = 9
+            var minute = 0
+            if let time = arguments["time"]?.string {
+                let parts = time.split(separator: ":").map { Int($0) }
+                guard parts.count == 2, let h = parts[0], let m = parts[1], (0...23).contains(h), (0...59).contains(m) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Argument time must be HH:MM.")
+                }
+                hour = h
+                minute = m
+            }
+            if let explicitMinute = try optionalInteger("minute", in: 0...59) { minute = explicitMinute }
+            var weekday: Int?
+            if let raw = arguments["weekday"]?.string?.lowercased() {
+                let names = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
+                if let index = names.firstIndex(where: { raw.hasPrefix($0) }) {
+                    weekday = index + 1
+                } else if let number = Int(raw), (1...7).contains(number) {
+                    weekday = number
+                } else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Argument weekday must be a day name, such as mon.")
+                }
+            }
+            if preset == .weekly, weekday == nil {
+                throw BridgeCommandError(code: "invalid_argument", message: "A weekly schedule needs --weekday.")
+            }
+            recurrence = TaskRecurrence(preset: preset, hour: hour, minute: minute, weekday: weekday)
+        }
+        let fireAt = try optionalDate("at")
+        if kind == .once, fireAt == nil {
+            throw BridgeCommandError(code: "invalid_argument", message: "A one-time schedule needs --at.")
+        }
+        let mode: ConversationMode = try optionalChoice("mode", default: .code)
+        let modelID = arguments["model"]?.string
+        if let modelID, !ConversationManager.isValidModelID(modelID) {
+            throw BridgeCommandError(code: "invalid_argument", message: "Argument model isn't a valid model ID.")
+        }
+        return TaskScheduleRequest(
+            kind: kind,
+            fireAt: fireAt,
+            recurrence: recurrence,
+            title: arguments["title"]?.string,
+            prompt: arguments["prompt"]?.string ?? "",
+            imageDataURLs: arguments["images"]?.strings ?? [],
+            mode: mode,
+            modelID: modelID
+        )
     }
 }
 
