@@ -318,6 +318,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         modelID: String = CodexAppServerClient.modelID,
         developerInstructions: String? = nil
     ) async throws -> String {
+        // Rule files Codex does not read itself join the thread's instructions.
+        let developerInstructions = RuleBridgeLaunch.combined(developerInstructions, workspace.ruleBridge?.codexInstructions)
         try await ensureInitialized(workspace: workspace)
 
         var params: [String: Any] = [
@@ -1225,6 +1227,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         reusingLoadedThread: Bool = false,
         confirmingModel: Bool = true
     ) async throws {
+        let developerInstructions = RuleBridgeLaunch.combined(developerInstructions, workspace.ruleBridge?.codexInstructions)
         var currentParameters = ResumeParameters(
             modelID: modelID, cwd: workspace.cwd.path, roots: workspace.roots.map(\.path), developerInstructions: developerInstructions
         )

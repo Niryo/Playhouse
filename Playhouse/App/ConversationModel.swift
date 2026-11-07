@@ -870,6 +870,8 @@ struct ConversationClients {
     let claude: ClaudeCodeClient
     /// The shared skill gallery, which a turn's launch bridges to its provider.
     var skills: SkillCatalogManager? = nil
+    /// The shared agent rules, which a turn's launch bridges to its provider.
+    var rules: RuleCatalogManager? = nil
 
     func client(for provider: ConversationProvider) -> ConversationProviderClient {
         switch provider {

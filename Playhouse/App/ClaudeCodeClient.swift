@@ -437,15 +437,21 @@ final class ClaudeSessionRunner {
         // turned off for this run only, so the user's settings stay untouched.
         if let bridge = workspace.skillBridge {
             for directory in bridge.claudeAddDirectories { arguments += ["--add-dir", directory] }
-            if let settings = bridge.claudeSettingsJSON { arguments += ["--settings", settings] }
+        }
+        // Turned-off rule files are excluded the same way, and AGENTS.md is read
+        // alongside a CLAUDE.md, so skills and rules share one --settings value.
+        if let settings = RuleBridgeLaunch.claudeSettingsJSON(skills: workspace.skillBridge, rules: workspace.ruleBridge) {
+            arguments += ["--settings", settings]
         }
         // Background Bash and Agent/Task calls report through Claude Code's task
         // events and keep the turn open, so Claude may end its response while
         // they run instead of blocking on a wait it cannot satisfy. Only a process
         // detached with `&` or `nohup` is invisible to Claude Code and Playhouse.
         var systemPrompt = ClaudeCodeClient.executionInstruction
-        if let developerInstructions, !developerInstructions.isEmpty {
-            systemPrompt += "\n\n" + developerInstructions
+        // Rule files Claude Code does not load itself, such as ~/.agents/AGENTS.md
+        // or Codex's global AGENTS.md, follow the task's instructions.
+        if let instructions = RuleBridgeLaunch.combined(developerInstructions, workspace.ruleBridge?.claudeInstructions) {
+            systemPrompt += "\n\n" + instructions
         }
         arguments += ["--append-system-prompt", systemPrompt]
 
