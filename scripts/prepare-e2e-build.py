@@ -13,6 +13,8 @@ import sys
 import tempfile
 import time
 
+import e2e_build_cache
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--root", required=True, type=Path)
 parser.add_argument("--profile-bundle-id", required=True)
@@ -56,6 +58,7 @@ def source_fingerprint():
             "AGENTS.md",
             "Playhouse/BridgeTests/BridgeTestContracts.json",
             "scripts/check-button-feedback.py",
+            "scripts/check-e2e-build-cache.py",
             "scripts/check-test-parity.py",
             "scripts/prepare-e2e-fixture.py",
             "scripts/seed-legacy-task-store.swift",
@@ -125,6 +128,7 @@ with (cache_root / f"{root_key}.lock").open("a+") as lock_file:
     else:
         print(f"Building E2E cache miss {fingerprint[:16]}.", file=sys.stderr, flush=True)
         cache_path.mkdir(parents=True, exist_ok=True)
+        e2e_build_cache.record_source_worktree(cache_path, root)
         subprocess.run(
             [
                 "xcodebuild", "build-for-testing", "-quiet",
@@ -151,5 +155,29 @@ with (cache_root / f"{root_key}.lock").open("a+") as lock_file:
         temporary_manifest = manifest.with_suffix(".tmp")
         temporary_manifest.write_text(fingerprint + "\n", encoding="utf-8")
         os.replace(temporary_manifest, manifest)
+    # Each source edit adds a full build; drop superseded idle ones while this
+    # worktree's cache lock is held. A pruning problem must never fail a run.
+    e2e_build_cache.mark_used(cache_path)
+    try:
+        removed, freed = e2e_build_cache.prune(
+            cache_root,
+            cache_path,
+            max_idle_seconds=max(
+                e2e_build_cache.MINIMUM_MAX_IDLE_SECONDS,
+                float(
+                    os.environ.get(
+                        "PLAYHOUSE_E2E_BUILD_CACHE_MAX_IDLE_SECONDS",
+                        e2e_build_cache.DEFAULT_MAX_IDLE_SECONDS,
+                    )
+                ),
+            ),
+        )
+        if removed:
+            print(
+                f"Pruned {len(removed)} superseded E2E build(s), freeing {freed / 1024 ** 3:.1f} GiB.",
+                file=sys.stderr,
+            )
+    except Exception as error:  # noqa: BLE001 - best-effort cleanup
+        print(f"Warning: could not prune the E2E build cache: {error}", file=sys.stderr)
 
 print(json.dumps({"derivedData": str(derived_data), "bundleID": bundle_id}))
