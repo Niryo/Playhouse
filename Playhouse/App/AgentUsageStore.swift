@@ -33,8 +33,8 @@ final class AgentUsageStore {
         return stream
     }
 
-    /// Loads the last-known values saved under `directory`, once. Claude only
-    /// reports while a task runs, so these are what an idle app shows.
+    /// Loads the last-known values saved under `directory`, once, so a restarted
+    /// daemon shows them before its first read.
     func configurePersistence(directory: URL) {
         guard persistenceURL == nil else { return }
         let url = directory.appendingPathComponent("agent-usage.json")
@@ -117,6 +117,29 @@ final class AgentUsageStore {
         }
     }
 
+    /// Records Claude Code's `get_usage` read. It lists every window the plan
+    /// has, so it replaces them; a reset time the read leaves out (the monthly
+    /// spend's) is kept from the stream while it is still ahead.
+    func recordClaudeRead(_ response: [String: Any], now: Date = .now) {
+        guard let parsed = ClaudeUsageRead.parse(response) else { return }
+        let seconds = now.timeIntervalSince1970
+        update(.claude) { state in
+            let previous = state.snapshot?.windows ?? []
+            var snapshot = AgentUsageSnapshot(updatedAt: seconds)
+            snapshot.windows = parsed.windows.map { window in
+                var window = window
+                if window.resetsAt == nil,
+                   let known = previous.first(where: { $0.id == window.id })?.resetsAt, known > seconds {
+                    window.resetsAt = known
+                }
+                return window
+            }
+            if parsed.limitReached { snapshot.status = .rejected }
+            state.snapshot = snapshot
+            state.loggedIn = state.loggedIn ?? true
+        }
+    }
+
     /// Records Codex's rate limits. A full read replaces everything; a push is
     /// sparse, so it only replaces the windows and credits it carries.
     func recordCodexRead(_ result: [String: Any], now: Date = .now) {
@@ -163,11 +186,9 @@ final class AgentUsageStore {
 
 /// The bridge's usage operations, shared by the window and the CLI.
 ///
-/// Usage is pushed by the providers while tasks run (see the clients), so a
-/// refresh only reads what a push cannot give: Codex's snapshot and both
-/// accounts' login state. Claude's idle usage has no official source; a future
-/// one (for example the OAuth usage endpoint behind `/usage`) can feed
-/// `AgentUsageStore.recordClaudeEvent`-style updates without touching callers.
+/// A refresh reads both accounts' login state and usage. Codex also pushes its
+/// usage while tasks run; Claude Code pushes only when a limit's status changes,
+/// so its client reads usage again after every turn (see the clients).
 @MainActor
 enum AgentUsageService {
     static func report(clients: ConversationClients, refresh: Bool) async -> AgentUsageReport {

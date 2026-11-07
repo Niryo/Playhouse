@@ -225,7 +225,7 @@ private struct AgentUsageBlock: View {
                         .accessibilityIdentifier("agents-info-\(provider.rawValue)-updated")
                 }
             } else {
-                Text(provider == .claude ? "No data yet. Updates while a task runs." : "No data yet")
+                Text("No data yet")
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("agents-info-\(provider.rawValue)-empty")
