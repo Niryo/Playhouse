@@ -246,13 +246,14 @@ private struct AgentUsageBlock: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(provider.displayName)
                     .font(.system(size: 11, weight: .semibold))
-                if let identity = [usage.account, usage.plan].compactMap({ $0 }).first {
-                    Text(identity)
+                let identity = [usage.account, usage.plan].compactMap { $0 }
+                if !identity.isEmpty {
+                    Text(identity.joined(separator: " "))
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .nativeHelp([usage.account, usage.plan].compactMap { $0 }.joined(separator: " · "))
+                        .nativeHelp(identity.joined(separator: " · "))
                         .accessibilityIdentifier("agents-info-\(provider.rawValue)-account")
                 }
             }
