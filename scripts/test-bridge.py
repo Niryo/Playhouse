@@ -8572,7 +8572,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         probe = self.data_directory / "codex-question-ownership-probe"
         core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
                 "ConversationModel", "ClaudeCodeClient", "ProviderRequestLog", "ProcessCPUSampler", "AgentUsage", "AgentUsageStore", "ConversationTranscriptStore",
-                "StandaloneChatStore", "SkillCatalog", "BridgeCore", "TaskSchedule"]
+                "StandaloneChatStore", "SkillCatalog", "RuleCatalog", "BridgeCore", "TaskSchedule"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine", "JavaScriptCore"):
             command.extend(["-framework", framework])
@@ -11969,6 +11969,419 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(resumed_disabled, disabled_real, "The resumed thread gets the same per-thread skill config.")
         later = [turn for turn in history["turns"] if turn["userMessage"] == "Complete this task again."][-1]
         self.assertEqual(later["skillInputs"], [], "A turn that names no skill sends none.")
+
+    # Rules
+
+    @property
+    def rules_claude_config(self):
+        return self.skills_home / ".claude"
+
+    @property
+    def rules_managed(self):
+        return self.skills_home / "managed" / "ClaudeCode"
+
+    def write_file(self, path, text):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def rule_catalog(self, task_id=None):
+        command = ["rules", "list"]
+        if task_id:
+            command += ["--task", task_id]
+        return self.assert_success(self.call_cli(*command)[0])
+
+    @staticmethod
+    def rules_by_name(rules):
+        return {rule["name"]: rule for rule in rules}
+
+    def rule_section(self, catalog, name):
+        return self.rules_by_name(next(section for section in catalog["repositories"] if section["name"] == name)["rules"])
+
+    # case-contract: test_rules_catalog_lists_repo_global_and_managed_rules | The Skills page, titled Skills & Rules, switches to its Rules list with a Skills | Rules picker. Rules lists each task repository's instruction files from its worktree (AGENTS.override.md, AGENTS.md, CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, and every .md file under .claude/rules, keyed by the source repository and the file's path), the user's global rules (~/.agents/AGENTS.md, Codex's AGENTS.md, and Claude's CLAUDE.md and rules folder), and the organization's managed CLAUDE.md. Each rule names the agents that follow it in Playhouse sessions and the ones that read it natively: a repository AGENTS.md beside a CLAUDE.md is followed by both but read natively only by Codex, ~/.agents/AGENTS.md is read natively by neither yet shared with both, a CLAUDE.md symlinked to AGENTS.md is one Linked rule read natively by both, AGENTS.override.md is Codex's own and leaves the AGENTS.md beside it to Claude, a .claude/rules file shows its paths globs, the managed CLAUDE.md is Claude's only and read-only, and an @import of a missing file is flagged as a problem. A repository without rules shows an empty state. Reading a rule returns its file exactly, and an unknown rule is not_found.
+    def test_rules_catalog_lists_repo_global_and_managed_rules(self):
+        working = self.make_skill_repository("rules-catalog-repo", {
+            "AGENTS.md": "# Repository conventions\nUse tabs.\n",
+            "CLAUDE.md": "# Claude notes\n@docs/missing.md\n",
+            ".claude/CLAUDE.md": "Claude folder notes.\n",
+            "CLAUDE.local.md": "My sandbox URL.\n",
+            ".claude/rules/api.md": "---\npaths:\n  - \"src/api/**\"\n---\n\n# API rules\nValidate input.\n",
+            ".claude/rules/style/naming.md": "Name things plainly.\n",
+        })
+        linked = self.make_skill_repository("rules-linked-repo", {"AGENTS.md": "# Linked rules\nShared by both.\n"},
+                                            links={"CLAUDE.md": "AGENTS.md"})
+        override = self.make_skill_repository("rules-override-repo", {
+            "AGENTS.md": "# Team rules\n", "AGENTS.override.md": "# Codex override\n",
+        })
+        empty = self.make_skill_repository("rules-empty-repo", {})
+        self.write_file(self.skills_home / ".agents" / "AGENTS.md", "# Personal rules\nBe brief.\n")
+        self.write_file(self.skills_codex_home / "AGENTS.md", "# Codex home rules\n")
+        self.write_file(self.rules_claude_config / "CLAUDE.md", "# Claude home rules\n")
+        self.write_file(self.rules_claude_config / "rules" / "global-style.md", "Prefer small functions.\n")
+        self.write_file(self.rules_managed / "CLAUDE.md", "# Company policy\n")
+
+        task = self.create_skills_task("Rules catalog", [working, linked, override, empty])
+        worktrees = {record["repositoryPath"]: record["worktreePath"] for record in task["repositoryWorktrees"]}
+        catalog = self.rule_catalog(task["id"])
+        self.assertEqual([section["name"] for section in catalog["repositories"]],
+                         ["rules-catalog-repo", "rules-linked-repo", "rules-override-repo", "rules-empty-repo"])
+        self.assertEqual(catalog["repositories"][0]["repositoryPath"], str(working), "Rules are keyed by the source repository.")
+        self.assertSamePath(catalog["repositories"][0]["rootPath"], worktrees[str(working)])
+        self.assertEqual(catalog["repositories"][3]["rules"], [], "A repository without rules has an empty section.")
+
+        repo = self.rule_section(catalog, "rules-catalog-repo")
+        self.assertEqual(list(repo), ["AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md", ".claude/rules/api.md", ".claude/rules/style/naming.md"],
+                         "Every rule file is listed, including nested .claude/rules files.")
+        agents = repo["AGENTS.md"]
+        self.assertEqual(agents["id"], f"repo:{working}#AGENTS.md")
+        self.assertEqual(agents["providers"], ["claude", "codex"], "Playhouse has both agents follow AGENTS.md.")
+        self.assertEqual(agents["nativeProviders"], ["codex"], "Claude Code skips AGENTS.md beside a CLAUDE.md on its own.")
+        self.assertEqual(agents["sharedWith"], ["claude"], "Playhouse has Claude read it alongside CLAUDE.md.")
+        self.assertFalse(agents["availableOutsidePlayhouse"])
+        self.assertEqual(agents["summary"], "Repository conventions")
+        self.assertSamePath(agents["filePath"], Path(worktrees[str(working)]) / "AGENTS.md")
+        claude = repo["CLAUDE.md"]
+        self.assertEqual(claude["nativeProviders"], ["claude"])
+        self.assertEqual(claude["providers"], ["claude", "codex"])
+        self.assertIn("@docs/missing.md", claude["issue"], "An import of a missing file is a problem.")
+        self.assertIsNone(agents.get("issue"))
+        self.assertEqual(repo[".claude/rules/api.md"]["paths"], ["src/api/**"])
+        self.assertEqual(repo[".claude/rules/style/naming.md"]["paths"], [])
+        self.assertEqual(repo["CLAUDE.local.md"]["locations"][0]["layout"], "claudeLocal")
+        self.assertEqual(repo[".claude/CLAUDE.md"]["locations"][0]["layout"], "claude")
+        self.assertEqual(repo[".claude/CLAUDE.md"]["nativeProviders"], ["claude"])
+        self.assertFalse(agents["linkable"], "Claude Code reads CLAUDE.md instead, so AGENTS.md has no link to offer.")
+        self.assertFalse(repo[".claude/rules/style/naming.md"]["linkable"], "Codex has no place for a separate rule file.")
+
+        linked_rules = self.rule_section(catalog, "rules-linked-repo")
+        self.assertEqual(list(linked_rules), ["AGENTS.md"], "A CLAUDE.md symlinked to AGENTS.md is one rule.")
+        self.assertEqual(sorted(location["layout"] for location in linked_rules["AGENTS.md"]["locations"]), ["agents", "claude"])
+        self.assertTrue(linked_rules["AGENTS.md"]["availableOutsidePlayhouse"])
+        self.assertEqual(linked_rules["AGENTS.md"]["nativeProviders"], ["claude", "codex"])
+
+        override_rules = self.rule_section(catalog, "rules-override-repo")
+        self.assertEqual(override_rules["AGENTS.override.md"]["providers"], ["codex"], "AGENTS.override.md is Codex's own.")
+        self.assertEqual(override_rules["AGENTS.md"]["providers"], ["claude"], "Codex reads the override instead of AGENTS.md.")
+
+        self.assertEqual([rule["id"] for rule in catalog["global"]],
+                         ["global:agents/AGENTS.md", "global:codex/AGENTS.md", "global:claude/CLAUDE.md", "global:claude/rules/global-style.md"])
+        global_rules = self.rules_by_name(catalog["global"])
+        codex_name = catalog["global"][1]["name"]
+        self.assertSamePath(codex_name, self.skills_codex_home / "AGENTS.md")
+        self.assertEqual(list(global_rules), ["~/.agents/AGENTS.md", codex_name, "~/.claude/CLAUDE.md", "~/.claude/rules/global-style.md"])
+        shared = global_rules["~/.agents/AGENTS.md"]
+        self.assertEqual(shared["id"], "global:agents/AGENTS.md")
+        self.assertEqual(shared["nativeProviders"], [], "Neither CLI reads ~/.agents/AGENTS.md on its own.")
+        self.assertEqual(shared["providers"], ["claude", "codex"], "Playhouse shares it with both.")
+        self.assertEqual(shared["sharedWith"], ["claude", "codex"])
+        self.assertTrue(shared["linkable"])
+        self.assertEqual(global_rules[codex_name]["nativeProviders"], ["codex"])
+        self.assertEqual(global_rules["~/.claude/CLAUDE.md"]["nativeProviders"], ["claude"])
+        self.assertEqual(global_rules["~/.claude/rules/global-style.md"]["id"], "global:claude/rules/global-style.md")
+        self.assertTrue(all(rule["providers"] == ["claude", "codex"] for rule in global_rules.values()))
+
+        managed = catalog["managed"]
+        self.assertEqual([rule["id"] for rule in managed], ["managed:claude/CLAUDE.md"])
+        self.assertEqual(managed[0]["providers"], ["claude"], "The managed CLAUDE.md is Claude's only.")
+        self.assertFalse(managed[0]["editable"])
+
+        detail = self.assert_success(self.call_cli("rules", "get", "--task", task["id"], "--rule", agents["id"])[0])
+        self.assertEqual(detail["content"], "# Repository conventions\nUse tabs.\n")
+        self.assertEqual(detail["rule"]["id"], agents["id"])
+        self.assert_failure(self.call_cli("rules", "get", "--task", task["id"], "--rule", "global:no-such-rule", expected_status=3)[0], "not_found")
+        without_task = self.rule_catalog()
+        self.assertEqual(without_task["repositories"], [])
+        self.assertEqual([rule["name"] for rule in without_task["global"]], list(global_rules))
+
+    # case-contract: test_rules_create_update_and_delete_on_disk | New Rule writes the shared AGENTS.md (the chosen task worktree's, or ~/.agents/AGENTS.md for a global rule) or, given a name, a topic file in .claude/rules (the worktree's, or Claude's global rules folder) whose paths frontmatter lists the globs given; empty instructions, an invalid name, globs without a name, the managed scope, and an existing file are rejected with nothing written, and the source checkout is left alone. Clicking a rule opens its editor on the whole file with a Markdown preview, and saving writes the file exactly as typed; empty instructions and a rules-folder file whose frontmatter never closes are rejected while keeping the file. The managed CLAUDE.md opens read-only without Save and can be neither edited nor deleted. Deleting a rule removes its file from disk, and every change is visible to a fresh CLI process and on the page.
+    def test_rules_create_update_and_delete_on_disk(self):
+        repository = self.make_skill_repository("rules-manage-repo", {})
+        task = self.create_skills_task("Rules manage", [repository])
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        self.write_file(self.rules_managed / "CLAUDE.md", "# Company policy\n")
+
+        def create(*arguments, expected_status=0):
+            return self.call_cli("rules", "create", "--task", task["id"], *arguments, expected_status=expected_status)[0]
+
+        for arguments in [
+            ["--scope", "repo", "--root", str(repository), "--body", "   "],
+            ["--scope", "repo", "--root", str(repository), "--name", "Bad Name", "--body", "Text."],
+            ["--scope", "repo", "--root", str(repository), "--path", "src/**", "--body", "Scoped without a name."],
+            ["--scope", "managed", "--body", "Not allowed."],
+        ]:
+            self.assert_failure(create(*arguments, expected_status=2), "invalid_argument")
+        self.assertFalse((worktree / "AGENTS.md").exists() or (worktree / ".claude").exists(), "A rejected rule writes nothing.")
+
+        repo_rule = self.assert_success(create("--scope", "repo", "--root", str(repository), "--body", "# Repository rules\nRun the linter."))
+        self.assertEqual(repo_rule["id"], f"repo:{repository}#AGENTS.md")
+        self.assertEqual((worktree / "AGENTS.md").read_text(encoding="utf-8"), "# Repository rules\nRun the linter.\n")
+        self.assertFalse((repository / "AGENTS.md").exists(), "The source checkout is left alone.")
+        self.assert_failure(create("--scope", "repo", "--root", str(repository), "--body", "Again.", expected_status=1), "already_exists")
+        self.assertEqual((worktree / "AGENTS.md").read_text(encoding="utf-8"), "# Repository rules\nRun the linter.\n")
+
+        global_rule = self.assert_success(create("--scope", "global", "--body", "Answer briefly."))
+        self.assertEqual(global_rule["id"], "global:agents/AGENTS.md")
+        self.assertEqual((self.skills_home / ".agents" / "AGENTS.md").read_text(encoding="utf-8"), "Answer briefly.\n")
+        topic = self.assert_success(create("--scope", "repo", "--root", str(repository), "--name", "api-style",
+                                           "--path", "src/**/*.ts", "--path", "lib/**", "--body", "Validate every input."))
+        self.assertEqual(topic["id"], f"repo:{repository}#.claude/rules/api-style.md")
+        self.assertEqual(topic["paths"], ["src/**/*.ts", "lib/**"])
+        self.assertEqual((worktree / ".claude" / "rules" / "api-style.md").read_text(encoding="utf-8"),
+                         '---\npaths:\n  - "src/**/*.ts"\n  - "lib/**"\n---\n\nValidate every input.\n')
+        global_topic = self.assert_success(create("--scope", "global", "--name", "global-topic", "--body", "Global topic."))
+        self.assertEqual(global_topic["id"], "global:claude/rules/global-topic.md")
+        self.assertTrue((self.rules_claude_config / "rules" / "global-topic.md").is_file())
+
+        def update(rule_id, content, expected_status=0):
+            path = self.data_directory / f"rule-edit-{uuid.uuid4().hex}.md"
+            path.write_text(content, encoding="utf-8")
+            return self.call_cli("rules", "update", "--task", task["id"], "--rule", rule_id, "--content-file", path, expected_status=expected_status)[0]
+
+        edited = "# Repository rules\n\n- Run the linter.\n- Keep commits small.\n"
+        self.assertEqual(self.assert_success(update(repo_rule["id"], edited))["summary"], "Repository rules")
+        self.assertEqual((worktree / "AGENTS.md").read_text(encoding="utf-8"), edited, "An edit is saved exactly as written.")
+        self.assert_failure(update(repo_rule["id"], "  \n", expected_status=2), "invalid_argument")
+        self.assert_failure(update(topic["id"], "---\npaths:\n  - src/**\nNo closing line.\n", expected_status=2), "invalid_argument")
+        self.assertEqual((worktree / "AGENTS.md").read_text(encoding="utf-8"), edited, "A rejected edit keeps the file.")
+        self.assertIn("Validate every input.", (worktree / ".claude" / "rules" / "api-style.md").read_text(encoding="utf-8"))
+        self.assertEqual(self.assert_success(self.call_cli("rules", "get", "--task", task["id"], "--rule", repo_rule["id"])[0])["content"], edited)
+
+        self.assert_failure(update("managed:claude/CLAUDE.md", "Rewritten.\n", expected_status=2), "invalid_argument")
+        self.assert_failure(self.call_cli("rules", "delete", "--task", task["id"], "--rule", "managed:claude/CLAUDE.md", expected_status=2)[0], "invalid_argument")
+        self.assertEqual((self.rules_managed / "CLAUDE.md").read_text(encoding="utf-8"), "# Company policy\n", "The managed CLAUDE.md is read-only.")
+
+        self.assertEqual(self.assert_success(self.call_cli("rules", "delete", "--task", task["id"], "--rule", topic["id"])[0]), {"deleted": True})
+        self.assertFalse((worktree / ".claude" / "rules" / "api-style.md").exists(), "Deleting removes the rule file from disk.")
+        self.assert_failure(self.call_cli("rules", "get", "--task", task["id"], "--rule", topic["id"], expected_status=3)[0], "not_found")
+        fresh = self.rule_catalog(task["id"])
+        self.assertEqual([rule["name"] for rule in fresh["repositories"][0]["rules"]], ["AGENTS.md"])
+        self.assertEqual([rule["name"] for rule in fresh["global"]], ["~/.agents/AGENTS.md", "~/.claude/rules/global-topic.md"])
+
+    # case-contract: test_rules_enable_state_and_outside_links_persist | A lone AGENTS.md that both CLIs already read on their own shows Both CLIs rather than Linked, since nothing links to it. Turning a rule off is stored by Playhouse rather than in either provider's settings, survives fresh CLI processes and reopening the page, and can be turned back on; the managed CLAUDE.md can't be turned off. A turned-off rule Codex reads itself, such as the working repository's AGENTS.md, still lists Codex and the page says Codex still reads it, while a rule only Playhouse shares, such as ~/.agents/AGENTS.md, reaches neither agent. Making ~/.agents/AGENTS.md available outside Playhouse writes absolute symlinks as Codex's AGENTS.md and Claude's CLAUDE.md, after which it is one Linked rule read natively by both; a repository CLAUDE.md gets a relative AGENTS.md symlink beside it. An existing file at a link path is left untouched and the request fails with already_exists without writing any link, a rule Codex has no place for can't be linked, and removing the outside link deletes only the symlinks.
+    def test_rules_enable_state_and_outside_links_persist(self):
+        working = self.make_skill_repository("rules-link-repo", {"AGENTS.md": "# Working rules\n"})
+        other = self.make_skill_repository("rules-link-claude-repo", {
+            "CLAUDE.md": "# Claude-only rules\n", ".claude/rules/topic.md": "A topic rule.\n",
+        })
+        task = self.create_skills_task("Rules links", [working, other])
+        other_worktree = Path(next(record["worktreePath"] for record in task["repositoryWorktrees"] if record["repositoryPath"] == str(other)))
+        shared_path = self.skills_home / ".agents" / "AGENTS.md"
+        self.write_file(shared_path, "# Personal rules\n")
+        self.write_file(self.rules_managed / "CLAUDE.md", "# Company policy\n")
+        claude_rules = self.rules_claude_config / "CLAUDE.md"
+        self.write_file(claude_rules, "Mine, in the way.\n")
+
+        def rule(rule_id):
+            catalog = self.rule_catalog(task["id"])
+            rules = [rule for section in catalog["repositories"] for rule in section["rules"]] + catalog["global"]
+            return next(rule for rule in rules if rule["id"] == rule_id)
+
+        agents_id = f"repo:{working}#AGENTS.md"
+        lone = rule(agents_id)
+        self.assertEqual(lone["nativeProviders"], ["claude", "codex"], "Both CLIs read an AGENTS.md with no CLAUDE.md beside it.")
+        self.assertTrue(lone["availableOutsidePlayhouse"])
+        self.assertFalse(any(location["isSymlink"] for location in lone["locations"]), "Nothing links to it.")
+        self.assertFalse(lone["linkable"], "A rule both CLIs already read has nothing to link.")
+        disabled = self.assert_success(self.call_cli("rules", "disable", "--task", task["id"], "--rule", agents_id)[0])
+        self.assertFalse(disabled["enabled"])
+        self.assertEqual(disabled["alwaysOnFor"], ["codex"], "Codex still reads the working repository's AGENTS.md itself.")
+        self.assertEqual(disabled["providers"], ["codex"])
+        self.assertFalse(rule(agents_id)["enabled"], "Turning a rule off survives a fresh CLI process.")
+        off = self.assert_success(self.call_cli("rules", "disable", "--task", task["id"], "--rule", "global:agents/AGENTS.md")[0])
+        self.assertEqual(off["providers"], [], "A rule only Playhouse shares reaches neither agent once off.")
+        self.assertEqual(off["alwaysOnFor"], [])
+        self.assertFalse((self.skills_codex_home / "config.toml").exists(), "Codex's config is not written.")
+        self.assertFalse((self.rules_claude_config / "settings.json").exists(), "Claude's settings are not written.")
+        self.assert_failure(self.call_cli("rules", "disable", "--task", task["id"], "--rule", "managed:claude/CLAUDE.md", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("rules", "disable", "--rule", "global:no-such-rule", expected_status=3)[0], "not_found")
+        for rule_id in [agents_id, "global:agents/AGENTS.md"]:
+            self.assertTrue(self.assert_success(self.call_cli("rules", "enable", "--task", task["id"], "--rule", rule_id)[0])["enabled"])
+        self.assertEqual(rule(agents_id)["providers"], ["claude", "codex"])
+
+        codex_link = self.skills_codex_home / "AGENTS.md"
+        self.assert_failure(self.call_cli("rules", "link", "--task", task["id"], "--rule", "global:agents/AGENTS.md", expected_status=1)[0], "already_exists")
+        self.assertEqual(claude_rules.read_text(encoding="utf-8"), "Mine, in the way.\n", "An existing file at a link path is left untouched.")
+        self.assertFalse(codex_link.exists() or codex_link.is_symlink(), "A blocked link writes no link at all.")
+        self.assert_success(self.call_cli("rules", "delete", "--task", task["id"], "--rule", "global:claude/CLAUDE.md")[0])
+
+        linked = self.assert_success(self.call_cli("rules", "link", "--task", task["id"], "--rule", "global:agents/AGENTS.md")[0])
+        self.assertTrue(linked["availableOutsidePlayhouse"])
+        self.assertEqual(linked["nativeProviders"], ["claude", "codex"])
+        self.assertFalse(linked["linkable"], "A linked rule has nothing left to link.")
+        for link in [codex_link, claude_rules]:
+            self.assertTrue(link.is_symlink())
+            self.assertTrue(os.path.isabs(os.readlink(link)), "A global link is absolute.")
+            self.assertSamePath(os.readlink(link), shared_path)
+        self.assertEqual([rule["id"] for rule in self.rule_catalog(task["id"])["global"]], ["global:agents/AGENTS.md"],
+                         "The linked files are one rule.")
+
+        claude_id = f"repo:{other}#CLAUDE.md"
+        self.assertTrue(rule(claude_id)["linkable"])
+        self.assertFalse(rule(f"repo:{other}#.claude/rules/topic.md")["linkable"], "A rule Codex has no place for offers no link.")
+        repo_linked = self.assert_success(self.call_cli("rules", "link", "--task", task["id"], "--rule", claude_id)[0])
+        self.assertTrue(repo_linked["availableOutsidePlayhouse"])
+        self.assertEqual(os.readlink(other_worktree / "AGENTS.md"), "CLAUDE.md", "A repository link is relative, so it can be committed.")
+        self.assert_failure(self.call_cli("rules", "link", "--task", task["id"], "--rule", f"repo:{other}#.claude/rules/topic.md", expected_status=2)[0], "invalid_argument")
+
+        unlinked = self.assert_success(self.call_cli("rules", "unlink", "--task", task["id"], "--rule", "global:agents/AGENTS.md")[0])
+        self.assertFalse(unlinked["availableOutsidePlayhouse"])
+        self.assertFalse(codex_link.exists() or codex_link.is_symlink() or claude_rules.is_symlink(), "Removing the outside link deletes only the symlinks.")
+        self.assertEqual(shared_path.read_text(encoding="utf-8"), "# Personal rules\n")
+        self.assert_failure(self.call_cli("rules", "unlink", "--task", task["id"], "--rule", "global:agents/AGENTS.md", expected_status=2)[0], "invalid_argument")
+
+    # case-contract: test_rules_fix_with_agent_starts_task_for_problem_rules | A rule with a problem offers Fix with Agent, which creates a task on the source task's provider whose saved prompt explains how both agents read rules and lists each rule with its problem: repository rules by repository-relative path, to be fixed in the new task's own worktree and committed and pushed, and global rules by absolute path, to be fixed in place with their folder opened as a context folder, and fixing only global rules needs no repository. The view switches to the new task's conversation, which sends that prompt once and leaves no unsent draft. A rule with no problem, the managed rule, an unknown rule, and a request without a task are rejected without opening a task.
+    def test_rules_fix_with_agent_starts_task_for_problem_rules(self):
+        repository = self.make_skill_repository("rules-fix-repo", {
+            "AGENTS.md": "# Fine rules\n", "CLAUDE.md": "# Claude notes\n@docs/missing.md\n",
+        })
+        broken = self.rules_claude_config / "rules" / "broken.md"
+        self.write_file(broken, "---\npaths:\n  - src/**\nThe frontmatter never closes.\n")
+        self.write_file(self.rules_managed / "CLAUDE.md", "# Company policy\n")
+        environment = self.install_claude_fixture("claude-fixture-rules-fix")
+        history_path = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".history")
+        source = self.create_skills_task("Rules fix source", [repository], provider="claude")
+        source_worktree = Path(source["repositoryWorktrees"][0]["worktreePath"])
+        tasks_before = len(self.assert_success(self.call_cli("board", "list")[0])["tasks"])
+
+        def fix(*rules, expected_status=0):
+            arguments = [argument for rule in rules for argument in ("--rule", rule)]
+            return self.call_cli("rules", "fix", "--task", source["id"], *arguments, expected_status=expected_status)[0]
+
+        self.assert_failure(fix(f"repo:{repository}#AGENTS.md", expected_status=2), "invalid_argument")
+        self.assert_failure(fix("managed:claude/CLAUDE.md", expected_status=2), "invalid_argument")
+        self.assert_failure(fix("global:no-such-rule", expected_status=3), "not_found")
+        self.assert_failure(self.call_cli("rules", "fix", "--rule", "global:claude/rules/broken.md", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(len(self.assert_success(self.call_cli("board", "list")[0])["tasks"]), tasks_before, "A rejected fix opens no task.")
+
+        created = self.assert_success(fix(f"repo:{repository}#CLAUDE.md", "global:claude/rules/broken.md"))
+        task, prompt = created["task"], created["prompt"]
+        self.assertEqual(task["title"], "Fix 2 rules")
+        self.assertEqual(task["conversationProvider"], "claude", "The fixing task uses the source task's provider.")
+        self.assertEqual([record["repositoryPath"] for record in task["repositoryWorktrees"]], [str(repository)])
+        self.assertEqual([os.path.realpath(folder) for folder in task["contextFolders"]], [os.path.realpath(broken.parent)],
+                         "A global rule's folder is opened to the agent.")
+        self.assertEqual(task["savedPrompt"], prompt)
+        self.assertIn("Codex reads AGENTS.md", prompt)
+        self.assertIn("commit and push", prompt)
+        self.assertIn("`CLAUDE.md` in rules-fix-repo", prompt)
+        self.assertIn("@docs/missing.md", prompt)
+        self.assertNotIn(str(source_worktree), prompt, "Repository paths are relative, so they point into the fixing task's worktree.")
+        self.assertTrue(str(broken) in prompt or os.path.realpath(broken) in prompt, "A global rule is named by its absolute path.")
+        self.assertIn("not tracked by Git", prompt)
+        self.assertNotIn("Fine rules", prompt)
+
+        global_only = self.assert_success(fix("global:claude/rules/broken.md"))["task"]
+        self.assertEqual(global_only["title"], "Fix rule ~/.claude/rules/broken.md")
+        self.assertEqual(global_only["repositoryWorktrees"], [], "Fixing only global rules needs no repository.")
+
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", prompt, extra_environment=environment)[0])
+        turns = [turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText") == prompt]
+        self.assertEqual(len(turns), 1, "The fixing prompt is sent once.")
+        started = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertFalse(started["hasUnsentDraft"])
+        self.assertSamePath(turns[0]["cwd"], started["repositoryWorktrees"][0]["worktreePath"])
+        self.assertNotEqual(os.path.realpath(started["repositoryWorktrees"][0]["worktreePath"]), os.path.realpath(source_worktree))
+
+    # case-contract: test_rules_bridge_claude_launch_follows_shared_rules | A Claude turn follows the rules Claude Code does not read itself: after the task instructions, its appended system prompt carries ~/.agents/AGENTS.md with its @import of another file expanded inline, Codex's global AGENTS.md, and the AGENTS.md of the task's other repository, plus a pointer naming the globs and file of that repository's path-scoped rule; rules Claude reads itself, such as Claude's global CLAUDE.md and the working repository's CLAUDE.md and AGENTS.md, are not repeated. Because the working repository has both AGENTS.md and CLAUDE.md, --settings tells Claude Code to read both, and a rule turned off on the page is excluded for that run with claudeMdExcludes, without writing to the repository or Claude's settings. The resumed second turn carries the same rules, and turning the rule back on drops the exclusion.
+    def test_rules_bridge_claude_launch_follows_shared_rules(self):
+        repository = self.make_skill_repository("rules-claude-repo", {
+            "AGENTS.md": "# Repo agents\nRepo AGENTS text.\n",
+            "CLAUDE.md": "# Claude repo notes\nClaude repo text.\n",
+            "CLAUDE.local.md": "Local text turned off.\n",
+        })
+        extra = self.make_skill_repository("rules-claude-extra", {
+            "AGENTS.md": "Extra repo agents text.\n",
+            ".claude/rules/extra.md": "---\npaths:\n  - \"lib/**\"\n---\n\nExtra scoped text.\n",
+        })
+        self.write_file(self.skills_home / ".agents" / "AGENTS.md", "# Personal rules\nShared global text.\n@~/notes/imported.md\n")
+        self.write_file(self.skills_home / "notes" / "imported.md", "Imported text.\n")
+        self.write_file(self.skills_codex_home / "AGENTS.md", "Codex global text.\n")
+        self.write_file(self.rules_claude_config / "CLAUDE.md", "Claude global text.\n")
+        environment = self.install_claude_fixture("claude-fixture-rules-bridge")
+        history_path = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".history")
+        task = self.create_skills_task("Claude rules", [repository, extra], provider="claude")
+        worktree = Path(next(record["worktreePath"] for record in task["repositoryWorktrees"] if record["repositoryPath"] == str(repository)))
+        extra_worktree = Path(next(record["worktreePath"] for record in task["repositoryWorktrees"] if record["repositoryPath"] == str(extra)))
+        local_id = f"repo:{repository}#CLAUDE.local.md"
+        self.assert_success(self.call_cli("rules", "disable", "--task", task["id"], "--rule", local_id)[0])
+        before = self.run_git(repository, "status", "--porcelain")
+
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", "Follow the rules.", extra_environment=environment)[0])
+        turns = [turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText")]
+        arguments = turns[0]["arguments"]
+        prompt = arguments[arguments.index("--append-system-prompt") + 1]
+        for text in ["Shared global text.", "Imported text.", "Codex global text.", "Extra repo agents text."]:
+            self.assertIn(text, prompt, f"{text} reaches Claude through the system prompt.")
+        self.assertIn("`lib/**` in rules-claude-extra:", prompt, "A path-scoped rule in another repository is a pointer.")
+        self.assertTrue(str(extra_worktree / ".claude" / "rules" / "extra.md") in prompt
+                        or os.path.realpath(extra_worktree / ".claude" / "rules" / "extra.md") in prompt)
+        self.assertNotIn("Extra scoped text.", prompt, "A path-scoped rule is shared by its file, not its text.")
+        for text in ["Claude global text.", "Claude repo text.", "Repo AGENTS text.", "Local text turned off.", "@~/notes/imported.md"]:
+            self.assertNotIn(text, prompt, f"{text} should not be added: Claude reads it itself, it is off, or it was expanded.")
+        self.assertGreater(prompt.index("# Rules Playhouse shares with you"), 0, "Rules follow the task instructions.")
+        settings = json.loads(arguments[arguments.index("--settings") + 1])
+        self.assertEqual({os.path.realpath(path) for path in settings["claudeMdExcludes"]}, {os.path.realpath(worktree / "CLAUDE.local.md")},
+                         "The turned-off rule is excluded for this run.")
+        self.assertEqual(settings["pluginConfigs"], {"cc-plugin-agents-md@builtin": {"options": {"instructionFiles": "claude-md-and-agents-md"}}},
+                         "Claude Code reads AGENTS.md alongside CLAUDE.md.")
+        self.assertEqual(self.run_git(repository, "status", "--porcelain"), before, "The repository is not written to.")
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain"), "", "The worktree is not written to.")
+        self.assertFalse((self.rules_claude_config / "settings.json").exists(), "Claude's settings are not written.")
+
+        bridge = self.assert_success(self.call_cli("rules", "bridge", "--task", task["id"])[0])
+        self.assertEqual([rule["id"] for rule in bridge["claudeShared"]],
+                         ["global:agents/AGENTS.md", "global:codex/AGENTS.md", f"repo:{extra}#AGENTS.md", f"repo:{extra}#.claude/rules/extra.md"])
+        self.assertTrue(bridge["claudeReadsAgentsAlongsideClaude"])
+        extra_agents = next(rule for section in self.rule_catalog(task["id"])["repositories"] for rule in section["rules"] if rule["id"] == f"repo:{extra}#AGENTS.md")
+        self.assertEqual(extra_agents["sharedWith"], ["claude", "codex"], "Neither agent loads another task repository's rules on its own.")
+
+        self.assert_success(self.call_cli("rules", "enable", "--task", task["id"], "--rule", local_id)[0])
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", "Follow them again.", extra_environment=environment)[0])
+        second = [turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText") == "Follow them again."][-1]
+        self.assertTrue(second["resumed"], "The second turn resumes the Claude session.")
+        resumed = second["arguments"]
+        self.assertIn("Shared global text.", resumed[resumed.index("--append-system-prompt") + 1], "A resumed turn carries the same rules.")
+        self.assertNotIn("claudeMdExcludes", json.loads(resumed[resumed.index("--settings") + 1]), "Turning the rule back on drops the exclusion.")
+
+    # case-contract: test_rules_bridge_codex_thread_follows_claude_rules | A Codex turn follows the rules Codex does not read itself: after the task instructions, the thread starts with developer instructions carrying ~/.agents/AGENTS.md, Claude's global CLAUDE.md, and the working repository's CLAUDE.md and always-on .claude/rules files, with CLAUDE.md's @AGENTS.md import left out because Codex already reads that file, and each path-scoped rule as a pointer naming its globs and file rather than its text. The working repository's AGENTS.md and Codex's global AGENTS.md are not repeated, a rule turned off on the page is left out, and Codex's config.toml is not written. A thread resumed on a fresh app-server gets the same rules.
+    def test_rules_bridge_codex_thread_follows_claude_rules(self):
+        repository = self.make_skill_repository("rules-codex-repo", {
+            "AGENTS.md": "Repo AGENTS text for Codex.\n",
+            "CLAUDE.md": "# Claude repo notes\n@AGENTS.md\nClaude repo text for Codex.\n",
+            ".claude/rules/testing.md": "Always run tests.\n",
+            ".claude/rules/api.md": "---\npaths:\n  - \"src/api/**\"\n---\n\nAPI rule text.\n",
+            ".claude/rules/off.md": "Turned off text.\n",
+        })
+        self.write_file(self.skills_home / ".agents" / "AGENTS.md", "Shared global text for Codex.\n")
+        self.write_file(self.rules_claude_config / "CLAUDE.md", "Claude global text for Codex.\n")
+        self.write_file(self.skills_codex_home / "AGENTS.md", "Codex global native text.\n")
+        task = self.create_skills_task("Codex rules", [repository])
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        self.assert_success(self.call_cli("rules", "disable", "--task", task["id"], "--rule", f"repo:{repository}#.claude/rules/off.md")[0])
+
+        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-rules", message="Follow the rules.")
+        history = json.loads((self.data_directory / "codex-fixture-rules.history").read_text(encoding="utf-8"))
+        instructions = history["threadStartDeveloperInstructions"]
+        for text in ["Shared global text for Codex.", "Claude global text for Codex.", "Claude repo text for Codex.", "Always run tests."]:
+            self.assertIn(text, instructions, f"{text} reaches Codex through the thread's developer instructions.")
+        self.assertIn("`src/api/**` in rules-codex-repo:", instructions, "A path-scoped rule is a pointer naming its globs.")
+        self.assertTrue(str(worktree / ".claude" / "rules" / "api.md") in instructions
+                        or os.path.realpath(worktree / ".claude" / "rules" / "api.md") in instructions)
+        for text in ["API rule text.", "Repo AGENTS text for Codex.", "Codex global native text.", "Turned off text.", "@AGENTS.md"]:
+            self.assertNotIn(text, instructions, f"{text} should not be added: Codex reads it itself, it is off, or it is a pointer.")
+        self.assertGreater(instructions.index("# Rules Playhouse shares with you"), 0, "Rules follow the task instructions.")
+        self.assertFalse((self.skills_codex_home / "config.toml").exists(), "Codex's config.toml is not written.")
+        bridge = self.assert_success(self.call_cli("rules", "bridge", "--task", task["id"])[0])
+        self.assertEqual([rule["name"] for rule in bridge["codexShared"]],
+                         ["~/.agents/AGENTS.md", "~/.claude/CLAUDE.md", "CLAUDE.md", ".claude/rules/api.md", ".claude/rules/testing.md"])
+
+        self.restart_provider(self.data_directory / "codex-fixture-rules")
+        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-rules", message="Follow them again.")
+        history = json.loads((self.data_directory / "codex-fixture-rules.history").read_text(encoding="utf-8"))
+        self.assertGreaterEqual(history.get("threadResumeCount", 0), 1, "The second turn resumes the thread on a fresh app-server.")
+        rules_section = instructions[instructions.index("# Rules Playhouse shares with you"):]
+        resumed = history["threadResumeDeveloperInstructions"][-1]
+        self.assertEqual(resumed[resumed.index("# Rules Playhouse shares with you"):], rules_section, "The resumed thread gets the same rules.")
 
     # Plugins and the Component Catalog
 

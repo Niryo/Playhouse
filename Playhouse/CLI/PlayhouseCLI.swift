@@ -536,6 +536,60 @@ enum PlayhouseCLI {
             default:
                 throw CLIError.usage("Unknown skills operation \(operation).")
             }
+        case "rules":
+            guard let operation = rest.first else { throw CLIError.usage("Missing rules operation.") }
+            let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: [
+                "--task", "--rule", "--scope", "--name", "--path", "--body", "--root", "--content", "--content-file",
+            ])
+            var arguments: [String: BridgeValue] = [:]
+            if let task = flags["--task"]?.first { arguments["taskID"] = .string(task) }
+            if let root = flags["--root"]?.first { arguments["root"] = .string(root) }
+            func ruleID() throws -> BridgeValue { .string(try requiredFlag("--rule", flags: flags).first!) }
+            switch operation {
+            case "list":
+                return BridgeRequest(command: "rules.list", arguments: arguments)
+            case "get":
+                arguments["ruleID"] = try ruleID()
+                return BridgeRequest(command: "rules.get", arguments: arguments)
+            case "create":
+                arguments["scope"] = .string(try requiredFlag("--scope", flags: flags).first!)
+                if let name = flags["--name"]?.first { arguments["name"] = .string(name) }
+                if let paths = flags["--path"], !paths.isEmpty { arguments["paths"] = .array(paths.map(BridgeValue.string)) }
+                arguments["body"] = .string(flags["--body"]?.first ?? "")
+                return BridgeRequest(command: "rules.create", arguments: arguments)
+            case "update":
+                arguments["ruleID"] = try ruleID()
+                if let path = flags["--content-file"]?.first {
+                    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+                        throw CLIError.usage("Could not read \(path).")
+                    }
+                    arguments["content"] = .string(content)
+                } else if let content = flags["--content"]?.first {
+                    arguments["content"] = .string(content)
+                } else {
+                    throw CLIError.usage("Use --content or --content-file.")
+                }
+                return BridgeRequest(command: "rules.update", arguments: arguments)
+            case "enable", "disable":
+                arguments["ruleID"] = try ruleID()
+                arguments["enabled"] = .boolean(operation == "enable")
+                return BridgeRequest(command: "rules.enable", arguments: arguments)
+            case "delete":
+                arguments["ruleIDs"] = .array(try requiredFlag("--rule", flags: flags).map(BridgeValue.string))
+                return BridgeRequest(command: "rules.delete", arguments: arguments)
+            case "fix":
+                guard arguments["taskID"] != nil else { throw CLIError.usage("Use: playhouse rules fix --task <task-id> --rule <rule-id> [--rule <rule-id>...]") }
+                arguments["ruleIDs"] = .array(try requiredFlag("--rule", flags: flags).map(BridgeValue.string))
+                return BridgeRequest(command: "rules.fix", arguments: arguments)
+            case "link", "unlink":
+                arguments["ruleID"] = try ruleID()
+                return BridgeRequest(command: "rules.\(operation)", arguments: arguments)
+            case "bridge":
+                guard arguments["taskID"] != nil else { throw CLIError.usage("Use: playhouse rules bridge --task <task-id>") }
+                return BridgeRequest(command: "rules.bridge", arguments: arguments)
+            default:
+                throw CLIError.usage("Unknown rules operation \(operation).")
+            }
         case "schedule":
             guard let operation = rest.first else {
                 throw CLIError.usage("Use: playhouse schedule list|set|clear|pause|resume|run-now|tick ...")
@@ -929,6 +983,14 @@ enum PlayhouseCLI {
       playhouse skills delete --skill <skill-id> [--skill <skill-id>...] [--task <task-id>]
       playhouse skills fix --task <task-id> --skill <skill-id> [--skill <skill-id>...]
       playhouse skills bridge --task <task-id> [--message <text>]
+      playhouse rules list [--task <task-id>]
+      playhouse rules get --rule <rule-id> [--task <task-id>]
+      playhouse rules create --scope <repo|global> [--name <name>] [--path <glob>...] --body <text> [--task <task-id>] [--root <repo-path>]
+      playhouse rules update --rule <rule-id> (--content <text>|--content-file <path>) [--task <task-id>]
+      playhouse rules enable|disable|link|unlink --rule <rule-id> [--task <task-id>]
+      playhouse rules delete --rule <rule-id> [--rule <rule-id>...] [--task <task-id>]
+      playhouse rules fix --task <task-id> --rule <rule-id> [--rule <rule-id>...]
+      playhouse rules bridge --task <task-id>
       playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>
       playhouse task token-usage <task-id>
       playhouse task token-waste <task-id>

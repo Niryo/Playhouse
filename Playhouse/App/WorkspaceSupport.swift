@@ -161,6 +161,8 @@ struct ConversationWorkspaceContext {
     /// The skill folders each provider needs passed so it sees the whole
     /// gallery. Only a turn's own launch sets it.
     var skillBridge: SkillBridgeLaunch?
+    /// The rule files each provider is handed or told to skip. Only a turn's own launch sets it.
+    var ruleBridge: RuleBridgeLaunch?
 
     init(roots: [URL]) throws {
         let normalized = roots.map(\.standardizedFileURL)

@@ -134,12 +134,10 @@ struct SkillBridgeLaunch: Codable, Equatable, Sendable {
     var codexLinks: [BridgedSkill] = []
     var invocations: [SkillInvocation] = []
 
-    /// `--settings` JSON that hides disabled skills from Claude Code for this run only.
-    var claudeSettingsJSON: String? {
-        guard !claudeDisabledSkillNames.isEmpty else { return nil }
-        let overrides = Dictionary(uniqueKeysWithValues: claudeDisabledSkillNames.map { ($0, "off") })
-        guard let data = try? JSONSerialization.data(withJSONObject: ["skillOverrides": overrides], options: [.sortedKeys]) else { return nil }
-        return String(data: data, encoding: .utf8)
+    /// `--settings` entries that hide disabled skills from Claude Code for this run only.
+    var claudeSettings: [String: Any] {
+        guard !claudeDisabledSkillNames.isEmpty else { return [:] }
+        return ["skillOverrides": Dictionary(uniqueKeysWithValues: claudeDisabledSkillNames.map { ($0, "off") })]
     }
 
     /// Per-thread Codex config that hides disabled and other tasks' bridged skills
@@ -150,13 +148,15 @@ struct SkillBridgeLaunch: Codable, Equatable, Sendable {
     }
 }
 
-/// The folders a skill gallery reads. Production uses the user's own homes;
-/// debug bridge tests point every one at isolated fixtures.
+/// The folders the skill gallery and the rule set read. Production uses the
+/// user's own homes; debug bridge tests point every one at isolated fixtures.
 struct SkillEnvironment: Equatable, Sendable {
     /// The folder whose `.agents/skills` holds global skills.
     var homeDirectory: String
     var claudeConfigDirectory: String
     var codexHome: String
+    /// Where an organization deploys Claude Code's managed CLAUDE.md.
+    var managedClaudeDirectory: String
     /// Playhouse-owned folder for bridge wrappers.
     var bridgeDirectory: String
 
@@ -185,6 +185,7 @@ struct SkillEnvironment: Equatable, Sendable {
             homeDirectory: home,
             claudeConfigDirectory: claude,
             codexHome: codex,
+            managedClaudeDirectory: homeOverride.map { $0 + "/managed/ClaudeCode" } ?? "/Library/Application Support/ClaudeCode",
             bridgeDirectory: URL(fileURLWithPath: data).appendingPathComponent("skill-bridge").path
         )
     }

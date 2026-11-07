@@ -15,6 +15,7 @@
 		A10000000000000000000010 /* WorkspaceRootsEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* WorkspaceRootsEditor.swift */; };
 		A10000000000000000000E01 /* SkillCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E01 /* SkillCatalog.swift */; };
 		A10000000000000000000E02 /* SkillsPageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E02 /* SkillsPageView.swift */; };
+		A10000000000000000000E03 /* RuleCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E03 /* RuleCatalog.swift */; };
 		A100000000000000000000E1 /* TaskTerminalPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000000000000000000E1 /* TaskTerminalPanel.swift */; };
 		A1000000000000000000F301 /* AgentsInfoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F301 /* AgentsInfoView.swift */; };
 		A1000000000000000000F401 /* TaskSchedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F401 /* TaskSchedule.swift */; };
@@ -68,6 +69,7 @@
 		A20000000000000000000010 /* WorkspaceRootsEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceRootsEditor.swift; sourceTree = "<group>"; };
 		A20000000000000000000E01 /* SkillCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillCatalog.swift; sourceTree = "<group>"; };
 		A20000000000000000000E02 /* SkillsPageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillsPageView.swift; sourceTree = "<group>"; };
+		A20000000000000000000E03 /* RuleCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleCatalog.swift; sourceTree = "<group>"; };
 		A200000000000000000000E1 /* TaskTerminalPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskTerminalPanel.swift; sourceTree = "<group>"; };
 		A2000000000000000000F301 /* AgentsInfoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentsInfoView.swift; sourceTree = "<group>"; };
 		A2000000000000000000F401 /* TaskSchedule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskSchedule.swift; sourceTree = "<group>"; };
@@ -181,6 +183,7 @@
 				A20000000000000000000010 /* WorkspaceRootsEditor.swift */,
 				A20000000000000000000E01 /* SkillCatalog.swift */,
 				A20000000000000000000E02 /* SkillsPageView.swift */,
+				A20000000000000000000E03 /* RuleCatalog.swift */,
 				A200000000000000000000E1 /* TaskTerminalPanel.swift */,
 				A2000000000000000000F301 /* AgentsInfoView.swift */,
 				A2000000000000000000F401 /* TaskSchedule.swift */,
@@ -424,6 +427,7 @@
 				"$(SRCROOT)/Playhouse/App/ConversationSubject.swift",
 				"$(SRCROOT)/Playhouse/App/ProviderRequestLog.swift",
 				"$(SRCROOT)/Playhouse/App/SkillCatalog.swift",
+				"$(SRCROOT)/Playhouse/App/RuleCatalog.swift",
 			);
 			name = "Build CLI and bridge daemon";
 			outputPaths = (
@@ -464,6 +468,7 @@
 				A10000000000000000000010 /* WorkspaceRootsEditor.swift in Sources */,
 				A10000000000000000000E01 /* SkillCatalog.swift in Sources */,
 				A10000000000000000000E02 /* SkillsPageView.swift in Sources */,
+				A10000000000000000000E03 /* RuleCatalog.swift in Sources */,
 				A100000000000000000000E1 /* TaskTerminalPanel.swift in Sources */,
 				A1000000000000000000F301 /* AgentsInfoView.swift in Sources */,
 				A1000000000000000000F401 /* TaskSchedule.swift in Sources */,

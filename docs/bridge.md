@@ -55,6 +55,11 @@ The daemon accepts a versioned, length-prefixed JSON request over its socket, st
 | `skills enable\|disable --skill <skill-id>` | Turn a skill on or off in Playhouse sessions without touching either provider's settings |
 | `skills link\|unlink --skill <skill-id>` | Write or remove a real symlink into the other provider's layout so the skill also works outside Playhouse |
 | `skills bridge --task <task-id> [--message <text>]` | Prepare the task's skill bridge wrappers, exactly as its next launch does, and report what that launch passes each provider; with `--message`, also the skills the message invokes |
+| `rules list [--task <task-id>]` / `rules get --rule <rule-id> [--task <task-id>]` | List the agent rules (each task repository's `AGENTS.override.md`, `AGENTS.md`, `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md` and `.claude/rules/**/*.md`; global `~/.agents/AGENTS.md`, Codex's `AGENTS.md`/`AGENTS.override.md`, Claude's `CLAUDE.md` and `rules`; the managed `CLAUDE.md`) with who reads each natively and who follows it in Playhouse, or read one rule's file |
+| `rules create --scope <repo\|global> [--name <name>] [--path <glob>...] --body <text> [--root <repo-path>]` | Without a name, write the shared `AGENTS.md` (the worktree's, or `~/.agents/AGENTS.md`); with one, a topic file in `.claude/rules` (the worktree's, or Claude's) with optional `paths` frontmatter |
+| `rules update --rule <rule-id> (--content <text>\|--content-file <path>)` / `rules delete --rule <rule-id> [--rule <rule-id>...]` | Replace a rule file as written, or delete it and the links to it; the managed `CLAUDE.md` is read-only |
+| `rules enable\|disable\|link\|unlink --rule <rule-id>` / `rules fix --task <task-id> --rule <rule-id>...` | Turn a rule on or off in Playhouse sessions, write or remove symlinks so both CLIs read it outside Playhouse, or open a task whose agent repairs rules with problems |
+| `rules bridge --task <task-id>` | Report what the task's next launch passes each provider for rules: the rule text it adds, Claude's `claudeMdExcludes`, and whether Claude is told to read `AGENTS.md` alongside `CLAUDE.md` |
 | `plugin list` | List the plugin folders in `<data>/Plugins` with their views and validation issues |
 | `plugin validate --path <dir> \| --id <id>` | Validate a plugin folder against the component catalog: manifest fields, unknown components and props, binding syntax, and actions logic.js must define. Issues carry their file and JSON path; the command exits 1 when any are found |
 | `plugin components [--type <component>]` | The component catalog: sections, every component's typed props and events, the common props and semantic colors |
@@ -91,6 +96,17 @@ At each turn's launch, Playhouse bridges the skills a provider would not otherwi
 - Codex shares one app-server across tasks, so it gets `skills/extraRoots/set` with every task's wrapper under `<data>/skill-bridge/codex/<key>`, and each thread starts with a `config.skills.config` that disables other tasks' bridged skills and the task's disabled skills by path. A `/skill-name` in the message is also sent to Codex as a structured `skill` input, since Codex has no slash commands. A thread that is already loaded keeps the skill configuration it started with.
 
 Wrappers are content addressed and never changed once written, so concurrent launches can share them; ones unused for 14 days are removed. A skill named twice in one scope with different contents is reported as a conflict and not bridged; each provider keeps its own copy. `skills link` writes a real symlink (relative inside a repository) for use outside Playhouse. Requests from a test bundle (`.e2e.` builds) with an isolated data directory read skills from `<data>/skills-home`, so tests never see the host's skills; development worktree builds read the user's real skills.
+
+## Rules
+
+Rules are the instruction files an agent follows on every turn. Codex reads `AGENTS.override.md` or `AGENTS.md` in each folder from the Git root down to its working directory (32 KiB in total) and one in `$CODEX_HOME`; Claude Code reads `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md` and `.claude/rules/**/*.md` (optionally scoped by `paths` frontmatter) in its working directory, its configuration directory's `CLAUDE.md` and `rules`, the managed `CLAUDE.md`, and a repository's `AGENTS.md` only when no `CLAUDE.md` is beside it. Codex's own `~/.codex/rules/*.rules` files are command-approval policies, not instructions, and are not listed. `RuleCatalogManager` in `Playhouse/App/RuleCatalog.swift` lists all of these as one set, and new global rules go in `~/.agents/AGENTS.md`, which neither CLI reads on its own, as `~/.agents/skills` does for skills.
+
+At each turn's launch, Playhouse shares the rules a provider would not otherwise read, without writing to repositories or either provider's settings:
+
+- Claude Code gets the text of those rules (such as `~/.agents/AGENTS.md`, Codex's global `AGENTS.md`, and the other task repositories' files) appended to its system prompt, with `@path` imports expanded. Its `--settings` adds `claudeMdExcludes` for turned-off files it reads itself and, when the working repository has both `AGENTS.md` and a `CLAUDE.md`, sets the built-in AGENTS.md plugin to `claude-md-and-agents-md` so it reads both.
+- Codex gets the same kind of text (such as `CLAUDE.md`, `.claude/rules`, and Claude's global files) in the thread's developer instructions, after the task instructions, leaving out files it already reads. When the shared rules change, the next send resumes the thread with the new instructions.
+
+A path-scoped rule is shared as a pointer naming its globs and file. A turned-off rule is no longer shared, but Codex still reads its own native files (the working repository's `AGENTS.md` and its global one), and the record's `alwaysOnFor` says so. `rules link` writes real symlinks for use outside Playhouse (relative inside a repository).
 
 ## Plugins
 

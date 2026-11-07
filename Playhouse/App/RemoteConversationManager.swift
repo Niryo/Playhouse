@@ -285,6 +285,59 @@ struct RemoteConversationManager {
             .decoded(SkillRecord.self)
     }
 
+    func rules(taskID: UUID) async throws -> RuleCatalog {
+        try await daemon.call("rules.list", ["taskID": id(taskID)]).decoded(RuleCatalog.self)
+    }
+
+    func ruleContent(taskID: UUID, ruleID: String) async throws -> String {
+        let result = try await daemon.call("rules.get", ["taskID": id(taskID), "ruleID": .string(ruleID)])
+        guard let content = result.object?["content"]?.string else {
+            throw BridgeCommandError(code: "invalid_response", message: "The bridge did not return the rule's text.")
+        }
+        return content
+    }
+
+    /// A nil name writes the shared AGENTS.md; a name writes a topic file in `.claude/rules`.
+    func createRule(taskID: UUID, name: String?, paths: [String], body: String, scope: RuleScope, root: String?) async throws -> RuleRecord {
+        var arguments: [String: BridgeValue] = [
+            "taskID": id(taskID), "scope": .string(scope.rawValue), "body": .string(body),
+            "paths": .array(paths.map(BridgeValue.string)),
+        ]
+        if let name { arguments["name"] = .string(name) }
+        if let root { arguments["root"] = .string(root) }
+        return try await daemon.call("rules.create", arguments).decoded(RuleRecord.self)
+    }
+
+    func updateRuleContent(taskID: UUID, ruleID: String, content: String) async throws -> RuleRecord {
+        try await daemon.call("rules.update", [
+            "taskID": id(taskID), "ruleID": .string(ruleID), "content": .string(content),
+        ]).decoded(RuleRecord.self)
+    }
+
+    func deleteRules(taskID: UUID, ruleIDs: [String]) async throws {
+        _ = try await daemon.call("rules.delete", ["taskID": id(taskID), "ruleIDs": .array(ruleIDs.map(BridgeValue.string))])
+    }
+
+    func setRuleEnabled(taskID: UUID, ruleID: String, enabled: Bool) async throws -> RuleRecord {
+        try await daemon.call("rules.enable", [
+            "taskID": id(taskID), "ruleID": .string(ruleID), "enabled": .boolean(enabled),
+        ]).decoded(RuleRecord.self)
+    }
+
+    func linkRule(taskID: UUID, ruleID: String, linked: Bool) async throws -> RuleRecord {
+        try await daemon.call(linked ? "rules.link" : "rules.unlink", ["taskID": id(taskID), "ruleID": .string(ruleID)])
+            .decoded(RuleRecord.self)
+    }
+
+    /// Opens a task whose agent repairs the rules, and returns it with the prompt to send.
+    func fixRules(taskID: UUID, ruleIDs: [String]) async throws -> (task: BoardTaskRecord, prompt: String) {
+        let result = try await daemon.call("rules.fix", ["taskID": id(taskID), "ruleIDs": .array(ruleIDs.map(BridgeValue.string))])
+        guard let task = result.object?["task"], let prompt = result.object?["prompt"]?.string else {
+            throw BridgeCommandError(code: "invalid_response", message: "The bridge did not return the new task.")
+        }
+        return (try task.decoded(BoardTaskRecord.self), prompt)
+    }
+
     func providerCapabilities(taskID: UUID) async throws -> [ConversationProviderCapabilities] {
         try await daemon.call("conversation.provider.capabilities", ["taskID": id(taskID)])
             .decoded([ConversationProviderCapabilities].self)
