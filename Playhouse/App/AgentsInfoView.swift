@@ -120,7 +120,6 @@ struct AgentsInfoView: View {
                                     .accessibilityHidden(true)
                                 Text("Agents info")
                                     .font(.system(size: 10, weight: .semibold))
-                                    .textCase(.uppercase)
                                 Spacer(minLength: 0)
                             }
                             .foregroundStyle(.secondary)
