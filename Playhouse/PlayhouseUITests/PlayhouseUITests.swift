@@ -1208,7 +1208,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(record["isPending"] as? Bool, true)
         let card = element("task-card-\(taskID.uppercased())")
         XCTAssertTrue(waitUntil({ card.exists }, timeout: 10), "Exactly one reservation should appear on the visible board.")
-        card.click()
+        clickTaskCardTitle(card)
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
     }
 
@@ -1704,7 +1704,7 @@ final class PlayhouseUITests: XCTestCase {
             let loserPrompt = "Claim the same generated branch."
             let loserCard = element("task-card-\(loserID.uppercased())")
             XCTAssertTrue(loserCard.waitForExistence(timeout: 10))
-            loserCard.click()
+            clickTaskCardTitle(loserCard)
             let composer = element("message-composer")
             XCTAssertTrue(
                 waitUntil({ composer.exists && composer.isHittable }, timeout: 15),
@@ -1749,7 +1749,7 @@ final class PlayhouseUITests: XCTestCase {
         let visibleID = try XCTUnwrap(prepared["id"] as? String)
         let card = element("task-card-\(visibleID.uppercased())")
         XCTAssertTrue(waitUntil({ card.exists }, timeout: 10), "Only the task with the prepared worktree should be visible in Review.")
-        card.click()
+        clickTaskCardTitle(card)
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
     }
 
@@ -1894,6 +1894,7 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 10), "Regaining focus should refresh both PR merge states.")
         XCTAssertEqual(Set(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), Set(["123", "456"]))
         XCTAssertTrue(completionButton.waitForExistence(timeout: 10), "A merged PR should replace its link with the completion button.")
+        revealOnBoard(completionButton)
         XCTAssertGreaterThanOrEqual(completionButton.frame.width, 30, "The completion action should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(completionButton.frame.height, 30, "The completion action should have a comfortable vertical hit target.")
         XCTAssertEqual(completionButton.label, "Green checkmark. Complete task, all linked pull requests merged")
@@ -2375,6 +2376,7 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         let activeCreateButton = element("task-create-pr-\(taskID)")
         XCTAssertTrue(activeCreateButton.waitForExistence(timeout: 5), "An active repository task should expose its PR action on the card.")
+        revealOnBoard(activeCreateButton)
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.width, 30, "The PR action should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.height, 30, "The PR action should have a comfortable vertical hit target.")
         // The control sits on its own last row, below the title and the time row, on the right; Backlog had no such row.
@@ -2556,6 +2558,7 @@ final class PlayhouseUITests: XCTestCase {
         try runGit(manualWorktree, "remote", "add", "origin", manualRemote.path)
         try runGit(manualWorktree, "push", "origin", "main")
         try "Manual PR task change.\n".write(to: manualWorktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
+        revealOnBoard(manualButton)
         manualButton.click()
         let manualPRLink = app.links["task-pr-link-\(manualTaskID)-502"]
         XCTAssertTrue(manualPRLink.waitForExistence(timeout: 10), "The manual PR flow must still work unchanged when Auto PR stays off.")
@@ -2836,6 +2839,7 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         let prButton = element("task-create-pr-\(taskID)")
         XCTAssertTrue(prButton.waitForExistence(timeout: 5))
+        revealOnBoard(prButton)
         prButton.click()
         let failureAlert = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
         XCTAssertTrue(failureAlert.waitForExistence(timeout: 10), "The local bare remote should reach the normal GitHub CLI failure after the task branch is published.")
@@ -2896,6 +2900,7 @@ final class PlayhouseUITests: XCTestCase {
         let createPRButton = element("task-create-pr-\(activeTaskID)")
         XCTAssertTrue(createPRButton.waitForExistence(timeout: 5), "An active repository task should expose its Create PR button.")
         XCTAssertEqual(createPRButton.label, "PRs. Create pull requests for each repository linked to this task")
+        revealOnBoard(createPRButton)
         assertHoverEmphasis(for: createPRButton)
         attachScreenshot(named: "Multi-repository task labels its action PRs")
         let records = try XCTUnwrap((try taskRecord(id: activeTaskID)?["repositoryWorktrees"] as? [[String: Any]]))
@@ -3038,6 +3043,7 @@ final class PlayhouseUITests: XCTestCase {
 
         let createPRButton = element("task-create-pr-\(taskID)")
         XCTAssertTrue(createPRButton.waitForExistence(timeout: 5), "The two-repository task should expose its PRs action.")
+        revealOnBoard(createPRButton)
         createPRButton.click()
         let primaryLink = app.links["task-pr-link-\(taskID)-501"]
         XCTAssertTrue(primaryLink.waitForExistence(timeout: 30), "The changed repository should get its pull request.")
@@ -3069,6 +3075,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: unchangedID)?["status"] as? String, "Review")
         let unchangedButton = element("task-create-pr-\(unchangedID)")
         XCTAssertTrue(unchangedButton.waitForExistence(timeout: 5))
+        revealOnBoard(unchangedButton)
         unchangedButton.click()
         let alertSheet = app.sheets.firstMatch
         XCTAssertTrue(alertSheet.waitForExistence(timeout: 30), "A task with no changes should report why no pull request was opened.")
@@ -4687,6 +4694,10 @@ final class PlayhouseUITests: XCTestCase {
             "origin/\(remoteBranch)",
             "A failed fetch must preserve the saved value."
         )
+        // Escape first cancels the open field edit (#173), then a second Escape closes the editor.
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(branchFromField), "Escape should first cancel the open field edit.")
+        XCTAssertTrue(branchFromValue.exists, "Cancelling the field edit should leave the editor open.")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(waitForDisappearance(branchFromValue), "Dismissing the editor should close it before the turn starts.")
 
@@ -5303,7 +5314,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("conversation-recent-repositories").exists, "The header should not show recent suggestion chips.")
         XCTAssertTrue(alternateRemove.exists, "Each attached repository chip should carry its own remove badge.")
         XCTAssertGreaterThanOrEqual(alternateBadge.frame.height, 28, "Attached repository chips should be prominent.")
-        XCTAssertLessThanOrEqual(alternateRemove.frame.width, 15, "The remove badge should stay small and unobtrusive.")
+        // #173 enlarged the badge to a 20 pt target; it is still a corner badge, not a full button.
+        XCTAssertGreaterThanOrEqual(alternateRemove.frame.width, 20, "The remove badge should be an easy target.")
+        XCTAssertLessThanOrEqual(alternateRemove.frame.width, 22, "The remove badge should stay a small corner badge.")
         XCTAssertGreaterThan(alternateRemove.frame.midX, alternateBadge.frame.midX, "The remove badge should sit on the chip's trailing corner.")
         XCTAssertLessThan(alternateRemove.frame.midY, alternateBadge.frame.midY, "The remove badge should sit on the chip's top corner.")
         attachScreenshot(named: "Attached repositories as large chips with remove badges")
@@ -5671,7 +5684,7 @@ final class PlayhouseUITests: XCTestCase {
         let coveringTaskID = try XCTUnwrap(coveringTask?["id"] as? String)
         let coveringCard = element("task-card-\(coveringTaskID.uppercased())")
         XCTAssertTrue(waitUntil({ coveringCard.exists }, timeout: 10), "The new task should appear on the board behind the open chat sidebar.")
-        coveringCard.click()
+        clickTaskCardTitle(coveringCard)
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10), "Opening a task should show its conversation view.")
         XCTAssertFalse(element("chat-sidebar").exists, "Entering a task must cover the standalone chat, not show both at once.")
         attachScreenshot(named: "Task view covers standalone chat sidebar")
@@ -7002,7 +7015,7 @@ final class PlayhouseUITests: XCTestCase {
             let titleTaskCard = element("task-card-\(titleTaskID.uppercased())")
             XCTAssertTrue(titleTaskCard.waitForExistence(timeout: 10))
             XCTAssertEqual(try taskRecord(id: titleTaskID)?["title"] as? String, "Generating title…", "The board should retain the title placeholder while title generation is pending.")
-            titleTaskCard.click()
+            clickTaskCardTitle(titleTaskCard)
             XCTAssertTrue(waitUntil({
                 element("task-view-title").exists || element("task-title-generating").exists
             }, timeout: 10), "The active title-pending task should reopen from the board. UI: \(app.debugDescription)")
@@ -7143,7 +7156,7 @@ final class PlayhouseUITests: XCTestCase {
             launchApp(defaultParent: fixture.parent.path)
             let recoveryTaskCard = element("task-card-\(recoveryTaskID.uppercased())")
             XCTAssertTrue(recoveryTaskCard.waitForExistence(timeout: 10))
-            recoveryTaskCard.click()
+            clickTaskCardTitle(recoveryTaskCard)
             XCTAssertTrue(waitUntil({
                 element("task-view-title").exists || element("task-title-generating").exists
             }, timeout: 10), "The recovered task should reopen while its title is still being generated.")
@@ -7360,7 +7373,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10), "\(provider) should receive its native interrupt.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response", "The task should move before the provider acknowledges the interrupt.")
         try Data("acknowledge interrupt\n".utf8).write(to: release)
-        waitingCard.click()
+        clickTaskCardTitle(waitingCard)
         XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 15), "The stopped turn should reset the composer to its resumable state.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         XCTAssertNil(try taskRecord(id: taskID)?["statusMessage"] as? String, "A user-requested stop should not leave a failure reason.")
@@ -16786,8 +16799,13 @@ final class PlayhouseUITests: XCTestCase {
         // Hovering highlights the item (the screen recording shows it), but a following
         // synthesized click re-reads its anchor and lands elsewhere. Return chooses the
         // highlighted menu item, exactly as it does for a user.
+        // Return chooses whatever is highlighted when it arrives, so wait for the hover to
+        // highlight this item; a fixed pause let a loaded run press Return too early.
         point.hover()
-        usleep(400_000)
+        if !waitUntil({ item.isSelected }, timeout: 2) {
+            point.hover()
+        }
+        XCTAssertTrue(waitUntil({ item.isSelected }, timeout: 2), "Hovering should highlight \(item.title) before Return chooses it.")
         app.typeKey(.return, modifierFlags: [])
     }
 
@@ -16866,6 +16884,11 @@ final class PlayhouseUITests: XCTestCase {
         environment.merge(environmentOverrides, uniquingKeysWith: { _, new in new })
         app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
         app.launchEnvironment = environment
+        // Every case starts from no restored windows. AppKit saves open windows on
+        // quit and reopens them on the next launch; a plugin window left open by
+        // an earlier case (or session) reopens against this case's data directory,
+        // shows "has no plugin.json", and covers the board.
+        app.launchArguments = ["-ApplePersistenceIgnoreState", "YES"]
         app.launch()
     }
 
@@ -17218,15 +17241,41 @@ final class PlayhouseUITests: XCTestCase {
         if !useCoordinateFallback {
             XCTAssertTrue(card.isHittable, "Task card must be hittable after bounded board scrolling.")
         }
-        // Open the card through its title. The card's center can sit on one of
-        // its own controls (the token counter button opens Token stats), so a
-        // plain card.click() may open that control instead of the task.
-        let cardTitle = element(card.identifier.replacingOccurrences(of: "task-card-", with: "task-title-"))
-        XCTAssertTrue(cardTitle.exists, "Task card title is missing: \(title)")
-        let titleCenter = CGPoint(x: cardTitle.frame.midX, y: cardTitle.frame.midY)
-        XCTAssertTrue(card.frame.contains(titleCenter), "Task card title must lie inside the visible card.")
-        cardTitle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        clickTaskCardTitle(card)
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10), "Clicking the task card title should open the task.")
+    }
+
+    /// Scrolls the board's columns sideways until `target` lies fully inside the
+    /// visible board. With the persistent sidebar, a narrow screen (the UI VM's is
+    /// 1024 points) clips the Review column's trailing edge, where a card's PR
+    /// controls sit: they stay in the hierarchy but take no hover or click.
+    private func revealOnBoard(_ target: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        let board = element("board-columns-scroll-view")
+        XCTAssertTrue(target.waitForExistence(timeout: 5), "Board control is missing: \(target.identifier)", file: file, line: line)
+        // A negative delta moves the columns left, revealing content on the right;
+        // flip it once if a step moved the control the wrong way.
+        var direction: CGFloat = -1
+        for _ in 0..<8 {
+            let visible = board.frame, frame = target.frame
+            if visible.contains(frame) { break }
+            let overflow = frame.maxX > visible.maxX ? frame.maxX - visible.maxX + 24 : frame.minX - visible.minX - 24
+            board.scroll(byDeltaX: direction * overflow, deltaY: 0)
+            waitForStableFrame(target, timeout: 2)
+            let moved = target.frame.minX - frame.minX
+            if moved == 0 || (moved > 0) == (overflow > 0) { direction = -direction }
+        }
+        XCTAssertTrue(board.frame.contains(target.frame), "\(target.identifier) should be scrolled into the visible board; control=\(target.frame), board=\(board.frame).", file: file, line: line)
+    }
+
+    /// Opens a board card through its title. The card's center can sit on one
+    /// of its own controls (the token counter button opens Token stats), so a
+    /// plain card.click() may open that control instead of the task.
+    private func clickTaskCardTitle(_ card: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        let cardTitle = element(card.identifier.replacingOccurrences(of: "task-card-", with: "task-title-"))
+        XCTAssertTrue(cardTitle.waitForExistence(timeout: 5), "Task card title is missing: \(card.identifier)", file: file, line: line)
+        let titleCenter = CGPoint(x: cardTitle.frame.midX, y: cardTitle.frame.midY)
+        XCTAssertTrue(card.frame.contains(titleCenter), "Task card title must lie inside the visible card.", file: file, line: line)
+        cardTitle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
     }
 
     private func completeCurrentTaskWithFixtureAnswers(
@@ -18358,7 +18407,7 @@ final class PlayhouseUITests: XCTestCase {
 
     private func helpTagIsShowing(_ text: String) -> Bool {
         app.descendants(matching: .helpTag)
-            .matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@ OR title CONTAINS %@", text, text, text))
+            .matching(Self.textPredicate(containing: text, caseInsensitive: false, includeTitle: true))
             .firstMatch.exists
     }
 
@@ -18531,8 +18580,25 @@ final class PlayhouseUITests: XCTestCase {
 
     private func element(containingAccessibilityText text: String) -> XCUIElement {
         app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS[c] %@ OR value CONTAINS[c] %@", text, text))
+            .matching(Self.textPredicate(containing: text, caseInsensitive: true))
             .firstMatch
+    }
+
+    /// Element types whose accessibility value is a number, not text.
+    private static let numericValueElementTypes: [UInt] = ([
+        .scrollBar, .valueIndicator, .slider, .progressIndicator, .activityIndicator, .levelIndicator,
+        .ratingIndicator, .checkBox, .radioButton, .switch, .toggle, .stepper, .incrementArrow, .disclosureTriangle, .splitter,
+    ] as [XCUIElement.ElementType]).map(\.rawValue)
+
+    /// Matches an element whose label, text value, or (optionally) title contains `text`.
+    /// `value CONTAINS` raises inside the app on a numeric value, such as the board's
+    /// horizontal scroll bar, and that aborts the whole query until it times out, so a
+    /// value is compared only on element types whose value is text.
+    private static func textPredicate(containing text: String, caseInsensitive: Bool, includeTitle: Bool = false) -> NSPredicate {
+        let contains = caseInsensitive ? "CONTAINS[c]" : "CONTAINS"
+        let format = "label \(contains) %@ OR (NOT (elementType IN %@) AND value \(contains) %@)" + (includeTitle ? " OR title \(contains) %@" : "")
+        let arguments: [Any] = includeTitle ? [text, numericValueElementTypes, text, text] : [text, numericValueElementTypes, text]
+        return NSPredicate(format: format, argumentArray: arguments)
     }
 
     private func accessibleLabelOrValue(of element: XCUIElement) -> String {
