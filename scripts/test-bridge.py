@@ -6291,7 +6291,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn(first_record.get("claudeSessionID"), fixture_sessions, turns)
         self.assertIn(second_record.get("claudeSessionID"), fixture_sessions, turns)
 
-    # case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message in its conversation, where the open and reopened task show it, with an empty composer and no unsent draft, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history.
+    # case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message in its conversation, where the open and reopened task show it, with an empty composer and no unsent draft, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history. While the failing task's conversation is open and its turn held, the parallel turn starts, finishes and advances only its own revision: CLI/XPC runtime still reports the held session active and interruptible and the parallel session inactive, and the open conversation still offers an enabled Stop and never shows the parallel answer.
     def test_conversation_isolates_failing_claude_turn_from_parallel_send(self):
         source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-parallel-failure"
@@ -6325,6 +6325,16 @@ class PlayhouseBridgeTests(unittest.TestCase):
             second_process = None
             self.assert_success(completed)
             self.assertIsNone(first_process.poll(), "The unaffected conversation must complete while the failing turn is still held.")
+            # The parallel turn started, finished and advanced its own revision; the held turn's
+            # runtime state is untouched by it.
+            held_session = self.assert_success(self.call_cli("task", "get", first["id"])[0]).get("claudeSessionID")
+            parallel_session = self.assert_success(self.call_cli("task", "get", second["id"])[0]).get("claudeSessionID")
+            self.assertTrue(held_session and parallel_session and held_session != parallel_session)
+            runtime = self.assert_success(self.call_cli("conversation", "runtime")[0])
+            self.assertIn(held_session, runtime.get("activeThreadIDs", []), runtime)
+            self.assertIn(held_session, runtime.get("interruptibleThreadIDs", []), runtime)
+            self.assertNotIn(parallel_session, runtime.get("activeThreadIDs", []), runtime)
+            self.assertIn(second["id"], runtime.get("conversationRevisions", {}), runtime)
             release.write_text("Fail the first Claude turn.\n", encoding="utf-8")
             failed, _ = self.finish_cli(first_process, first_command, expected_status=1)
             self.assertFalse(failed.get("ok"), failed)

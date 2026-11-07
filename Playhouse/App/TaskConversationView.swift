@@ -960,7 +960,9 @@ struct TaskConversationView: View {
     }
 
     @Environment(\.modelContext) private var modelContext
-    @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
+    /// Read without observing; `runtimeSlice` re-renders this view for its own task's changes.
+    @Environment(\.conversationRuntimeModel) private var runtimeModel
+    @StateObject private var runtimeSlice = ConversationRuntimeSliceObserver()
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
 
@@ -1147,6 +1149,11 @@ struct TaskConversationView: View {
         // Standalone chat has no repository/worktree of its own, so it must never require the
         // app's global repository-root setting to be configured before sending.
         task.isStandaloneChat || WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) != nil
+    }
+
+    private var conversationRuntime: ConversationRuntimeModel {
+        guard let runtimeModel else { preconditionFailure("The conversation runtime model is not in the environment.") }
+        return runtimeModel
     }
 
     private var canPauseResponse: Bool {
@@ -1649,6 +1656,11 @@ struct TaskConversationView: View {
             }
         }
         .background(WorkspaceTheme.windowBackground)
+        .onChange(of: task.id, initial: true) {
+            runtimeSlice.observe(conversationRuntime, taskID: task.id.uuidString) { [task] in
+                Set([task.codexThreadID, task.claudeSessionID].compactMap { $0 })
+            }
+        }
         .onAppear {
             if !isReadOnly,
                let savedMode = WorkspaceSettings.preferencesStore.string(forKey: conversationModeDefaultsKey),

@@ -1,4 +1,5 @@
 import Darwin
+import Combine
 import Foundation
 import SwiftUI
 
@@ -232,6 +233,66 @@ final class ConversationRuntimeModel: ObservableObject {
     func wasLastTurnInterrupted(threadID: String) -> Bool { snapshot.wasLastTurnInterrupted(threadID: threadID) }
     func pendingUserInputRequest(forThread threadID: String) -> ConversationUserInputRequest? { snapshot.pendingUserInput[threadID] }
     func isObservingGoal(threadID: String) -> Bool { snapshot.goal.observedThreadIDs.contains(threadID) }
+}
+
+/// The runtime model without observing it. Reading it through `@EnvironmentObject` re-renders a
+/// view on every snapshot, and the snapshot changes with every turn and revision of every task,
+/// so an open conversation re-ran its whole transcript while other tasks worked.
+/// `ConversationRuntimeSliceObserver` re-renders it for its own task's changes instead.
+private struct ConversationRuntimeModelKey: EnvironmentKey {
+    static let defaultValue: ConversationRuntimeModel? = nil
+}
+
+extension EnvironmentValues {
+    var conversationRuntimeModel: ConversationRuntimeModel? {
+        get { self[ConversationRuntimeModelKey.self] }
+        set { self[ConversationRuntimeModelKey.self] = newValue }
+    }
+}
+
+/// Announces a change when one task's slice of the runtime snapshot changes (see
+/// `ConversationRuntimeSnapshot.slice`), so a view reading the unobserved model re-renders for
+/// its own task only. The thread IDs are read on each snapshot, so a conversation started after
+/// `observe` is followed from its first turn.
+@MainActor
+final class ConversationRuntimeSliceObserver: ObservableObject {
+    private struct Observed: Equatable {
+        var threadIDs: Set<String>
+        var slice: ConversationRuntimeSnapshot
+    }
+
+    private var subscription: AnyCancellable?
+    private var taskID: String?
+    private var observed: Observed?
+
+    /// Follows `taskID`; called again with another task, it follows that one instead.
+    func observe(
+        _ model: ConversationRuntimeModel,
+        taskID: String,
+        threadIDs: @escaping @MainActor () -> Set<String>
+    ) {
+        guard subscription == nil || self.taskID != taskID else { return }
+        subscription?.cancel()
+        self.taskID = taskID
+        observed = nil
+        // `$snapshot` publishes before the model stores the value; the view re-renders on a
+        // later pass, when it reads the stored one.
+        subscription = model.$snapshot.sink { [weak self] snapshot in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let ids = threadIDs()
+                // The thread IDs are compared too: a slice taken before a new conversation's ID
+                // was stored can equal the one after its turn ends, though the view showed the
+                // turn running in between.
+                let next = Observed(threadIDs: ids, slice: snapshot.slice(taskID: taskID, threadIDs: ids))
+                guard next != self.observed else { return }
+                // The first slice is what the view already rendered from.
+                let isFirst = self.observed == nil
+                self.observed = next
+                if !isFirst { self.objectWillChange.send() }
+            }
+        }
+    }
 }
 
 /// Live CPU usage per turn-active task (Claude or Codex), sampled
