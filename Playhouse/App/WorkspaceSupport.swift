@@ -161,6 +161,8 @@ struct ConversationWorkspaceContext {
     /// The skill folders each provider needs passed so it sees the whole
     /// gallery. Only a turn's own launch sets it.
     var skillBridge: SkillBridgeLaunch?
+    /// The rule files each provider is handed or told to skip. Only a turn's own launch sets it.
+    var ruleBridge: RuleBridgeLaunch?
 
     init(roots: [URL]) throws {
         let normalized = roots.map(\.standardizedFileURL)
@@ -840,11 +842,18 @@ enum PlayhouseWorktreeManager {
         return current
     }
 
-    static func resolve(spec: RepositoryWorktreeSpec, title: String, root: URL) throws -> RepositoryWorktreeRecord {
+    /// `reservedBranches` are branch names other active tasks already use in this
+    /// repository; an auto-named branch avoids them (and any other taken name).
+    static func resolve(
+        spec: RepositoryWorktreeSpec,
+        title: String,
+        root: URL,
+        reservedBranches: Set<String> = []
+    ) throws -> RepositoryWorktreeRecord {
         let repository = try repositoryRoot(spec.repositoryPath)
-        let branch = (spec.branch?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
-            ? spec.branch!.trimmingCharacters(in: .whitespacesAndNewlines)
-            : branchSlug(title)
+        let requested = spec.branch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let isAuto = requested.isEmpty || requested == "auto"
+        var branch = isAuto ? branchSlug(title) : requested
         guard !branch.hasPrefix("-") else {
             throw BridgeCommandError(code: "invalid_argument", message: "Branch names can't begin with a hyphen.")
         }
@@ -855,6 +864,9 @@ enum PlayhouseWorktreeManager {
         let defaults = try defaultBranchOptionsIfNeeded(repository: repository, spec: spec)
         let branchFrom = try resolveBase(repository: repository, requested: spec.branchFrom, defaults: defaults)
         let mergeTarget = try resolveMergeTarget(repository: repository, requested: spec.mergeTarget, defaults: defaults)
+        if isAuto {
+            branch = try uniqueAutoBranch(slug: branch, repository: repository, root: root, reserved: reservedBranches)
+        }
         guard branch != mergeTarget else {
             throw BridgeCommandError(code: "invalid_argument", message: "A task branch can't also be its merge target: \(branch).")
         }
@@ -875,6 +887,45 @@ enum PlayhouseWorktreeManager {
             _ = try git(repository, ["worktree", "add", "--no-track", "-b", branch, destination.path, branchFrom])
         }
         return RepositoryWorktreeRecord(repositoryPath: repository, branch: branch, worktreePath: destination.path, branchFrom: branchFrom, createdByPlayhouse: true, mergeTarget: mergeTarget)
+    }
+
+    private static let suffixAlphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789")
+
+    /// The slug when nothing uses it yet, else the slug plus a short random suffix
+    /// that is also free, so an auto task always gets a fresh branch and worktree.
+    private static func uniqueAutoBranch(slug: String, repository: String, root: URL, reserved: Set<String>) throws -> String {
+        let taken = try takenBranchNames(repository: repository, reserved: reserved)
+        func isTaken(_ name: String) -> Bool {
+            taken.contains(name)
+                || FileManager.default.fileExists(atPath: managedPath(root: root, repository: repository, branch: name).path)
+        }
+        guard isTaken(slug) else { return slug }
+        for _ in 0..<10 {
+            let suffix = String((0..<4).map { _ in suffixAlphabet.randomElement()! })
+            let candidate = "\(slug)-\(suffix)"
+            guard !isTaken(candidate) else { continue }
+            guard try git(repository, ["check-ref-format", "--branch", candidate], allowFailure: true).status == 0 else { continue }
+            return candidate
+        }
+        throw BridgeCommandError(code: "operation_failed", message: "Couldn't find an unused branch name based on '\(slug)'. Choose a branch name instead.")
+    }
+
+    private static func takenBranchNames(repository: String, reserved: Set<String>) throws -> Set<String> {
+        var names = reserved
+        let refs = try git(repository, ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"]).output
+        for ref in refs.split(whereSeparator: \.isNewline).map(String.init) {
+            if ref.hasPrefix("refs/heads/") {
+                names.insert(String(ref.dropFirst("refs/heads/".count)))
+            } else if ref.hasPrefix("refs/remotes/") {
+                // refs/remotes/<remote>/<branch>
+                let parts = ref.dropFirst("refs/remotes/".count).split(separator: "/", maxSplits: 1)
+                if parts.count == 2 { names.insert(String(parts[1])) }
+            }
+        }
+        for worktree in try worktrees(repository: repository) {
+            if let branch = worktree.branch { names.insert(branch) }
+        }
+        return names
     }
 
     static func pendingRecord(spec: RepositoryWorktreeSpec) throws -> RepositoryWorktreeRecord {
@@ -1361,7 +1412,8 @@ struct PlayhouseWorktreeService {
     func resolve(
         spec: RepositoryWorktreeSpec,
         title: String,
-        root: URL
+        root: URL,
+        reservedBranches: Set<String> = []
     ) async throws -> RepositoryWorktreeRecord {
         try await perform("worktree.create", fields: [
             "repositoryPath": spec.repositoryPath,
@@ -1371,7 +1423,7 @@ struct PlayhouseWorktreeService {
             "managedRoot": root.path
         ]) {
             try await PlayhouseBackgroundOperation.run {
-                try PlayhouseWorktreeManager.resolve(spec: spec, title: title, root: root)
+                try PlayhouseWorktreeManager.resolve(spec: spec, title: title, root: root, reservedBranches: reservedBranches)
             }
         }
     }

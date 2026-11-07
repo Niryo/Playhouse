@@ -1318,6 +1318,7 @@ enum PlayhouseManagerError: LocalizedError {
     case invalidParentFolder(String)
     case invalidMessage
     case repositoryAssigned(String)
+    case branchAssigned(branch: String, taskTitle: String)
     case invalidTransition(String)
     case unmergedPullRequests([Int])
     case uncommittedChanges([String])
@@ -1340,6 +1341,8 @@ enum PlayhouseManagerError: LocalizedError {
             "Message can't be empty."
         case .repositoryAssigned(let path):
             "This branch worktree is already assigned to another active task: \(path). Choose another branch or finish that task first."
+        case .branchAssigned(let branch, let taskTitle):
+            "Branch `\(branch)` is already used by task \"\(taskTitle)\". Choose another branch or finish that task first."
         case .invalidTransition(let message):
             message
         case .unmergedPullRequests(let numbers):
@@ -4163,7 +4166,8 @@ final class BoardTaskManager {
                                 mergeTarget: item.mergeTarget
                             ),
                             title: branchTitle,
-                            root: worktreeRoot
+                            root: worktreeRoot,
+                            reservedBranches: reservedBranches(repositoryPath: item.repositoryPath, excludingTaskID: id)
                         )
                         resolved.append(record)
                     }
@@ -4269,6 +4273,18 @@ final class BoardTaskManager {
         return fields
     }
 
+    /// Branches other active tasks use in a repository, which an auto-named branch avoids.
+    private func reservedBranches(repositoryPath: String, excludingTaskID: UUID?) -> Set<String> {
+        let repository = Self.canonicalPath(repositoryPath)
+        var names: Set<String> = []
+        for other in (try? listModels()) ?? [] where other.id != excludingTaskID && other.status != .done {
+            for record in other.repositoryWorktrees where !record.isPending && Self.canonicalPath(record.repositoryPath) == repository {
+                names.insert(record.branch)
+            }
+        }
+        return names
+    }
+
     private func validateRepositoryAssignments(
         _ candidates: [RepositoryWorktreeRecord],
         excludingTaskID: UUID?
@@ -4280,7 +4296,7 @@ final class BoardTaskManager {
                    other.repositoryWorktrees.contains(where: {
                        Self.canonicalPath($0.repositoryPath) == repositoryPath && $0.branch == candidate.branch
                    }) {
-                    throw PlayhouseManagerError.repositoryAssigned(candidate.repositoryPath)
+                    throw PlayhouseManagerError.branchAssigned(branch: candidate.branch, taskTitle: other.title)
                 }
 
                 let candidateWorkspacePath = Self.canonicalPath(
@@ -5113,7 +5129,7 @@ final class ConversationManager {
     }
 
     /// The workspace a provider launch for `task` runs in, carrying the skill
-    /// bridge so the provider sees the whole gallery. Every path that can start
+    /// and rule bridges so the provider sees the whole gallery and every rule. Every path that can start
     /// or load the task's own provider session (send, history, goals) uses this:
     /// Codex keeps a loaded thread's skill config, so the first load decides it.
     private func launchWorkspace(for task: any ConversationSubject, roots: [URL], message: String = "") throws -> ConversationWorkspaceContext {
@@ -5123,6 +5139,9 @@ final class ConversationManager {
             var bridge = skills.bridge(roots: skillRoots)
             bridge.invocations = skills.invocations(in: message, roots: skillRoots)
             workspace.skillBridge = bridge
+        }
+        if let rules = clients.rules {
+            workspace.ruleBridge = rules.bridge(roots: SkillRoot.roots(for: task))
         }
         return workspace
     }
@@ -8895,20 +8914,20 @@ final class PlayhouseBridgeRuntime {
             #else
             skillsHome = nil
             #endif
-            let skills = SkillCatalogManager(
-                environment: SkillEnvironment.resolve(
-                    homeOverride: skillsHome,
-                    claudeConfigOverride: claudeConfigDirectory,
-                    codexHomeOverride: callerCodexHome,
-                    storeDirectory: storeDirectory
-                ),
-                preferences: preferences
+            let agentEnvironment = SkillEnvironment.resolve(
+                homeOverride: skillsHome,
+                claudeConfigOverride: claudeConfigDirectory,
+                codexHomeOverride: callerCodexHome,
+                storeDirectory: storeDirectory
             )
+            let skills = SkillCatalogManager(environment: agentEnvironment, preferences: preferences)
+            let rules = RuleCatalogManager(environment: agentEnvironment, preferences: preferences)
             func conversationClients(codexHome: String? = nil, goalFeatureEnabled: Bool = false) -> ConversationClients {
                 ConversationClients(
                     codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: codexHome ?? callerCodexHome, goalFeatureEnabled: goalFeatureEnabled, goalRuntimeEnabled: guiRuntime, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
                     claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, configDirectoryOverride: claudeConfigDirectory, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
-                    skills: skills
+                    skills: skills,
+                    rules: rules
                 )
             }
             func skillRoots() throws -> [SkillRoot] {
@@ -8933,6 +8952,11 @@ final class PlayhouseBridgeRuntime {
             func skillIDs() throws -> [String] {
                 if let ids = request.arguments["skillIDs"]?.strings, !ids.isEmpty { return ids }
                 return [try request.requiredString("skillID")]
+            }
+            /// One rule as `ruleID`, or several as `ruleIDs`.
+            func ruleIDs() throws -> [String] {
+                if let ids = request.arguments["ruleIDs"]?.strings, !ids.isEmpty { return ids }
+                return [try request.requiredString("ruleID")]
             }
             /// Optional SKILL.md header fields, such as license, keyed by name.
             func skillFields() throws -> [String: String] {
@@ -9556,6 +9580,60 @@ final class PlayhouseBridgeRuntime {
                 var bridge = skills.bridge(roots: roots)
                 bridge.invocations = skills.invocations(in: request.arguments["message"]?.string ?? "", roots: roots)
                 result = try Self.value(bridge)
+            case "rules.list":
+                result = try Self.value(rules.catalog(roots: skillRoots()))
+            case "rules.get":
+                let roots = try skillRoots()
+                let ruleID = try request.requiredString("ruleID")
+                guard let record = rules.catalog(roots: roots).rule(id: ruleID) else {
+                    throw BridgeCommandError(code: "not_found", message: "No rule matches \(ruleID).")
+                }
+                result = .object(["rule": try Self.value(record), "content": .string(try rules.content(id: ruleID, roots: roots))])
+            case "rules.create":
+                let roots = try skillRoots()
+                guard let scope = RuleScope(rawValue: try request.requiredString("scope")), scope != .managed else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Scope must be 'repo' or 'global'.")
+                }
+                result = try Self.value(rules.create(
+                    name: request.arguments["name"]?.string,
+                    paths: request.arguments["paths"]?.strings ?? [],
+                    body: request.arguments["body"]?.string ?? "",
+                    scope: scope,
+                    root: scope == .repo ? try skillRoot(in: roots) : nil,
+                    roots: roots
+                ))
+            case "rules.update":
+                result = try Self.value(rules.update(
+                    id: request.requiredString("ruleID"), content: request.requiredString("content"), roots: skillRoots()
+                ))
+            case "rules.delete":
+                try rules.delete(ids: ruleIDs(), roots: skillRoots())
+                result = .object(["deleted": .boolean(true)])
+            case "rules.enable":
+                let value = request.arguments["enabled"]
+                guard let enabled = value?.bool ?? value?.string.flatMap({ ["true": true, "false": false][$0] }) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Enabled must be true or false.")
+                }
+                result = try Self.value(rules.setEnabled(id: request.requiredString("ruleID"), enabled: enabled, roots: skillRoots()))
+            case "rules.link":
+                result = try Self.value(rules.link(id: request.requiredString("ruleID"), roots: skillRoots()))
+            case "rules.unlink":
+                result = try Self.value(rules.unlink(id: request.requiredString("ruleID"), roots: skillRoots()))
+            case "rules.fix":
+                let taskID = try request.requiredUUID("taskID")
+                let plan = try rules.fixPlan(ids: ruleIDs(), roots: skillRoots())
+                let source = try taskManager.conversationSubject(taskID)
+                let created = try await taskManager.create(
+                    title: plan.title,
+                    repositories: plan.repositoryPaths.map { RepositoryWorktreeSpec(repositoryPath: $0, branch: nil, branchFrom: nil) },
+                    contextFolders: plan.contextFolders,
+                    provider: source.conversationProvider,
+                    pullRequestMode: settings.pullRequestModeDefault,
+                    prompt: plan.prompt
+                )
+                result = .object(["task": try Self.value(created), "prompt": .string(plan.prompt)])
+            case "rules.bridge":
+                result = try Self.value(rules.bridge(roots: skillRoots()))
             case "conversation.provider.capabilities":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .array(try await conversations.providerCapabilities(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })
@@ -9565,7 +9643,7 @@ final class PlayhouseBridgeRuntime {
                 var ownsClient = !guiRuntime
                 if let threadID = try? taskManager.taskModel(request.requiredUUID("taskID")).codexThreadID,
                    let owner = CodexAppServerClient.sharedClient(loading: threadID, compatibleWith: clients.codex), owner !== clients.codex {
-                    clients = ConversationClients(codex: owner, claude: clients.claude, skills: clients.skills)
+                    clients = ConversationClients(codex: owner, claude: clients.claude, skills: clients.skills, rules: clients.rules)
                     ownsClient = false
                 }
                 defer { if ownsClient { clients.codex.shutdown() } }
@@ -9763,7 +9841,7 @@ final class PlayhouseBridgeRuntime {
             let code: String
             switch error {
             case .taskNotFound: code = "not_found"
-            case .invalidTitle, .invalidStatus, .noWorkspaceRoots, .unavailableWorkspaceRoot, .invalidParentFolder, .invalidMessage, .repositoryAssigned: code = "invalid_argument"
+            case .invalidTitle, .invalidStatus, .noWorkspaceRoots, .unavailableWorkspaceRoot, .invalidParentFolder, .invalidMessage, .repositoryAssigned, .branchAssigned: code = "invalid_argument"
             case .invalidTransition: code = "invalid_argument"
             case .unmergedPullRequests, .uncommittedChanges: code = "invalid_transition"
             }

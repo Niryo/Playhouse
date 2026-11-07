@@ -542,19 +542,13 @@ def scenario_concurrent_auto_branch(ws):
         fcntl.lockf(lock_descriptor, fcntl.LOCK_UN, 0, 0, os.SEEK_SET)
         os.close(lock_descriptor)
     outcomes = [finish_turn(turn) for turn in turn_processes]
-    require(sorted(status for status, _ in outcomes) == [0, 2], f"Expected one live branch claim and one assignment conflict; got {[status for status, _ in outcomes]}.")
-    successful = [response for _, response in outcomes if response.get("ok") is True]
-    rejected = [response for _, response in outcomes if response.get("ok") is False]
-    require(len(successful) == len(rejected) == 1, f"Expected one successful and one rejected live turn: {outcomes}")
-    require(rejected[0].get("error", {}).get("code") == "invalid_argument", f"Unexpected auto branch conflict error: {rejected[0]}")
-    require("already assigned" in rejected[0].get("error", {}).get("message", ""), f"Auto branch conflict omitted its explanation: {rejected[0]}")
+    require(sorted(status for status, _ in outcomes) == [0, 0], f"Both concurrent live auto-branch turns should start; got {[status for status, _ in outcomes]}.")
     persisted = [run_cli("task", "get", contender["id"]) for contender in auto_tasks]
-    prepared = [task for task in persisted if not task["repositoryWorktrees"][0]["isPending"]]
-    pending = [task for task in persisted if task["repositoryWorktrees"][0]["isPending"]]
-    require(len(prepared) == len(pending) == 1, f"Concurrent auto branch turns must leave one prepared task and one pending task: {persisted}")
-    require(prepared[0]["status"] == "Review", f"The winning turn should finish in Review after reporting its outcome: {persisted}")
-    require(pending[0]["status"] == "Backlog", f"A rejected branch claim must restore the losing contender to Backlog: {persisted}")
-    require(pending[0].get("pendingSubmittedPrompt") is None, f"A rejected branch claim left a pending submitted prompt: {persisted}")
+    prepared = persisted
+    require(all(not task["repositoryWorktrees"][0]["isPending"] for task in persisted), f"Both concurrent auto branch turns must prepare a worktree: {persisted}")
+    branches = {task["repositoryWorktrees"][0]["branch"] for task in persisted}
+    paths = {task["repositoryWorktrees"][0]["worktreePath"] for task in persisted}
+    require(len(branches) == len(paths) == 2, f"Concurrent auto-branch tasks must get distinct branches and worktrees: {persisted}")
     prepared_path = Path(prepared[0]["repositoryWorktrees"][0]["worktreePath"])
     require(prepared_path.is_dir() and data_directory.joinpath("worktrees") in prepared_path.parents, f"The winning managed worktree is missing or outside the owned worktree directory: {prepared_path}")
     worktree_count_after = subprocess.run(
@@ -563,7 +557,7 @@ def scenario_concurrent_auto_branch(ws):
         capture_output=True,
         text=True,
     ).stdout.count("worktree ")
-    require(worktree_count_after == worktree_count_before + 1, "Only the winning live turn should create a managed worktree.")
+    require(worktree_count_after == worktree_count_before + 2, "Each live turn should create its own managed worktree.")
     return "concurrent auto-branch claim"
 
 
