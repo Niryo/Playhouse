@@ -490,7 +490,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Playhouse board opened with a healthy bridge")
     }
 
-    // case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude, which only reports usage while a task runs, starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the placeholder button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
+    // case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude's usage is read with Claude Code's get_usage control request, which has none for this account yet, so Claude starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Because Claude Code streams rate_limit_event only when a limit's status changes, and a usage-based plan's event has no utilization, every finished Claude turn reads the plan's usage again through get_usage (skipping the local transcript scan) without a refresh: the read replaces the windows with the plan's current ones, keeps get_usage percents as percents, shows a usage-based plan's monthly extra usage as a Spend limit row with the reset time from the stream's overage event, and is persisted; a refresh reads it too, a reply without plan usage keeps the last known rows, a reached spend limit reads as the limit reached, and a usage request that is never answered times out, keeping the last known rows, so later reads work again. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the placeholder button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. After a Claude turn whose usage read reports the plan's spend, the open window shows Claude's Spend limit row with its percent and reset time and the updated 5h row without a relaunch. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
     func test_agents_info_shows_provider_usage_and_accounts() throws {
         let codexExecutable = try makeCodexFixture(emptyQuestions: false)
         let codexAccount = URL(fileURLWithPath: codexExecutable.path + ".account")
@@ -537,7 +537,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(secondary.contains("Weekly") && secondary.contains("62%"), "Codex's weekly window should show its percent: \(secondary)")
         XCTAssertEqual(text("agents-info-codex-credits"), "Credits: 12.50")
         XCTAssertEqual(text("agents-info-claude-account"), "claude-fixture@example.com")
-        XCTAssertTrue(element("agents-info-claude-empty").exists, "Claude should say it has no data yet.")
+        XCTAssertEqual(text("agents-info-claude-empty"), "No data yet", "Claude should say it has no data yet.")
         XCTAssertTrue(element("agents-info-switch-claude").exists && element("agents-info-switch-codex").exists, "Each agent should offer a switch-account button.")
         attachScreenshot(named: "Agents info with Codex usage and Claude awaiting data")
 
@@ -569,6 +569,29 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ text("agents-info-claude-window-five_hour").contains("Reset") && text("agents-info-claude-window-five_hour").contains("0%") }, timeout: 40), "A window past its reset time should show as reset.")
         XCTAssertFalse(element("agents-info-claude-status").exists, "The limit state should lift once its window has reset.")
         XCTAssertTrue(text("agents-info-claude-window-seven_day").contains("41%"))
+
+        // Claude Code streams an event only when a limit's status changes, and a usage-based plan's event has no
+        // percent, so every finished turn reads the plan's usage through get_usage and the open window follows it.
+        let usageURL = URL(fileURLWithPath: claudeExecutable.path + ".usage")
+        defer { try? FileManager.default.removeItem(at: usageURL) }
+        func iso(_ seconds: Int) -> String { ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: TimeInterval(seconds))) }
+        try JSONSerialization.data(withJSONObject: ["rate_limits_available": true, "rate_limits": [
+            "five_hour": ["utilization": 12.0, "resets_at": iso(now + 7200)],
+            "seven_day": ["utilization": 0.5, "resets_at": iso(now + 5 * 86400)],
+            "extra_usage": ["is_enabled": true, "utilization": 51.7, "spend_limit_reached": false],
+        ]]).write(to: usageURL)
+        try claudeTurn(["status": "allowed", "rateLimitType": "overage", "resetsAt": now + 20 * 86400, "isUsingOverage": false])
+        XCTAssertTrue(waitUntil({ text("agents-info-claude-window-overage").contains("52%") }, timeout: 40), "A finished turn should read Claude's spend from get_usage.")
+        let spend = text("agents-info-claude-window-overage")
+        XCTAssertTrue(spend.contains("Spend limit") && spend.contains("Resets in"), "The spend row should be labelled and keep the stream's monthly reset: \(spend)")
+        let fiveHour = text("agents-info-claude-window-five_hour")
+        XCTAssertTrue(fiveHour.contains("12%") && fiveHour.contains("Resets in"), "The read should replace the reset 5h window with the current one: \(fiveHour)")
+        let weekly = text("agents-info-claude-window-seven_day")
+        XCTAssertTrue(weekly.contains("1%") && !weekly.contains("41%") && !weekly.contains("50%"), "get_usage's 0.5 is a percent, shown rounded as 1%: \(weekly)")
+        XCTAssertFalse(element("agents-info-claude-empty").exists)
+        attachScreenshot(named: "Agents info with Claude usage read after a turn")
+        // The account switched to below has no usage of its own.
+        try FileManager.default.removeItem(at: usageURL)
 
         // While a Codex task runs, switching asks first, and cancelling keeps the account.
         let holdMarker = URL(fileURLWithPath: codexExecutable.path + ".hold-release")
@@ -16044,6 +16067,10 @@ final class PlayhouseUITests: XCTestCase {
         try FileManager.default.createDirectory(at: claudeSkills, withIntermediateDirectories: true)
         try "Not a skill, just a file in the way.\n".write(to: claudeSkills.appendingPathComponent("blocked"), atomically: true, encoding: .utf8)
         launchApp(defaultParent: fixture.parent.path)
+        // The window reads Claude's plan usage once at launch, in a session of its own; count from after it.
+        let usageReadsURL = URL(fileURLWithPath: claudeExecutable.path + ".usage-reads")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: usageReadsURL.path) }, timeout: 30), "Launch reads Claude's plan usage.")
+        let sessionsAtLaunch = claudeSessions()
         let task = try createSkillsTask("Skills links", repositories: [repository])
         let taskID = try XCTUnwrap(task["id"] as? String)
         let worktree = URL(fileURLWithPath: try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String))
@@ -16056,7 +16083,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
         XCTAssertTrue(isOn(toggle))
         // The page reads Claude Code's built-ins once when it opens.
-        XCTAssertTrue(waitUntil({ claudeSessions() >= 1 }, timeout: 20), "Opening the Skills page reads Claude Code's built-ins.")
+        XCTAssertTrue(waitUntil({ claudeSessions() > sessionsAtLaunch }, timeout: 20), "Opening the Skills page reads Claude Code's built-ins.")
         let sessionsBeforeToggle = claudeSessions()
         toggle.click()
         XCTAssertTrue(waitUntil({ !self.isOn(toggle) }, timeout: 0.75), "The switch flips as soon as it is clicked.")

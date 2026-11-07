@@ -10243,7 +10243,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_success(response)
         assert_nudged_work(self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0]), "later turn")
 
-    # case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude, which only reports usage while a task runs, starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the placeholder button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
+    # case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude's usage is read with Claude Code's get_usage control request, which has none for this account yet, so Claude starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Because Claude Code streams rate_limit_event only when a limit's status changes, and a usage-based plan's event has no utilization, every finished Claude turn reads the plan's usage again through get_usage (skipping the local transcript scan) without a refresh: the read replaces the windows with the plan's current ones, keeps get_usage percents as percents, shows a usage-based plan's monthly extra usage as a Spend limit row with the reset time from the stream's overage event, and is persisted; a refresh reads it too, a reply without plan usage keeps the last known rows, a reached spend limit reads as the limit reached, and a usage request that is never answered times out, keeping the last known rows, so later reads work again. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the placeholder button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. After a Claude turn whose usage read reports the plan's spend, the open window shows Claude's Spend limit row with its percent and reset time and the updated 5h row without a relaunch. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
     def test_agents_info_shows_provider_usage_and_accounts(self):
         source = Path(__file__).resolve().parent / "fixtures"
         codex = self.data_directory / "codex-fixture-agents-info"
@@ -10355,6 +10355,75 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(expired.get("resetsAt"))
         self.assertEqual(claude_state["snapshot"]["status"], "allowed", "The limit lifts with the window that held it.")
         self.assertEqual(windows(claude_state)["seven_day"]["usedPercent"], 41)
+
+        # Claude Code pushes rate_limit_event only when a limit's status changes, and a
+        # usage-based plan's event names its spend limit with no utilization. So after
+        # every turn Playhouse reads the plan's usage with Claude Code's get_usage
+        # control request, without a model call and without a refresh.
+        usage_path = Path(str(claude) + ".usage")
+        usage_reads = Path(str(claude) + ".usage-reads")
+
+        def read_count():
+            return len(usage_reads.read_text(encoding="utf-8").splitlines()) if usage_reads.exists() else 0
+
+        def iso(seconds):
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+
+        usage_path.write_text(json.dumps({"rate_limits_available": True, "rate_limits": {
+            "five_hour": {"utilization": 12.0, "resets_at": iso(now + 7200)},
+            "seven_day": {"utilization": 0.5, "resets_at": iso(now + 5 * 86400)},
+            "seven_day_opus": None,
+            "extra_usage": {"is_enabled": True, "monthly_limit": 65000, "used_credits": 33602,
+                            "utilization": 51.7, "spend_limit_reached": False},
+        }}), encoding="utf-8")
+        reads_before_turn = read_count()
+        claude_turn({"status": "allowed", "rateLimitType": "overage", "resetsAt": now + 20 * 86400, "isUsingOverage": False})
+        claude_state = wait_for(
+            "claude", lambda state: windows(state).get("five_hour", {}).get("usedPercent") == 12,
+            "A finished Claude turn should read the plan's usage again.",
+        )
+        self.assertGreater(read_count(), reads_before_turn, "The turn's end reads usage through get_usage.")
+        self.assertIs(json.loads(usage_reads.read_text(encoding="utf-8").splitlines()[-1])["skipBehaviors"], True,
+                      "The read skips the local transcript scan.")
+        read_windows = windows(claude_state)
+        self.assertEqual(list(read_windows), ["five_hour", "seven_day", "overage"], "The read lists the plan's windows; null ones are left out.")
+        self.assertFalse(read_windows["five_hour"]["isReset"], "The read replaces the expired window with the current one.")
+        self.assertEqual(read_windows["five_hour"]["resetsAt"], now + 7200)
+        self.assertEqual(read_windows["seven_day"]["usedPercent"], 0.5, "get_usage reports percents, so 0.5 stays 0.5%.")
+        self.assertEqual((read_windows["overage"]["label"], read_windows["overage"]["usedPercent"]), ("Spend limit", 51.7))
+        self.assertEqual(read_windows["overage"]["resetsAt"], now + 20 * 86400, "The spend's reset time comes from the stream's overage event.")
+        self.assertEqual(claude_state["snapshot"]["status"], "allowed")
+        saved = json.loads(persisted[0].read_text(encoding="utf-8"))
+        self.assertEqual([window["usedPercent"] for window in saved["claude"]["snapshot"]["windows"]], [12, 0.5, 51.7])
+
+        # A refresh reads it too; a reply without plan usage keeps the last known rows.
+        usage_path.write_text(json.dumps({"rate_limits_available": False, "rate_limits": None}), encoding="utf-8")
+        reads_before_refresh = read_count()
+        claude_state = usage("--refresh")["claude"]
+        self.assertGreater(read_count(), reads_before_refresh, "A refresh reads Claude's usage.")
+        self.assertEqual([window["usedPercent"] for window in windows(claude_state).values()], [12, 0.5, 51.7],
+                         "An unavailable reply must not clear the rows.")
+        usage_path.write_text(json.dumps({"rate_limits_available": True, "rate_limits": {
+            "extra_usage": {"is_enabled": True, "utilization": 100.0, "spend_limit_reached": True},
+        }}), encoding="utf-8")
+        claude_state = usage("--refresh")["claude"]
+        self.assertEqual(list(windows(claude_state)), ["overage"], "A read replaces the windows a plan no longer has.")
+        self.assertEqual(claude_state["snapshot"]["status"], "rejected", "A reached spend limit is a reached limit.")
+
+        # A get_usage request that is never answered times out instead of holding
+        # every later read, and the next read works again.
+        hang_path = Path(str(claude) + ".usage-hang")
+        hang_path.write_text("hang\n", encoding="utf-8")
+        started = time.monotonic()
+        claude_state = usage("--refresh")["claude"]
+        self.assertLess(time.monotonic() - started, 45, "An unanswered usage read must time out.")
+        self.assertEqual(list(windows(claude_state)), ["overage"], "A read that timed out keeps the last known rows.")
+        hang_path.unlink()
+        usage_path.write_text(json.dumps({"rate_limits_available": True, "rate_limits": {
+            "extra_usage": {"is_enabled": True, "utilization": 40.0, "spend_limit_reached": False},
+        }}), encoding="utf-8")
+        self.assertEqual(windows(usage("--refresh")["claude"])["overage"]["usedPercent"], 40, "Reads work again after a timeout.")
+        usage_path.unlink()
 
         # Switching the Codex account signs out, clears usage, and signs in again;
         # the new account's usage arrives with the login's own notifications.

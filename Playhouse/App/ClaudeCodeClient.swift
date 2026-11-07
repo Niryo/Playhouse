@@ -1291,6 +1291,10 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     private var conversationOperationsInFlight = 0
     private static let bundledSkillsLifetime: TimeInterval = 10 * 60
     private var bundledSkillsCache: (readAt: Date, skills: [(name: String, description: String)])?
+    /// The plan usage read in flight, and whether another was asked for meanwhile.
+    fileprivate var planUsageRead: Task<Void, Never>?
+    fileprivate var planUsageReadQueued = false
+    fileprivate static let planUsageReadTimeout: Duration = .seconds(15)
 
     /// `dataDirectory` only ever varies across calls in debug/test builds (via
     /// `BridgeRequest.dataDirectory`); production always passes `nil`, so one
@@ -1525,6 +1529,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             }
             if runners[sessionID] === runner { runners.removeValue(forKey: sessionID) }
             runnerStateChanged(runner)
+            // The turn spent plan usage that its stream does not report.
+            Task { await self.readPlanUsage() }
         }
 
         let isNewSession = newSessionIDs.contains(sessionID)
@@ -1844,8 +1850,7 @@ extension ClaudeCodeClient {
     var isInstalled: Bool { executablePath != nil }
 
     /// Reads the sign-in state with `claude auth status`, a local call that
-    /// needs no network. Usage itself only arrives as `rate_limit_event`
-    /// messages while a task runs, so it is not read here.
+    /// needs no network, then the plan's usage.
     func refreshAgentUsage() async {
         let store = AgentUsageStore.shared(scope: runtimeScope)
         store.setInstalled(.claude, isInstalled)
@@ -1859,6 +1864,50 @@ extension ClaudeCodeClient {
             account: (status["email"] as? String) ?? (status["authMethod"] as? String),
             plan: subscription
         )
+        if loggedIn { await readPlanUsage() }
+    }
+
+    /// Reads the plan's usage with Claude Code's `get_usage` control request, in
+    /// a session that never receives a prompt, so no model request is made.
+    /// The stream's `rate_limit_event` is sent only when a limit's status
+    /// changes, and carries no utilization at all for a usage-based plan, so
+    /// this read is what keeps the numbers current after each turn. Reads asked
+    /// for while one runs share one follow-up read.
+    func readPlanUsage() async {
+        if let running = planUsageRead {
+            planUsageReadQueued = true
+            await running.value
+            return
+        }
+        let read = Task { @MainActor in
+            repeat {
+                planUsageReadQueued = false
+                await readPlanUsageOnce()
+            } while planUsageReadQueued
+            planUsageRead = nil
+        }
+        planUsageRead = read
+        await read.value
+    }
+
+    private func readPlanUsageOnce() async {
+        guard isInstalled, let workspace = try? ConversationWorkspaceContext(roots: []) else { return }
+        do {
+            let response = try await withMetadataSession(workspace: workspace) { runner in
+                // A reply that never comes (a stalled usage service, or a CLI that ignores
+                // the request) must not hold every later read: stopping the session fails it.
+                let timeout = Task { @MainActor in
+                    try await Task.sleep(for: Self.planUsageReadTimeout)
+                    runner.shutdown()
+                }
+                defer { timeout.cancel() }
+                return try await runner.controlRequest(["subtype": "get_usage", "skip_behaviors": true])
+            }
+            AgentUsageStore.shared(scope: runtimeScope).recordClaudeRead(response.extra)
+        } catch {
+            // An older Claude Code without `get_usage` still reports through the stream.
+            PlayhouseDiagnostics.record("claude.usage.read_failed", fields: PlayhouseDiagnostics.errorFields(error))
+        }
     }
 
     /// Starts `claude auth login`, which opens the browser itself and exits once
