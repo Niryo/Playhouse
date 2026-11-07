@@ -1,0 +1,14 @@
+{
+  "id": "context-menu",
+  "name": "Context menu",
+  "version": "1.0.0",
+  "description": "Right-click the card for its menu.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Context menu"
+      }
+    ]
+  }
+}

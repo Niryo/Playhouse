@@ -1,0 +1,160 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 10
+    },
+    "children": [
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 8
+        },
+        "children": [
+          {
+            "type": "badge",
+            "props": {
+              "text": "accent",
+              "color": "accent"
+            }
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "success",
+              "color": "success"
+            }
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "warning",
+              "color": "warning"
+            }
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "danger",
+              "color": "danger"
+            }
+          }
+        ]
+      },
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 8
+        },
+        "children": [
+          {
+            "type": "badge",
+            "props": {
+              "text": "accent",
+              "color": "accent",
+              "style": "solid"
+            }
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "success",
+              "color": "success",
+              "style": "solid"
+            }
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "warning",
+              "color": "warning",
+              "style": "solid"
+            }
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "danger",
+              "color": "danger",
+              "style": "solid"
+            }
+          }
+        ]
+      },
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 8
+        },
+        "children": [
+          {
+            "type": "badge",
+            "props": {
+              "text": "accent",
+              "color": "accent",
+              "style": "outline"
+            }
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "success",
+              "color": "success",
+              "style": "outline"
+            }
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "warning",
+              "color": "warning",
+              "style": "outline"
+            }
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "danger",
+              "color": "danger",
+              "style": "outline"
+            }
+          }
+        ]
+      },
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 8
+        },
+        "children": [
+          {
+            "type": "badge",
+            "props": {
+              "text": "Ready",
+              "icon": "checkmark.circle.fill",
+              "color": "success"
+            }
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "12",
+              "monospaced": true,
+              "size": "small"
+            }
+          },
+          {
+            "type": "badge",
+            "props": {
+              "text": "M",
+              "monospaced": true,
+              "color": "warning",
+              "style": "solid",
+              "size": "small"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -191,12 +191,15 @@ struct PluginTreeResolver {
             if let defaultValue = prop.defaultValue { props[prop.name] = defaultValue }
         }
         let missing = spec.props.filter { $0.required && (props[$0.name]?.isNull ?? true) }.map(\.name)
+        var resolvedChildren = children(of: node, path: path, scope: scope)
+        // A closed popover keeps its anchor; a closed sheet keeps nothing, so its content can't be reached.
+        if spec.presentation, props["open"]?.isTruthy != true { resolvedChildren = Array(resolvedChildren.prefix(spec.anchorChildren)) }
         return [PluginResolvedNode(
             id: id,
             type: node.type,
             props: props,
             events: events,
-            children: children(of: node, path: path, scope: scope),
+            children: resolvedChildren,
             error: missing.isEmpty ? nil : "Missing required prop \(missing.joined(separator: ", "))."
         )]
     }

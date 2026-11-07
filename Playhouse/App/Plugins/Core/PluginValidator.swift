@@ -46,8 +46,12 @@ enum PluginValidator {
         var actions: [(name: String, path: String)] = []
         for viewID in bundle.views.keys.sorted() {
             guard let root = bundle.views[viewID] else { continue }
+            var parents: [String: String] = [:]
             for node in root.allNodes {
-                issues += nodeIssues(node, actions: &actions)
+                for child in effectiveChildren(node) { parents[child.path] = node.type }
+            }
+            for node in root.allNodes {
+                issues += nodeIssues(node, parent: parents[node.path], directory: bundle.directory, actions: &actions)
             }
         }
         let defined: Result<Set<String>, PluginLoadError>?
@@ -108,7 +112,12 @@ enum PluginValidator {
         return issues
     }
 
-    private static func nodeIssues(_ node: PluginViewNode, actions: inout [(name: String, path: String)]) -> [PluginIssue] {
+    /// The children a node produces, looking through `if` and `list`, which draw nothing themselves.
+    private static func effectiveChildren(_ node: PluginViewNode) -> [PluginViewNode] {
+        node.children.flatMap { PluginComponentCatalog.spec($0.type)?.structural == true ? effectiveChildren($0) : [$0] }
+    }
+
+    private static func nodeIssues(_ node: PluginViewNode, parent: String?, directory: URL, actions: inout [(name: String, path: String)]) -> [PluginIssue] {
         var issues: [PluginIssue] = []
         func add(_ path: String, _ message: String) { issues.append(PluginIssue(file: PluginBundle.viewFile, path: path, message: message)) }
         guard let spec = PluginComponentCatalog.spec(node.type) else {
@@ -117,6 +126,20 @@ enum PluginValidator {
         }
         if !spec.acceptsChildren, !node.children.isEmpty {
             add("\(node.path).children", "\(node.type) doesn't take children.")
+        }
+        if let allowed = spec.childTypes {
+            for child in effectiveChildren(node) where !allowed.contains(child.type) {
+                add("\(child.path).type", "\(node.type) only takes \(allowed.joined(separator: " and ")) children, not \(child.type).")
+            }
+        }
+        if node.children.count < spec.minChildren {
+            add("\(node.path).children", "\(node.type) needs at least \(spec.minChildren) child\(spec.minChildren == 1 ? "" : "ren")" + (spec.anchorChildren > 0 ? ": the anchor, then its content." : "."))
+        }
+        if let parents = spec.parentTypes, !parents.contains(parent ?? "") {
+            add("\(node.path).type", "\(node.type) belongs directly inside \(parents.joined(separator: " or ")).")
+        }
+        if !spec.needsOneOf.isEmpty, !spec.needsOneOf.contains(where: { node.props[$0] != nil }) {
+            add("\(node.path).props", "\(node.type) needs one of the props \(spec.needsOneOf.joined(separator: ", ")).")
         }
         let accepted = PluginComponentCatalog.acceptedPropNames(spec)
         for name in node.props.keys.sorted() {
@@ -141,6 +164,7 @@ enum PluginValidator {
             issues += bindingIssues(value, path: path)
             let kind = spec.props.first { $0.name == name }?.kind ?? PluginComponentCatalog.commonProps.first { $0.name == name }?.kind ?? .any
             if let problem = typeProblem(value, kind: kind) { add(path, problem) }
+            if kind == .file, let problem = fileProblem(value, directory: directory) { add(path, problem) }
         }
         for prop in spec.props where prop.required && node.props[prop.name] == nil {
             add("\(node.path).props", "\(node.type) needs the prop \"\(prop.name)\".")
@@ -164,13 +188,22 @@ enum PluginValidator {
         }
     }
 
+    /// A literal file prop must name an existing file inside the plugin folder.
+    private static func fileProblem(_ value: BridgeValue, directory: URL) -> String? {
+        guard let text = value.string, !text.contains("{{") else { return nil }
+        guard let url = PluginFiles.resolve(text, in: directory) else {
+            return "\"\(text)\" must be a relative path inside the plugin folder."
+        }
+        return FileManager.default.fileExists(atPath: url.path) ? nil : "The plugin folder has no file \"\(text)\"."
+    }
+
     /// Literal values only: a binding is checked when it resolves, not here.
     private static func typeProblem(_ value: BridgeValue, kind: PluginPropKind) -> String? {
         if case .string(let text) = value, text.contains("{{") { return nil }
         switch kind {
         case .any:
             return nil
-        case .string:
+        case .string, .file:
             return value.string == nil ? "Expected a string." : nil
         case .number:
             return value.number == nil ? "Expected a number." : nil

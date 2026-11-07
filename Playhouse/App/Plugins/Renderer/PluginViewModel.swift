@@ -21,7 +21,9 @@ final class PluginViewModel: ObservableObject {
     var actions: PluginNodeActions {
         PluginNodeActions(
             tap: { [weak self] id in self?.session?.tap(nodeID: id) },
-            input: { [weak self] id, text in self?.session?.input(nodeID: id, text: text) }
+            input: { [weak self] id, text in self?.session?.input(nodeID: id, text: text) },
+            fire: { [weak self] id, event, value in self?.session?.fire(nodeID: id, event: event, value: value) },
+            directory: directory
         )
     }
 

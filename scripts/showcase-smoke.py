@@ -2,9 +2,10 @@
 """Drive every Component Catalog showcase through playhouse-plugin-dev.
 
 One generic driver for all showcases, with no per-showcase scripts: it loads the
-showcase, checks the tree has no error elements, then taps every element with an
-onTap action and types into every element with an onChange action, re-reading the
-tree after each so newly revealed elements are exercised too. Any failed action,
+showcase, checks the tree has no error elements, then fires every event of every
+element (taps, edits, toggles, submits, dismissals) with a sample value of the kind
+the catalog says the event carries, re-reading the tree after each so newly revealed
+elements are exercised too. Elements of a dialog or popover that isn't open are skipped. Any failed action,
 JS exception, error element or invalid state fails the run. Live showcases
 (`"live": true`, which need the real daemon) are skipped.
 """
@@ -18,10 +19,11 @@ import threading
 import time
 from pathlib import Path
 
-MAX_INTERACTIONS = 60
+MAX_INTERACTIONS = 100
 REPLY_TIMEOUT = 75
 LOAD_TIMEOUT = 20
 TYPED_TEXT = "smoke test"
+SAMPLE_DATE = "2026-11-07T10:00:00Z"
 
 
 class RunnerSession:
@@ -101,15 +103,48 @@ def check_tree(tree, label):
             raise RuntimeError(f"{label}: element {node['id']} ({node['type']}) has an error: {node['error']}")
 
 
-def interactions(tree):
+def event_specs(catalog):
+    """(component type, event name) -> the catalog's event spec, plus the set of presentation components."""
+    events = {}
+    presentation = set()
+    for component in catalog["components"]:
+        if component["presentation"]:
+            presentation.add(component["type"])
+        for event in component["events"]:
+            events[(component["type"], event["name"])] = event
+    return events, presentation
+
+
+def sample_value(node, event):
+    """A JSON value of the kind the event carries, or None for events without one."""
+    kind = event.get("valueKind") if event else None
+    if kind is None:
+        return None
+    source = event.get("valueFrom")
+    if source:
+        options = node.get("props", {}).get(source) or []
+        values = [o if isinstance(o, str) else o.get("value") for o in options]
+        return json.dumps(values[0]) if values else json.dumps("")
+    if kind == "bool":
+        return "true"
+    if kind == "number":
+        return "1"
+    if node["type"] == "date-picker":
+        return json.dumps(SAMPLE_DATE)
+    return json.dumps(TYPED_TEXT)
+
+
+def interactions(tree, catalog):
+    events, presentation = catalog
     for node in walk(tree):
-        if is_truthy(node.get("props", {}).get("disabled")):
+        props = node.get("props", {})
+        if is_truthy(props.get("disabled")):
             continue
-        events = node.get("events", {})
-        if "onTap" in events:
-            yield (node["id"], "tap")
-        if "onChange" in events:
-            yield (node["id"], "type")
+        if node["type"] in presentation and not is_truthy(props.get("open")):
+            continue
+        for name in node.get("events", {}):
+            if name != "onAppear":
+                yield (node["id"], name, sample_value(node, events.get((node["type"], name))))
 
 
 def smoke(runner, directory):
@@ -121,14 +156,18 @@ def smoke(runner, directory):
         if not view.get("ok"):
             raise RuntimeError(f"view failed: {view.get('error')}")
         check_tree(view["tree"], "initial view")
+        reply = session.send("components")
+        if not reply.get("ok"):
+            raise RuntimeError(f"components failed: {reply.get('error')}")
+        catalog = event_specs(reply["catalog"])
         done = set()
         while count < MAX_INTERACTIONS:
-            pending = [item for item in interactions(view["tree"]) if item not in done]
+            pending = [item for item in interactions(view["tree"], catalog) if item[:2] not in done]
             if not pending:
                 break
-            node_id, kind = pending[0]
-            done.add((node_id, kind))
-            command = f"tap {node_id}" if kind == "tap" else f"type {node_id} {TYPED_TEXT}"
+            node_id, event, value = pending[0]
+            done.add((node_id, event))
+            command = f"tap {node_id}" if event == "onTap" else f"fire {node_id} {event}" + (f" {value}" if value is not None else "")
             reply = session.send(command)
             count += 1
             if not reply.get("ok"):

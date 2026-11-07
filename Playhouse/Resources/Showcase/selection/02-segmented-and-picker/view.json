@@ -1,0 +1,91 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 10
+    },
+    "children": [
+      {
+        "type": "segmented",
+        "props": {
+          "value": "{{layout}}",
+          "options": [
+            {
+              "value": "list",
+              "title": "List",
+              "icon": "list.bullet"
+            },
+            {
+              "value": "board",
+              "title": "Board",
+              "icon": "rectangle.split.3x1"
+            },
+            {
+              "value": "grid",
+              "title": "Grid",
+              "icon": "square.grid.2x2"
+            }
+          ],
+          "onChange": {
+            "action": "set",
+            "payload": {
+              "field": "layout"
+            }
+          }
+        }
+      },
+      {
+        "type": "segmented",
+        "props": {
+          "value": "{{size}}",
+          "options": [
+            "S",
+            "M",
+            "L"
+          ],
+          "onChange": {
+            "action": "set",
+            "payload": {
+              "field": "size"
+            }
+          }
+        }
+      },
+      {
+        "type": "picker",
+        "props": {
+          "label": "Priority",
+          "value": "{{priority}}",
+          "options": [
+            {
+              "value": "low",
+              "title": "Low"
+            },
+            {
+              "value": "normal",
+              "title": "Normal"
+            },
+            {
+              "value": "high",
+              "title": "High"
+            }
+          ],
+          "onChange": {
+            "action": "set",
+            "payload": {
+              "field": "priority"
+            }
+          }
+        }
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "layout = {{layout}}, size = {{size}}, priority = {{priority}}",
+          "style": "caption",
+          "color": "secondary"
+        }
+      }
+    ]
+  }
+}

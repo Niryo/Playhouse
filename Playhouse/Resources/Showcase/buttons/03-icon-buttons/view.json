@@ -1,0 +1,83 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 10
+    },
+    "children": [
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 12
+        },
+        "children": [
+          {
+            "type": "icon-button",
+            "props": {
+              "icon": "trash",
+              "title": "Delete",
+              "size": "mini",
+              "destructive": true,
+              "onTap": {
+                "action": "pressed",
+                "payload": {
+                  "which": "delete"
+                }
+              }
+            }
+          },
+          {
+            "type": "icon-button",
+            "props": {
+              "icon": "square.and.pencil",
+              "title": "Edit",
+              "onTap": {
+                "action": "pressed",
+                "payload": {
+                  "which": "edit"
+                }
+              }
+            }
+          },
+          {
+            "type": "icon-button",
+            "props": {
+              "icon": "arrow.clockwise",
+              "title": "Refresh",
+              "size": "regular",
+              "onTap": {
+                "action": "pressed",
+                "payload": {
+                  "which": "refresh"
+                }
+              }
+            }
+          },
+          {
+            "type": "icon-button",
+            "props": {
+              "icon": "pin",
+              "title": "Pin",
+              "emphasis": false,
+              "color": "accent",
+              "onTap": {
+                "action": "pressed",
+                "payload": {
+                  "which": "pin"
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "Last pressed: {{last}}",
+          "style": "caption",
+          "color": "secondary"
+        }
+      }
+    ]
+  }
+}

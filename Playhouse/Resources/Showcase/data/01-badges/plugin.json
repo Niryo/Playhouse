@@ -1,0 +1,14 @@
+{
+  "id": "badges",
+  "name": "Badges",
+  "version": "1.0.0",
+  "description": "Tinted, solid and outline badges for labels and counts.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Badges"
+      }
+    ]
+  }
+}

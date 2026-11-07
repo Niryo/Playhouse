@@ -1,0 +1,106 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 12
+    },
+    "children": [
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 8
+        },
+        "children": [
+          {
+            "type": "list",
+            "props": {
+              "items": "{{tags}}",
+              "key": "id"
+            },
+            "children": [
+              {
+                "type": "chip",
+                "props": {
+                  "text": "{{item.text}}",
+                  "icon": "tag",
+                  "color": "accent",
+                  "selected": "{{item.selected}}",
+                  "removable": true,
+                  "onTap": {
+                    "action": "toggle",
+                    "payload": {
+                      "id": "{{item.id}}"
+                    }
+                  },
+                  "onRemove": {
+                    "action": "remove",
+                    "payload": {
+                      "id": "{{item.id}}"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 10
+        },
+        "children": [
+          {
+            "type": "button",
+            "props": {
+              "title": "Add tag",
+              "icon": "plus",
+              "onTap": {
+                "action": "add"
+              }
+            }
+          },
+          {
+            "type": "text",
+            "props": {
+              "text": "{{tags.length}} tags",
+              "style": "caption",
+              "color": "secondary"
+            }
+          }
+        ]
+      },
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 8
+        },
+        "children": [
+          {
+            "type": "chip",
+            "props": {
+              "text": "feature",
+              "color": "success"
+            }
+          },
+          {
+            "type": "chip",
+            "props": {
+              "text": "bug",
+              "color": "danger",
+              "selected": true
+            }
+          },
+          {
+            "type": "chip",
+            "props": {
+              "text": "docs",
+              "icon": "book",
+              "color": "info"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "main": {
+    "type": "vstack",
+    "props": {
+      "spacing": 10
+    },
+    "children": [
+      {
+        "type": "hstack",
+        "props": {
+          "spacing": 10
+        },
+        "children": [
+          {
+            "type": "button",
+            "props": {
+              "title": "Delete project\u2026",
+              "icon": "trash",
+              "destructive": true,
+              "onTap": {
+                "action": "askDelete"
+              }
+            }
+          },
+          {
+            "type": "button",
+            "props": {
+              "title": "Show alert",
+              "onTap": {
+                "action": "showAlert"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "type": "confirm-dialog",
+        "props": {
+          "open": "{{confirming}}",
+          "title": "Delete this project?",
+          "message": "This can't be undone.",
+          "confirmTitle": "Delete",
+          "destructive": true,
+          "onConfirm": {
+            "action": "confirm"
+          },
+          "onCancel": {
+            "action": "cancel"
+          }
+        }
+      },
+      {
+        "type": "alert",
+        "props": {
+          "open": "{{alerting}}",
+          "title": "Heads up",
+          "message": "The build is still running.",
+          "onDismiss": {
+            "action": "dismissAlert"
+          }
+        }
+      },
+      {
+        "type": "text",
+        "props": {
+          "text": "Result: {{result}}",
+          "style": "caption",
+          "color": "secondary"
+        }
+      }
+    ]
+  }
+}

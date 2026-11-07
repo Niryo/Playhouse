@@ -22,6 +22,8 @@ enum BadgeComponent: PluginComponent {
 }
 ```
 
+Events that carry a value declare its kind (`PluginEventSpec.valueKind`, and `valueFrom` naming the array prop of allowed values, such as a picker's `options`); the renderer reports it with `ctx.fire("onChange", value: …)`, and the core refuses a value of another kind. A modal-like component sets `presentation: true` with a required `open` prop: its content is dropped from the tree and its events are refused while closed (`anchorChildren` keeps a popover's anchor). `childTypes`, `parentTypes`, `minChildren` and `needsOneOf` make `plugin validate` reject misuse, and a `.file` prop must name a file in the plugin folder (`ctx.fileURL`).
+
 Then list it in `PluginComponentRegistry.components` in `Renderer/PluginRenderer.swift`. Read props through `ctx` (`string`, `number`, `bool`, `color`, `alignment`), place children with `ctx.children`, and report input with `ctx.tap()` or `ctx.input(text)`. The common props (padding, frame, colors, border, tooltip, `onTap` on any component) and the `plugin-node-<n>` accessibility identifier are applied for you. A control that handles its own clicks and help text, like a button or a field, declares `static let handlesOwnInput = true` so the common `onTap` and `tooltip` aren't layered on top. A `Button` needs `.buttonHoverPointer()` and `.nativeHelp(...)` (`scripts/check-button-feedback.py`). Structural components (`if`, `list`) are resolved by the core and have no renderer.
 
 ## 3. Add a showcase

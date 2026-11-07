@@ -12501,7 +12501,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         if logic is not None:
             (directory / "logic.js").write_text(logic, encoding="utf-8")
 
-    # case-contract: test_plugin_catalog_showcases_cover_every_component | The Plugins menu opens the Component Catalog, whose sidebar lists every bundled showcase section; each section page renders all of its showcases live through the real renderer with no unknown-component or error placeholders and lists its components' props reference. The progress-bar showcase's bar itself advances to 100% when Start is clicked, both in the Catalog and through playhouse-plugin-dev with no app running, where `tap` returns after the async action settles and `state` shows pct 100; the stage's Reset restarts it from initialState, Show Source shows its view.json and logic.js, and Show Node IDs overlays each element's number, matching the runner's numbering. Typing into the text-field showcase sends each edit's value to its action and shows it, removing the first row of the list showcase leaves the others in place with their element numbers, and an if shows its content only while its condition holds. `plugin components` lists every section and component spec with typed props and events and rejects an unknown component, and `plugin check-showcases` passes for the bundled showcases while a copy with a component used by no showcase, an empty section, an event-bearing component left without an interactive showcase, or an unknown component fails with issues naming them.
+    # case-contract: test_plugin_catalog_showcases_cover_every_component | The Plugins menu opens the Component Catalog, whose sidebar lists every bundled showcase section; each section page renders all of its showcases live through the real renderer with no unknown-component or error placeholders and lists its components' props reference. The progress-bar showcase's bar itself advances to 100% when Start is clicked, both in the Catalog and through playhouse-plugin-dev with no app running, where `tap` returns after the async action settles and `state` shows pct 100; the stage's Reset restarts it from initialState, Show Source shows its view.json and logic.js, and Show Node IDs overlays each element's number, matching the runner's numbering. Typing into the text-field showcase sends each edit's value to its action and shows it, removing the first row of the list showcase leaves the others in place with their element numbers, and an if shows its content only while its condition holds. `plugin components` lists every section and component spec with typed props and events and rejects an unknown component, and `plugin check-showcases` passes for the bundled showcases while a copy with a component used by no showcase, an empty section, an event-bearing component left without an interactive showcase, or an unknown component fails with issues naming them. `plugin components` also reports each event's value kind and which components are presentation components, and the catalog covers the app's atomic components: labels, badges, chips, status dots, images and avatars, icon buttons, copy buttons, fields, toggles, segmented controls, pickers, sliders, date pickers, cards, hints, empty states, scroll, menus, popovers, sheets, alerts and confirm dialogs.
     def test_plugin_catalog_showcases_cover_every_component(self):
         showcase_root = Path(__file__).resolve().parent.parent / "Playhouse/Resources/Showcase"
         catalog = self.assert_success(self.call_cli("plugin", "components")[0])
@@ -12516,6 +12516,19 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assertIn(component_type, components)
             self.assertIn(components[component_type]["section"], section_ids)
         self.assertTrue(components["if"]["structural"] and components["list"]["structural"])
+        for component_type in ["label", "code", "kbd", "link", "image", "avatar", "icon-button", "copy-button", "secure-field",
+                               "text-editor", "search-field", "toggle", "segmented", "picker", "slider", "date-picker", "badge",
+                               "chip", "card", "status-dot", "empty-state", "hint", "scroll", "menu", "menu-item", "context-menu",
+                               "popover", "sheet", "alert", "confirm-dialog"]:
+            self.assertIn(component_type, components, f"The catalog covers {component_type}.")
+        def change(component_type):
+            return next(event for event in components[component_type]["events"] if event["name"] == "onChange")
+        self.assertEqual([change(kind)["valueKind"] for kind in ["toggle", "slider", "textfield"]], ["bool", "number", "string"])
+        self.assertEqual(change("segmented")["valueFrom"], "options")
+        self.assertEqual([name for name, component in sorted(components.items()) if component["presentation"]],
+                         ["alert", "confirm-dialog", "popover", "sheet"])
+        self.assertEqual(components["menu-item"]["parentTypes"], ["menu", "context-menu"])
+        self.assertEqual(components["menu"]["childTypes"], ["menu-item", "divider"])
         self.assertIn("padding", [prop["name"] for prop in catalog["commonProps"]])
         button = self.assert_success(self.call_cli("plugin", "components", "--type", "button")[0])
         self.assertEqual([component["type"] for component in button["components"]], ["button"])
@@ -12541,7 +12554,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         shutil.copytree(showcase_root, broken_root)
         shutil.rmtree(broken_root / "progress-status" / "03-spinners")
         shutil.rmtree(broken_root / "media" / "01-icons")
-        (broken_root / "text-input" / "01-textfield" / "logic.js").unlink()
+        shutil.rmtree(broken_root / "media" / "02-images-avatars")
+        (broken_root / "typography" / "04-links" / "logic.js").unlink()
         self.write_plugin(
             broken_root / "layout" / "09-unknown",
             {"id": "unknown", "name": "Unknown", "version": "1.0.0", "contributes": {"views": [{"id": "main", "title": "Unknown"}]}},
@@ -12552,7 +12566,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(report["valid"])
         messages = [issue["message"] for issue in report["issues"]]
         self.assertTrue(any("spinner isn't used by any showcase" in message for message in messages), messages)
-        self.assertTrue(any("textfield has events, so it needs an interactive showcase" in message for message in messages), messages)
+        self.assertTrue(any("link has events, so it needs an interactive showcase" in message for message in messages), messages)
         unknown = [issue for issue in report["issues"] if issue["showcase"] == "layout/09-unknown"]
         self.assertTrue(any("Unknown component \"fancy-widget\"" in issue["message"] and issue["path"] == "main.children[0].type" for issue in unknown), unknown)
         self.assertTrue(any(issue["file"] == "media/" and "no showcases" in issue["message"] for issue in report["issues"]), messages)
@@ -12625,6 +12639,175 @@ class PlayhouseBridgeTests(unittest.TestCase):
         toggle.stdin.write("quit\n")
         toggle.stdin.flush()
         self.assertEqual(toggle.wait(timeout=10), 0)
+
+    # case-contract: test_plugin_controls_report_typed_values_and_present_overlays | The app's atomic components are available to plugins in the Component Catalog. The Notifications switch reports false and the checkbox true, each shown in the showcase text; choosing Board in the segmented control and High in the picker shows layout = board and priority = high; the stepped slider moves to its last step and shows effort = 4. The Sort menu opens with its items and choosing Date shows Sorted by date; a right-click on the context-menu card offers Delete and reports it. The popover opens from its anchor with its content and closes on Got it; the sheet opens with a name field, saves the typed name and closes; the delete confirmation is cancelled (Result: Cancelled), then confirmed (Result: Deleted), and the alert is dismissed. The icon and copy buttons report their press (Last pressed: edit, Copied 1 times); the secure field, search field and text editor report what is typed (secret length 3, the query, the note's characters); removing a chip drops it (2 tags, then 1 tags); the date pickers show their ISO dates and a runner `type` sets one; a scroll region's last row starts outside its frame and scrolls into it; and the display components show their content (labels, badges, chips, avatars, cards, hints, empty states, status labels and an image's description). Through playhouse-plugin-dev the same showcases refuse bad values: a toggle takes only true or false, a slider only a number, a segmented control or picker only one of its options, and an event a component doesn't have is refused; a closed confirm dialog, alert, popover or sheet can't be answered and has no content in the tree until it is opened, after which onCancel and onConfirm run their actions. `plugin validate` reports an image whose file is missing or outside the plugin folder, an icon without name or src, an alert without open, a menu with a non-menu child and a menu-item outside a menu, each with its file and JSON path.
+    def test_plugin_controls_report_typed_values_and_present_overlays(self):
+        showcase_root = Path(__file__).resolve().parent.parent / "Playhouse/Resources/Showcase"
+
+        def open_showcase(section, name):
+            runner = self.plugin_runner(showcase_root / section / name)
+            self.assertTrue(self.runner_message(runner)["ok"])
+            return runner
+
+        def tree_nodes(runner):
+            return self.plugin_nodes(self.runner_send(runner, "view")["tree"])
+
+        def node(runner, **match):
+            return self.runner_node(tree_nodes(runner), **match)
+
+        def state(runner):
+            return self.runner_send(runner, "state")["state"]
+
+        def accepted(runner, command):
+            reply = self.runner_send(runner, command)
+            self.assertTrue(reply["ok"], f"{command}: {reply}")
+
+        def refused(runner, command, reason):
+            reply = self.runner_send(runner, command)
+            self.assertFalse(reply["ok"], f"{command} should be refused.")
+            self.assertIn(reason, reply["error"], command)
+
+        toggles = open_showcase("selection", "01-toggles")
+        switch = node(toggles, type="toggle", label="Notifications")["id"]
+        checkbox = node(toggles, type="toggle", style="checkbox")["id"]
+        accepted(toggles, f"type {switch} false")
+        self.assertIs(state(toggles)["notify"], False, "A toggle reports a real boolean.")
+        accepted(toggles, f"fire {checkbox} onChange true")
+        self.assertIs(state(toggles)["autosave"], True)
+        refused(toggles, f"type {switch} maybe", "true or false")
+        refused(toggles, f"fire {switch} onChange 5", "expected true or false")
+        refused(toggles, f"fire {switch} onChange", "needs a bool value")
+        refused(toggles, f"fire {switch} onTap", "has no onTap action")
+        self.assertIs(state(toggles)["notify"], False, "A refused value leaves the state alone.")
+
+        sliders = open_showcase("selection", "03-slider")
+        effort = node(sliders, type="slider", label="Effort")["id"]
+        accepted(sliders, f"type {effort} 3")
+        self.assertEqual(state(sliders)["effort"], 3)
+        accepted(sliders, f"fire {effort} onChange 2.5")
+        self.assertEqual(state(sliders)["effort"], 2.5)
+        refused(sliders, f"type {effort} lots", "takes a number")
+        refused(sliders, f"fire {effort} onChange \"lots\"", "expected a number")
+
+        choices = open_showcase("selection", "02-segmented-and-picker")
+        layout = node(choices, type="segmented", value="list")["id"]
+        picker = node(choices, type="picker")["id"]
+        accepted(choices, f"fire {layout} onChange \"board\"")
+        self.assertEqual(state(choices)["layout"], "board")
+        refused(choices, f"fire {layout} onChange \"carousel\"", "isn't one of the options")
+        accepted(choices, f"type {picker} high")
+        self.assertEqual(state(choices)["priority"], "high")
+        refused(choices, f"type {picker} urgent", "isn't one of the options")
+        self.assertEqual((state(choices)["layout"], state(choices)["priority"]), ("board", "high"))
+
+        menus = open_showcase("overlays", "01-menus")
+        sort = node(menus, type="menu", title="Sort")
+        self.assertEqual([child["type"] for child in sort["children"]], ["menu-item", "menu-item", "divider", "menu-item", "menu-item"])
+        accepted(menus, f"tap {node(menus, type='menu-item', title='Date')['id']}")
+        self.assertEqual((state(menus)["byDate"], state(menus)["byName"], state(menus)["last"]), (True, False, "Sorted by date"))
+
+        popover = open_showcase("overlays", "03-popover")
+        closed = node(popover, type="popover")
+        self.assertEqual([child["type"] for child in closed["children"]], ["button"], "A closed popover keeps only its anchor.")
+        refused(popover, f"fire {closed['id']} onDismiss", "is closed")
+        accepted(popover, f"tap {closed['children'][0]['id']}")
+        self.assertEqual(len(node(popover, type="popover")["children"]), 4, "An open popover shows its content.")
+        accepted(popover, f"fire {closed['id']} onDismiss")
+        self.assertEqual(len(node(popover, type="popover")["children"]), 1)
+
+        sheet = open_showcase("overlays", "04-sheet")
+        self.assertEqual(node(sheet, type="sheet")["children"], [], "A closed sheet has no content.")
+        accepted(sheet, f"tap {node(sheet, type='button', title='Rename project…')['id']}")
+        self.assertEqual([child["type"] for child in node(sheet, type="sheet")["children"]], ["heading", "textfield", "hstack"])
+        accepted(sheet, f"type {node(sheet, type='textfield')['id']} Roadmap")
+        accepted(sheet, f"tap {node(sheet, type='button', title='Save')['id']}")
+        self.assertEqual((state(sheet)["name"], state(sheet)["open"]), ("Roadmap", False))
+        self.assertEqual(node(sheet, type="sheet")["children"], [])
+
+        dialogs = open_showcase("overlays", "05-dialogs")
+        confirm = node(dialogs, type="confirm-dialog")["id"]
+        alert = node(dialogs, type="alert")["id"]
+        refused(dialogs, f"fire {confirm} onConfirm", "is closed")
+        refused(dialogs, f"fire {alert} onDismiss", "is closed")
+        delete = node(dialogs, type="button", title="Delete project…")["id"]
+        accepted(dialogs, f"tap {delete}")
+        self.assertIs(state(dialogs)["confirming"], True)
+        accepted(dialogs, f"fire {confirm} onCancel")
+        self.assertEqual((state(dialogs)["result"], state(dialogs)["confirming"]), ("Cancelled", False))
+        refused(dialogs, f"fire {confirm} onCancel", "is closed")
+        accepted(dialogs, f"tap {delete}")
+        accepted(dialogs, f"fire {confirm} onConfirm")
+        self.assertEqual((state(dialogs)["result"], state(dialogs)["confirming"]), ("Deleted", False))
+        accepted(dialogs, f"tap {node(dialogs, type='button', title='Show alert')['id']}")
+        accepted(dialogs, f"fire {alert} onDismiss")
+        self.assertEqual(state(dialogs)["result"], "Alert dismissed")
+
+        pressed = open_showcase("buttons", "03-icon-buttons")
+        accepted(pressed, f"tap {node(pressed, type='icon-button', title='Edit')['id']}")
+        self.assertEqual(state(pressed)["last"], "edit", "An icon button reports its press.")
+        copying = open_showcase("buttons", "04-copy-button")
+        accepted(copying, f"fire {node(copying, type='copy-button', text='Copy all')['id']} onCopy")
+        self.assertEqual(state(copying)["copies"], 1)
+
+        fields = open_showcase("text-input", "02-fields")
+        accepted(fields, f"type {node(fields, type='secure-field')['id']} abc")
+        accepted(fields, f"type {node(fields, type='search-field')['id']} plugin")
+        accepted(fields, f"type {node(fields, type='text-editor')['id']} hello")
+        accepted(fields, f"fire {node(fields, type='search-field')['id']} onSubmit")
+        self.assertEqual([state(fields)[key] for key in ["secretLength", "query", "notes", "submits"]], [3, "plugin", "hello", 1])
+
+        chips = open_showcase("data", "02-chips")
+        first_chip = node(chips, type="chip", text="swift")["id"]
+        accepted(chips, f"fire {first_chip} onRemove")
+        self.assertEqual([tag["text"] for tag in state(chips)["tags"]], ["plugins"], "Removing a chip drops it.")
+
+        dates = open_showcase("pickers", "01-date-picker")
+        picker_id = node(dates, type="date-picker", label="Date")["id"]
+        self.assertEqual(state(dates)["day"], "2026-11-07T09:30:00Z")
+        accepted(dates, f"type {picker_id} 2026-12-01T08:00:00Z")
+        self.assertEqual(state(dates)["day"], "2026-12-01T08:00:00Z")
+
+        scroll = open_showcase("layout", "04-scroll")
+        self.assertEqual(len(node(scroll, type="scroll", axis="vertical")["children"]), 12)
+
+        display = [
+            ("typography", "03-labels-code-kbd", ["Pull request merged", "scripts/test-e2e.sh"]),
+            ("data", "01-badges", ["Ready", "success"]),
+            ("data", "03-cards", ["Panel", "Reviewing 3 pull requests"]),
+            ("feedback", "01-empty-states", ["No tasks yet", "Create a task to get started."]),
+            ("feedback", "02-hints", ["Add comment", "Merge conflict"]),
+            ("progress-status", "04-status-dots", ["In progress", "Blocked"]),
+            ("media", "02-images-avatars", ["Logo", "Ada Lovelace"]),
+        ]
+        for section, name, expected in display:
+            shown = {str(value) for item in tree_nodes(open_showcase(section, name))
+                     for key, value in item.get("props", {}).items() if key in ("text", "title", "message", "alt")}
+            for value in expected:
+                self.assertIn(value, shown, f"{section}/{name} shows {value}.")
+
+        bad = self.data_directory / "Plugins" / "bad-components"
+        self.write_plugin(
+            bad,
+            {"id": "bad-components", "name": "Bad components", "version": "1.0.0", "contributes": {"views": [{"id": "main", "title": "Bad"}]}},
+            {"main": {"type": "vstack", "children": [
+                {"type": "image", "props": {"src": "missing.png"}},
+                {"type": "image", "props": {"src": "../escape.png"}},
+                {"type": "icon", "props": {}},
+                {"type": "alert", "props": {"title": "Hi"}},
+                {"type": "menu", "children": [{"type": "text", "props": {"text": "Not an entry"}}]},
+                {"type": "menu-item", "props": {"title": "Stray"}},
+                {"type": "popover", "props": {"open": False}, "children": [{"type": "text", "props": {"text": "Anchor only"}}]},
+            ]}},
+        )
+        report, _ = self.call_cli("plugin", "validate", "--path", bad, expected_status=1)
+        issues = {(issue["file"], issue["path"]): issue["message"] for issue in self.assert_success(report)["issues"]}
+        self.assertIn("no file \"missing.png\"", issues[("view.json", "main.children[0].props.src")])
+        self.assertIn("inside the plugin folder", issues[("view.json", "main.children[1].props.src")])
+        self.assertIn("needs one of the props name, src", issues[("view.json", "main.children[2].props")])
+        self.assertIn("needs the prop \"open\"", issues[("view.json", "main.children[3].props")])
+        self.assertIn("only takes menu-item and divider", issues[("view.json", "main.children[4].children[0].type")])
+        self.assertIn("belongs directly inside menu or context-menu", issues[("view.json", "main.children[5].type")])
+        self.assertIn("needs at least 2 children", issues[("view.json", "main.children[6].children")])
 
     # case-contract: test_plugin_installed_plugin_loads_validates_and_runs | A plugin folder in the data directory's Plugins folder appears in the Plugins menu with one Open item per view, and each view opens in its own window; clicking its button runs the logic.js action and updates the bound text, an action's api.call reaches the real daemon and shows its result while a call to an unknown command rejects with the daemon's error, the plugin's Reload item restarts the open window from initialState, and editing view.json reloads it. A plugin with problems shows its first problem in its submenu; the menu and `plugin list` validate through the same manager. `plugin new` scaffolds a valid plugin there and refuses an existing id, `plugin list` reports each installed plugin with its views and validation issues, and `plugin validate` reports unknown components, missing actions and reserved button contributions with their file and JSON path and exits non-zero. A showcase scaffold needs a showcase root and lands in its section as NN-<id> with a section.json. Through playhouse-plugin-dev the same plugin's button updates state, its api.call actions resolve and reject the same way and appear in its log, a disabled button refuses taps, and editing view.json reloads it.
     def test_plugin_installed_plugin_loads_validates_and_runs(self):

@@ -44,8 +44,10 @@ Each view is a tree of `{ "type", "props", "children" }`. `playhouse-cli plugin 
 
 - **Bindings** are `{{path}}` lookups into state, with `!` to negate and `.length` on arrays and strings. A prop that is exactly one binding gets the bound value itself (a number, array or boolean); bindings inside longer text are interpolated. Anything more is computed in logic.js and stored in state.
 - **Structural nodes:** `if` shows its children while `cond` is truthy; `list` repeats its children per item of `items`, with the item as `item` (or the name in `as`) and its position as `index`. Rows are keyed by the item's `id` (or the field in `key`).
-- **Events** are `{ "action": "<name>", "payload": … }`, with bindings in the payload resolved when the view renders. `onTap` and `onAppear` work on every component; inputs such as `textfield` fire `onChange` with `{ value }` merged into the payload.
-- **Common props** on every component: `width`, `height`, `minWidth`, `maxWidth`, `minHeight`, `maxHeight`, `grow`, `align`, `padding`, `background`, `foreground`, `border`, `radius`, `opacity`, `shadow`, `hidden`, `disabled`, `tooltip`. Colors are `accent`, `primary`, `secondary`, `muted`, `success`, `warning`, `danger`, `info`, `clear`, or `#RRGGBB`.
+- **Events** are `{ "action": "<name>", "payload": … }`, with bindings in the payload resolved when the view renders. `onTap` and `onAppear` work on every component; inputs such as `textfield` fire `onChange` with `{ value }` merged into the payload. The `value` has the kind the control reports: text for fields, pickers and date pickers (dates are ISO 8601), a boolean for `toggle`, a number for `slider`. A `segmented` control or `picker` only reports one of its `options` (`[{ "value", "title", "icon"? }]` or plain strings). Other events: `onSubmit` (fields), `onRemove` (`chip`), `onCopy` (`copy-button`), and `onDismiss`, `onConfirm` and `onCancel` on overlays.
+- **Common props** on every component: `width`, `height`, `minWidth`, `maxWidth`, `minHeight`, `maxHeight`, `grow`, `align`, `padding`, `background`, `foreground`, `border`, `radius`, `opacity`, `shadow`, `hidden`, `disabled`, `tooltip`, `cursor` (`pointer`). Colors are `accent`, `primary`, `secondary`, `muted`, `success`, `warning`, `danger`, `info`, `purple`, `clear`, the app surfaces `window`, `panel` and `input`, or `#RRGGBB`.
+- **Overlays** (`popover`, `sheet`, `alert`, `confirm-dialog`) are shown while their `open` prop is true, so `open` is bound to state and the dismissal event (`onDismiss`, `onCancel`) is where the action sets it back to false. A popover is anchored to its first child and shows the rest as its content; a sheet's children are its content. While an overlay is closed its content is not in the tree, and its events are refused. `menu` takes `menu-item` and `divider` children; `context-menu` takes menu entries plus the content they belong to.
+- **Files.** `src` props (`image`, `avatar`, `icon`) name a file inside the plugin folder; `plugin validate` reports a missing file or a path that leaves the folder.
 
 ## logic.js
 
@@ -80,7 +82,9 @@ playhouse-plugin-dev "<data>/Plugins/my-plugin"         # run it live, without t
 | --- | --- |
 | `view` | Prints the resolved tree, one element per line with its number: `[5] button title="Start" onTap→start` |
 | `tap <id>` | Runs element `<id>`'s `onTap` action and returns once it settles; a disabled element refuses |
-| `type <id> <text>` | Runs element `<id>`'s `onChange` action with `{ value: <text> }` |
+| `type <id> <text>` | Runs element `<id>`'s `onChange` action with `{ value: <text> }`, read as the control's value kind (`true`/`false` for a toggle, a number for a slider) |
+| `fire <id> <event> [json]` | Runs any event of element `<id>` (`onSubmit`, `onConfirm`, …) with `{ value: <json> }` when given; a value of the wrong kind, an option the control doesn't have, or an overlay that isn't open is refused |
+| `components` | The component catalog as JSON |
 | `state` | The current state as JSON |
 | `log [n]` | Console output, exceptions and the `api` call trace |
 | `reload` | Load the folder again; state resets to `initialState` |

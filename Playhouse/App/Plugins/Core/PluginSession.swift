@@ -112,16 +112,39 @@ final class PluginSession {
 
     /// Runs the node's `onTap` action.
     func tap(nodeID: Int, completion: @escaping (PluginActionOutcome) -> Void) {
-        trigger(nodeID: nodeID, event: "onTap", value: nil, completion: completion)
+        fire(nodeID: nodeID, event: "onTap", value: nil, completion: completion)
     }
 
-    /// Runs the node's `onChange` action with `{ value: text }` merged into its payload.
+    /// Runs the node's `onChange` action with text typed for it, read as the kind of
+    /// value the control reports: `true` for a toggle, `3` for a slider, text otherwise.
     func input(nodeID: Int, text: String, completion: @escaping (PluginActionOutcome) -> Void) {
-        trigger(nodeID: nodeID, event: "onChange", value: .string(text), completion: completion)
+        let kind = snapshot.tree?.allNodes.first { $0.id == nodeID }
+            .flatMap { PluginComponentCatalog.spec($0.type) }
+            .flatMap { PluginComponentCatalog.event("onChange", for: $0)?.valueKind }
+        let value: BridgeValue
+        switch kind {
+        case .bool?:
+            guard let flag = ["true": true, "false": false][text.lowercased()] else {
+                return completion(.failed("Node \(nodeID) takes true or false."))
+            }
+            value = .boolean(flag)
+        case .number?:
+            guard let number = Double(text) else { return completion(.failed("Node \(nodeID) takes a number.")) }
+            value = number == number.rounded() && abs(number) < 1e15 ? .integer(Int(number)) : .decimal(number)
+        default:
+            value = .string(text)
+        }
+        fire(nodeID: nodeID, event: "onChange", value: value, completion: completion)
+    }
+
+    /// Runs any of the node's event actions, with `{ value }` merged into its payload when the event carries one.
+    func fire(nodeID: Int, event: String, value: BridgeValue?, completion: @escaping (PluginActionOutcome) -> Void) {
+        trigger(nodeID: nodeID, event: event, value: value, completion: completion)
     }
 
     func tap(nodeID: Int) { tap(nodeID: nodeID) { _ in } }
     func input(nodeID: Int, text: String) { input(nodeID: nodeID, text: text) { _ in } }
+    func fire(nodeID: Int, event: String, value: BridgeValue?) { fire(nodeID: nodeID, event: event, value: value) { _ in } }
 
     // MARK: - Plugin thread
 
@@ -201,6 +224,14 @@ final class PluginSession {
         if node.props["disabled"]?.isTruthy == true {
             return completion(.failed("Node \(nodeID) (\(node.type)) is disabled."))
         }
+        let spec = PluginComponentCatalog.spec(node.type)
+        // A dialog or popover that isn't showing can't be answered.
+        if spec?.presentation == true, node.props["open"]?.isTruthy != true {
+            return completion(.failed("Node \(nodeID) (\(node.type)) is closed."))
+        }
+        if let problem = valueProblem(value, event: event, node: node, spec: spec) {
+            return completion(.failed("Node \(nodeID) (\(node.type)) \(event): \(problem)"))
+        }
         if let value {
             switch binding.payload {
             case .object(var object):
@@ -221,6 +252,28 @@ final class PluginSession {
             guard let self else { return completion(.failed("The plugin was stopped.")) }
             run(binding, host: host, generation: generation, completion: completion)
         }
+    }
+
+    /// Why `value` isn't something this event can carry, or nil when it is fine.
+    private func valueProblem(_ value: BridgeValue?, event: String, node: PluginResolvedNode, spec: PluginComponentSpec?) -> String? {
+        let eventSpec = spec.flatMap { PluginComponentCatalog.event(event, for: $0) }
+        guard let kind = eventSpec?.valueKind else {
+            return value == nil ? nil : "the event carries no value."
+        }
+        guard let value else { return "the event needs a \(kind.label) value." }
+        switch kind {
+        case .bool where value.bool == nil: return "expected true or false."
+        case .number where value.number == nil: return "expected a number."
+        case .string where value.string == nil: return "expected a string."
+        default: break
+        }
+        if let source = eventSpec?.valueFrom {
+            let allowed = (node.props[source]?.array ?? []).compactMap { $0.string ?? $0.object?["value"]?.string }
+            if !allowed.contains(value.string ?? "") {
+                return "\(value.jsonText) isn't one of the options (\(allowed.joined(separator: ", ")))."
+            }
+        }
+        return nil
     }
 
     private func run(_ binding: PluginEventBinding, host: PluginHost, generation: Int, completion: @escaping (PluginActionOutcome) -> Void) {

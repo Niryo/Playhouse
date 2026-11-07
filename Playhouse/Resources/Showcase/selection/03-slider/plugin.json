@@ -1,0 +1,14 @@
+{
+  "id": "slider",
+  "name": "Sliders",
+  "version": "1.0.0",
+  "description": "A continuous slider and a stepped one with a tick for each step.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Sliders"
+      }
+    ]
+  }
+}

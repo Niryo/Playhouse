@@ -1,0 +1,14 @@
+{
+  "id": "date-picker",
+  "name": "Date and time pickers",
+  "version": "1.0.0",
+  "description": "Dates travel as ISO 8601 text.",
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "title": "Date and time pickers"
+      }
+    ]
+  }
+}
