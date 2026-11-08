@@ -45,7 +45,8 @@ enum PluginValue: Codable, Equatable, Sendable {
     }
 
     var int: Int? {
-        if case .number(let value) = self, value.rounded() == value { return Int(value) }
+        // Int(exactly:) is nil for a fraction or a number outside Int's range (1e300), where Int(_:) would trap.
+        if case .number(let value) = self { return Int(exactly: value) }
         return nil
     }
 

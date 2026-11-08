@@ -4,7 +4,7 @@
 // Playhouse/App/Plugins/README.md for the op protocol this sends.
 //
 // Native functions Swift installs before this file runs:
-//   __native.commit(json)          one JSON array of ops per React commit
+//   __native.commit(ops)           one array of ops per React commit, read by Swift directly
 //   __native.log(level, message)
 //   __native.setTimer(id, ms)      Swift calls __playhouseFireTimer(id) when due
 //   __native.clearTimer(id)
@@ -85,7 +85,7 @@
     var atoms = {};
     atomNames.forEach(function (name) { atoms[name] = true; });
 
-    // Ops collected since the last commit; flushed as one message in resetAfterCommit.
+    // Ops collected since the last commit; handed to Swift as one array in resetAfterCommit.
     var ops = [];
     var nextID = 1;
     // Event handlers by node id. Functions never cross into Swift; only their names do.
@@ -182,7 +182,7 @@
         if (ops.length === 0) return;
         var batch = ops;
         ops = [];
-        __native.commit(JSON.stringify(batch));
+        __native.commit(batch);
       },
       preparePortalMount: function () {},
       getInstanceFromNode: function () { return null; },

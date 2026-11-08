@@ -4,8 +4,9 @@ import Observation
 
 /// Runs one plugin: a JavaScriptCore context with the vendored React,
 /// react-reconciler and scheduler, the prelude's host config, and the
-/// plugin's script. Each React commit arrives as one JSON array of ops and is
-/// applied to `tree`; `dispatch` sends an atom's event back to its handler.
+/// plugin's script. Each React commit arrives as one array of ops, read
+/// straight from the JavaScript value with no JSON string, and is applied to
+/// `tree`; `dispatch` sends an atom's event back to its handler.
 ///
 /// Not thread-safe: create and use it on one thread (the main thread in the
 /// app). With `.manual` timers nothing runs until `runDueTimers` is called,
@@ -66,8 +67,7 @@ final class PluginRuntime {
             let wrapped = "__playhouseDefine(\(PluginValue.string(module).jsonText), function (module, exports, require) {\n\(text)\n});"
             context.evaluateScript(wrapped, withSourceURL: file)
         }
-        context.setObject(try JSONSerialization.jsonObject(with: JSONEncoder().encode(PluginValue.object(props))), forKeyedSubscript: "__playhousePropsValue" as NSString)
-        context.evaluateScript("this.__playhouseProps = this.__playhousePropsValue; delete this.__playhousePropsValue;")
+        context.setObject(PluginValue.object(props).javaScriptValue(in: context), forKeyedSubscript: "__playhouseProps" as NSString)
         context.objectForKeyedSubscript("__playhouseBoot").call(withArguments: [AtomType.allCases.map(\.rawValue)])
         guard errors.isEmpty else { return }
         context.evaluateScript(source, withSourceURL: URL(fileURLWithPath: sourceName))
@@ -83,9 +83,7 @@ final class PluginRuntime {
     func dispatch(nodeID: Int, event: String, value: PluginValue? = nil) -> Bool {
         let dispatcher = context.objectForKeyedSubscript("__playhouseDispatch")
         var arguments: [Any] = [nodeID, event]
-        if let value, let object = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(value), options: .fragmentsAllowed) {
-            arguments.append(object)
-        }
+        if let value { arguments.append(value.javaScriptValue(in: context)) }
         return dispatcher?.call(withArguments: arguments)?.toBool() ?? false
     }
 
@@ -105,10 +103,11 @@ final class PluginRuntime {
 
     private func installNative() {
         let native = JSValue(newObjectIn: context)!
-        let commit: @convention(block) (String) -> Void = { [weak self] json in
+        // A commit's op array arrives as a JavaScript value and is read directly, with no JSON string.
+        let commit: @convention(block) (JSValue) -> Void = { [weak self] ops in
             guard let self else { return }
             do {
-                try tree.apply(json: json)
+                try tree.apply(PluginValue(javaScript: ops))
             } catch {
                 record(error: "Invalid commit: \(error.localizedDescription)")
             }

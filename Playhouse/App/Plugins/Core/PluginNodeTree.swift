@@ -1,9 +1,10 @@
 import Foundation
 import Observation
 
-/// One mutation the plugin's React host config sends; a commit is a JSON array
-/// of these. See Playhouse/App/Plugins/README.md.
-enum PluginOp: Decodable, Equatable {
+/// One mutation the plugin's React host config sends; a commit is an array
+/// of these, passed to Swift as a JavaScript value. See
+/// Playhouse/App/Plugins/README.md.
+enum PluginOp: Equatable {
     case create(id: Int, type: String, props: [String: PluginValue], events: [String])
     case createText(id: Int, text: String)
     case update(id: Int, props: [String: PluginValue], events: [String])
@@ -13,34 +14,47 @@ enum PluginOp: Decodable, Equatable {
     case remove(parent: Int, child: Int)
     case clear
 
-    private enum CodingKeys: String, CodingKey { case op, id, type, props, events, text, parent, child, before }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let op = try container.decode(String.self, forKey: .op)
-        func int(_ key: CodingKeys) throws -> Int { try container.decode(Int.self, forKey: key) }
+    /// Reads one op object (`{op: "append", parent: 3, child: 4}`).
+    init(_ value: PluginValue) throws {
+        guard let fields = value.object, let op = fields["op"]?.string else {
+            throw PluginTreeError(message: "An op must be an object with an \"op\" name, not \(value.jsonText).")
+        }
+        func int(_ key: String) throws -> Int {
+            guard let number = fields[key]?.int else { throw PluginTreeError(message: "The \(op) op needs an integer \"\(key)\".") }
+            return number
+        }
+        func string(_ key: String) throws -> String {
+            guard let text = fields[key]?.string else { throw PluginTreeError(message: "The \(op) op needs a string \"\(key)\".") }
+            return text
+        }
+        func props() throws -> [String: PluginValue] {
+            switch fields["props"] {
+            case nil, .null?: return [:]
+            case .object(let props)?: return props
+            default: throw PluginTreeError(message: "The \(op) op's \"props\" must be an object.")
+            }
+        }
+        func events() throws -> [String] {
+            switch fields["events"] {
+            case nil, .null?: return []
+            case .array(let names)?:
+                return try names.map { name in
+                    guard let text = name.string else { throw PluginTreeError(message: "The \(op) op's \"events\" must be strings.") }
+                    return text
+                }
+            default: throw PluginTreeError(message: "The \(op) op's \"events\" must be an array.")
+            }
+        }
         switch op {
-        case "create":
-            self = .create(
-                id: try int(.id),
-                type: try container.decode(String.self, forKey: .type),
-                props: try container.decodeIfPresent([String: PluginValue].self, forKey: .props) ?? [:],
-                events: try container.decodeIfPresent([String].self, forKey: .events) ?? []
-            )
-        case "createText": self = .createText(id: try int(.id), text: try container.decode(String.self, forKey: .text))
-        case "update":
-            self = .update(
-                id: try int(.id),
-                props: try container.decodeIfPresent([String: PluginValue].self, forKey: .props) ?? [:],
-                events: try container.decodeIfPresent([String].self, forKey: .events) ?? []
-            )
-        case "text": self = .text(id: try int(.id), text: try container.decode(String.self, forKey: .text))
-        case "append": self = .append(parent: try int(.parent), child: try int(.child))
-        case "insert": self = .insert(parent: try int(.parent), child: try int(.child), before: try int(.before))
-        case "remove": self = .remove(parent: try int(.parent), child: try int(.child))
+        case "create": self = .create(id: try int("id"), type: try string("type"), props: try props(), events: try events())
+        case "createText": self = .createText(id: try int("id"), text: try string("text"))
+        case "update": self = .update(id: try int("id"), props: try props(), events: try events())
+        case "text": self = .text(id: try int("id"), text: try string("text"))
+        case "append": self = .append(parent: try int("parent"), child: try int("child"))
+        case "insert": self = .insert(parent: try int("parent"), child: try int("child"), before: try int("before"))
+        case "remove": self = .remove(parent: try int("parent"), child: try int("child"))
         case "clear": self = .clear
-        default:
-            throw DecodingError.dataCorruptedError(forKey: .op, in: container, debugDescription: "Unknown op \(op)")
+        default: throw PluginTreeError(message: "Unknown op \(op).")
         }
     }
 
@@ -129,9 +143,11 @@ final class PluginNodeTree {
 
     func node(_ id: Int) -> PluginNode? { nodes[id] }
 
-    func apply(json: String) throws {
-        let ops = try JSONDecoder().decode([PluginOp].self, from: Data(json.utf8))
-        try apply(ops)
+    /// Reads a commit's op array and applies it. A malformed op is reported
+    /// before any op of the commit applies.
+    func apply(_ commit: PluginValue) throws {
+        guard case .array(let items) = commit else { throw PluginTreeError(message: "A commit must be an array of ops.") }
+        try apply(items.map(PluginOp.init))
     }
 
     /// Applies one commit. Ops are checked as they apply; an invalid op stops
