@@ -135,7 +135,11 @@ way, as plain JavaScript values. The root container is node `0`.
 
 Swift applies a commit with `PluginNodeTree.apply`. A malformed op rejects the
 whole commit before any of it applies. Each `create` and
-`update` is checked against the atom's props struct first. Every
+`update` is checked against the atom's props struct first.
+`PluginValueDecoder` decodes the props struct straight from the
+`PluginValue`s, with no JSON in between, both for this check and on every
+render in `AtomRegistry`. An invalid prop is reported with its path and what
+is wrong, for example `<PillPicker> has an invalid prop: options.0.label: missing`. Every
 `PluginNode` is observed on its own, so an op redraws only the SwiftUI view
 of the node it changes. For example, toggling a label sends one `text` op,
 and only that `Text` re-renders.
