@@ -1001,10 +1001,10 @@ enum PlayhouseWorktreeManager {
         }
         let fetch = try git(record.worktreePath, ["fetch", "--quiet", remote, record.branch], allowFailure: true)
         guard fetch.status == 0 else {
-            if fetch.output.localizedCaseInsensitiveContains("couldn't find remote ref") {
+            if fetch.error.localizedCaseInsensitiveContains("couldn't find remote ref") {
                 return RemoteBranchSyncState(remote: remote, remoteBranchExists: false, aheadCount: 0, behindCount: 0)
             }
-            throw BridgeCommandError(code: "operation_failed", message: fetch.output.isEmpty ? "Git couldn't fetch the task branch from \(remote)." : fetch.output)
+            throw BridgeCommandError(code: "operation_failed", message: fetch.error.isEmpty ? "Git couldn't fetch the task branch from \(remote)." : fetch.error)
         }
         let ahead = Int(try git(record.worktreePath, ["rev-list", "--count", "FETCH_HEAD..HEAD"]).output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         let behind = Int(try git(record.worktreePath, ["rev-list", "--count", "HEAD..FETCH_HEAD"]).output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0

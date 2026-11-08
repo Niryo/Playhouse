@@ -2186,7 +2186,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !resolveButton.exists }, timeout: 10), "The action should disappear after GitHub confirms the pushed head.")
     }
 
-    // case-contract: test_review_sync_pushes_unpushed_changes_on_completion | A completed turn outcome on a task with a PR-linked repository and a configured remote commits local work, merges new remote pull request commits, and pushes the branch before the task reaches Review, so the reviewed worktree holds no local-only changes. A linked repository without a publishing remote is left untouched and still reaches Review. When the sync cannot complete, the task moves to Blocked with the sync failure message instead of resting in Review, and a later successful sync pushes the stranded commits and returns the task to Review. While a provider turn holds the task's worktree, the sync command skips it untouched and reports turn-active.
+    // case-contract: test_review_sync_pushes_unpushed_changes_on_completion | A completed turn outcome on a task with a PR-linked repository and a configured remote commits local work, merges new remote pull request commits, and pushes the branch before the task reaches Review, so the reviewed worktree holds no local-only changes. A linked repository without a publishing remote is left untouched and still reaches Review. When the sync cannot complete, the task moves to Blocked with the sync failure message instead of resting in Review, and a later successful sync pushes the stranded commits and returns the task to Review. While a provider turn holds the task's worktree, the sync command skips it untouched and reports turn-active. A task branch deleted on a reachable remote is reported as no-remote-branch and leaves the task in Review.
     func test_review_sync_pushes_unpushed_changes_on_completion() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123]).merging(Self.prCheckCooldownEnvironment) { $1 }
@@ -2260,6 +2260,13 @@ final class PlayhouseUITests: XCTestCase {
         assertTaskVisible("Review sync push UI", inColumn: "Review")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
         XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), try runGitOutput(worktree, "rev-parse", "HEAD"))
+
+        // A branch deleted on a reachable remote is reported as missing, not as a fetch failure.
+        try runGit(remote, "update-ref", "-d", "refs/heads/\(branch)")
+        let deletedSync = try XCTUnwrap(try runCLI(["task", "pr", "sync", taskID])["result"] as? [String: Any])
+        XCTAssertEqual((deletedSync["records"] as? [[String: Any]])?.compactMap { $0["action"] as? String }, ["no-remote-branch"])
+        XCTAssertEqual(deletedSync["status"] as? String, "Review")
+        assertTaskVisible("Review sync push UI", inColumn: "Review")
     }
 
     // case-contract: test_review_sync_resolves_conflicts_with_provider_or_blocks | When the remote pull request branch conflicts with local task commits, the review sync merges the remote branch and instructs the task's provider to resolve every conflict; if conflicts remain after the provider turn, the sync fails, the task moves to Blocked with the sync failure message, the merge stays in progress for manual resolution, and the remote branch is unchanged. A rerun with the conflicts staged commits the resolution, pushes the merged branch, and returns the task to Review. The board triggers the same sync automatically when a mergeable pull request's remote head diverges from the local head.
@@ -3415,7 +3422,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
     }
 
-    // case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response, so a retry after the fix moves it to Review.
+    // case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response; once GitHub reports the pull request merged, a retry commits local work, skips syncing the merged branch even though its remote is unreachable, and moves the task to Review.
     func test_waiting_response_task_moves_to_review_manually() throws {
         let questionFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: questionFixture.path))
@@ -3522,8 +3529,10 @@ final class PlayhouseUITests: XCTestCase {
         rejection.buttons["OK"].click()
         XCTAssertEqual(try taskRecord(id: menuTaskID)?["status"] as? String, "Waiting Response")
         assertTaskVisible("Manual review menu", inColumn: "Waiting Response")
-        try runGit(fixture.primary, "remote", "remove", "origin")
 
+        // Once GitHub reports the PR merged, its gone branch is not synced and the retry reaches Review.
+        try "Work after the failed move.\n".write(to: worktree.appendingPathComponent("merged-retry.txt"), atomically: true, encoding: .utf8)
+        try "321=merged\n".write(toFile: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STATE_PATH"]), atomically: true, encoding: .utf8)
         menuCard.rightClick()
         XCTAssertTrue(moveToReview.waitForExistence(timeout: 5))
         attachScreenshot(named: "Waiting Response card context menu offers Move to Review")
@@ -3535,8 +3544,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertNil(try taskRecord(id: menuTaskID)?["statusMessage"] as? String)
         XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain", "--untracked-files=all"), "",
                        "Moving to Review should commit the PR-linked worktree's local changes like a completed turn.")
-        XCTAssertTrue(try runGitOutput(worktree, "show", "--name-only", "--format=%s", "HEAD").contains("manual-review.txt"))
+        XCTAssertTrue(try runGitOutput(worktree, "show", "--name-only", "--format=%s", "HEAD").contains("merged-retry.txt"),
+                      "The merged retry should commit the work left after the failed move.")
+        XCTAssertTrue(try runGitOutput(worktree, "log", "--name-only", "--format=%s", "-2").contains("manual-review.txt"))
         XCTAssertEqual((try taskRecord(id: menuTaskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"] as? Int, 321)
+        XCTAssertFalse(rejection.exists, "A merged pull request should not raise a sync alert.")
+        attachScreenshot(named: "A merged pull request's task moves to Review")
+        try runGit(fixture.primary, "remote", "remove", "origin")
 
         // Drag and drop: a Waiting Response card dropped on the Review column.
         try createTaskFixture(title: "Manual review drag", roots: [fixture.secondary.path])

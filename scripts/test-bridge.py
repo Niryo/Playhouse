@@ -3937,7 +3937,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_failure(invalid, "invalid_argument")
         self.run_git(self.primary, "remote", "remove", "origin")
 
-    # case-contract: test_review_sync_pushes_unpushed_changes_on_completion | A completed turn outcome on a task with a PR-linked repository and a configured remote commits local work, merges new remote pull request commits, and pushes the branch before the task reaches Review, so the reviewed worktree holds no local-only changes. A linked repository without a publishing remote is left untouched and still reaches Review. When the sync cannot complete, the task moves to Blocked with the sync failure message instead of resting in Review, and a later successful sync pushes the stranded commits and returns the task to Review. While a provider turn holds the task's worktree, the sync command skips it untouched and reports turn-active.
+    # case-contract: test_review_sync_pushes_unpushed_changes_on_completion | A completed turn outcome on a task with a PR-linked repository and a configured remote commits local work, merges new remote pull request commits, and pushes the branch before the task reaches Review, so the reviewed worktree holds no local-only changes. A linked repository without a publishing remote is left untouched and still reaches Review. When the sync cannot complete, the task moves to Blocked with the sync failure message instead of resting in Review, and a later successful sync pushes the stranded commits and returns the task to Review. While a provider turn holds the task's worktree, the sync command skips it untouched and reports turn-active. A task branch deleted on a reachable remote is reported as no-remote-branch and leaves the task in Review.
     def test_review_sync_pushes_unpushed_changes_on_completion(self):
         task = self.create_repo_task("Review sync push", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
         record = task["repositoryWorktrees"][0]
@@ -4015,6 +4015,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
         healed_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
         self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), healed_head)
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
+
+        # A branch deleted on a reachable remote is reported as missing, not as a fetch failure.
+        self.run_git(remote, "update-ref", "-d", f"refs/heads/{branch}")
+        deleted, _ = self.call_cli("task", "pr", "sync", task["id"])
+        deleted_result = self.assert_success(deleted)
+        self.assertEqual([item["action"] for item in deleted_result["records"]], ["no-remote-branch"])
+        self.assertEqual(deleted_result["status"], "Review")
         self.run_git(self.primary, "remote", "remove", "origin")
 
     # case-contract: test_review_sync_resolves_conflicts_with_provider_or_blocks | When the remote pull request branch conflicts with local task commits, the review sync merges the remote branch and instructs the task's provider to resolve every conflict; if conflicts remain after the provider turn, the sync fails, the task moves to Blocked with the sync failure message, the merge stays in progress for manual resolution, and the remote branch is unchanged. A rerun with the conflicts staged commits the resolution, pushes the merged branch, and returns the task to Review. The board triggers the same sync automatically when a mergeable pull request's remote head diverges from the local head.
@@ -4330,7 +4337,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(waiting["status"], "Waiting Response")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
 
-    # case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response, so a retry after the fix moves it to Review.
+    # case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response; once GitHub reports the pull request merged, a retry commits local work, skips syncing the merged branch even though its remote is unreachable, and moves the task to Review.
     def test_waiting_response_task_moves_to_review_manually(self):
         def remove_fixture_origin(repository, expected_url):
             current = subprocess.run(
@@ -4402,14 +4409,29 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertNotIn("still running", failed["error"]["message"])
         waiting = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(waiting["status"], "Waiting Response", "A failed review sync must not move or block the task.")
-        self.run_git(self.primary, "remote", "remove", "origin")
 
-        moved = self.assert_success(self.call_cli("task", "move", task["id"], "Review")[0])
+        # Once GitHub reports the PR merged, its gone branch is not synced and the retry reaches Review.
+        (worktree / "merged-retry.txt").write_text("Work after the failed move.\n", encoding="utf-8")
+        gh_directory = self.data_directory / "manual-review-gh-fixture"
+        gh_directory.mkdir()
+        (gh_directory / "state").write_text("321=merged\n", encoding="utf-8")
+        gh = gh_directory / "gh"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_environment = {
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "PLAYHOUSE_E2E_GH_STATE_PATH": str(gh_directory / "state"),
+            "PLAYHOUSE_E2E_GH_CALL_LOG": str(gh_directory / "calls"),
+        }
+        moved = self.assert_success(self.call_cli("task", "move", task["id"], "Review", extra_environment=gh_environment)[0])
+        self.run_git(self.primary, "remote", "remove", "origin")
         self.assertEqual(moved["status"], "Review")
         self.assertIsNone(moved.get("statusMessage"))
         self.assertEqual(self.run_git(worktree, "status", "--porcelain", "--untracked-files=all").strip(), "",
                          "Moving to Review should commit the PR-linked worktree's local changes like a completed turn.")
-        self.assertIn("manual-review.txt", self.run_git(worktree, "show", "--name-only", "--format=%s", "HEAD"))
+        self.assertIn("merged-retry.txt", self.run_git(worktree, "show", "--name-only", "--format=%s", "HEAD"),
+                      "The merged retry should commit the work left after the failed move.")
+        self.assertIn("manual-review.txt", self.run_git(worktree, "log", "--name-only", "--format=%s", "-2"))
         reread = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(reread["status"], "Review")
         self.assertEqual(reread["repositoryWorktrees"][0]["pullRequestNumber"], 321)
