@@ -1253,7 +1253,7 @@ struct PullRequestAutopilotOutcome: Codable, Sendable {
     var mergedPullRequests: [Int]? = nil
 }
 
-/// What the review sync did to one PR-linked repository: no-remote,
+/// What the review sync did to one PR-linked repository: pr-merged, no-remote,
 /// no-remote-branch, up-to-date, pushed, merged-and-pushed, or resolved-and-pushed.
 struct TaskBranchSyncResult: Codable, Sendable {
     let repositoryPath: String
@@ -2925,6 +2925,8 @@ final class BoardTaskManager {
             let title = task.title
             let records = task.repositoryWorktrees.filter { !$0.isPending && $0.pullRequestNumber != nil }
             var results: [TaskBranchSyncResult] = []
+            // GitHub is the source of truth for a merged PR; without gh the check is skipped.
+            let executable = records.isEmpty ? nil : try? pullRequestService.resolveExecutable()
             for record in records {
                 // A failed earlier sync can leave its merge in progress; resolve
                 // its conflicts before anything else touches the working tree.
@@ -2934,6 +2936,12 @@ final class BoardTaskManager {
                 let hadLocalChanges = try await worktreeService.hasChanges(record)
                 if hadLocalChanges {
                     try await worktreeService.commitChanges(record, message: "Complete task: \(title)")
+                }
+                // A merged PR's branch is usually deleted on the remote, so there is
+                // nothing left to fetch or push; local work stays committed.
+                if let executable, (try? await pullRequestService.isMerged(record, executable: executable)) == true {
+                    results.append(TaskBranchSyncResult(repositoryPath: record.repositoryPath, action: "pr-merged"))
+                    continue
                 }
                 let state = try await worktreeService.fetchRemoteBranchState(record)
                 guard state.remote != nil else {
