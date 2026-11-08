@@ -688,10 +688,13 @@ private struct TableBlockView: View {
     /// The weight is applied here rather than by the caller because `cellText` already sets a
     /// `.font`, and the innermost `.font` modifier is the one SwiftUI honors — a `.semibold` font
     /// applied by the caller outside this view would be silently discarded.
+    /// The vertical `fixedSize` lets a cell take the full height of its wrapped text; without it
+    /// the `Grid` row settles on a shorter height and long cells are cut off with an ellipsis.
     private func cellText(_ cell: String, weight: Font.Weight = .regular) -> some View {
         let formatted = TaskConversationView.markdownNSAttributedString(cell, baseFont: font)
         return Text((try? AttributedString(formatted, including: \.appKit)) ?? AttributedString(cell))
             .font(.system(size: font.pointSize, weight: weight))
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     var body: some View {
