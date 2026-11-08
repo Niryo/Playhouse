@@ -18965,7 +18965,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(((noCodex["claude"] as? [[String: Any]]) ?? []).contains { $0["name"] as? String == "claude-remote" }, "The other agent's answer is still shown.")
     }
 
-    // case-contract: test_mcp_authenticate_signs_in_each_provider | The Sign in for Claude or Sign in for Codex badge on a server is the button that signs in: it asks that agent to start the OAuth sign-in of that one server (Claude Code's mcp_authenticate, Codex's mcpServer/oauth/login) and returns the authorization link, which the page opens in the browser (a test build only records it, and never opens one) while the badge reads Waiting for sign-in…. The agent finishes the sign-in when the browser redirects back to it, and the page then checks again by itself and the badge goes away; waiting for it through the CLI keeps the bridge running and returns signed in. Starting one agent's sign-in never asks the other agent, a sign-in nobody finishes times out with a message that names the server, and waiting for a sign-in that was never started or was already reported with either agent, an unknown provider, and a blank server name are rejected or reported without starting anything.
+    // case-contract: test_mcp_authenticate_signs_in_each_provider | The Sign in for Claude or Sign in for Codex badge on a server is the button that signs in: it asks that agent to start the OAuth sign-in of that one server (Claude Code's mcp_authenticate, Codex's mcpServer/oauth/login) and returns the authorization link, which the page opens in the browser (a test build only records it, and never opens one) while the badge reads Waiting for sign-in…. A server both agents have shows one Sign in button per agent on the same row: each starts only its own agent's sign-in, waiting on one leaves the other clickable, and each badge clears on its own once that agent is signed in. The agent finishes the sign-in when the browser redirects back to it, and the page then checks again by itself and the badge goes away; waiting for it through the CLI keeps the bridge running and returns signed in. Starting one agent's sign-in never asks the other agent, a sign-in nobody finishes times out with a message that names the server, and waiting for a sign-in that was never started or was already reported with either agent, an unknown provider, and a blank server name are rejected or reported without starting anything.
     func test_mcp_authenticate_signs_in_each_provider() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let codexPath = try XCTUnwrap(codexFixtureExecutable)
@@ -18974,15 +18974,16 @@ final class PlayhouseUITests: XCTestCase {
         addTeardownBlock { codexSidecars.forEach { try? FileManager.default.removeItem(at: $0) } }
         let repository = try makeSkillRepository("mcp-auth-repo", skills: [:])
         try writeMcpJSON(mcpClaudeState, ["mcpServers": [
-            "claude-remote": ["type": "http", "url": "https://remote.example.com/mcp"],
+            "shared-remote": ["type": "http", "url": "https://remote.example.com/mcp"],
             "claude-other": ["type": "http", "url": "https://other.example.com/mcp"],
         ]])
-        try writeRuleFile(mcpCodexConfig, "[mcp_servers.codex-remote]\nurl = \"https://codex.example.com/mcp\"\n\n[mcp_servers.codex-other]\nurl = \"https://codex-other.example.com/mcp\"\n")
+        try writeRuleFile(mcpCodexConfig, "[mcp_servers.shared-remote]\nurl = \"https://remote.example.com/mcp\"\n\n[mcp_servers.codex-remote]\nurl = \"https://codex.example.com/mcp\"\n\n[mcp_servers.codex-other]\nurl = \"https://codex-other.example.com/mcp\"\n")
         let claude = try installSkillsClaudeFixture("claude-fixture-mcp-auth")
         try writeMcpJSON(URL(fileURLWithPath: claude.path + ".mcp-status"), [
-            ["name": "claude-remote", "status": "needs-auth"], ["name": "claude-other", "status": "needs-auth"],
+            ["name": "shared-remote", "status": "needs-auth"], ["name": "claude-other", "status": "needs-auth"],
         ])
         try writeMcpJSON(URL(fileURLWithPath: codexPath + ".mcp-status"), [
+            ["name": "shared-remote", "authStatus": "notLoggedIn", "tools": [:]],
             ["name": "codex-remote", "authStatus": "notLoggedIn", "tools": [:]], ["name": "codex-other", "authStatus": "notLoggedIn", "tools": [:]],
         ])
         func logged(_ path: String) -> [[String: String]] {
@@ -19002,34 +19003,40 @@ final class PlayhouseUITests: XCTestCase {
         openMcpPage()
         selectSkillsTab("Global", picker: "mcp-tab-picker")
 
-        let claudeBadge = element("mcp-signin-claude-remote-claude")
+        let claudeBadge = element("mcp-signin-shared-remote-claude")
         XCTAssertTrue(claudeBadge.waitForExistence(timeout: 30), "The sign-in badges show up without pressing anything.")
         XCTAssertTrue(element("mcp-signin-codex-remote-codex").exists)
-        attachScreenshot(named: "Sign-in badges appear on their own")
+        let sharedCodexBadge = element("mcp-signin-shared-remote-codex")
+        XCTAssertTrue(sharedCodexBadge.exists, "A server both agents have gets a sign-in button for each of them on the same row.")
+        XCTAssertTrue(element("mcp-row-shared-remote").exists)
+        attachScreenshot(named: "A server both agents have needs a sign-in for each of them")
 
         // A real click at the badge's position: it starts the sign-in rather than opening the server's editor.
         claudeBadge.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: claudeBadge).contains("Waiting for sign-in") }, timeout: 15),
                       "The badge reads Waiting for sign-in… while Claude Code waits for the browser.")
         XCTAssertFalse(element("mcp-editor-panel").exists, "Clicking the badge doesn't open the server's editor.")
-        XCTAssertTrue(waitUntil({ logged(claude.path + ".mcp-authenticate") == [["serverName": "claude-remote"]] }, timeout: 20),
+        XCTAssertTrue(sharedCodexBadge.isEnabled && accessibleLabelOrValue(of: sharedCodexBadge).contains("Sign in for Codex"),
+                      "Codex's button on the same server stays available while Claude's waits.")
+        XCTAssertTrue(waitUntil({ logged(claude.path + ".mcp-authenticate") == [["serverName": "shared-remote"]] }, timeout: 20),
                       "Claude Code is asked to sign in to that server only.")
         XCTAssertTrue(logged(codexPath + ".mcp-login").isEmpty, "Claude's sign-in doesn't ask Codex.")
         XCTAssertTrue(element("mcp-signin-codex-remote-codex").exists, "The other agent's badge is unchanged.")
         XCTAssertFalse(claudeBadge.isEnabled, "A sign-in that is waiting can't be started twice.")
         attachScreenshot(named: "Claude sign-in waiting for the browser")
-        try redirect("claude-remote", to: claude.path + ".mcp-callback")
-        XCTAssertTrue(waitUntil({ !self.element("mcp-signin-claude-remote-claude").exists }, timeout: 30),
+        try redirect("shared-remote", to: claude.path + ".mcp-callback")
+        XCTAssertTrue(waitUntil({ !self.element("mcp-signin-shared-remote-claude").exists }, timeout: 30),
                       "Once the browser has redirected back, the badge goes away.")
         XCTAssertFalse(element("mcp-error").exists)
         XCTAssertTrue(element("mcp-signin-codex-remote-codex").exists)
-        attachScreenshot(named: "Claude sign-in finished")
+        XCTAssertTrue(sharedCodexBadge.exists, "Signing in for Claude doesn't sign the same server in for Codex.")
+        attachScreenshot(named: "Claude sign-in finished; the same server still needs Codex's")
 
         let codexBadge = element("mcp-signin-codex-remote-codex")
         codexBadge.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: codexBadge).contains("Waiting for sign-in") }, timeout: 15))
         XCTAssertTrue(waitUntil({ logged(codexPath + ".mcp-login") == [["name": "codex-remote"]] }, timeout: 20), "Codex is asked to sign in to that server only.")
-        XCTAssertEqual(logged(claude.path + ".mcp-authenticate"), [["serverName": "claude-remote"]], "Codex's sign-in doesn't ask Claude Code.")
+        XCTAssertEqual(logged(claude.path + ".mcp-authenticate"), [["serverName": "shared-remote"]], "Codex's sign-in doesn't ask Claude Code.")
         attachScreenshot(named: "Codex sign-in waiting for the browser")
         try redirect("codex-remote", to: codexPath + ".mcp-callback")
         XCTAssertTrue(waitUntil({ !self.element("mcp-signin-codex-remote-codex").exists }, timeout: 30), "The Codex badge goes away too.")
@@ -19054,12 +19061,12 @@ final class PlayhouseUITests: XCTestCase {
         let never = try result(try cli(["authenticate-wait", "--provider", "claude", "--name", "never-started"]))
         XCTAssertEqual(never["signedIn"] as? Bool, false, "Waiting for a sign-in that was never started reports it.")
         XCTAssertTrue((never["error"] as? String ?? "").contains("No sign-in"))
-        for (provider, name) in [("claude", "claude-remote"), ("codex", "codex-remote")] {
+        for (provider, name) in [("claude", "shared-remote"), ("codex", "codex-remote")] {
             let reported = try result(try cli(["authenticate-wait", "--provider", provider, "--name", name]))
             XCTAssertEqual(reported["signedIn"] as? Bool, false, "A finished sign-in is reported once; waiting again finds none in progress.")
             XCTAssertTrue((reported["error"] as? String ?? "").contains("No sign-in"))
         }
-        assertCLIError(try cli(["authenticate", "--provider", "gemini", "--name", "claude-remote"], status: 2), code: "invalid_argument")
+        assertCLIError(try cli(["authenticate", "--provider", "gemini", "--name", "shared-remote"], status: 2), code: "invalid_argument")
         assertCLIError(try cli(["authenticate", "--provider", "claude", "--name", ""], status: 2), code: "invalid_argument")
         XCTAssertEqual(logged(claude.path + ".mcp-authenticate").last, ["serverName": "claude-other"], "A rejected request starts nothing.")
     }

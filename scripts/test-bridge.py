@@ -13550,22 +13550,23 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(server["name"] == "claude-remote" and server["needsSignIn"] for server in claude_only["claude"]))
         self.assert_failure(self.call_cli("mcp", "status", "--provider", "gemini", expected_status=2)[0], "invalid_argument")
 
-    # case-contract: test_mcp_authenticate_signs_in_each_provider | The Sign in for Claude or Sign in for Codex badge on a server is the button that signs in: it asks that agent to start the OAuth sign-in of that one server (Claude Code's mcp_authenticate, Codex's mcpServer/oauth/login) and returns the authorization link, which the page opens in the browser (a test build only records it, and never opens one) while the badge reads Waiting for sign-in…. The agent finishes the sign-in when the browser redirects back to it, and the page then checks again by itself and the badge goes away; waiting for it through the CLI keeps the bridge running and returns signed in. Starting one agent's sign-in never asks the other agent, a sign-in nobody finishes times out with a message that names the server, and waiting for a sign-in that was never started or was already reported with either agent, an unknown provider, and a blank server name are rejected or reported without starting anything.
+    # case-contract: test_mcp_authenticate_signs_in_each_provider | The Sign in for Claude or Sign in for Codex badge on a server is the button that signs in: it asks that agent to start the OAuth sign-in of that one server (Claude Code's mcp_authenticate, Codex's mcpServer/oauth/login) and returns the authorization link, which the page opens in the browser (a test build only records it, and never opens one) while the badge reads Waiting for sign-in…. A server both agents have shows one Sign in button per agent on the same row: each starts only its own agent's sign-in, waiting on one leaves the other clickable, and each badge clears on its own once that agent is signed in. The agent finishes the sign-in when the browser redirects back to it, and the page then checks again by itself and the badge goes away; waiting for it through the CLI keeps the bridge running and returns signed in. Starting one agent's sign-in never asks the other agent, a sign-in nobody finishes times out with a message that names the server, and waiting for a sign-in that was never started or was already reported with either agent, an unknown provider, and a blank server name are rejected or reported without starting anything.
     def test_mcp_authenticate_signs_in_each_provider(self):
         repository = self.make_skill_repository("mcp-auth-repo", {})
         self.write_json(self.mcp_claude_state, {"mcpServers": {
-            "claude-remote": {"type": "http", "url": "https://remote.example.com/mcp"},
+            "shared-remote": {"type": "http", "url": "https://remote.example.com/mcp"},
             "claude-other": {"type": "http", "url": "https://other.example.com/mcp"},
         }})
-        self.write_file(self.mcp_codex_config, '[mcp_servers.codex-remote]\nurl = "https://codex.example.com/mcp"\n\n[mcp_servers.codex-other]\nurl = "https://codex-other.example.com/mcp"\n')
+        self.write_file(self.mcp_codex_config, '[mcp_servers.shared-remote]\nurl = "https://remote.example.com/mcp"\n\n[mcp_servers.codex-remote]\nurl = "https://codex.example.com/mcp"\n\n[mcp_servers.codex-other]\nurl = "https://codex-other.example.com/mcp"\n')
         claude = self.install_claude_fixture("claude-fixture-mcp-auth")
         codex = self.install_codex_fixture("codex-fixture-mcp-auth")
         claude_executable = claude["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
         codex_executable = codex["PLAYHOUSE_E2E_CODEX_EXECUTABLE"]
         self.write_json(claude_executable + ".mcp-status", [
-            {"name": "claude-remote", "status": "needs-auth"}, {"name": "claude-other", "status": "needs-auth"},
+            {"name": "shared-remote", "status": "needs-auth"}, {"name": "claude-other", "status": "needs-auth"},
         ])
         self.write_json(codex_executable + ".mcp-status", [
+            {"name": "shared-remote", "authStatus": "notLoggedIn", "tools": {}},
             {"name": "codex-remote", "authStatus": "notLoggedIn", "tools": {}}, {"name": "codex-other", "authStatus": "notLoggedIn", "tools": {}},
         ])
         environment = {**claude, **codex}
@@ -13588,24 +13589,28 @@ class PlayhouseBridgeTests(unittest.TestCase):
             response, _ = self.finish_cli(process, command)
             return self.assert_success(response)
 
-        started = self.assert_success(call("authenticate", "--provider", "claude", "--name", "claude-remote"))
-        self.assertEqual(started, {"provider": "claude", "name": "claude-remote",
-                                   "authorizationUrl": "https://auth.example.test/claude/authorize?server=claude-remote"})
-        self.assertEqual(logged(claude_executable + ".mcp-authenticate"), [{"serverName": "claude-remote"}], "Claude Code is asked for that server only.")
+        started = self.assert_success(call("authenticate", "--provider", "claude", "--name", "shared-remote"))
+        self.assertEqual(started, {"provider": "claude", "name": "shared-remote",
+                                   "authorizationUrl": "https://auth.example.test/claude/authorize?server=shared-remote"})
+        self.assertEqual(logged(claude_executable + ".mcp-authenticate"), [{"serverName": "shared-remote"}], "Claude Code is asked for that server only.")
         self.assertEqual(logged(codex_executable + ".mcp-login"), [], "Starting Claude's sign-in doesn't ask Codex.")
         before = {server["name"]: server for server in self.assert_success(call("status", "--provider", "claude"))["claude"]}
-        self.assertTrue(before["claude-remote"]["needsSignIn"], "The server needs its sign-in until the browser redirects back.")
-        finished = finish("claude", "claude-remote", claude_executable + ".mcp-callback")
-        self.assertEqual(finished, {"provider": "claude", "name": "claude-remote", "signedIn": True})
+        self.assertTrue(before["shared-remote"]["needsSignIn"], "The server needs its sign-in until the browser redirects back.")
+        codex_before = {server["name"]: server for server in self.assert_success(call("status", "--provider", "codex"))["codex"]}
+        self.assertTrue(codex_before["shared-remote"]["needsSignIn"], "A server both agents have needs a sign-in for each of them.")
+        finished = finish("claude", "shared-remote", claude_executable + ".mcp-callback")
+        self.assertEqual(finished, {"provider": "claude", "name": "shared-remote", "signedIn": True})
         after = {server["name"]: server for server in self.assert_success(call("status", "--provider", "claude"))["claude"]}
-        self.assertFalse(after["claude-remote"]["needsSignIn"], "The finished sign-in no longer needs one.")
+        self.assertFalse(after["shared-remote"]["needsSignIn"], "The finished sign-in no longer needs one.")
+        codex_during = {server["name"]: server for server in self.assert_success(call("status", "--provider", "codex"))["codex"]}
+        self.assertTrue(codex_during["shared-remote"]["needsSignIn"], "Signing in for Claude doesn't sign the same server in for Codex.")
         self.assertTrue(after["claude-other"]["needsSignIn"], "Other servers still need theirs.")
 
         started = self.assert_success(call("authenticate", "--provider", "codex", "--name", "codex-remote"))
         self.assertEqual(started, {"provider": "codex", "name": "codex-remote",
                                    "authorizationUrl": "https://auth.example.test/codex/authorize?server=codex-remote"})
         self.assertEqual(logged(codex_executable + ".mcp-login"), [{"name": "codex-remote"}], "Codex is asked for that server only.")
-        self.assertEqual(logged(claude_executable + ".mcp-authenticate"), [{"serverName": "claude-remote"}], "Starting Codex's sign-in doesn't ask Claude Code.")
+        self.assertEqual(logged(claude_executable + ".mcp-authenticate"), [{"serverName": "shared-remote"}], "Starting Codex's sign-in doesn't ask Claude Code.")
         finished = finish("codex", "codex-remote", codex_executable + ".mcp-callback")
         self.assertEqual(finished, {"provider": "codex", "name": "codex-remote", "signedIn": True})
         codex_after = {server["name"]: server for server in self.assert_success(call("status", "--provider", "codex"))["codex"]}
@@ -13646,11 +13651,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
         never = self.assert_success(call("authenticate-wait", "--provider", "claude", "--name", "never-started"))
         self.assertFalse(never["signedIn"], "Waiting for a sign-in that was never started reports it.")
         self.assertIn("No sign-in", never["error"])
-        for provider, name in [("claude", "claude-remote"), ("codex", "codex-remote")]:
+        for provider, name in [("claude", "shared-remote"), ("codex", "codex-remote")]:
             reported = self.assert_success(call("authenticate-wait", "--provider", provider, "--name", name))
             self.assertFalse(reported["signedIn"], "A finished sign-in is reported once; waiting again finds none in progress.")
             self.assertIn("No sign-in", reported["error"])
-        self.assert_failure(call("authenticate", "--provider", "gemini", "--name", "claude-remote", expected_status=2), "invalid_argument")
+        self.assert_failure(call("authenticate", "--provider", "gemini", "--name", "shared-remote", expected_status=2), "invalid_argument")
         self.assert_failure(call("authenticate", "--provider", "claude", "--name", "", expected_status=2), "invalid_argument")
         self.assertEqual(logged(claude_executable + ".mcp-authenticate")[-1], {"serverName": "claude-other"}, "A rejected request starts nothing.")
 
