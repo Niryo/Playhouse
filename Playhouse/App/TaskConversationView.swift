@@ -2117,6 +2117,8 @@ struct TaskConversationView: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .frame(width: 14, height: 24)
+                    // A plain button only hit-tests drawn pixels; the full frame keeps the target usable.
+                    .contentShape(Rectangle())
             }
             .buttonHoverPointer()
             .buttonStyle(.plain)

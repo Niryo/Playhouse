@@ -15214,6 +15214,13 @@ final class PlayhouseUITests: XCTestCase {
         assertText("toggle-workspace-changes-section-button", equals: "Collapsed")
         XCTAssertFalse(element("workspace-changes-empty").exists, "The collapsed section state is global, so another task opens with it collapsed.")
         XCTAssertFalse(element("collapsed-workspace-changes-section-count").exists, "A task with nothing pending shows no count.")
+        // The chevron's whole frame toggles, not only the drawn glyph at its center.
+        element("toggle-workspace-changes-section-button").coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).click()
+        XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10), "Clicking the chevron's leading edge expands the section.")
+        assertText("toggle-workspace-changes-section-button", equals: "Expanded")
+        element("toggle-workspace-changes-section-button").coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).click()
+        XCTAssertTrue(element("workspace-changes-empty").waitForNonExistence(timeout: 5), "Clicking the chevron's trailing edge collapses the section.")
+        assertText("toggle-workspace-changes-section-button", equals: "Collapsed")
         element("workspace-changes-title").click()
         XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10), "Clicking the section title expands it.")
         assertText("toggle-workspace-changes-section-button", equals: "Expanded")
