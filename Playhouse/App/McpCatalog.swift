@@ -352,6 +352,47 @@ struct McpStatusReport: Codable, Equatable, Sendable {
     var errors: [String: String] = [:]
 }
 
+/// A sign-in one provider started for an MCP server: the page opens the link
+/// in the user's browser, and the provider finishes the login when the browser
+/// redirects back to it.
+struct McpLoginStart: Codable, Equatable, Sendable {
+    let provider: ConversationProvider
+    let name: String
+    let authorizationUrl: String
+}
+
+struct McpLoginResult: Codable, Equatable, Sendable {
+    let provider: ConversationProvider
+    let name: String
+    /// The provider now reports the server as signed in.
+    let signedIn: Bool
+    let error: String?
+}
+
+enum McpLogin {
+    /// How long a started sign-in waits for the user to finish in the browser.
+    static var timeout: Duration {
+        let seconds = PlayhouseProcessEnvironment.current["PLAYHOUSE_E2E_MCP_LOGIN_TIMEOUT_SECONDS"].flatMap(Double.init) ?? 300
+        return .milliseconds(Int(seconds * 1000))
+    }
+
+    static let pollInterval: Duration = .seconds(2)
+
+    static func pollInterval(for timeout: Duration) -> Duration {
+        timeout < .seconds(30) ? .milliseconds(250) : pollInterval
+    }
+
+    static func timedOut(provider: ConversationProvider, name: String) -> McpLoginResult {
+        McpLoginResult(provider: provider, name: name, signedIn: false,
+                       error: "The sign-in to \(name) wasn't finished in the browser in time. Click Sign in to try again.")
+    }
+
+    static func notStarted(provider: ConversationProvider, name: String) -> McpLoginResult {
+        McpLoginResult(provider: provider, name: name, signedIn: false,
+                       error: "No sign-in to \(name) is in progress for \(provider.displayName).")
+    }
+}
+
 /// What a provider launch needs so it starts every server that is on. Nothing
 /// is written to the user's files: Claude Code gets `--mcp-config` and
 /// `--settings`, and Codex gets the thread's `mcp_servers` config, which Codex

@@ -661,7 +661,11 @@
   },
   {
     "id": "test_mcp_status_reports_sign_in_per_provider",
-    "expectation": "Check Sign-In asks both agents about the servers they start: Claude Code, asked with the task's own MCP bridge, reports each server including the ones Playhouse passes it, and Codex reports its own; a server that needs a sign-in shows Sign in for Claude or Sign in for Codex on its row, and the claude.ai connectors and plugin servers Claude Code starts that no file defines are listed under Also started by Claude Code on the Managed tab. An agent that can't be asked is reported by name while the other agent's answer is still shown."
+    "expectation": "Opening the MCP page asks both agents on its own, with no button to press, which servers they start and which need a sign-in, showing Checking sign-in\u2026 while they answer and asking again whenever the page is opened: Claude Code, asked with the task's own MCP bridge, reports each server including the ones Playhouse passes it, and Codex reports its own; a server that needs a sign-in shows a Sign in for Claude or Sign in for Codex badge on its row, and the claude.ai connectors and plugin servers Claude Code starts that no file defines are listed under Also started by Claude Code on the Managed tab, a connector that needs a sign-in with the same badge. Asking for one provider only asks that provider. An agent that can't be asked is reported by name on the page while the other agent's answer is still shown."
+  },
+  {
+    "id": "test_mcp_authenticate_signs_in_each_provider",
+    "expectation": "The Sign in for Claude or Sign in for Codex badge on a server is the button that signs in: it asks that agent to start the OAuth sign-in of that one server (Claude Code's mcp_authenticate, Codex's mcpServer/oauth/login) and returns the authorization link, which the page opens in the browser (a test build only records it, and never opens one) while the badge reads Waiting for sign-in\u2026. The agent finishes the sign-in when the browser redirects back to it, and the page then checks again by itself and the badge goes away; waiting for it through the CLI keeps the bridge running and returns signed in. Starting one agent's sign-in never asks the other agent, a sign-in nobody finishes times out with a message that names the server, and waiting for a sign-in that was never started or was already reported with either agent, an unknown provider, and a blank server name are rejected or reported without starting anything."
   },
   {
     "id": "test_plugin_catalog_showcases_cover_every_component",

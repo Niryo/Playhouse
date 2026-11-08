@@ -427,8 +427,25 @@ struct RemoteConversationManager {
         return (try task.decoded(BoardTaskRecord.self), prompt)
     }
 
-    func mcpStatus(taskID: UUID) async throws -> McpStatusReport {
-        try await daemon.call("mcp.status", ["taskID": id(taskID)]).decoded(McpStatusReport.self)
+    func mcpStatus(taskID: UUID, provider: ConversationProvider? = nil) async throws -> McpStatusReport {
+        var arguments: [String: BridgeValue] = ["taskID": id(taskID)]
+        if let provider { arguments["provider"] = .string(provider.rawValue) }
+        return try await daemon.call("mcp.status", arguments).decoded(McpStatusReport.self)
+    }
+
+    /// Starts the provider's sign-in to an MCP server and returns the link to open in the browser.
+    func startMcpLogin(taskID: UUID, provider: ConversationProvider, name: String) async throws -> McpLoginStart {
+        try await daemon.call("mcp.authenticate", [
+            "taskID": id(taskID), "provider": .string(provider.rawValue), "name": .string(name),
+        ]).decoded(McpLoginStart.self)
+    }
+
+    /// Returns once the started sign-in is finished, failed, or timed out. The
+    /// daemon stays up while it waits.
+    func mcpLoginResult(taskID: UUID, provider: ConversationProvider, name: String) async throws -> McpLoginResult {
+        try await daemon.call("mcp.authenticate.wait", [
+            "taskID": id(taskID), "provider": .string(provider.rawValue), "name": .string(name),
+        ]).decoded(McpLoginResult.self)
     }
 
     func providerCapabilities(taskID: UUID) async throws -> [ConversationProviderCapabilities] {

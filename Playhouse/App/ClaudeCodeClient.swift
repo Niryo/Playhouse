@@ -1849,6 +1849,103 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         return capabilities
     }
 
+    /// A sign-in in progress for one MCP server. Claude Code listens for the
+    /// browser's redirect inside its own process, so that process stays up until
+    /// the sign-in finishes, fails, or times out.
+    private final class McpLoginSession {
+        let runner: ClaudeSessionRunner
+        var task: Task<McpLoginResult, Never>?
+        /// A newer sign-in to the same server replaced this one.
+        var superseded = false
+        init(runner: ClaudeSessionRunner) { self.runner = runner }
+    }
+
+    private var mcpLogins: [String: McpLoginSession] = [:]
+
+    /// Asks Claude Code to start the OAuth sign-in of an MCP server and returns
+    /// the link to open in the browser. Claude Code is told not to open it itself.
+    ///
+    /// This uses Claude Code's `mcp_authenticate` control request, which its own
+    /// remote UI uses but which isn't part of its documented interface: a failure
+    /// surfaces as an error here, and a missing redirect as the sign-in's timeout.
+    /// The sign-in counts as background work while it waits, so the bridge daemon
+    /// doesn't idle-exit and take the process, and its callback port, with it.
+    func startMcpLogin(name: String, workspace: ConversationWorkspaceContext) async throws -> String {
+        guard let executable = executablePath else { throw ClientError.cliNotFound }
+        let runner = ClaudeSessionRunner(
+            sessionID: UUID().uuidString.lowercased(),
+            executable: executable,
+            configDirectoryOverride: configDirectoryOverride,
+            persistsSessions: false,
+            owner: nil
+        )
+        let reply: [String: Any]
+        do {
+            _ = try await runner.launch(
+                resume: false, mode: .code, modelID: Self.defaultModelID, effort: nil,
+                workspace: workspace, developerInstructions: nil
+            )
+            reply = try await runner.controlRequest(["subtype": "mcp_authenticate", "serverName": name])
+        } catch {
+            runner.shutdown()
+            throw error
+        }
+        guard reply["requiresUserAction"] as? Bool != false, let link = reply["authUrl"] as? String, !link.isEmpty else {
+            runner.shutdown()
+            throw BridgeCommandError(code: "invalid_argument", message: "Claude Code doesn't need you to sign in to \(name).")
+        }
+        let session = McpLoginSession(runner: runner)
+        let timeout = McpLogin.timeout
+        BridgeBackgroundWork.onBegin?()
+        session.task = Task { @MainActor [session] in
+            defer {
+                runner.shutdown()
+                BridgeBackgroundWork.onEnd?()
+            }
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: timeout)
+            while clock.now < deadline, !Task.isCancelled {
+                try? await Task.sleep(for: McpLogin.pollInterval(for: timeout))
+                guard let status = try? await runner.controlRequest(["subtype": "mcp_status"]) else {
+                    return McpLoginResult(provider: .claude, name: name, signedIn: false, error: "Claude Code stopped before the sign-in finished.")
+                }
+                let servers = status["mcpServers"] as? [[String: Any]] ?? []
+                switch servers.first(where: { $0["name"] as? String == name })?["status"] as? String {
+                case "connected":
+                    return McpLoginResult(provider: .claude, name: name, signedIn: true, error: nil)
+                case "failed":
+                    return McpLoginResult(provider: .claude, name: name, signedIn: false, error: "Claude Code couldn't connect to \(name) after the sign-in.")
+                default:
+                    continue
+                }
+            }
+            if session.superseded {
+                return McpLoginResult(provider: .claude, name: name, signedIn: false, error: "A newer sign-in to \(name) replaced this one.")
+            }
+            return McpLogin.timedOut(provider: .claude, name: name)
+        }
+        // Replaced only now, after the awaits, so overlapping starts for one
+        // server can't each leave a process behind.
+        if let previous = mcpLogins.removeValue(forKey: name) {
+            previous.superseded = true
+            previous.task?.cancel()
+            previous.runner.shutdown()
+        }
+        mcpLogins[name] = session
+        PlayhouseDiagnostics.record("mcp.login.started", fields: ["provider": "claude"])
+        return link
+    }
+
+    /// Waits for the sign-in started for `name` to finish.
+    func waitForMcpLogin(name: String) async -> McpLoginResult {
+        guard let session = mcpLogins[name], let task = session.task else { return McpLogin.notStarted(provider: .claude, name: name) }
+        let result = await task.value
+        // A finished sign-in is reported once; a newer one for the same server stays.
+        if mcpLogins[name] === session { mcpLogins[name] = nil }
+        PlayhouseDiagnostics.record("mcp.login.finished", fields: ["provider": "claude", "signedIn": String(result.signedIn)])
+        return result
+    }
+
     /// The skills and commands built into Claude Code itself, which have no
     /// folder on disk, read without starting a model turn.
     /// Claude Code's built-in skills and commands. They come with the binary

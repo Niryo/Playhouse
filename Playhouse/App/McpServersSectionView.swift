@@ -27,6 +27,9 @@ struct McpServersSectionView: View {
     @State private var catalog: McpCatalog?
     @State private var status: McpStatusReport?
     @State private var isCheckingStatus = false
+    @State private var recheckRequested = false
+    /// Sign-ins waiting for the browser, as `name|provider`.
+    @State private var signingIn = Set<String>()
     @State private var errorMessage: String?
     @State private var panel: Panel?
     @State private var pendingDelete: McpServerRecord?
@@ -58,17 +61,14 @@ struct McpServersSectionView: View {
                 .frame(width: 260)
                 .accessibilityIdentifier("mcp-tab-picker")
                 Spacer()
-                Button { checkStatus() } label: {
-                    if isCheckingStatus {
+                if isCheckingStatus {
+                    HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
-                    } else {
-                        Label("Check Sign-In", systemImage: "person.badge.key")
+                        Text("Checking sign-in…").font(.callout).foregroundStyle(.secondary)
                     }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("mcp-checking-status")
                 }
-                .disabled(isCheckingStatus)
-                .buttonHoverPointer()
-                .nativeHelp("Ask Claude and Codex which servers they start and which need you to sign in")
-                .accessibilityIdentifier("mcp-check-status")
                 Button { setPanel(.creating) } label: { Label("New Server", systemImage: "plus") }
                     .buttonHoverPointer()
                     .nativeHelp("Add an MCP server that both Claude and Codex can use")
@@ -100,7 +100,12 @@ struct McpServersSectionView: View {
         .overlay { panels }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("mcp-page")
-        .task { await reload() }
+        .task {
+            // Opening the page asks both agents which servers need a sign-in, while the list loads.
+            async let statuses: Void = checkStatus()
+            await reload()
+            await statuses
+        }
         .alert(
             "Delete \(pendingDelete?.name ?? "server")?",
             isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
@@ -227,7 +232,7 @@ struct McpServersSectionView: View {
     }
 
     /// Servers Claude Code reports that no file here defines, such as claude.ai
-    /// connectors and plugin servers. Known only after Check Sign-In.
+    /// connectors and plugin servers. Known once the sign-in check has answered.
     @ViewBuilder
     private func connectors(_ catalog: McpCatalog) -> some View {
         let known = Set(catalog.allServers.map(\.name))
@@ -236,7 +241,7 @@ struct McpServersSectionView: View {
             .font(.headline)
             .padding(.top, 10)
         if status == nil {
-            Text("Check Sign-In lists the claude.ai connectors and plugin servers Claude Code starts on its own.")
+            Text("Checking which claude.ai connectors and plugin servers Claude Code starts on its own…")
                 .font(.callout).foregroundStyle(.secondary)
                 .accessibilityIdentifier("mcp-connectors-hint")
         } else if others.isEmpty {
@@ -245,16 +250,54 @@ struct McpServersSectionView: View {
         ForEach(others, id: \.name) { server in
             HStack(spacing: 8) {
                 Text(server.name).font(.body.weight(.semibold))
-                badge(server.needsSignIn ? "Sign in for Claude" : server.status, systemImage: server.needsSignIn ? "person.badge.key" : "circle.fill",
-                      color: server.needsSignIn ? .orange : .secondary)
+                if server.needsSignIn {
+                    connectorSignInButton(server)
+                } else {
+                    badge(server.status, systemImage: "circle.fill", color: .secondary)
+                }
                 Spacer()
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 10))
-            .accessibilityElement(children: .combine)
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("mcp-connector-\(server.name)")
         }
+    }
+
+    /// A claude.ai connector is signed in to on claude.ai, not from Claude Code,
+    /// so its badge opens the connectors settings; a plugin server is signed in
+    /// to the same way as any other server.
+    @ViewBuilder
+    private func connectorSignInButton(_ server: McpProviderStatus) -> some View {
+        let isConnector = server.name.hasPrefix("claude.ai ")
+        let key = "\(server.name)|claude"
+        Button {
+            if isConnector {
+                openInBrowser("https://claude.ai/settings/connectors")
+            } else {
+                signIn(name: server.name, provider: .claude)
+            }
+        } label: {
+            signInLabel("Sign in for Claude", waiting: signingIn.contains(key))
+        }
+        .buttonStyle(.plain)
+        .disabled(signingIn.contains(key))
+        .buttonHoverPointer()
+        .nativeHelp(isConnector ? "Connect \(server.name) in claude.ai's connector settings" : "Open your browser to sign in to \(server.name) for Claude")
+        .accessibilityIdentifier("mcp-connector-signin-\(server.name)")
+    }
+
+    private func signInLabel(_ text: String, waiting: Bool) -> some View {
+        HStack(spacing: 4) {
+            if waiting { ProgressView().controlSize(.mini) } else { Image(systemName: "person.badge.key") }
+            Text(waiting ? "Waiting for sign-in…" : text).lineLimit(1)
+        }
+        .font(.caption2.weight(.medium))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .foregroundStyle(.orange)
+        .background(Color.orange.opacity(0.12), in: Capsule())
     }
 
     private func emptyState(_ text: String, identifier: String) -> some View {
@@ -288,6 +331,7 @@ struct McpServersSectionView: View {
     private func row(_ server: McpServerRecord) -> some View {
         let key = Self.key(server)
         return HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
@@ -313,11 +357,6 @@ struct McpServersSectionView: View {
                         } else if server.issue != nil {
                             badge("Problem", systemImage: "exclamationmark.triangle", color: .orange)
                                 .accessibilityIdentifier("mcp-problem-\(key)")
-                        }
-                        ForEach(signInNeeded(server)) { provider in
-                            badge("Sign in for \(provider.displayName)", systemImage: "person.badge.key", color: .orange)
-                                .nativeHelp(provider == .claude ? "Run /mcp in the claude CLI to sign in" : "Run codex mcp login \(server.name) to sign in")
-                                .accessibilityIdentifier("mcp-signin-\(key)-\(provider.rawValue)")
                         }
                     }
                     Text(server.summary)
@@ -356,6 +395,9 @@ struct McpServersSectionView: View {
             .overlay {
                 SkillRowPressArea(showsPointingHand: true, onClick: { openEditor(server) }, onLongPress: {})
             }
+            // Outside the click-to-open area above, so the buttons get their own clicks.
+            signInButtons(server, key: key)
+            }
             if server.issue != nil, server.scope != .managed {
                 Button { fix(server) } label: { Label("Fix with Agent", systemImage: "wand.and.stars") }
                     .controlSize(.small)
@@ -381,6 +423,28 @@ struct McpServersSectionView: View {
         .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 10))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("mcp-row-\(key)")
+    }
+
+    /// One button per agent that needs the server's sign-in: the label that says
+    /// so is what starts it.
+    @ViewBuilder
+    private func signInButtons(_ server: McpServerRecord, key: String) -> some View {
+        let providers = signInNeeded(server)
+        if !providers.isEmpty {
+            HStack(spacing: 6) {
+                ForEach(providers) { provider in
+                    let waiting = signingIn.contains("\(server.name)|\(provider.rawValue)")
+                    Button { signIn(name: server.name, provider: provider) } label: {
+                        signInLabel("Sign in for \(provider.displayName)", waiting: waiting)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(waiting)
+                    .buttonHoverPointer()
+                    .nativeHelp("Open your browser to sign in to \(server.name) for \(provider.displayName)")
+                    .accessibilityIdentifier("mcp-signin-\(key)-\(provider.rawValue)")
+                }
+            }
+        }
     }
 
     private func badge(_ text: String, systemImage: String, color: Color) -> some View {
@@ -456,11 +520,17 @@ struct McpServersSectionView: View {
         }
     }
 
-    private func checkStatus() {
-        guard !isCheckingStatus else { return }
+    /// Asks both agents which servers need a sign-in. It runs whenever the page
+    /// opens and after a sign-in finishes.
+    private func checkStatus() async {
+        // A check asked for while one is running (a sign-in that just finished) runs right after it.
+        guard !isCheckingStatus else {
+            recheckRequested = true
+            return
+        }
         isCheckingStatus = true
-        Task { @MainActor in
-            defer { isCheckingStatus = false }
+        repeat {
+            recheckRequested = false
             do {
                 status = try await manager.mcpStatus(taskID: task.id)
                 let failures = (status?.errors ?? [:]).sorted { $0.key < $1.key }.map { "\($0.key.capitalized): \($0.value)" }
@@ -468,6 +538,34 @@ struct McpServersSectionView: View {
             } catch {
                 errorMessage = error.localizedDescription
             }
+        } while recheckRequested
+        isCheckingStatus = false
+    }
+
+    private func openInBrowser(_ link: String) {
+        // A test build never opens a browser.
+        guard let url = URL(string: link), !BridgeContract.isTestBundle(PlayhouseAppIdentity.applicationIdentifier) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Has the agent start its OAuth sign-in, opens the link it returns, waits
+    /// for the browser's redirect to finish it, and then checks again.
+    private func signIn(name: String, provider: ConversationProvider) {
+        let key = "\(name)|\(provider.rawValue)"
+        guard signingIn.insert(key).inserted else { return }
+        Task { @MainActor in
+            var failure: String?
+            do {
+                let start = try await manager.startMcpLogin(taskID: task.id, provider: provider, name: name)
+                openInBrowser(start.authorizationUrl)
+                let result = try await manager.mcpLoginResult(taskID: task.id, provider: provider, name: name)
+                if !result.signedIn { failure = result.error ?? "The sign-in to \(name) wasn't finished." }
+            } catch {
+                failure = error.localizedDescription
+            }
+            signingIn.remove(key)
+            await checkStatus()
+            if let failure { errorMessage = failure }
         }
     }
 

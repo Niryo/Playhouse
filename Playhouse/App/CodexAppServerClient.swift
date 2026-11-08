@@ -429,6 +429,68 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
     }
 
+    /// Asks Codex to start the OAuth sign-in of one of its MCP servers and
+    /// returns the link to open in the browser. Codex finishes the sign-in itself
+    /// when the browser redirects back to it.
+    func startMcpLogin(name: String, workspace: ConversationWorkspaceContext) async throws -> String {
+        try await ensureInitialized(workspace: workspace)
+        let response = try await request(method: "mcpServer/oauth/login", params: ["name": name])
+        guard let link = response["authorizationUrl"] as? String, !link.isEmpty else {
+            throw ClientError.protocolFailure("Codex did not return a sign-in link for \(name).")
+        }
+        startedMcpLogins.insert(name)
+        holdBridgeForMcpLogin(name)
+        PlayhouseDiagnostics.record("mcp.login.started", fields: ["provider": "codex"])
+        return link
+    }
+
+    /// The servers whose sign-in this client started and that no wait has reported on yet.
+    private var startedMcpLogins = Set<String>()
+    /// While a sign-in is pending the bridge counts as busy, so it doesn't idle-exit and
+    /// stop this app-server, which is the one listening for the browser's redirect.
+    private var mcpLoginHolds: [String: Task<Void, Never>] = [:]
+
+    private func holdBridgeForMcpLogin(_ name: String) {
+        releaseBridgeForMcpLogin(name)
+        BridgeBackgroundWork.onBegin?()
+        let timeout = McpLogin.timeout
+        mcpLoginHolds[name] = Task {
+            defer { BridgeBackgroundWork.onEnd?() }
+            try? await Task.sleep(for: timeout)
+        }
+    }
+
+    private func releaseBridgeForMcpLogin(_ name: String) {
+        mcpLoginHolds.removeValue(forKey: name)?.cancel()
+    }
+
+    /// Waits until Codex reports the server as signed in, or the sign-in times out.
+    func waitForMcpLogin(name: String, workspace: ConversationWorkspaceContext) async -> McpLoginResult {
+        guard startedMcpLogins.contains(name) else { return McpLogin.notStarted(provider: .codex, name: name) }
+        defer {
+            startedMcpLogins.remove(name)
+            releaseBridgeForMcpLogin(name)
+        }
+        let timeout = McpLogin.timeout
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline, !Task.isCancelled {
+            try? await Task.sleep(for: McpLogin.pollInterval(for: timeout))
+            do {
+                guard let server = try await mcpServerStatuses(workspace: workspace).first(where: { $0.name == name }) else {
+                    return McpLoginResult(provider: .codex, name: name, signedIn: false, error: "Codex doesn't have an MCP server named \(name).")
+                }
+                if !server.needsSignIn {
+                    PlayhouseDiagnostics.record("mcp.login.finished", fields: ["provider": "codex", "signedIn": "true"])
+                    return McpLoginResult(provider: .codex, name: name, signedIn: true, error: nil)
+                }
+            } catch {
+                return McpLoginResult(provider: .codex, name: name, signedIn: false, error: error.localizedDescription)
+            }
+        }
+        return McpLogin.timedOut(provider: .codex, name: name)
+    }
+
     func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption] {
         try await ensureInitialized(workspace: workspace)
         for attempt in 0..<3 {

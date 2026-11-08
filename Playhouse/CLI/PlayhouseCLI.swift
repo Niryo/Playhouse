@@ -539,7 +539,7 @@ enum PlayhouseCLI {
         case "mcp":
             guard let operation = rest.first else { throw CLIError.usage("Missing mcp operation.") }
             let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: [
-                "--task", "--server", "--scope", "--name", "--root", "--command", "--arg", "--env", "--url", "--header", "--config-json",
+                "--task", "--server", "--scope", "--name", "--root", "--command", "--arg", "--env", "--url", "--header", "--config-json", "--provider",
             ])
             var arguments: [String: BridgeValue] = [:]
             if let task = flags["--task"]?.first { arguments["taskID"] = .string(task) }
@@ -607,7 +607,12 @@ enum PlayhouseCLI {
                 guard arguments["taskID"] != nil else { throw CLIError.usage("Use: playhouse mcp bridge --task <task-id>") }
                 return BridgeRequest(command: "mcp.bridge", arguments: arguments)
             case "status":
+                if let provider = flags["--provider"]?.first { arguments["provider"] = .string(provider) }
                 return BridgeRequest(command: "mcp.status", arguments: arguments)
+            case "authenticate", "authenticate-wait":
+                arguments["provider"] = .string(try requiredFlag("--provider", flags: flags).first!)
+                arguments["name"] = .string(try requiredFlag("--name", flags: flags).first!)
+                return BridgeRequest(command: operation == "authenticate" ? "mcp.authenticate" : "mcp.authenticate.wait", arguments: arguments)
             default:
                 throw CLIError.usage("Unknown mcp operation \(operation).")
             }
@@ -1077,7 +1082,9 @@ enum PlayhouseCLI {
       playhouse mcp delete --server <server-id> [--server <server-id>...] [--task <task-id>]
       playhouse mcp fix --task <task-id> --server <server-id> [--server <server-id>...]
       playhouse mcp bridge --task <task-id>
-      playhouse mcp status [--task <task-id>]
+      playhouse mcp status [--task <task-id>] [--provider <claude|codex>]
+      playhouse mcp authenticate --provider <claude|codex> --name <server-name> [--task <task-id>]
+      playhouse mcp authenticate-wait --provider <claude|codex> --name <server-name> [--task <task-id>]
       playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>
       playhouse task token-usage <task-id>
       playhouse task token-waste <task-id>

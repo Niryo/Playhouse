@@ -13499,7 +13499,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "repo-codex-off": {"command": "repo-codex-off", "enabled": False},
         }, "The resumed thread gets the new servers.")
 
-    # case-contract: test_mcp_status_reports_sign_in_per_provider | Check Sign-In asks both agents about the servers they start: Claude Code, asked with the task's own MCP bridge, reports each server including the ones Playhouse passes it, and Codex reports its own; a server that needs a sign-in shows Sign in for Claude or Sign in for Codex on its row, and the claude.ai connectors and plugin servers Claude Code starts that no file defines are listed under Also started by Claude Code on the Managed tab. An agent that can't be asked is reported by name while the other agent's answer is still shown.
+    # case-contract: test_mcp_status_reports_sign_in_per_provider | Opening the MCP page asks both agents on its own, with no button to press, which servers they start and which need a sign-in, showing Checking sign-in… while they answer and asking again whenever the page is opened: Claude Code, asked with the task's own MCP bridge, reports each server including the ones Playhouse passes it, and Codex reports its own; a server that needs a sign-in shows a Sign in for Claude or Sign in for Codex badge on its row, and the claude.ai connectors and plugin servers Claude Code starts that no file defines are listed under Also started by Claude Code on the Managed tab, a connector that needs a sign-in with the same badge. Asking for one provider only asks that provider. An agent that can't be asked is reported by name on the page while the other agent's answer is still shown.
     def test_mcp_status_reports_sign_in_per_provider(self):
         repository = self.make_skill_repository("mcp-status-repo", {})
         self.write_json(self.mcp_claude_state, {"mcpServers": {"claude-remote": {"type": "http", "url": "https://remote.example.com/mcp"}}})
@@ -13539,6 +13539,120 @@ class PlayhouseBridgeTests(unittest.TestCase):
         only_claude = self.assert_success(self.call_cli("mcp", "status", "--task", task["id"], extra_environment=claude)[0])
         self.assertIn("codex", only_claude["errors"], "An agent that isn't installed is reported by name.")
         self.assertTrue(any(server["name"] == "claude-remote" for server in only_claude["claude"]))
+
+        Path(codex["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] + ".mcp-status-fail").unlink()
+        codex_only = self.assert_success(self.call_cli("mcp", "status", "--task", task["id"], "--provider", "codex", extra_environment={**claude, **codex})[0])
+        self.assertEqual(codex_only["claude"], [], "Asking for Codex alone doesn't ask Claude Code.")
+        self.assertEqual(codex_only["errors"], {})
+        self.assertTrue(any(server["name"] == "codex-remote" and server["needsSignIn"] for server in codex_only["codex"]))
+        claude_only = self.assert_success(self.call_cli("mcp", "status", "--task", task["id"], "--provider", "claude", extra_environment={**claude, **codex})[0])
+        self.assertEqual(claude_only["codex"], [], "Asking for Claude alone doesn't ask Codex.")
+        self.assertTrue(any(server["name"] == "claude-remote" and server["needsSignIn"] for server in claude_only["claude"]))
+        self.assert_failure(self.call_cli("mcp", "status", "--provider", "gemini", expected_status=2)[0], "invalid_argument")
+
+    # case-contract: test_mcp_authenticate_signs_in_each_provider | The Sign in for Claude or Sign in for Codex badge on a server is the button that signs in: it asks that agent to start the OAuth sign-in of that one server (Claude Code's mcp_authenticate, Codex's mcpServer/oauth/login) and returns the authorization link, which the page opens in the browser (a test build only records it, and never opens one) while the badge reads Waiting for sign-in…. The agent finishes the sign-in when the browser redirects back to it, and the page then checks again by itself and the badge goes away; waiting for it through the CLI keeps the bridge running and returns signed in. Starting one agent's sign-in never asks the other agent, a sign-in nobody finishes times out with a message that names the server, and waiting for a sign-in that was never started or was already reported with either agent, an unknown provider, and a blank server name are rejected or reported without starting anything.
+    def test_mcp_authenticate_signs_in_each_provider(self):
+        repository = self.make_skill_repository("mcp-auth-repo", {})
+        self.write_json(self.mcp_claude_state, {"mcpServers": {
+            "claude-remote": {"type": "http", "url": "https://remote.example.com/mcp"},
+            "claude-other": {"type": "http", "url": "https://other.example.com/mcp"},
+        }})
+        self.write_file(self.mcp_codex_config, '[mcp_servers.codex-remote]\nurl = "https://codex.example.com/mcp"\n\n[mcp_servers.codex-other]\nurl = "https://codex-other.example.com/mcp"\n')
+        claude = self.install_claude_fixture("claude-fixture-mcp-auth")
+        codex = self.install_codex_fixture("codex-fixture-mcp-auth")
+        claude_executable = claude["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
+        codex_executable = codex["PLAYHOUSE_E2E_CODEX_EXECUTABLE"]
+        self.write_json(claude_executable + ".mcp-status", [
+            {"name": "claude-remote", "status": "needs-auth"}, {"name": "claude-other", "status": "needs-auth"},
+        ])
+        self.write_json(codex_executable + ".mcp-status", [
+            {"name": "codex-remote", "authStatus": "notLoggedIn", "tools": {}}, {"name": "codex-other", "authStatus": "notLoggedIn", "tools": {}},
+        ])
+        environment = {**claude, **codex}
+        task = self.create_skills_task("MCP authenticate", [repository], provider="claude")
+
+        def call(*command, extra=None, expected_status=0):
+            return self.call_cli("mcp", *command, "--task", task["id"], extra_environment={**environment, **(extra or {})}, expected_status=expected_status)[0]
+
+        def logged(path):
+            return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()] if Path(path).exists() else []
+
+        def finish(provider, name, callback_path, extra=None):
+            """Waits for a started sign-in through the CLI while the "browser" redirects back."""
+            command = ["mcp", "authenticate-wait", "--provider", provider, "--name", name, "--task", task["id"]]
+            process = self.start_cli(*command, extra_environment={**environment, **(extra or {})})
+            time.sleep(1.5)
+            self.assertIsNone(process.poll(), "Waiting for the sign-in keeps the request, and so the bridge, running.")
+            with open(callback_path, "a", encoding="utf-8") as callback:
+                callback.write(name + "\n")
+            response, _ = self.finish_cli(process, command)
+            return self.assert_success(response)
+
+        started = self.assert_success(call("authenticate", "--provider", "claude", "--name", "claude-remote"))
+        self.assertEqual(started, {"provider": "claude", "name": "claude-remote",
+                                   "authorizationUrl": "https://auth.example.test/claude/authorize?server=claude-remote"})
+        self.assertEqual(logged(claude_executable + ".mcp-authenticate"), [{"serverName": "claude-remote"}], "Claude Code is asked for that server only.")
+        self.assertEqual(logged(codex_executable + ".mcp-login"), [], "Starting Claude's sign-in doesn't ask Codex.")
+        before = {server["name"]: server for server in self.assert_success(call("status", "--provider", "claude"))["claude"]}
+        self.assertTrue(before["claude-remote"]["needsSignIn"], "The server needs its sign-in until the browser redirects back.")
+        finished = finish("claude", "claude-remote", claude_executable + ".mcp-callback")
+        self.assertEqual(finished, {"provider": "claude", "name": "claude-remote", "signedIn": True})
+        after = {server["name"]: server for server in self.assert_success(call("status", "--provider", "claude"))["claude"]}
+        self.assertFalse(after["claude-remote"]["needsSignIn"], "The finished sign-in no longer needs one.")
+        self.assertTrue(after["claude-other"]["needsSignIn"], "Other servers still need theirs.")
+
+        started = self.assert_success(call("authenticate", "--provider", "codex", "--name", "codex-remote"))
+        self.assertEqual(started, {"provider": "codex", "name": "codex-remote",
+                                   "authorizationUrl": "https://auth.example.test/codex/authorize?server=codex-remote"})
+        self.assertEqual(logged(codex_executable + ".mcp-login"), [{"name": "codex-remote"}], "Codex is asked for that server only.")
+        self.assertEqual(logged(claude_executable + ".mcp-authenticate"), [{"serverName": "claude-remote"}], "Starting Codex's sign-in doesn't ask Claude Code.")
+        finished = finish("codex", "codex-remote", codex_executable + ".mcp-callback")
+        self.assertEqual(finished, {"provider": "codex", "name": "codex-remote", "signedIn": True})
+        codex_after = {server["name"]: server for server in self.assert_success(call("status", "--provider", "codex"))["codex"]}
+        self.assertFalse(codex_after["codex-remote"]["needsSignIn"])
+        self.assertTrue(codex_after["codex-other"]["needsSignIn"])
+
+        quick = {"PLAYHOUSE_E2E_MCP_LOGIN_TIMEOUT_SECONDS": "2"}
+        self.assert_success(call("authenticate", "--provider", "claude", "--name", "claude-other", extra=quick))
+        timed_out = self.assert_success(call("authenticate-wait", "--provider", "claude", "--name", "claude-other", extra=quick))
+        self.assertFalse(timed_out["signedIn"], "A sign-in nobody finishes doesn't sign in.")
+        self.assertIn("claude-other", timed_out["error"])
+        self.assertIn("in time", timed_out["error"])
+        self.assert_success(call("authenticate", "--provider", "codex", "--name", "codex-other", extra=quick))
+        codex_timed_out = self.assert_success(call("authenticate-wait", "--provider", "codex", "--name", "codex-other", extra=quick))
+        self.assertFalse(codex_timed_out["signedIn"])
+        self.assertIn("codex-other", codex_timed_out["error"])
+
+        # A pending sign-in is background work for either agent: the daemon, which would
+        # idle-exit after 3 seconds here, stays up while the agent waits for the browser.
+        # (The window's own watchers keep a daemon up, so only this suite can show it.)
+        for provider, name, callback_path in [("claude", "claude-other", claude_executable + ".mcp-callback"),
+                                              ("codex", "codex-other", codex_executable + ".mcp-callback")]:
+            lifecycle = {"PLAYHOUSE_BRIDGE_SERVICE_NAME": f"{arguments.service_name}.mcp-login-{uuid.uuid4().hex[:8]}",
+                         "PLAYHOUSE_BRIDGE_IDLE_GRACE_SECONDS": "3"}
+            daemon_pid = self.assert_success(self.call_cli("status", extra_environment={**environment, **lifecycle})[0])["processID"]
+            self.assert_success(call("authenticate", "--provider", provider, "--name", name, extra=lifecycle))
+            time.sleep(5.5)
+            self.assertTrue(self.process_is_running(daemon_pid), f"The bridge stays up while a {provider} sign-in waits for the browser.")
+            with open(callback_path, "a", encoding="utf-8") as callback:
+                callback.write(name + "\n")
+            finished = self.assert_success(call("authenticate-wait", "--provider", provider, "--name", name, extra=lifecycle))
+            self.assertTrue(finished["signedIn"], "The sign-in finishes on the daemon that waited for it.")
+            deadline = time.monotonic() + 10
+            while self.process_is_running(daemon_pid) and time.monotonic() < deadline:
+                time.sleep(0.25)
+            self.assertFalse(self.process_is_running(daemon_pid), "Once the sign-in is over, the idle bridge exits again.")
+
+        never = self.assert_success(call("authenticate-wait", "--provider", "claude", "--name", "never-started"))
+        self.assertFalse(never["signedIn"], "Waiting for a sign-in that was never started reports it.")
+        self.assertIn("No sign-in", never["error"])
+        for provider, name in [("claude", "claude-remote"), ("codex", "codex-remote")]:
+            reported = self.assert_success(call("authenticate-wait", "--provider", provider, "--name", name))
+            self.assertFalse(reported["signedIn"], "A finished sign-in is reported once; waiting again finds none in progress.")
+            self.assertIn("No sign-in", reported["error"])
+        self.assert_failure(call("authenticate", "--provider", "gemini", "--name", "claude-remote", expected_status=2), "invalid_argument")
+        self.assert_failure(call("authenticate", "--provider", "claude", "--name", "", expected_status=2), "invalid_argument")
+        self.assertEqual(logged(claude_executable + ".mcp-authenticate")[-1], {"serverName": "claude-other"}, "A rejected request starts nothing.")
 
     # Plugins and the Component Catalog
 

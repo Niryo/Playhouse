@@ -6181,34 +6181,77 @@ final class ConversationManager {
     /// with the task's own MCP bridge, so it also reports the servers Playhouse
     /// passes it and its claude.ai connectors and plugin servers; Codex reports
     /// the servers in its own configuration.
-    func mcpStatus(taskID: UUID?) async -> McpStatusReport {
-        var report = McpStatusReport()
+    /// The workspace a provider is asked about the task's MCP servers in: the
+    /// task's folders with its MCP bridge, or an empty one without a task.
+    private func mcpWorkspace(taskID: UUID?) -> ConversationWorkspaceContext? {
         let task = taskID.flatMap { try? tasks.conversationSubject($0) }
         let roots = task.map { Self.historyRoots($0).map { URL(fileURLWithPath: $0, isDirectory: true) } } ?? []
-        guard var workspace = (try? ConversationWorkspaceContext(roots: roots)) ?? (try? ConversationWorkspaceContext(roots: [])) else {
+        guard var workspace = (try? ConversationWorkspaceContext(roots: roots)) ?? (try? ConversationWorkspaceContext(roots: [])) else { return nil }
+        if let task, let mcp = clients.mcp { workspace.mcpBridge = mcp.bridge(roots: SkillRoot.roots(for: task)) }
+        return workspace
+    }
+
+    /// With `provider`, only that provider is asked, so a sign-in that is being
+    /// waited on doesn't start the other one.
+    func mcpStatus(taskID: UUID?, provider: ConversationProvider? = nil) async -> McpStatusReport {
+        var report = McpStatusReport()
+        guard let workspace = mcpWorkspace(taskID: taskID) else {
             report.errors = ["claude": "The task's folders are missing.", "codex": "The task's folders are missing."]
             return report
         }
-        if let task, let mcp = clients.mcp { workspace.mcpBridge = mcp.bridge(roots: SkillRoot.roots(for: task)) }
-        let claude = await clients.claude.capabilities(workspace: workspace)
-        if claude.isAvailable {
-            report.claude = claude.mcpServers.map { McpProviderStatus(name: $0.name, status: $0.status, needsSignIn: $0.status == "needs-auth") }
-        } else {
-            report.errors["claude"] = claude.error ?? "Claude Code is not installed."
-        }
-        if clients.codex.isInstalled {
-            do {
-                report.codex = try await clients.codex.mcpServerStatuses(workspace: workspace)
-            } catch {
-                report.errors["codex"] = error.localizedDescription
+        if provider != .codex {
+            let claude = await clients.claude.capabilities(workspace: workspace)
+            if claude.isAvailable {
+                report.claude = claude.mcpServers.map { McpProviderStatus(name: $0.name, status: $0.status, needsSignIn: $0.status == "needs-auth") }
+            } else {
+                report.errors["claude"] = claude.error ?? "Claude Code is not installed."
             }
-        } else {
-            report.errors["codex"] = "Codex is not installed."
+        }
+        if provider != .claude {
+            if clients.codex.isInstalled {
+                do {
+                    report.codex = try await clients.codex.mcpServerStatuses(workspace: workspace)
+                } catch {
+                    report.errors["codex"] = error.localizedDescription
+                }
+            } else {
+                report.errors["codex"] = "Codex is not installed."
+            }
         }
         PlayhouseDiagnostics.record("mcp.status.read", fields: [
             "claudeCount": String(report.claude.count), "codexCount": String(report.codex.count),
         ])
         return report
+    }
+
+    /// Starts the sign-in of an MCP server in one provider and returns the link
+    /// to open in the browser. The provider finishes the sign-in when the browser
+    /// redirects back to it; `mcpLoginResult` waits for that.
+    func startMcpLogin(taskID: UUID?, provider: ConversationProvider, name: String) async throws -> McpLoginStart {
+        guard !name.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Name the MCP server to sign in to.")
+        }
+        guard let workspace = mcpWorkspace(taskID: taskID) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "The task's folders are missing.")
+        }
+        let link: String
+        switch provider {
+        case .claude: link = try await clients.claude.startMcpLogin(name: name, workspace: workspace)
+        case .codex:
+            guard clients.codex.isInstalled else { throw BridgeCommandError(code: "unavailable", message: "Codex is not installed.") }
+            link = try await clients.codex.startMcpLogin(name: name, workspace: workspace)
+        }
+        return McpLoginStart(provider: provider, name: name, authorizationUrl: link)
+    }
+
+    /// Waits for a started sign-in to finish: signed in, failed, or timed out.
+    func mcpLoginResult(taskID: UUID?, provider: ConversationProvider, name: String) async -> McpLoginResult {
+        switch provider {
+        case .claude: return await clients.claude.waitForMcpLogin(name: name)
+        case .codex:
+            guard let workspace = mcpWorkspace(taskID: taskID) else { return McpLogin.notStarted(provider: .codex, name: name) }
+            return await clients.codex.waitForMcpLogin(name: name, workspace: workspace)
+        }
     }
 
     /// Changes the provider that runs the task's next turn. A switch waits for the
@@ -9730,10 +9773,25 @@ final class PlayhouseBridgeRuntime {
                 result = .object(["task": try Self.value(created), "prompt": .string(plan.prompt)])
             case "mcp.bridge":
                 result = try Self.value(mcp.bridge(roots: skillRoots()))
-            case "mcp.status":
+            case "mcp.status", "mcp.authenticate", "mcp.authenticate.wait":
                 let taskID = request.arguments["taskID"]?.string?.isEmpty == false ? try request.requiredUUID("taskID") : nil
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
-                result = try Self.value(await conversations.mcpStatus(taskID: taskID))
+                let provider = try request.arguments["provider"]?.string.map { value -> ConversationProvider in
+                    guard let provider = ConversationProvider(rawValue: value) else {
+                        throw BridgeCommandError(code: "invalid_argument", message: "Provider must be 'claude' or 'codex'.")
+                    }
+                    return provider
+                }
+                switch request.command {
+                case "mcp.status":
+                    result = try Self.value(await conversations.mcpStatus(taskID: taskID, provider: provider))
+                case "mcp.authenticate":
+                    guard let provider else { throw BridgeCommandError(code: "invalid_argument", message: "Provider must be 'claude' or 'codex'.") }
+                    result = try Self.value(await conversations.startMcpLogin(taskID: taskID, provider: provider, name: request.requiredString("name")))
+                default:
+                    guard let provider else { throw BridgeCommandError(code: "invalid_argument", message: "Provider must be 'claude' or 'codex'.") }
+                    result = try Self.value(await conversations.mcpLoginResult(taskID: taskID, provider: provider, name: request.requiredString("name")))
+                }
             case "conversation.provider.capabilities":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .array(try await conversations.providerCapabilities(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })
