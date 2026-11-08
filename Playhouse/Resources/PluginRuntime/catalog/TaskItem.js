@@ -25,7 +25,7 @@ function WorkingTime(props) {
     var timer = setInterval(function () { now[1](Date.now()); }, 1000);
     return function () { clearInterval(timer); };
   }, []);
-  return h(Text, { size: 10, color: "tertiary", testID: "task-working-duration-" + props.task.id }, workingDuration(props.task, now[0]));
+  return h(Text, { size: 10, color: "tertiary", passThrough: true, testID: "task-working-duration-" + props.task.id }, workingDuration(props.task, now[0]));
 }
 
 function menuItems(task) {
@@ -49,18 +49,19 @@ function PullRequestControls(props) {
     }, pr.create.busy ? h(Spinner, { size: "mini" }) : h(Text, { size: 10, weight: "semibold" }, pr.create.title)));
   }
   if (pr.mergedCheck) {
-    controls.push(h(Button, {
-      key: "merged", style: "borderless", emphasis: 10,
+    // The capsule hugs the small check and the 30 pt slot centers it.
+    controls.push(h(Stack, { key: "merged", axis: "h", width: 30, height: 30 }, h(Button, {
+      style: "borderless", emphasis: 10, overhang: true,
       testID: "task-complete-merged-pr-" + id, label: "Green checkmark. Complete task, all linked pull requests merged",
-      help: "Complete task: all linked pull requests have merged", width: 30, height: 30,
+      help: "Complete task: all linked pull requests have merged",
       onPress: on.moveToDone
-    }, h(Icon, { name: "checkmark", size: 11, weight: "bold", color: "green" })));
+    }, h(Icon, { name: "checkmark", size: 11, weight: "bold", color: "green" }))));
     return controls;
   }
   if (pr.conflictsHelp) {
     controls.push(h(Button, {
       key: "conflicts", style: "borderless", emphasis: 10,
-      testID: "task-resolve-pr-conflicts-" + id, label: "Resolve pull request conflicts", help: pr.conflictsHelp, minWidth: 30, minHeight: 30,
+      testID: "task-resolve-pr-conflicts-" + id, label: "Resolve pull request conflicts", help: pr.conflictsHelp,
       onPress: on.resolveConflicts
     }, h(Icon, { asset: "ConflictIndicator", color: "orange", testID: "task-resolve-pr-conflicts-icon-" + id, width: 16, height: 16 })));
   }
@@ -109,10 +110,11 @@ function TaskItem(props) {
         size: 10, color: task.statusIsBlocked ? "red" : "secondary", lineLimit: 3,
         testID: "task-status-message-" + id, fillWidth: true, passThrough: true
       }, task.statusMessage) : null,
+      // One flat row, as in TaskItemView: nested beside the overhanging
+      // counter, a widening time kept its old width and truncated.
       h(Stack, { axis: "h", spacing: 6 },
-        h(Stack, { axis: "h", spacing: 6, passThrough: true },
-          h(Icon, { name: "clock", size: 10, color: "tertiary" }),
-          task.isWorking ? h(WorkingTime, { task: task }) : h(Text, { size: 10, color: "tertiary" }, task.createdText)),
+        h(Icon, { name: "clock", size: 10, color: "tertiary", passThrough: true }),
+        task.isWorking ? h(WorkingTime, { task: task }) : h(Text, { size: 10, color: "tertiary", testID: "task-created-time-" + id, passThrough: true }, task.createdText),
         task.tokens ? h(Button, {
           emphasis: 6, overhang: true,
           testID: "task-token-usage-counter-" + id, label: task.tokens.description, hint: "Open Token Stats",
