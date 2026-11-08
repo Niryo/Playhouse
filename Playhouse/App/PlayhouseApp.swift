@@ -9,7 +9,6 @@ struct PlayhouseApp: App {
     private let appPreferences: UserDefaults
     @StateObject private var conversationRuntime: ConversationRuntimeModel
     @StateObject private var cpuUsageModel: TaskCPUUsageModel
-    @StateObject private var pluginLibrary = PluginLibraryModel()
     @StateObject private var agentUsageModel = AgentUsageModel(client: DaemonClient())
 
     private var windowTitle: String {
@@ -72,25 +71,15 @@ struct PlayhouseApp: App {
                 .help("Search tasks")
                 .keyboardShortcut("f", modifiers: .command)
             }
-            CommandMenu("Plugins") { PluginsMenuContent(library: pluginLibrary) }
+            CommandMenu("Plugins") { PluginsMenuContent() }
             CommandMenu("Debug") { DebugConversationImportMenu(modelContainer: modelContainer) } // DEBUG-IMPORT:
         }
 
-        Window("Component Catalog", id: "component-catalog") {
-            ComponentCatalogView()
+        Window("Plugin Catalog", id: "plugin-catalog") {
+            PluginCatalogView()
                 .defaultAppStorage(appPreferences)
         }
-        .defaultSize(width: 1180, height: 820)
-
-        WindowGroup("Plugin", id: "plugin", for: PluginViewRef.self) { $ref in
-            if let ref = ref {
-                PluginWindowView(ref: ref)
-                    .defaultAppStorage(appPreferences)
-            }
-        }
-        .defaultSize(width: 520, height: 420)
-        // Plugin windows open from the Plugins menu with a view; no empty "New Plugin Window".
-        .commandsRemoved()
+        .defaultSize(width: 1000, height: 760)
 
         Settings {
             WorkspaceSettingsView()
@@ -171,5 +160,16 @@ private struct MainWindowView: View {
                 lifecycleError = error.localizedDescription
             }
         }
+    }
+}
+
+/// The app menu's Plugins menu.
+struct PluginsMenuContent: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Plugin Catalog") { openWindow(id: "plugin-catalog") }
+            .buttonHoverPointer()
+            .help("Open the Plugin Catalog")
     }
 }

@@ -27,9 +27,9 @@ enum PlayhouseCLI {
             }
             printResponse(response)
             guard response.ok else { exit(exitStatus(for: response.error?.code)) }
-            // Checks that find problems still answer with the full report, but fail the process.
-            if configuredRequest.command == "plugin.validate" || configuredRequest.command == "plugin.check-showcases",
-               response.result?.object?["valid"]?.bool == false {
+            // A plugin that renders with errors still answers with the full report, but fails the process.
+            if configuredRequest.command == "plugin.render",
+               case .array(let errors)? = response.result?.object?["errors"], !errors.isEmpty {
                 exit(1)
             }
         } catch {
@@ -404,40 +404,23 @@ enum PlayhouseCLI {
                 "parent": .string(try requiredFlag("--parent", flags: flags).first!)
             ])
         case "plugin":
-            guard let operation = rest.first else { throw CLIError.usage("Missing plugin operation.") }
-            let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--path", "--id", "--type", "--template", "--section"])
-            // The daemon resolves paths from its own working directory, so send absolute ones.
-            func absolutePath() -> BridgeValue? {
-                flags["--path"]?.first.map { path in
-                    .string(URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)).standardizedFileURL.path)
-                }
+            let usage = "Use: playhouse plugin render (--file <plugin.js> | --page <catalog-page>) [--props <json>] [--event <testID>:<event>[:<value>]...] [--advance <seconds>]"
+            guard rest.first == "render" else { throw CLIError.usage(usage) }
+            let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--file", "--page", "--props", "--event", "--advance"])
+            guard (flags["--file"] == nil) != (flags["--page"] == nil) else { throw CLIError.usage(usage) }
+            var arguments: [String: BridgeValue] = [:]
+            // The daemon resolves paths from its own working directory, so send an absolute one.
+            arguments["file"] = flags["--file"]?.first.map { path in
+                .string(URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)).standardizedFileURL.path)
             }
-            switch operation {
-            case "list":
-                return BridgeRequest(command: "plugin.list")
-            case "validate":
-                var arguments: [String: BridgeValue] = [:]
-                arguments["path"] = absolutePath()
-                arguments["id"] = flags["--id"]?.first.map(BridgeValue.string)
-                guard !arguments.isEmpty else { throw CLIError.usage("Use: playhouse plugin validate --path <plugin-dir> | --id <plugin-id>") }
-                return BridgeRequest(command: "plugin.validate", arguments: arguments)
-            case "components":
-                var arguments: [String: BridgeValue] = [:]
-                arguments["type"] = flags["--type"]?.first.map(BridgeValue.string)
-                return BridgeRequest(command: "plugin.components", arguments: arguments)
-            case "check-showcases":
-                var arguments: [String: BridgeValue] = [:]
-                arguments["path"] = absolutePath()
-                return BridgeRequest(command: "plugin.check-showcases", arguments: arguments)
-            case "new":
-                var arguments: [String: BridgeValue] = ["id": .string(try requiredFlag("--id", flags: flags).first!)]
-                arguments["template"] = flags["--template"]?.first.map(BridgeValue.string)
-                arguments["section"] = flags["--section"]?.first.map(BridgeValue.string)
-                arguments["path"] = absolutePath()
-                return BridgeRequest(command: "plugin.new", arguments: arguments)
-            default:
-                throw CLIError.usage("Unknown plugin operation: \(operation)")
+            arguments["page"] = flags["--page"]?.first.map(BridgeValue.string)
+            arguments["props"] = flags["--props"]?.first.map(BridgeValue.string)
+            arguments["events"] = flags["--event"].map { .array($0.map(BridgeValue.string)) }
+            if let advance = flags["--advance"]?.first {
+                guard let seconds = Double(advance), seconds >= 0 else { throw CLIError.usage(usage) }
+                arguments["advance"] = .decimal(seconds)
             }
+            return BridgeRequest(command: "plugin.render", arguments: arguments)
         case "usage":
             switch rest.first {
             case "get":
@@ -1050,12 +1033,7 @@ enum PlayhouseCLI {
       playhouse chat page close-turn <chat-id> --continues <true|false> [--new-title <title>] [--summary-hint <text>]
       playhouse workspace suggest --parent <path>
       playhouse workspace repos list
-      playhouse plugin list
-      playhouse plugin validate --path <plugin-dir> | --id <plugin-id>
-      playhouse plugin components [--type <component>]
-      playhouse plugin check-showcases [--path <showcase-root>]
-      playhouse plugin new --id <id> [--template view|showcase] [--section <section-id>] [--path <parent-dir>]
-      playhouse-plugin-dev <plugin-dir> [--json]   (run a plugin live without the app; see its help)
+      playhouse plugin render (--file <plugin.js> | --page <catalog-page>) [--props <json>] [--event <testID>:<event>[:<value>]...] [--advance <seconds>]
       playhouse usage get [--refresh|--watch]|login <codex|claude>|switch-account <codex|claude>
       playhouse skills list [--task <task-id>] [--include-bundled true]
       playhouse skills get --skill <skill-id> [--task <task-id>]

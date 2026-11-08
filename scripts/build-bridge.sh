@@ -17,10 +17,6 @@ app_executable="${app_macos}/${EXECUTABLE_NAME:?}"
 # replaced, which needed its own bundle specifically for XPC's service
 # discovery).
 daemon_executable="${app_macos}/playhouse-daemon"
-# The plugin dev runner links only the plugin core (Foundation + JavaScriptCore)
-# and the bridge client, so the core can never come to depend on SwiftUI or the
-# app target: an import of either breaks this build.
-plugin_dev_executable="${app_macos}/playhouse-plugin-dev"
 architecture="${CURRENT_ARCH:-}"
 if [[ -z "${architecture}" || "${architecture}" == "undefined_arch" ]]; then
   architecture="${ARCHS%% *}"
@@ -74,7 +70,8 @@ if [[ ! -x "${app_executable}" ]]; then
 fi
 
 # Plugins/Core is a synchronized Xcode folder; every Swift file in it is part of
-# the plugin core, shared by the app, the daemon and playhouse-plugin-dev.
+# the plugin core (the JavaScript runtime and node tree), shared by the app and
+# the daemon's `plugin render` command.
 plugin_core_sources=()
 while IFS= read -r source; do
   plugin_core_sources+=("${source}")
@@ -124,7 +121,6 @@ bridge_inputs=(
   "${repository_root}/Playhouse/Bridge/DaemonMain.swift"
   "${repository_root}/Playhouse/CLI/BridgeClient.swift"
   "${repository_root}/Playhouse/CLI/PlayhouseCLI.swift"
-  "${repository_root}/Playhouse/PluginDev/PluginDevMain.swift"
   "${architecture}-apple-macosx${deployment_target}"
   "${sdk}"
   "$(xcrun --sdk macosx swiftc -version)"
@@ -153,7 +149,7 @@ metadata_matches() {
     [[ "$(/usr/libexec/PlistBuddy -c 'Print :PlayhouseSourceWorktree' "${app_info}" 2>/dev/null)" == "${PLAYHOUSE_PROFILE_ROOT}" ]]
 }
 
-if [[ -x "${cli_executable}" && -x "${daemon_executable}" && -x "${plugin_dev_executable}" &&
+if [[ -x "${cli_executable}" && -x "${daemon_executable}" &&
       -f "${bridge_stamp}" && "$(cat "${bridge_stamp}")" == "${bridge_fingerprint}" ]] &&
       metadata_matches; then
   printf 'Reusing unchanged embedded bridge tools in %s\n' "${app_contents}"
@@ -193,20 +189,6 @@ xcrun --sdk macosx swiftc \
   "${repository_root}/Playhouse/CLI/PlayhouseCLI.swift" \
   -o "${cli_executable}"
 
-xcrun --sdk macosx swiftc \
-  -swift-version 5 \
-  -target "${architecture}-apple-macosx${deployment_target}" \
-  -sdk "${sdk}" \
-  -O \
-  "${debug_flags[@]}" \
-  -framework Foundation \
-  -framework JavaScriptCore \
-  "${plugin_core_sources[@]}" \
-  "${repository_root}/Playhouse/Bridge/BridgeContract.swift" \
-  "${repository_root}/Playhouse/Bridge/BridgeSocket.swift" \
-  "${repository_root}/Playhouse/CLI/BridgeClient.swift" \
-  "${repository_root}/Playhouse/PluginDev/PluginDevMain.swift" \
-  -o "${plugin_dev_executable}"
 
 # Checked without launching the selected executable, including overrides. Only
 # the app's own Info.plist needs stamping now: the daemon and the CLI both
@@ -225,14 +207,13 @@ with open(path, 'wb') as stream:
     plistlib.dump(info, stream)
 PYMETA
 
-chmod 755 "${cli_executable}" "${daemon_executable}" "${plugin_dev_executable}"
-if [[ "${app_executable}" -ef "${cli_executable}" || "${app_executable}" -ef "${daemon_executable}" || "${app_executable}" -ef "${plugin_dev_executable}" ]]; then
+chmod 755 "${cli_executable}" "${daemon_executable}"
+if [[ "${app_executable}" -ef "${cli_executable}" || "${app_executable}" -ef "${daemon_executable}" ]]; then
   printf 'The CLI/daemon must not replace the Playhouse app executable: %s\n' "${app_executable}" >&2
   exit 1
 fi
 
 codesign --force --sign - --timestamp=none "${cli_executable}"
 codesign --force --sign - --timestamp=none "${daemon_executable}"
-codesign --force --sign - --timestamp=none "${plugin_dev_executable}"
 printf '%s\n' "${bridge_fingerprint}" > "${bridge_stamp}"
-printf 'Embedded playhouse CLI, bridge daemon and plugin dev runner in %s\n' "${app_contents}"
+printf 'Embedded playhouse CLI and bridge daemon in %s\n' "${app_contents}"

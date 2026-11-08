@@ -1,0 +1,477 @@
+import SwiftUI
+
+// The atoms' SwiftUI views. Plugins reach them through `AtomRegistry`, and
+// native composites (the task item) build them directly with the same props
+// structs, so both share one implementation.
+
+/// Colors a prop may name: primary, secondary, tertiary, accent, text (the
+/// conversation text color), red, green, orange, blue, purple, or #RRGGBB.
+enum AtomColor {
+    static func style(_ name: String?) -> AnyShapeStyle? {
+        guard let name else { return nil }
+        switch name {
+        case "primary": return AnyShapeStyle(.primary)
+        case "secondary": return AnyShapeStyle(.secondary)
+        case "tertiary": return AnyShapeStyle(.tertiary)
+        case "accent": return AnyShapeStyle(Color.accentColor)
+        case "text": return AnyShapeStyle(WorkspaceTheme.conversationText)
+        case "red": return AnyShapeStyle(Color.red)
+        case "green": return AnyShapeStyle(Color.green)
+        case "orange": return AnyShapeStyle(Color.orange)
+        case "blue": return AnyShapeStyle(Color.blue)
+        // GitHub's merged purple.
+        case "purple": return AnyShapeStyle(Color(red: 0.64, green: 0.44, blue: 0.97))
+        default:
+            guard name.hasPrefix("#"), name.count == 7, let value = UInt32(name.dropFirst(), radix: 16) else { return nil }
+            return AnyShapeStyle(Color(
+                red: Double((value >> 16) & 0xFF) / 255,
+                green: Double((value >> 8) & 0xFF) / 255,
+                blue: Double(value & 0xFF) / 255
+            ))
+        }
+    }
+
+    /// `color` as the #RRGGBB a prop carries.
+    static func hex(_ color: Color) -> String {
+        let resolved = NSColor(color).usingColorSpace(.sRGB) ?? .gray
+        let channel = { (value: CGFloat) in Int((min(1, max(0, value)) * 255).rounded()) }
+        return String(format: "#%02X%02X%02X", channel(resolved.redComponent), channel(resolved.greenComponent), channel(resolved.blueComponent))
+    }
+}
+
+enum AtomFont {
+    static func font(size: Double?, weight: String?, design: String? = nil) -> Font? {
+        guard size != nil || weight != nil || design != nil else { return nil }
+        return .system(size: size ?? NSFont.systemFontSize, weight: self.weight(weight), design: design == "monospaced" ? .monospaced : .default)
+    }
+
+    private static func weight(_ name: String?) -> Font.Weight {
+        switch name {
+        case "medium": .medium
+        case "semibold": .semibold
+        case "bold": .bold
+        default: .regular
+        }
+    }
+}
+
+private struct AtomCommonModifier: ViewModifier {
+    let common: AtomCommon
+    /// Makes the atom one accessibility container for its children.
+    var group = false
+
+    /// False when the atom already applied its frame (a Button, inside its label).
+    var frame = true
+
+    func body(content: Content) -> some View {
+        content
+            .modifier(Applied(when: frame) { $0.atomFrame(common) })
+            .modifier(OptionalHelp(text: common.help))
+            .allowsHitTesting(common.passThrough != true)
+            .modifier(AtomAccessibility(common: common, group: group))
+    }
+}
+
+private struct OptionalHelp: ViewModifier {
+    let text: String?
+
+    func body(content: Content) -> some View {
+        if let text { content.nativeHelp(text) } else { content }
+    }
+}
+
+/// Only the accessibility fields a plugin set: an empty label or identifier
+/// would replace a Text's own label or erase its children's identifiers.
+private struct AtomAccessibility: ViewModifier {
+    let common: AtomCommon
+    let group: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .modifier(Applied(when: group) { $0.accessibilityElement(children: .contain) })
+            .modifier(Applied(when: common.label != nil) { $0.accessibilityLabel(common.label ?? "") })
+            .modifier(Applied(when: common.value != nil) { $0.accessibilityValue(common.value ?? "") })
+            .modifier(Applied(when: common.hint != nil) { $0.accessibilityHint(common.hint ?? "") })
+            .modifier(Applied(when: common.testID != nil) { $0.accessibilityIdentifier(common.testID ?? "") })
+    }
+}
+
+private struct Applied<Modified: View>: ViewModifier {
+    let when: Bool
+    let transform: (AnyView) -> Modified
+
+    init(when: Bool, _ transform: @escaping (AnyView) -> Modified) {
+        self.when = when
+        self.transform = transform
+    }
+
+    func body(content: Content) -> some View {
+        if when { transform(AnyView(content)) } else { content }
+    }
+}
+
+extension View {
+    func atomCommon(_ common: AtomCommon, group: Bool = false, frame: Bool = true) -> some View {
+        modifier(AtomCommonModifier(common: common, group: group, frame: frame))
+    }
+
+    /// The common size, fill and padding props.
+    func atomFrame(_ common: AtomCommon) -> some View {
+        self
+            .padding(.horizontal, CGFloat(common.paddingX ?? 0))
+            .frame(width: common.width.map { CGFloat($0) }, height: common.height.map { CGFloat($0) })
+            .frame(minWidth: common.minWidth.map { CGFloat($0) }, minHeight: common.minHeight.map { CGFloat($0) })
+            .frame(maxWidth: common.fillWidth == true ? .infinity : nil, alignment: .leading)
+            .padding(CGFloat(common.padding ?? 0))
+    }
+
+    @ViewBuilder
+    func atomForeground(_ color: String?) -> some View {
+        if let style = AtomColor.style(color) { foregroundStyle(style) } else { self }
+    }
+
+    @ViewBuilder
+    func atomFont(_ font: Font?) -> some View {
+        if let font { self.font(font) } else { self }
+    }
+
+    @ViewBuilder
+    func atomEmphasis(_ padding: Double?) -> some View {
+        if let padding { actionButtonHoverEmphasis(padding: CGFloat(padding)) } else { self }
+    }
+}
+
+struct AtomStack<Content: View>: View {
+    var props = StackProps()
+    var common = AtomCommon()
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        Group {
+            if props.axis == "h" {
+                HStack(alignment: verticalAlignment, spacing: props.spacing.map { CGFloat($0) }, content: content)
+            } else {
+                VStack(alignment: horizontalAlignment, spacing: props.spacing.map { CGFloat($0) }, content: content)
+            }
+        }
+        .atomCommon(common, group: props.group == true)
+    }
+
+    private var verticalAlignment: VerticalAlignment {
+        switch props.align {
+        case "top": .top
+        case "bottom": .bottom
+        default: .center
+        }
+    }
+
+    private var horizontalAlignment: HorizontalAlignment {
+        switch props.align {
+        case "leading": .leading
+        case "trailing": .trailing
+        default: .center
+        }
+    }
+}
+
+struct AtomText: View {
+    var props = TextProps()
+    var common = AtomCommon()
+    /// The raw string children, when `props.text` is unset.
+    var children = ""
+
+    var body: some View {
+        let string = props.text ?? children
+        Text(verbatim: string)
+            .lineSpacing(CGFloat(props.lineSpacing ?? 0))
+            .atomFont(AtomFont.font(size: props.size, weight: props.weight, design: props.design))
+            .tracking(CGFloat(props.tracking ?? 0))
+            .atomForeground(props.color)
+            .lineLimit(props.lineLimit)
+            .contentTransition(props.numeric == true ? .numericText() : .identity)
+            .animation(props.numeric == true ? .default : nil, value: string)
+            .fixedSize(horizontal: false, vertical: props.wrap == true)
+            .atomCommon(common)
+    }
+}
+
+struct AtomIcon: View {
+    var props = IconProps()
+    var common = AtomCommon()
+
+    var body: some View {
+        Group {
+            if let asset = props.asset {
+                Image(asset)
+                    .resizable()
+                    .renderingMode(.template)
+                    .scaledToFit()
+            } else {
+                Image(systemName: props.name ?? "questionmark")
+                    .atomFont(AtomFont.font(size: props.size, weight: props.weight))
+            }
+        }
+        .atomForeground(props.color)
+        .atomCommon(common)
+    }
+}
+
+struct AtomLabel: View {
+    var props: LabelProps
+    var common = AtomCommon()
+
+    var body: some View {
+        Label(props.text, systemImage: props.icon)
+            .atomFont(AtomFont.font(size: props.size, weight: props.weight))
+            .atomForeground(props.color)
+            .atomCommon(common)
+    }
+}
+
+struct AtomButton<Content: View>: View {
+    var props = ButtonProps()
+    var common = AtomCommon()
+    let action: () -> Void
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        styled
+            .padding(.horizontal, props.overhang == true ? -CGFloat((props.emphasis ?? 0) + (common.paddingX ?? 0)) : 0)
+            .padding(.vertical, props.overhang == true ? -CGFloat(props.emphasis ?? 0) : 0)
+            .disabled(props.disabled == true)
+            .atomCommon(common, frame: false)
+    }
+
+    /// The hover capsule and the frame sit inside the label, so the whole
+    /// padded area is the click target.
+    private var label: some View {
+        var outer = common
+        outer.paddingX = nil
+        return content()
+            .padding(.horizontal, CGFloat(common.paddingX ?? 0))
+            .atomEmphasis(props.emphasis)
+            .atomFrame(outer)
+            .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private var styled: some View {
+        if props.style == "borderless" {
+            Button(action: action) { label }
+                .buttonStyle(.borderless)
+                .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
+        } else {
+            Button(action: action) { label }
+                .buttonStyle(.plain)
+                .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
+        }
+    }
+}
+
+struct AtomLink<Content: View>: View {
+    var props: LinkProps
+    var common = AtomCommon()
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        if let url = URL(string: props.url) {
+            Link(destination: url, label: content)
+                .buttonStyle(.borderless)
+                .atomEmphasis(props.emphasis)
+                .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
+                .atomCommon(common)
+                .contentShape(Rectangle())
+        } else {
+            content().atomCommon(common)
+        }
+    }
+}
+
+struct AtomSpinner: View {
+    var props = SpinnerProps()
+    var common = AtomCommon()
+
+    var body: some View {
+        ProgressView()
+            .controlSize(props.size == "mini" ? .mini : .small)
+            .atomCommon(common)
+    }
+}
+
+struct AtomSpacer: View {
+    var props = SpacerProps()
+
+    var body: some View {
+        Spacer(minLength: props.minLength.map { CGFloat($0) })
+    }
+}
+
+/// Collapsed it shows the selected option and a chevron; clicked, it slides
+/// open into every option. A choice shows at once and reverts after five
+/// seconds unless `selected` catches up (a rejected choice must not stick).
+/// `common.help` is the collapsed tooltip; "{help}" in it becomes the shown
+/// option's help.
+struct AtomPillPicker: View {
+    var props: PillPickerProps
+    var common = AtomCommon()
+    let onChange: (String) -> Void
+    @State private var isExpanded = false
+    @State private var chosen: String?
+    @Namespace private var selection
+
+    private var shown: String { chosen ?? props.selected }
+    private var shownOption: PillPickerProps.Option? { props.options.first { $0.value == shown } }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            if isExpanded {
+                ForEach(Array(props.options.enumerated()), id: \.element.value) { index, option in
+                    if index > 0 {
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.18))
+                            .frame(width: 1, height: 9)
+                            .opacity(option.value == shown || props.options[index - 1].value == shown ? 0 : 1)
+                    }
+                    optionButton(option)
+                        .transition(.asymmetric(insertion: .move(edge: .leading).combined(with: .opacity), removal: .opacity))
+                }
+            } else {
+                Button {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { isExpanded = true }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(shownOption?.label ?? shown)
+                            .font(.system(size: 9, weight: .semibold))
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 7, weight: .bold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 7)
+                    .frame(height: 17)
+                    .background(Capsule().fill(Color.primary.opacity(0.14)).matchedGeometryEffect(id: "selected", in: selection))
+                    .frame(minHeight: 30)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .buttonHoverPointer()
+                .nativeHelp((common.help ?? "{help}").replacingOccurrences(of: "{help}", with: shownOption?.help ?? ""))
+                .accessibilityLabel(common.label ?? shownOption?.label ?? shown)
+                .accessibilityValue(shown)
+                .accessibilityIdentifier(common.testID ?? "")
+            }
+        }
+        .padding(.horizontal, 1)
+        .background(Capsule().fill(Color.primary.opacity(0.07)).frame(height: 19))
+        .clipShape(Capsule().inset(by: -6))
+        .fixedSize()
+        .accessibilityElement(children: .contain)
+        .onChange(of: props.selected) { _, stored in
+            if stored == chosen { chosen = nil }
+        }
+        .task(id: chosen) {
+            guard chosen != nil else { return }
+            try? await Task.sleep(for: .seconds(5))
+            chosen = nil
+        }
+    }
+
+    private func optionButton(_ option: PillPickerProps.Option) -> some View {
+        let isSelected = option.value == shown
+        return Button {
+            if !isSelected {
+                chosen = option.value
+                onChange(option.value)
+            }
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { isExpanded = false }
+        } label: {
+            Text(option.label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                .padding(.horizontal, 7)
+                .frame(height: 17)
+                .background {
+                    if isSelected {
+                        Capsule().fill(Color.primary.opacity(0.14)).matchedGeometryEffect(id: "selected", in: selection)
+                    }
+                }
+                .frame(minHeight: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .buttonHoverPointer()
+        .nativeHelp(option.help ?? option.label)
+        .accessibilityLabel(option.label)
+        .accessibilityValue(isSelected ? "selected" : "")
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityIdentifier(option.testID ?? "")
+    }
+}
+
+/// The task item's surface. Its content sits in front of one big button that
+/// owns the card chrome, so a click anywhere the content lets through (atoms
+/// with `passThrough`) presses the card. `common.testID`, `label` and `hint`
+/// describe that button; the card itself is an accessibility container.
+struct AtomCard<Content: View>: View {
+    var props = CardProps()
+    var common = AtomCommon()
+    let onPress: () -> Void
+    let onMenu: (String) -> Void
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        content()
+            .padding(CGFloat(common.padding ?? 0))
+            .frame(maxWidth: common.fillWidth == true ? .infinity : nil, alignment: .leading)
+            .background {
+                Button(action: { DispatchQueue.main.async(execute: onPress) }) {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(WorkspaceTheme.windowBackground)
+                        .shadow(color: .black.opacity(0.035), radius: 5, x: 0, y: 2)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+                        }
+                        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .buttonHoverPointer()
+                .buttonStyle(.plain) // no-tooltip: clicking a card obviously opens it; VoiceOver gets the hint.
+                .accessibilityLabel(common.label ?? "")
+                .accessibilityHint(common.hint ?? "")
+                .accessibilityIdentifier(common.testID ?? "")
+            }
+            .overlay(alignment: .leading) {
+                if let fraction = props.meter {
+                    GeometryReader { proxy in
+                        // The gradient is drawn at the track's full height so a
+                        // y-position always maps to the same color, then masked
+                        // down to the filled part.
+                        CPUUsageHeatmap.gradient
+                            .opacity(0.15)
+                        CPUUsageHeatmap.gradient
+                            .mask(alignment: .bottom) {
+                                Rectangle().frame(height: proxy.size.height * min(1, max(0, fraction)))
+                            }
+                    }
+                    .frame(width: 4)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .padding(.vertical, 1)
+                    .animation(.easeInOut(duration: 1.2), value: fraction)
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier(props.meterTestID ?? "")
+                    .accessibilityLabel(props.meterLabel ?? "")
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .contextMenu {
+                ForEach(props.menu ?? [], id: \.id) { item in
+                    Button(item.title, systemImage: item.icon ?? "circle", role: item.destructive == true ? .destructive : nil) {
+                        onMenu(item.id)
+                    }
+                    .buttonHoverPointer()
+                    .help(item.title.replacingOccurrences(of: "…", with: ""))
+                    .accessibilityIdentifier(item.testID ?? "")
+                }
+            }
+    }
+}
