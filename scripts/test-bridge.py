@@ -13819,7 +13819,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         path.write_text(source, encoding="utf-8")
         return self.call_cli("plugin", "render", "--file", path, *options, expected_status=expected_status)[0]
 
-    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card) and the Task Item example; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1, and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument.
+    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card) and the Task Item example; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1, and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
     def test_plugin_renderer_commits_minimal_ops_and_runs_handlers(self):
         plugin = """
 function App() {
@@ -13872,6 +13872,46 @@ Playhouse.render(h(App));
         self.assertEqual(len(tick_commits), 1)
         self.assertEqual(set(tick_commits[0]["touchedNodes"]), {ticks["children"][1]["id"]}, "Each tick changes only its own string node.")
         self.assertEqual(self.plugin_node(advanced["tree"], "label")["children"][0]["updates"], 0)
+
+        # Commits, props and event values cross as JavaScript values, not JSON
+        # strings, but keep JSON.stringify's rules.
+        values_plugin = """
+function App() {
+  var picked = React.useState("none");
+  return h(Stack, { testID: "values" },
+    h(Text, { testID: "props-echo" }, JSON.stringify(Playhouse.props)),
+    h(Text, { testID: "nan", size: NaN, label: new Date(0) }, "x"),
+    h(PillPicker, { testID: "pill", selected: "a", onChange: function (value) { picked[1](typeof value + " " + value); },
+      options: [{ value: "a", label: "A", help: undefined, extra: function () {}, gone: { toJSON: function () { return undefined; } }, selfish: { toJSON: function () { return this; } } }, inherits] }),
+    h(Text, { testID: "picked" }, picked[0]));
+}
+var inherits = Object.create({ inherited: "x" });
+inherits.value = "b";
+inherits.label = "B";
+Playhouse.render(h(App));
+"""
+        props = {"nested": {"list": [1, 2.5, "two", True, None], "flag": False}, "title": "Hi"}
+        values = self.assert_success(self.render_plugin(values_plugin, "--props", json.dumps(props), "--event", "pill:onChange:b"))
+        self.assertEqual(values["errors"], [])
+        self.assertEqual(json.loads(self.plugin_text(self.plugin_node(values["tree"], "props-echo"))), props,
+                         "The plugin's props reach JavaScript with their types and nesting intact.")
+        nan = self.plugin_node(values["tree"], "nan")["props"]
+        self.assertIn("size", nan)
+        self.assertIsNone(nan["size"], "NaN crosses as null, as JSON.stringify sends it.")
+        self.assertEqual(nan["label"], "1970-01-01T00:00:00.000Z", "A Date crosses as its toJSON() string.")
+        options = self.plugin_node(values["tree"], "pill")["props"]["options"]
+        self.assertEqual(options, [{"value": "a", "label": "A", "selfish": {}}, {"value": "b", "label": "B"}],
+                         "Undefined, function, undefined-toJSON and inherited fields are left out of nested values, and toJSON runs once (a self-returning one gives {}).")
+        self.assertEqual(self.plugin_node(values["tree"], "pill")["props"]["selected"], "a")
+        self.assertEqual(self.plugin_text(self.plugin_node(values["tree"], "picked")), "string b", "An event value arrives as a JavaScript string.")
+        circular = self.render_plugin("""
+var loop = {}; loop.self = loop;
+Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "A", extra: loop }] }));
+""", expected_status=1)
+        self.assertTrue(any("circular" in error for error in circular["result"]["errors"]), f"A circular prop is reported: {circular['result']['errors']}")
+        out_of_range = self.render_plugin('__native.commit([{ op: "createText", id: 1e300, text: "x" }]);', expected_status=1)
+        self.assertTrue(any("Invalid commit" in error and "integer" in error for error in out_of_range["result"]["errors"]),
+                        f"An op whose node id is out of range is reported, not a crash: {out_of_range['result']['errors']}")
 
         for page in ["Button", "Card", "Icon", "Label", "Link", "PillPicker", "Spacer", "Spinner", "Stack", "TaskItem", "Text"]:
             page_render = self.assert_success(self.call_cli("plugin", "render", "--page", page)[0])

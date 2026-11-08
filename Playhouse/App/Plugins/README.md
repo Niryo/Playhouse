@@ -109,8 +109,18 @@ only when a native composite needs it.
 `prelude.js` implements a mutation-mode host config for `react-reconciler`. A
 legacy (synchronous) root is used, so every update commits before the call
 that caused it returns. The ops are collected while React renders and
-commits. In `resetAfterCommit` they are sent to Swift as **one JSON array per
-commit** (`__native.commit(json)`). The root container is node `0`.
+commits. In `resetAfterCommit` they are handed to Swift as **one array per
+commit** (`__native.commit(ops)`). Swift reads that JavaScript array directly
+into `PluginOp`s (`PluginValue(javaScript:)`); no JSON string is built or
+parsed. Values follow JSON.stringify's rules: only an object's own
+enumerable keys are read, `undefined`, functions and symbols are dropped from
+objects and become `null` in arrays, `NaN` and `Infinity` become `null`,
+`toJSON()` is called once per value (a Date becomes its ISO string), and a circular value is an
+error. Two differences: a boxed primitive (`new String("x")`) is read as an
+object, and an exception thrown by a getter or `toJSON` is reported in the
+plugin's errors while the commit still applies, with that field left out of
+its object (or `null` in an array). The plugin's props and event values go the other way the same
+way, as plain JavaScript values. The root container is node `0`.
 
 | Op | Fields | Meaning |
 | --- | --- | --- |
@@ -123,7 +133,8 @@ commit** (`__native.commit(json)`). The root container is node `0`.
 | `remove` | `parent`, `child` | Removes the child and its subtree. |
 | `clear` | | Empties the root (React sends it before the first mount). |
 
-Swift applies a commit with `PluginNodeTree.apply`. Each `create` and
+Swift applies a commit with `PluginNodeTree.apply`. A malformed op rejects the
+whole commit before any of it applies. Each `create` and
 `update` is checked against the atom's props struct first. Every
 `PluginNode` is observed on its own, so an op redraws only the SwiftUI view
 of the node it changes. For example, toggling a label sends one `text` op,

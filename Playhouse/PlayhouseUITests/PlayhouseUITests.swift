@@ -19366,7 +19366,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(switched["conversationProvider"] as? String, liveProvider)
     }
 
-    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card) and the Task Item example; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1, and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument.
+    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card) and the Task Item example; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1, and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
     func test_plugin_renderer_commits_minimal_ops_and_runs_handlers() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
@@ -19376,6 +19376,7 @@ final class PlayhouseUITests: XCTestCase {
         let rendered = try XCTUnwrap(try runCLI(["plugin", "render", "--page", "Stack"])["result"] as? [String: Any])
         let atoms = try XCTUnwrap(rendered["atoms"] as? [String])
         XCTAssertEqual(atoms, ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card"])
+        try assertPluginValuesCrossWithJSONRules()
         for atom in atoms {
             let row = element("plugin-catalog-atom-\(atom)")
             XCTAssertTrue(row.waitForExistence(timeout: 10), "The sidebar lists the \(atom) atom.")
@@ -19410,6 +19411,66 @@ final class PlayhouseUITests: XCTestCase {
         element("button-disabled").click()
         XCTAssertFalse(waitUntil({ self.pluginText(pressCount) != "Pressed 1 times" }, timeout: 2), "A disabled Button doesn't call its handler.")
         XCTAssertTrue(pluginText(commit).hasPrefix("Commit 2: "), "No commit followed the disabled tap: \(pluginText(commit))")
+    }
+
+    /// Commits, props and event values cross as JavaScript values, not JSON
+    /// strings, but keep JSON.stringify's rules. Mirrors the CLI case's check.
+    private func assertPluginValuesCrossWithJSONRules() throws {
+        func node(_ testID: String, in tree: Any?) -> [String: Any]? {
+            guard let object = tree as? [String: Any] else { return nil }
+            if (object["props"] as? [String: Any])?["testID"] as? String == testID { return object }
+            for child in object["children"] as? [Any] ?? [] {
+                if let found = node(testID, in: child) { return found }
+            }
+            return nil
+        }
+        func text(_ node: [String: Any]?) -> String {
+            (node?["children"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined()
+        }
+        let source = """
+        function App() {
+          var picked = React.useState("none");
+          return h(Stack, { testID: "values" },
+            h(Text, { testID: "props-echo" }, JSON.stringify(Playhouse.props)),
+            h(Text, { testID: "nan", size: NaN, label: new Date(0) }, "x"),
+            h(PillPicker, { testID: "pill", selected: "a", onChange: function (value) { picked[1](typeof value + " " + value); },
+              options: [{ value: "a", label: "A", help: undefined, extra: function () {}, gone: { toJSON: function () { return undefined; } }, selfish: { toJSON: function () { return this; } } }, inherits] }),
+            h(Text, { testID: "picked" }, picked[0]));
+        }
+        var inherits = Object.create({ inherited: "x" });
+        inherits.value = "b";
+        inherits.label = "B";
+        Playhouse.render(h(App));
+        """
+        let file = dataDirectory.appendingPathComponent("plugin-values.js")
+        try source.write(to: file, atomically: true, encoding: .utf8)
+        let props = #"{"nested":{"list":[1,2.5,"two",true,null],"flag":false},"title":"Hi"}"#
+        let values = try XCTUnwrap(try runCLI(["plugin", "render", "--file", file.path, "--props", props, "--event", "pill:onChange:b"])["result"] as? [String: Any])
+        XCTAssertEqual(values["errors"] as? [String], [])
+        let tree = values["tree"]
+        let echoed = try JSONSerialization.jsonObject(with: Data(text(node("props-echo", in: tree)).utf8)) as? NSDictionary
+        let expected = try JSONSerialization.jsonObject(with: Data(props.utf8)) as? NSDictionary
+        XCTAssertEqual(echoed, expected, "The plugin's props reach JavaScript with their types and nesting intact.")
+        let nan = try XCTUnwrap(node("nan", in: tree)?["props"] as? [String: Any])
+        XCTAssertTrue(nan["size"] is NSNull, "NaN crosses as null, as JSON.stringify sends it.")
+        XCTAssertEqual(nan["label"] as? String, "1970-01-01T00:00:00.000Z", "A Date crosses as its toJSON() string.")
+        let pill = try XCTUnwrap(node("pill", in: tree)?["props"] as? [String: Any])
+        XCTAssertEqual(pill["options"] as? NSArray, [["value": "a", "label": "A", "selfish": [String: String]()], ["value": "b", "label": "B"]] as NSArray,
+                       "Undefined, function, undefined-toJSON and inherited fields are left out of nested values, and toJSON runs once (a self-returning one gives {}).")
+        XCTAssertEqual(pill["selected"] as? String, "a")
+        XCTAssertEqual(text(node("picked", in: tree)), "string b", "An event value arrives as a JavaScript string.")
+
+        let circularFile = dataDirectory.appendingPathComponent("plugin-circular.js")
+        try #"var loop = {}; loop.self = loop; Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "A", extra: loop }] }));"#
+            .write(to: circularFile, atomically: true, encoding: .utf8)
+        let circular = try XCTUnwrap(try runCLI(["plugin", "render", "--file", circularFile.path], expectedStatus: 1)["result"] as? [String: Any])
+        XCTAssertTrue((circular["errors"] as? [String] ?? []).contains { $0.contains("circular") }, "A circular prop is reported: \(circular)")
+
+        let outOfRangeFile = dataDirectory.appendingPathComponent("plugin-out-of-range.js")
+        try #"__native.commit([{ op: "createText", id: 1e300, text: "x" }]);"#.write(to: outOfRangeFile, atomically: true, encoding: .utf8)
+        let outOfRange = try XCTUnwrap(try runCLI(["plugin", "render", "--file", outOfRangeFile.path], expectedStatus: 1)["result"] as? [String: Any])
+        XCTAssertTrue((outOfRange["errors"] as? [String] ?? []).contains { $0.contains("Invalid commit") && $0.contains("integer") },
+                      "An op whose node id is out of range is reported, not a crash: \(outOfRange)")
     }
 
     // case-contract: test_plugin_task_item_renders_from_atoms_like_native | The Plugin Catalog's Task Item page shows the task item composed in JavaScript from atoms beside the native SwiftUI task item built from the same atoms and sample data: both show the same title, progress report, status message, token counter, conflicts button, pull-request mode pill and pull-request link with the same sizes, and the JavaScript tree uses only atoms with the native card's identifiers and context menu. Blocking the JavaScript item changes only its status message and the toggle's label (one commit: text, update, text on three nodes) while the native item keeps its own state, clicking the JavaScript card runs its onPress handler (Opened 1 times, one text op), choosing Merge in its mode pill runs onChange (Last: mode merge) without re-rendering the title or the card, and right-clicking the JavaScript card offers the native card's menu, whose Move to Done runs onMenu with its id (Last: menu done).
