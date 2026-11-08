@@ -302,17 +302,18 @@ struct TaskItemView: View {
     }
 
     private var timeRow: some View {
+        // One flat row: with the time in a nested stack beside the overhanging
+        // token counter, a tick that widened the text ("59s" to "1m") kept the
+        // old width and truncated the time to "…".
         AtomStack(props: StackProps(axis: "h", spacing: 6)) {
-            AtomStack(props: StackProps(axis: "h", spacing: 6), common: AtomCommon(passThrough: true)) {
-                AtomIcon(props: IconProps(name: "clock", size: 10, color: "tertiary"))
-                if model.isWorking {
-                    // The clock only drives the string; the view is the Text atom.
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        AtomText(props: TextProps(text: model.workingDuration(at: context.date), size: 10, color: "tertiary"), common: AtomCommon(testID: "task-working-duration-\(id)"))
-                    }
-                } else {
-                    AtomText(props: TextProps(text: model.createdText, size: 10, color: "tertiary"))
+            AtomIcon(props: IconProps(name: "clock", size: 10, color: "tertiary"), common: AtomCommon(passThrough: true))
+            if model.isWorking {
+                // The clock only drives the string; the view is the Text atom.
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    AtomText(props: TextProps(text: model.workingDuration(at: context.date), size: 10, color: "tertiary"), common: AtomCommon(testID: "task-working-duration-\(id)", passThrough: true))
                 }
+            } else {
+                AtomText(props: TextProps(text: model.createdText, size: 10, color: "tertiary"), common: AtomCommon(testID: "task-created-time-\(id)", passThrough: true))
             }
             if let tokens = model.tokens {
                 // The hover capsule pads the hit area well past the small text
@@ -344,18 +345,21 @@ struct TaskItemView: View {
             }
         }
         if pullRequests.mergedCheck {
-            AtomButton(
-                props: ButtonProps(style: "borderless", emphasis: 10),
-                common: AtomCommon(testID: "task-complete-merged-pr-\(id)", label: "Green checkmark. Complete task, all linked pull requests merged", help: "Complete task: all linked pull requests have merged", width: 30, height: 30),
-                action: actions.moveToDone
-            ) {
-                AtomIcon(props: IconProps(name: "checkmark", size: 11, weight: "bold", color: "green"))
+            // The capsule hugs the small check and the 30 pt slot centers it.
+            AtomStack(props: StackProps(axis: "h"), common: AtomCommon(width: 30, height: 30)) {
+                AtomButton(
+                    props: ButtonProps(style: "borderless", emphasis: 10, overhang: true),
+                    common: AtomCommon(testID: "task-complete-merged-pr-\(id)", label: "Green checkmark. Complete task, all linked pull requests merged", help: "Complete task: all linked pull requests have merged"),
+                    action: actions.moveToDone
+                ) {
+                    AtomIcon(props: IconProps(name: "checkmark", size: 11, weight: "bold", color: "green"))
+                }
             }
         } else {
             if let conflictsHelp = pullRequests.conflictsHelp {
                 AtomButton(
                     props: ButtonProps(style: "borderless", emphasis: 10),
-                    common: AtomCommon(testID: "task-resolve-pr-conflicts-\(id)", label: "Resolve pull request conflicts", help: conflictsHelp, minWidth: 30, minHeight: 30),
+                    common: AtomCommon(testID: "task-resolve-pr-conflicts-\(id)", label: "Resolve pull request conflicts", help: conflictsHelp),
                     action: actions.resolveConflicts
                 ) {
                     AtomIcon(props: IconProps(asset: "ConflictIndicator", color: "orange"), common: AtomCommon(testID: "task-resolve-pr-conflicts-icon-\(id)", width: 16, height: 16))

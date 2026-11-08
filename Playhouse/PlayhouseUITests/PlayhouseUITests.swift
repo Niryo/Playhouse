@@ -2423,7 +2423,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Done removes the worktree and keeps the branch")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover, while hovering the card itself shows no tooltip and the card remains an openable control; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover, while hovering the card itself shows no tooltip and the card remains an openable control; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status. The card's PR button shows its full PR label with its hover capsule around it, not a truncated ellipsis; the JavaScript task item composes it the same way, as a borderless 30-point button whose 10-point capsule overhangs it, labelled PR.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -2450,6 +2450,14 @@ final class PlayhouseUITests: XCTestCase {
         revealOnBoard(activeCreateButton)
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.width, 30, "The PR action should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.height, 30, "The PR action should have a comfortable vertical hit target.")
+        // Framed outside its 10-point hover capsule, the 30-point button left "PR" 10 points and drew "…",
+        // whose three dots ink about 8 points; "PR" inks nearly its full typographic width.
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.97)).hover()
+        Thread.sleep(forTimeInterval: 0.3)
+        let prLabelWidth = "PR".size(withAttributes: [.font: NSFont.systemFont(ofSize: 10, weight: .semibold)]).width
+        let prInkWidth = try XCTUnwrap(inkWidth(of: activeCreateButton.screenshot().image, pointWidth: activeCreateButton.frame.width), "Could not read the PR button's pixels.")
+        XCTAssertGreaterThanOrEqual(prInkWidth, prLabelWidth * 0.8, "The PR button should draw its full PR label, not a truncated ellipsis: \(prInkWidth) pt of ink for \(prLabelWidth) pt of text.")
+        attachScreenshot(named: "Active card shows the full PR button")
         // The control sits on its own last row, below the title and the time row, on the right; Backlog had no such row.
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.minY, element("task-title-\(taskID)").frame.maxY, "The pull-request row should sit below the title.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.minY, element("task-token-usage-counter-\(taskID)").frame.maxY, "The pull-request row should sit below the time row.")
@@ -2533,7 +2541,19 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(pill.waitForExistence(timeout: 5), "An in-progress task with no linked PR should show the PR mode pill.")
             XCTAssertFalse(self.element("task-create-pr-\(taskID)").exists, "The mode pill replaces the manual PR button while the task is in progress.")
             XCTAssertGreaterThanOrEqual(pill.frame.height, 30, "The closed pill should keep a comfortable hit target.")
-            XCTAssertGreaterThanOrEqual(pill.frame.minY, self.element("task-working-duration-\(taskID)").frame.maxY, "The mode pill should sit below the working-duration time row.")
+            let duration = self.element("task-working-duration-\(taskID)")
+            XCTAssertGreaterThanOrEqual(pill.frame.minY, duration.frame.maxY, "The mode pill should sit below the working-duration time row.")
+            // The time grows as it ticks ("9s" to "10s"); a stale layout kept the narrower width and truncated it to "…".
+            let firstDuration = self.pluginText(duration)
+            // Only under 10s does it grow within seconds; later the width check still applies to the current string.
+            if firstDuration.count < 3 {
+                XCTAssertTrue(self.waitUntil({ self.pluginText(duration).count > firstDuration.count }, timeout: 15),
+                              "The working time should grow as it ticks, from \(firstDuration) to \(self.pluginText(duration)).")
+            }
+            XCTAssertTrue(self.waitUntil({
+                let text = self.pluginText(duration)
+                return duration.frame.width >= ceil(text.size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width) - 1
+            }, timeout: 3), "The working time, grown from \(firstDuration), should keep its full width: \(self.pluginText(duration)) in \(duration.frame.width) pt")
             XCTAssertEqual(pill.value as? String, "manual", "The closed pill shows the current mode, defaulting to Manual.")
             XCTAssertFalse(self.element("task-pr-mode-merge-\(taskID)").exists, "A closed pill shows only the current mode.")
             XCTAssertFalse(try XCTUnwrap(self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool), "Auto PR must default to off.")
@@ -2634,6 +2654,7 @@ final class PlayhouseUITests: XCTestCase {
         try runGit(manualWorktree, "push", "origin", "main")
         try "Manual PR task change.\n".write(to: manualWorktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
         revealOnBoard(manualButton)
+        attachScreenshot(named: "Review card shows the manual PR button", fullScreen: true)
         manualButton.click()
         let manualPRLink = app.links["task-pr-link-\(manualTaskID)-502"]
         XCTAssertTrue(manualPRLink.waitForExistence(timeout: 10), "The manual PR flow must still work unchanged when Auto PR stays off.")
@@ -19286,7 +19307,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(pluginText(commit).hasPrefix("Commit 2: "), "No commit followed the disabled tap: \(pluginText(commit))")
     }
 
-    // case-contract: test_plugin_task_item_renders_from_atoms_like_native | The Plugin Catalog's Task Item page shows the task item composed in JavaScript from atoms beside the native SwiftUI task item built from the same atoms and sample data: both show the same title, progress report, status message, token counter, conflicts button, pull-request mode pill and pull-request link with the same sizes, and the JavaScript tree uses only atoms with the native card's identifiers and context menu. Blocking the JavaScript item changes only its status message and the toggle's label (one commit: text, update, text on three nodes) while the native item keeps its own state, clicking the JavaScript card runs its onPress handler (Opened 1 times, one text op), choosing Merge in its mode pill runs onChange (Last: mode merge) without re-rendering the title or the card, and right-clicking the JavaScript card offers the native card's menu, whose Move to Done runs onMenu with its id (Last: menu done).
+    // case-contract: test_plugin_task_item_renders_from_atoms_like_native | The Plugin Catalog's Task Item page shows the task item composed in JavaScript from atoms beside the native SwiftUI task item built from the same atoms and sample data: both show the same title, progress report, status message, token counter, conflicts button, pull-request mode pill and pull-request link with the same sizes, and the JavaScript tree uses only atoms with the native card's identifiers and context menu. Blocking the JavaScript item changes only its status message and the toggle's label (one commit: text, update, text on three nodes) while the native item keeps its own state, clicking the JavaScript card runs its onPress handler (Opened 1 times, one text op), choosing Merge in its mode pill runs onChange (Last: mode merge) without re-rendering the title or the card, and right-clicking the JavaScript card offers the native card's menu, whose Move to Done runs onMenu with its id (Last: menu done). The time row is one flat row: the clock, the created time and the token counter are siblings in one stack, so the time shows in full (Nov 8, 2026), as wide in the JavaScript item as in the native one and left of the counter.
     func test_plugin_task_item_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
@@ -19320,6 +19341,17 @@ final class PlayhouseUITests: XCTestCase {
         let jsStatus = pair("task-status-message-").js, nativeStatus = pair("task-status-message-").native
         XCTAssertEqual(pluginText(jsStatus), "Waiting on CI checks")
         XCTAssertEqual(pluginText(nativeStatus), "Waiting on CI checks")
+        // Nested in its own stack beside the overhanging counter, the time kept a stale width and showed "…".
+        let createdWidth = ceil("Nov 8, 2026".size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width)
+        for (time, counter) in [(pair("task-created-time-").js, pair("task-token-usage-counter-").js),
+                                (pair("task-created-time-").native, pair("task-token-usage-counter-").native)] {
+            XCTAssertTrue(time.waitForExistence(timeout: 5), "The item shows its created time.")
+            XCTAssertEqual(pluginText(time), "Nov 8, 2026")
+            XCTAssertGreaterThanOrEqual(time.frame.width, createdWidth - 1, "The created time shows in full, not truncated.")
+            XCTAssertLessThanOrEqual(time.frame.maxX, counter.frame.midX, "The time sits left of the token counter.")
+        }
+        XCTAssertEqual(pair("task-created-time-").js.frame.width, pair("task-created-time-").native.frame.width, accuracy: 1,
+                       "The time is as wide in the JavaScript item as in the native one.")
         attachScreenshot(named: "Task item: JavaScript beside native")
 
         let commit = jsSide.descendants(matching: .any).matching(identifier: "plugin-last-commit").firstMatch
@@ -21185,6 +21217,11 @@ final class PlayhouseUITests: XCTestCase {
         if !waitUntil({ !self.nativeHelpTextIsVisible(expected) }, timeout: 4) {
             movePointerToHelpRunway(below: element, horizontalShift: -60)
         }
+        // A control at the window's right edge (the Done archive) can keep the tag up through
+        // short moves beside it; a move well clear of every control ends it.
+        if !waitUntil({ !self.nativeHelpTextIsVisible(expected) }, timeout: 4) {
+            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.85)).hover()
+        }
         XCTAssertTrue(waitUntil({ !self.nativeHelpTextIsVisible(expected) }, timeout: 8), "Moving away should dismiss the native help text ‘\(expected)’ outside the PR control.")
     }
 
@@ -21217,6 +21254,28 @@ final class PlayhouseUITests: XCTestCase {
             }
         }
         return count
+    }
+
+    /// The horizontal span, in points, of the pixels that differ from the image's corner (its background).
+    private func inkWidth(of image: NSImage, pointWidth: CGFloat, threshold: CGFloat = 0.25) -> CGFloat? {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil), cgImage.width > 0 else { return nil }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        guard let background = bitmap.colorAt(x: 0, y: 0)?.usingColorSpace(.deviceRGB) else { return nil }
+        var columns: [Int] = []
+        for x in 0..<cgImage.width {
+            for y in 0..<cgImage.height {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                let delta = abs(color.redComponent - background.redComponent)
+                    + abs(color.greenComponent - background.greenComponent)
+                    + abs(color.blueComponent - background.blueComponent)
+                if delta > threshold {
+                    columns.append(x)
+                    break
+                }
+            }
+        }
+        guard let first = columns.first, let last = columns.last else { return 0 }
+        return CGFloat(last - first + 1) * pointWidth / CGFloat(cgImage.width)
     }
 
     /// Sampled pixels whose summed RGB change exceeds `threshold`; nil when either image is unreadable or the sizes differ.

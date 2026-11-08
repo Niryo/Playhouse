@@ -3274,7 +3274,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.primary, "rev-parse", branch), branch_head, "The branch must keep its commits without merging.")
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover, while hovering the card itself shows no tooltip and the card remains an openable control; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover, while hovering the card itself shows no tooltip and the card remains an openable control; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status. The card's PR button shows its full PR label with its hover capsule around it, not a truncated ellipsis; the JavaScript task item composes it the same way, as a borderless 30-point button whose 10-point capsule overhangs it, labelled PR.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task(
             "PR failure", [self.primary], merge_targets={self.primary: "main"}
@@ -3320,6 +3320,20 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(record.get("pullRequestNumber"))
         self.assertIsNone(record.get("pullRequestURL"))
         self.assertEqual(current["status"], "Done")
+
+        # Framed outside its hover capsule, the 30-point button left "PR" 10 points and showed "…".
+        sample = json.loads((Path(__file__).resolve().parent.parent / "Playhouse/Resources/PluginRuntime/catalog/sample-task.json").read_text(encoding="utf-8"))
+        sample_task = sample["task"]
+        sample_task["pullRequests"].update({"create": {"title": "PR", "label": "PR. Create a pull request for each repository linked to this task",
+                                                       "help": "Create a pull request for each repository linked to this task", "busy": False},
+                                            "conflictsHelp": None, "showModePill": False, "links": []})
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "TaskItem", "--props", json.dumps({"task": sample_task}))[0])
+        self.assertEqual(rendered["errors"], [])
+        create = self.plugin_node(rendered["tree"], f"task-create-pr-{sample_task['id']}")
+        self.assertEqual(create["type"], "Button")
+        self.assertEqual({key: create["props"].get(key) for key in ["style", "emphasis", "overhang", "width", "height"]},
+                         {"style": "borderless", "emphasis": 10, "overhang": None, "width": 30, "height": 30})
+        self.assertEqual([(child["type"], self.plugin_text(child)) for child in create["children"]], [("Text", "PR")])
 
     # case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to Manual; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. The last switch choice is remembered: tasks created after turning it on start on, and tasks created after turning it off start off. Toggling Auto PR for an unknown task is rejected.
     def test_task_auto_pr_toggle_creates_pull_request_on_review(self):
@@ -13810,7 +13824,7 @@ Playhouse.render(h(App));
         self.assert_failure(self.render_plugin(plugin, "--event", "label:onPress", expected_status=2), "invalid_argument")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "NoSuchPage", expected_status=2)[0], "invalid_argument")
 
-    # case-contract: test_plugin_task_item_renders_from_atoms_like_native | The Plugin Catalog's Task Item page shows the task item composed in JavaScript from atoms beside the native SwiftUI task item built from the same atoms and sample data: both show the same title, progress report, status message, token counter, conflicts button, pull-request mode pill and pull-request link with the same sizes, and the JavaScript tree uses only atoms with the native card's identifiers and context menu. Blocking the JavaScript item changes only its status message and the toggle's label (one commit: text, update, text on three nodes) while the native item keeps its own state, clicking the JavaScript card runs its onPress handler (Opened 1 times, one text op), choosing Merge in its mode pill runs onChange (Last: mode merge) without re-rendering the title or the card, and right-clicking the JavaScript card offers the native card's menu, whose Move to Done runs onMenu with its id (Last: menu done).
+    # case-contract: test_plugin_task_item_renders_from_atoms_like_native | The Plugin Catalog's Task Item page shows the task item composed in JavaScript from atoms beside the native SwiftUI task item built from the same atoms and sample data: both show the same title, progress report, status message, token counter, conflicts button, pull-request mode pill and pull-request link with the same sizes, and the JavaScript tree uses only atoms with the native card's identifiers and context menu. Blocking the JavaScript item changes only its status message and the toggle's label (one commit: text, update, text on three nodes) while the native item keeps its own state, clicking the JavaScript card runs its onPress handler (Opened 1 times, one text op), choosing Merge in its mode pill runs onChange (Last: mode merge) without re-rendering the title or the card, and right-clicking the JavaScript card offers the native card's menu, whose Move to Done runs onMenu with its id (Last: menu done). The time row is one flat row: the clock, the created time and the token counter are siblings in one stack, so the time shows in full (Nov 8, 2026), as wide in the JavaScript item as in the native one and left of the counter.
     def test_plugin_task_item_renders_from_atoms_like_native(self):
         task = self.TASK_ITEM_ID
         rendered = self.assert_success(self.call_cli(
@@ -13834,6 +13848,15 @@ Playhouse.render(h(App));
         self.assertEqual(self.plugin_text(self.plugin_node(tree, f"task-progress-label-{task}")), "Building")
         types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
         self.assertEqual(types, {"Card", "Stack", "Text", "Icon", "Button", "Link", "Spacer", "PillPicker"}, "The task item is atoms only.")
+        # Nested in its own stack beside the overhanging counter, a time that grew kept its old width and truncated.
+        created = self.plugin_node(tree, f"task-created-time-{task}")
+        self.assertEqual(self.plugin_text(created), "Nov 8, 2026")
+        counter = self.plugin_node(tree, f"task-token-usage-counter-{task}")
+        time_row = next(node for node in self.plugin_nodes(tree) if any(child["id"] == counter["id"] for child in node.get("children", [])))
+        self.assertEqual(time_row["type"], "Stack")
+        self.assertEqual([(child["type"], child.get("props", {}).get("testID")) for child in time_row["children"]],
+                         [("Icon", None), ("Text", f"task-created-time-{task}"), ("Button", f"task-token-usage-counter-{task}")],
+                         "The clock, the time and the counter are siblings in one flat row.")
 
         status = self.plugin_node(tree, f"task-status-message-{task}")
         self.assertEqual(self.plugin_text(status), "Blocked: 2 checks failing")

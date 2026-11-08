@@ -236,21 +236,28 @@ struct AtomButton<Content: View>: View {
 
     var body: some View {
         styled
-            .padding(.horizontal, props.overhang == true ? -CGFloat((props.emphasis ?? 0) + (common.paddingX ?? 0)) : 0)
-            .padding(.vertical, props.overhang == true ? -CGFloat(props.emphasis ?? 0) : 0)
+            .padding(.horizontal, overhangs ? -CGFloat((props.emphasis ?? 0) + (common.paddingX ?? 0)) : 0)
+            .padding(.vertical, overhangs ? -CGFloat(props.emphasis ?? 0) : 0)
             .disabled(props.disabled == true)
             .atomCommon(common, frame: false)
     }
 
-    /// The hover capsule and the frame sit inside the label, so the whole
-    /// padded area is the click target.
+    private var isFixedSize: Bool { common.width != nil || common.height != nil }
+    /// A fixed-size capsule already spills past its slot.
+    private var overhangs: Bool { props.overhang == true && !isFixedSize }
+
+    /// The frame sizes the content: framed outside a 10 pt capsule, a 30 pt
+    /// button left its "PR" 10 pt and truncated it to "…". A fixed size is the
+    /// button's slot, the click target, and the capsule spills past it;
+    /// otherwise the whole padded capsule is the click target.
     private var label: some View {
         var outer = common
         outer.paddingX = nil
         return content()
             .padding(.horizontal, CGFloat(common.paddingX ?? 0))
-            .atomEmphasis(props.emphasis)
             .atomFrame(outer)
+            .atomEmphasis(props.emphasis)
+            .padding(isFixedSize ? -CGFloat(props.emphasis ?? 0) : 0)
             .contentShape(Rectangle())
     }
 
