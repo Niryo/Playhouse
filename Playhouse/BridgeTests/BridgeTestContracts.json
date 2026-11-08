@@ -81,7 +81,7 @@
   },
   {
     "id": "test_task_store_repairs_missing_pending_prompt_column",
-    "expectation": "A real legacy SwiftData task store with in-progress timing columns and no submitted-prompt column waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before adding the missing VARCHAR prompt column as nullable with no default and preserves elapsed time at zero. The CLI preserves the task and draft, and the visible app opens the migrated store and preserves the draft through a subsequent restart with duration still zero; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only draft data survives import, and a subsequent edited draft survives restart without reimport."
+    "expectation": "A real legacy SwiftData task store with in-progress timing columns and no submitted-prompt column waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before adding the missing VARCHAR prompt column as nullable with no default and preserves elapsed time at zero. The CLI preserves the task and its saved prompt, which a store from before drafts were flagged does not restore as a draft, and the visible app opens the migrated store with an empty composer that keeps the saved prompt through a subsequent restart with duration still zero; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only saved prompt data survives import, and a subsequent edited draft survives restart without reimport."
   },
   {
     "id": "test_test_bundle_rejects_unisolated_data_directory",
@@ -189,7 +189,7 @@
   },
   {
     "id": "test_task_prompt_draft_persists_after_back",
-    "expectation": "Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text."
+    "expectation": "Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text. A prompt saved through the CLI without submitting is an unsent draft, so the composer shows it when the task is reopened. A send that fails before any turn starts, such as one into a folder that no longer exists, returns its prompt to the composer as the draft, clears the pending marker and leaves the task out of In Progress."
   },
   {
     "id": "test_composer_draft_autosaves_during_active_turn",
@@ -282,6 +282,10 @@
   {
     "id": "test_conversation_loads_newest_messages_before_older_history",
     "expectation": "Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below. Scrolling upward loads earlier messages automatically in 40-message batches, including when the latest turn alone is shorter than the viewport, while keeping the anchored message in place and preserving chronological order. No separate control is needed on systems that report scroll position; below macOS 15 the transcript keeps an explicit Load earlier messages control inside that runway instead. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn and keeps upward paging working. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order."
+  },
+  {
+    "id": "test_sent_prompt_stays_out_of_composer_past_history_page",
+    "expectation": "A sent prompt followed by a 120-message turn, so that it lies outside the newest history page, never returns to the composer when the task is reopened: the composer is empty, the task keeps hasUnsentDraft false and its last sent prompt as the saved prompt, and the CLI newest page of 80 messages leaves out the earlier messages. Only the saved draft flag decides draft restoration, so the same task restores a real unsent draft after it is typed."
   },
   {
     "id": "test_conversation_history_pages_claude_transcript_from_store",
@@ -537,7 +541,7 @@
   },
   {
     "id": "test_codex_turn_reattaches_after_daemon_restart",
-    "expectation": "A Codex turn keeps running in its shared socket app-server when the daemon is killed: the next daemon reconnects to the same server (no second server, one connection per daemon), keeps the task In Progress with no restart notice, shows the output written before the restart exactly once, saves the question the server re-sends on resume and answers the re-sent approval exactly once, accepts a steered follow-up, streams the rest of the turn to a watcher, and settles it through the normal outcome path. A turn that finished while no daemon was connected settles from the server's state."
+    "expectation": "A Codex turn keeps running in its shared socket app-server when the daemon is killed: the next daemon reconnects to the same server (no second server, one connection per daemon), keeps the task In Progress with no restart notice, shows the output written before the restart exactly once, saves the question the server re-sends on resume and answers the re-sent approval exactly once, accepts a steered follow-up, streams the rest of the turn to a watcher, and settles it through the normal outcome path. A turn that finished while no daemon was connected settles from the server's state. A question the shared server raises on a thread no conversation owns gets no reply from the connected client, which leaves it for its owner instead of rejecting it."
   },
   {
     "id": "test_task_token_usage_records_claude_turn_breakdown",

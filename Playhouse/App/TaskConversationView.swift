@@ -5652,25 +5652,18 @@ struct TaskConversationView: View {
                 }
             }
             goalStatusUpdatedAt = .now
-            // Stores from before drafts were marked can hold an already sent prompt
-            // as the saved prompt; that one does not belong back in the composer.
-            let queuedTexts = Set(((try? conversationManager.queuedMessages(taskID: task.id)) ?? []).map(\.text))
-            let promptWasSent = task.savedPrompt.map { prompt in
-                history.messages.contains { $0.role == .user && $0.text == prompt }
-                    || queuedTexts.contains(prompt.trimmingCharacters(in: .whitespacesAndNewlines))
-            } ?? false
+            // A pending submitted prompt is shown as a bubble unless its text is already in the
+            // loaded transcript. Only the flag decides draft restoration: `savedPrompt` otherwise
+            // holds the last sent prompt, which can sit beyond the loaded page.
             let hasPendingSubmittedPrompt = task.pendingSubmittedPrompt != nil
-            if hasPendingSubmittedPrompt,
-               !promptWasSent,
-               let submittedPrompt = task.pendingSubmittedPrompt,
-               !submittedPrompt.isEmpty {
+            if let submittedPrompt = task.pendingSubmittedPrompt,
+               !submittedPrompt.isEmpty,
+               !history.messages.contains(where: { $0.role == .user && $0.text == submittedPrompt }) {
                 messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: submittedPrompt))
             }
             // A marked draft is unsent by definition: steering, queueing, and sending clear it.
-            let savedDraft = task.hasUnsentDraft || !(promptWasSent || hasPendingSubmittedPrompt)
-                ? task.savedPrompt ?? ""
-                : ""
-            let restoresDraftImages = task.hasUnsentDraft || !(promptWasSent || hasPendingSubmittedPrompt)
+            let savedDraft = task.hasUnsentDraft ? task.savedPrompt ?? "" : ""
+            let restoresDraftImages = task.hasUnsentDraft
             // Unsent composer text is never replaced by a saved draft, which can only be older.
             // A composer the user just cleared is unsaved, and stays cleared.
             if draft == draftAtLoadStart, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isDraftUnsaved {
@@ -6952,7 +6945,7 @@ struct TaskConversationView: View {
             // images leave the draft once the turn starts.
             if sendsComposerDraft {
                 do {
-                    _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: "")
+                    _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: "", replacingDraft: true)
                 } catch {
                     errorMessage = error.localizedDescription
                     return false
