@@ -17,6 +17,44 @@ struct AgentRunHostTests {
         if actual != expected { failures.append("\(message): expected \(expected), got \(actual)") }
     }
 
+    static let kqueueReaderFlag = "--kqueue-stdin-reader"
+
+    /// One newline-terminated line of `bytes` characters.
+    static func line(bytes: Int) -> Data { Data(repeating: UInt8(ascii: "x"), count: bytes) + Data([0x0A]) }
+
+    /// "written", the write error, or "timed out" while the writer is still busy after `timeout`,
+    /// so a writer stuck in a blocking write fails the check instead of hanging the suite.
+    static func writeLine(_ writer: AgentInputWriter, _ line: Data, timeout: TimeInterval = 5) -> String {
+        let outcome = Locked<String?>(nil)
+        writer.enqueue(line) { error in outcome.mutate { $0 = error.map { "\($0)" } ?? "written" } }
+        _ = waitUntil(timeout) { outcome.value != nil }
+        return outcome.value ?? "timed out"
+    }
+
+    /// Reads stdin the way Bun and Node do: waits in kevent() for it to be readable, then reads.
+    /// Prints "line <n> <length>" for each line, so a test sees what arrived and in what order.
+    static func runKqueueStdinReader() -> Never {
+        let queue = kqueue()
+        var change = kevent(ident: 0, filter: Int16(EVFILT_READ), flags: UInt16(EV_ADD), fflags: 0, data: 0, udata: nil)
+        _ = kevent(queue, &change, 1, nil, 0, nil)
+        var pending = [UInt8]()
+        var buffer = [UInt8](repeating: 0, count: 65_536)
+        var count = 0
+        while true {
+            var event = kevent()
+            guard kevent(queue, nil, 0, &event, 1, nil) == 1 else { continue }
+            let read = Darwin.read(0, &buffer, buffer.count)
+            if read <= 0 { exit(0) }
+            pending.append(contentsOf: buffer[0..<read])
+            while let newline = pending.firstIndex(of: 0x0A) {
+                count += 1
+                print("line \(count) \(newline)")
+                fflush(stdout)
+                pending.removeSubrange(0...newline)
+            }
+        }
+    }
+
     static func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -27,6 +65,7 @@ struct AgentRunHostTests {
     }
 
     static func main() async throws {
+        if CommandLine.arguments.contains(kqueueReaderFlag) { runKqueueStdinReader() }
         let base = "/tmp/playhouse-agent-run-host-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: base) }
@@ -107,6 +146,54 @@ struct AgentRunHostTests {
         expect(fifoOutput, "got:one\ngot:two\n", "A FIFO child reads every writer's lines and never sees EOF between writers")
         expect(reader.isAlive, true, "A FIFO child survives its writer closing")
         await AgentRunHost.terminate(reader)
+
+        // Agent input: Claude Code's runtime reads stdin only once kqueue reports it readable,
+        // and macOS doesn't report a FIFO readable while one oversized write() is pending. This
+        // test binary, run as a kqueue reader, stands in for it.
+        let inputFIFO = "\(base)/input.in"
+        mkfifo(inputFIFO, 0o600)
+        let kqueueReader = try AgentRunHost.spawn(
+            executable: CommandLine.arguments[0], arguments: [kqueueReaderFlag],
+            environment: [:], workingDirectory: base,
+            stdin: .path(inputFIFO, flags: O_RDWR),
+            stdout: .path("\(base)/input.out", flags: O_WRONLY | O_CREAT | O_APPEND),
+            stderr: .path("/dev/null", flags: O_WRONLY)
+        )
+        let inputWriter = AgentInputWriter(path: inputFIFO)
+        let readerLines: () -> [String] = {
+            ((try? String(contentsOfFile: "\(base)/input.out", encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+        }
+        expect(writeLine(inputWriter, line(bytes: 10)), "written", "A short line is written")
+        expect(waitUntil { readerLines().count == 1 }, true, "The kqueue reader takes a short line")
+        usleep(500_000) // The reader goes idle in kevent(), like Claude Code after `initialize`.
+        expect(writeLine(inputWriter, line(bytes: 200_000)), "written", "A 200 KB line reaches an idle kqueue reader")
+        let ordered = Locked<[String]>([])
+        for bytes in [70_000, 5, 300_000] {
+            inputWriter.enqueue(line(bytes: bytes)) { error in ordered.mutate { $0.append(error.map { "\($0)" } ?? "written") } }
+        }
+        _ = waitUntil(5) { ordered.value.count == 3 && readerLines().count == 5 }
+        expect(ordered.value, ["written", "written", "written"], "Queued lines of any size are all written")
+        expect(readerLines(), ["line 1 10", "line 2 200000", "line 3 70000", "line 4 5", "line 5 300000"],
+               "Every line arrives whole, in the order it was queued")
+        inputWriter.close()
+        expect(writeLine(inputWriter, line(bytes: 10)), "closed", "A closed writer refuses lines")
+        await AgentRunHost.terminate(kqueueReader)
+
+        // An agent that never reads its input fails the line after the stall time, not never,
+        // and the writer refuses the lines after a line that may have been cut off.
+        let stalledFIFO = "\(base)/stalled.in"
+        mkfifo(stalledFIFO, 0o600)
+        let nonReader = try AgentRunHost.spawn(
+            executable: "/bin/sleep", arguments: ["60"], environment: [:], workingDirectory: base,
+            stdin: .path(stalledFIFO, flags: O_RDWR),
+            stdout: .path("/dev/null", flags: O_WRONLY), stderr: .path("/dev/null", flags: O_WRONLY)
+        )
+        let stalledWriter = AgentInputWriter(path: stalledFIFO, stallTimeout: 1)
+        let stallStarted = Date()
+        expect(writeLine(stalledWriter, line(bytes: 200_000)), "stalled(seconds: 1)", "A line the agent never reads fails as stalled")
+        expect(Date().timeIntervalSince(stallStarted) < 4, true, "A stalled line fails within its stall time")
+        expect(writeLine(stalledWriter, line(bytes: 10)), "stalled(seconds: 1)", "Lines after a stalled line are refused")
+        await AgentRunHost.terminate(nonReader)
 
         // Ownership lock: exclusive, also within one process, and released when the holder dies.
         let lockPath = "\(base)/run.owner.lock"

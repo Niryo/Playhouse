@@ -24,6 +24,7 @@ import threading
 import time
 import unittest
 import uuid
+import zlib
 from pathlib import Path
 
 # A CLI run inside a Playhouse conversation inherits the host app's bridge
@@ -223,6 +224,18 @@ class RepositoryAllocationLockBarrier:
         fcntl.lockf(self.descriptor, fcntl.LOCK_UN, 0, 0, os.SEEK_SET)
         os.close(self.descriptor)
         self.descriptor = None
+
+
+def write_noise_png(path, width, height):
+    """A valid RGB PNG of random pixels. Noise barely compresses, so the file stays about
+    `width * height * 3` bytes, which keeps its data URL far larger than a FIFO's buffer."""
+    rows = b"".join(b"\x00" + os.urandom(width * 3) for _ in range(height))
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    Path(path).write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b""))
 
 
 def ordinary_messages(messages):
@@ -7539,6 +7552,52 @@ class PlayhouseBridgeTests(unittest.TestCase):
         image_index = next(index for index, message in enumerate(messages) if message["id"] == image_message["id"])
         answer_index = next(index for index, message in enumerate(messages) if message["text"] == "Claude answer after the image.")
         self.assertLess(image_index, answer_index, "The image should precede Claude's later answer in transcript order.")
+
+    # case-contract: test_claude_large_image_message_reaches_idle_agent | A Claude Code agent that has answered initialize and gone idle receives a user message carrying a screenshot larger than its input FIFO's buffer: the send completes with Claude's answer, the agent receives the whole image, the user message keeps that image when history is read over a fresh CLI/XPC connection and when the conversation is reopened, and a later text turn in the same conversation still completes. Claude Code's runtime, like the kqueue-reading fixture, is never woken by one oversized blocking write, so such a message must reach it without freezing the daemon. Codex agents talk over a socket and are not affected.
+    def test_claude_large_image_message_reaches_idle_agent(self):
+        task_id = self.create_task(title="Claude screenshot", provider="claude")["id"]
+        executable = self.data_directory / "claude-fixture-large-image"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        screenshot = self.data_directory / "large-screenshot.png"
+        write_noise_png(screenshot, 160, 160)
+        prompt = "Describe this screenshot."
+
+        # The send starts a fresh agent, which answers initialize and waits in kqueue before
+        # the message arrives; a single blocking write of the message would never complete.
+        sent = self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", prompt, "--image", str(screenshot),
+            extra_environment=environment,
+        )[0])
+        self.assertIn("OK.", [message["text"] for message in ordinary_messages(sent["messages"]) if message["role"] == "assistant"])
+        history = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        user_messages = [message for message in ordinary_messages(history["messages"])
+                         if message["role"] == "user" and message["text"] == prompt]
+        self.assertEqual(len(user_messages), 1, "A fresh CLI/XPC read shows the screenshot message once.")
+        image_urls = user_messages[0]["imageDataURLs"]
+        self.assertEqual(len(image_urls), 1)
+        self.assertTrue(image_urls[0].startswith("data:image/png;base64,"))
+        encoded_length = len(image_urls[0].split(",", 1)[1])
+        self.assertGreater(encoded_length, 64 * 1024, "The screenshot must not fit in a FIFO's buffer.")
+        turns = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+        image_turns = [turn for turn in turns if (turn.get("userText") or "").endswith(prompt)]
+        self.assertEqual(len(image_turns), 1, "Claude Code received the screenshot message once.")
+        self.assertEqual(image_turns[0]["images"], [{"mediaType": "image/png", "base64Length": encoded_length}],
+                         "Claude Code received the whole image.")
+
+        followup = "Thanks, that is all."
+        answered = self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", followup, extra_environment=environment,
+        )[0])
+        replies = [message["text"] for message in ordinary_messages(answered["messages"]) if message["role"] == "assistant"]
+        self.assertEqual(replies.count("OK."), 2, "A later text turn in the same conversation still completes.")
+        turns = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+        followup_turn = next(turn for turn in turns if (turn.get("userText") or "").endswith(followup))
+        self.assertEqual(followup_turn["images"], [])
 
     # case-contract: test_codex_agent_image_published_during_active_turn | While a Codex turn is active, CLI/XPC image publication avoids requesting provider history; the assistant image is tied to that turn, appears after its native response and before the next turn in ordered history, and remains visible after reopening the conversation.
     def test_codex_agent_image_published_during_active_turn(self):

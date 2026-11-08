@@ -16,11 +16,60 @@ import json
 import re
 import os
 import select
+import selectors
 import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+class AgentInput:
+    """Reads stdin the way Claude Code's runtime (Bun) does: it waits for kqueue to report the
+    input readable, then reads. On macOS kqueue does not report a FIFO readable while a blocking
+    write() of more than the FIFO holds is pending, so a Playhouse that wrote a large message
+    (one with an image, say) in one blocking write would stall this fixture just as it stalls
+    Claude Code, instead of the fixture reading it with a blocking read Claude Code never does."""
+
+    def __init__(self, fd=0):
+        self.fd = fd
+        self.buffer = b""
+        self.ended = False
+        self.selector = None
+
+    def readline(self, timeout=None):
+        """The next line with its newline, "" once input has ended, or None when `timeout`
+        seconds pass first."""
+        if self.selector is None:
+            self.selector = selectors.KqueueSelector()
+            self.selector.register(self.fd, selectors.EVENT_READ)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while b"\n" not in self.buffer:
+            if self.ended:
+                line, self.buffer = self.buffer, b""
+                return line.decode()
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return None
+            if not self.selector.select(remaining):
+                continue
+            chunk = os.read(self.fd, 65536)
+            if chunk:
+                self.buffer += chunk
+            else:
+                self.ended = True
+        line, self.buffer = self.buffer.split(b"\n", 1)
+        return line.decode() + "\n"
+
+    def __iter__(self):
+        while True:
+            line = self.readline()
+            if not line:
+                return
+            yield line
+
+
+STDIN = AgentInput()
+
 
 STORY = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
 STORY_CLOSING = "The story is above."
@@ -401,10 +450,9 @@ def read_steered_input(description):
     Returns its text and command uuid, which the turn completes once answered."""
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        readable, _, _ = select.select([sys.stdin], [], [], 0.02)
-        if not readable:
+        line = STDIN.readline(0.02)
+        if line is None:
             continue
-        line = sys.stdin.readline()
         if not line.strip():
             continue
         message = json.loads(line)
@@ -630,10 +678,10 @@ def respond(user_text, instructions, preserve_no_outcome=False, previous_prompt=
         deadline = time.monotonic() + 30
         received_interrupt = False
         while time.monotonic() < deadline:
-            readable, _, _ = select.select([sys.stdin], [], [], 0.02)
-            if not readable:
+            line = STDIN.readline(0.02)
+            if line is None:
                 continue
-            control = json.loads(sys.stdin.readline())
+            control = json.loads(line)
             if control.get("type") != "control_request" or control.get("request", {}).get("subtype") != "interrupt":
                 continue
             received_interrupt = True
@@ -1211,7 +1259,6 @@ def run_reattach_turn():
     turn_uuid = None
     reporting = None
     pending = {}
-    buffer = ""
 
     def log(name, value):
         with open(f"{base}.{name}", "a", encoding="utf-8") as handle:
@@ -1272,16 +1319,13 @@ def run_reattach_turn():
                 complete_command(message.get("uuid"))
 
     while True:
-        readable, _, _ = select.select([sys.stdin], [], [], 0.05)
-        if readable:
-            chunk = os.read(sys.stdin.fileno(), 65536).decode()
-            if not chunk:
-                # A piped helper run ends with its input; a file-backed run never sees this.
-                return 0
-            buffer += chunk
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                handle(line)
+        line = STDIN.readline(0.05)
+        while line:
+            handle(line[:-1] if line.endswith("\n") else line)
+            line = STDIN.readline(0)
+        if line == "":
+            # A piped helper run ends with its input; a file-backed run never sees this.
+            return 0
         if turn_uuid is None:
             continue
         if Path(f"{base}.reattach-ask").exists():
@@ -1336,7 +1380,7 @@ def main():
         # The non-built-in skills this launch would load, after bridging and overrides.
         "skills": [command["name"] for command in fixture_commands() if not command.get("builtin")],
     }
-    for line in sys.stdin:
+    for line in STDIN:
         if not line.strip():
             continue
         message = json.loads(line)
@@ -1464,6 +1508,12 @@ def main():
             content = message.get("message", {}).get("content", [])
             user_text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
             turn["userText"] = user_text
+            # What arrived of each image, without keeping its payload in the history.
+            turn["images"] = [
+                {"mediaType": block.get("source", {}).get("media_type"),
+                 "base64Length": len(block.get("source", {}).get("data", ""))}
+                for block in content if block.get("type") == "image"
+            ]
             recovery_error = Path(str(sys.argv[0]) + ".recovery-error")
             if "answer to the pending question from the prior playhouse session" in user_text.lower() and recovery_error.exists():
                 recovery_error.unlink(missing_ok=True)

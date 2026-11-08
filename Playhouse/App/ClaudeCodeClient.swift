@@ -32,7 +32,10 @@ final class ClaudeAgentRun {
     let directory: URL
     private(set) var manifest: ClaudeRunManifest
     var identity: AgentProcessIdentity? { manifest.process }
-    private var writer: Int32 = -1
+    private let input: AgentInputWriter
+    private var writesInFlight = 0
+    /// Why the agent's input failed; the agent is stopped then, and its exit reports this.
+    private(set) var inputFailure: AgentInputWriter.WriteError?
     private var tailer: LineTailer
     private var reader: Int32 = -1
     private var outputSource: DispatchSourceFileSystemObject?
@@ -45,11 +48,11 @@ final class ClaudeAgentRun {
     private init(directory: URL, manifest: ClaudeRunManifest) {
         self.directory = directory
         self.manifest = manifest
+        input = AgentInputWriter(path: ClaudeRunFiles.inputPath(directory))
         tailer = LineTailer(offset: manifest.consumedOffset)
     }
 
     deinit {
-        if writer >= 0 { close(writer) }
         if reader >= 0 { close(reader) }
     }
 
@@ -100,28 +103,56 @@ final class ClaudeAgentRun {
 
     var isRunning: Bool { !hasExited && identity?.isAlive == true }
 
-    /// Writes one JSON line to the agent's input. A line is written whole or the turn is lost,
-    /// so the manifest marks the write while it is in flight.
-    func write(_ line: Data) throws {
-        if writer < 0 {
-            let descriptor = open(ClaudeRunFiles.inputPath(directory), O_WRONLY | O_NONBLOCK | O_CLOEXEC)
-            guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
-            _ = fcntl(descriptor, F_SETFL, fcntl(descriptor, F_GETFL) & ~O_NONBLOCK)
-            writer = descriptor
-        }
-        manifest.writeInProgress = true
-        try saveManifest()
-        var offset = 0
-        try line.withUnsafeBytes { bytes in
-            while offset < bytes.count {
-                let written = Darwin.write(writer, bytes.baseAddress! + offset, bytes.count - offset)
-                if written < 0, errno == EINTR || errno == EAGAIN { continue }
-                guard written > 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
-                offset += written
+    /// Writes one JSON line to the agent's input and returns once it is written, without
+    /// holding the main actor while the agent reads it.
+    func write(_ line: Data) async throws {
+        let error: AgentInputWriter.WriteError? = try await withCheckedThrowingContinuation { continuation in
+            do {
+                try queue(line) { continuation.resume(returning: $0) }
+            } catch {
+                continuation.resume(throwing: error)
             }
         }
-        manifest.writeInProgress = false
-        try saveManifest()
+        if let error { throw error }
+    }
+
+    /// Queues one JSON line without waiting for it. A line that fails stops the agent, and the
+    /// agent's exit ends the turn with `inputFailure`.
+    func send(_ line: Data) throws {
+        try queue(line) { _ in }
+    }
+
+    /// Lines reach the agent whole and in the order they are queued. A line is written whole or
+    /// the turn is lost, so the manifest marks the run while any line is in flight.
+    private func queue(_ line: Data, completion: @escaping @MainActor (AgentInputWriter.WriteError?) -> Void) throws {
+        if let inputFailure { throw inputFailure }
+        if writesInFlight == 0 {
+            manifest.writeInProgress = true
+            try saveManifest()
+        }
+        writesInFlight += 1
+        input.enqueue(line) { error in
+            Task { @MainActor [weak self] in
+                self?.finishWrite(error)
+                completion(error)
+            }
+        }
+    }
+
+    private func finishWrite(_ error: AgentInputWriter.WriteError?) {
+        writesInFlight -= 1
+        if let error {
+            // The line may be cut off in the agent's input, so the marker stays and the agent,
+            // which can't take another line, is stopped.
+            guard inputFailure == nil else { return }
+            inputFailure = error
+            if let identity { Task { await AgentRunHost.terminate(identity) } }
+            return
+        }
+        if writesInFlight == 0, inputFailure == nil {
+            manifest.writeInProgress = false
+            try? saveManifest()
+        }
     }
 
     /// Lines up to the committed offset: what this run's previous daemon already handled.
@@ -218,7 +249,7 @@ final class ClaudeAgentRun {
         stopFollowing()
         exitSource?.cancel()
         exitSource = nil
-        if writer >= 0 { close(writer); writer = -1 }
+        input.close()
         if let identity { await AgentRunHost.terminate(identity) }
         if reader >= 0 { close(reader); reader = -1 }
         try? FileManager.default.removeItem(at: directory)
@@ -466,8 +497,15 @@ final class ClaudeSessionRunner {
         turnCompletion = TurnCompletion()
         parentWakeBackstopGeneration += 1
         pendingCommandUUIDs = [userMessageID]
-        try writeUserMessage(text: providerPrompt, imageDataURLs: imageDataURLs, uuid: userMessageID, priority: nil)
+        // Active before the write, which suspends: Claude Code can answer before it returns,
+        // and the runner must not look idle meanwhile.
         isTurnActive = true
+        do {
+            try await writeUserMessage(text: providerPrompt, imageDataURLs: imageDataURLs, uuid: userMessageID, priority: nil)
+        } catch {
+            isTurnActive = false
+            throw error
+        }
         owner?.runnerStateChanged(self)
         ClaudeCodeClient.markProcessActive(sessionID: sessionID)
         ConversationSteerMailbox.publishActiveTurn(threadID: sessionID, turnID: turnID)
@@ -481,7 +519,7 @@ final class ClaudeSessionRunner {
         let mailboxTask = Task { @MainActor [weak self] in
             while let self, !Task.isCancelled, self.activeTurnID == turnID {
                 await ConversationSteerMailbox.service(threadID: self.sessionID, turnID: turnID) { text, images in
-                    let accepted = try self.sendSteerInput(text: text, imageDataURLs: images)
+                    let accepted = try await self.sendSteerInput(text: text, imageDataURLs: images)
                     if accepted { self.steerMessageHandler?(text, images) }
                     return accepted
                 } interrupt: {
@@ -544,7 +582,7 @@ final class ClaudeSessionRunner {
     /// an outstanding background task, an undelivered notification, or a parent
     /// wake — is as steerable as one still streaming: Playhouse keeps showing it
     /// as the active turn, so its input must still reach the running process.
-    func sendSteerInput(text: String, imageDataURLs: [String]) throws -> Bool {
+    func sendSteerInput(text: String, imageDataURLs: [String]) async throws -> Bool {
         guard isTurnActive, activeTurnID != nil, isAgentRunning,
               !isTurnSettled || !turnCompletion.resultReceived || !pendingCommandUUIDs.isEmpty else {
             // A refusal is invisible to the user — the follow-up just stays
@@ -565,7 +603,7 @@ final class ClaudeSessionRunner {
         let uuid = UUID().uuidString.lowercased()
         pendingCommandUUIDs.insert(uuid)
         do {
-            try writeUserMessage(text: text, imageDataURLs: imageDataURLs, uuid: uuid, priority: "next")
+            try await writeUserMessage(text: text, imageDataURLs: imageDataURLs, uuid: uuid, priority: "next")
         } catch {
             pendingCommandUUIDs.remove(uuid)
             throw error
@@ -808,7 +846,7 @@ final class ClaudeSessionRunner {
         return try await withCheckedThrowingContinuation { continuation in
             pendingControlRequests[requestID] = continuation
             do {
-                try sendJSON(["type": "control_request", "request_id": requestID, "request": request])
+                try queueJSON(["type": "control_request", "request_id": requestID, "request": request])
             } catch {
                 pendingControlRequests.removeValue(forKey: requestID)
                 continuation.resume(throwing: error)
@@ -817,16 +855,16 @@ final class ClaudeSessionRunner {
     }
 
     private func sendControlResponse(requestID: String, response: [String: Any]) throws {
-        try sendJSON(["type": "control_response", "response": ["subtype": "success", "request_id": requestID, "response": response]])
+        try queueJSON(["type": "control_response", "response": ["subtype": "success", "request_id": requestID, "response": response]])
         agentRun?.noteAnswered(requestID)
     }
 
     private func sendControlError(requestID: String, message: String) {
-        try? sendJSON(["type": "control_response", "response": ["subtype": "error", "request_id": requestID, "error": message]])
+        try? queueJSON(["type": "control_response", "response": ["subtype": "error", "request_id": requestID, "error": message]])
         agentRun?.noteAnswered(requestID)
     }
 
-    private func writeUserMessage(text: String, imageDataURLs: [String], uuid: String, priority: String?) throws {
+    private func writeUserMessage(text: String, imageDataURLs: [String], uuid: String, priority: String?) async throws {
         var content: [[String: Any]] = []
         if !text.isEmpty { content.append(["type": "text", "text": text]) }
         for dataURL in imageDataURLs {
@@ -844,22 +882,48 @@ final class ClaudeSessionRunner {
             "uuid": uuid
         ]
         if let priority { message["priority"] = priority }
-        try sendJSON(message)
+        try await sendJSON(message)
     }
 
-    private func sendJSON(_ object: [String: Any]) throws {
+    /// Writes one line to Claude Code and returns once it is written; the main actor stays free
+    /// while Claude Code reads it.
+    private func sendJSON(_ object: [String: Any]) async throws {
         guard !isReplaying else { return }
         if let agentRun {
             guard agentRun.isRunning else { throw ClientError.processExited(stderrSummary()) }
             do {
-                var data = try JSONSerialization.data(withJSONObject: object)
-                data.append(0x0A)
-                try agentRun.write(data)
+                try await agentRun.write(Self.jsonLine(object))
             } catch {
                 throw ClientError.protocolFailure(error.localizedDescription)
             }
             return
         }
+        try writeToProcessPipe(object)
+    }
+
+    /// Queues one line for Claude Code without waiting. A line that fails stops the agent, whose
+    /// exit fails the turn and any control request still waiting for its reply.
+    private func queueJSON(_ object: [String: Any]) throws {
+        guard !isReplaying else { return }
+        if let agentRun {
+            guard agentRun.isRunning else { throw ClientError.processExited(stderrSummary()) }
+            do {
+                try agentRun.send(Self.jsonLine(object))
+            } catch {
+                throw ClientError.protocolFailure(error.localizedDescription)
+            }
+            return
+        }
+        try writeToProcessPipe(object)
+    }
+
+    private static func jsonLine(_ object: [String: Any]) throws -> Data {
+        var data = try JSONSerialization.data(withJSONObject: object)
+        data.append(0x0A)
+        return data
+    }
+
+    private func writeToProcessPipe(_ object: [String: Any]) throws {
         guard let process, process.isRunning, let inputPipe else {
             throw ClientError.processExited(stderrSummary())
         }
@@ -991,9 +1055,20 @@ final class ClaudeSessionRunner {
             "processID": String(run.identity?.pid ?? -1),
             "exitStatus": exitCode.map(String.init) ?? "unknown",
         ]))
-        let error: Error = sessionWasMissing || stderrTail.contains("No conversation found with session ID")
-            ? ClientError.sessionNotFound
-            : ClaudeCodeClient.classifyFailure(ClientError.processExited(stderrSummary(status: exitCode)), text: stderrTail)
+        let error: Error = if let inputFailure = run.inputFailure {
+            // Playhouse stopped an agent that wouldn't take its input; say so, not "it exited".
+            ClientError.protocolFailure(inputFailure.localizedDescription)
+        } else if sessionWasMissing || stderrTail.contains("No conversation found with session ID") {
+            ClientError.sessionNotFound
+        } else {
+            ClaudeCodeClient.classifyFailure(ClientError.processExited(stderrSummary(status: exitCode)), text: stderrTail)
+        }
+        if let inputFailure = run.inputFailure {
+            PlayhouseDiagnostics.record("claude.input.failed", fields: diagnosticFields([
+                "processID": String(run.identity?.pid ?? -1),
+                "reason": inputFailure.localizedDescription,
+            ]))
+        }
         for continuation in pendingControlRequests.values { continuation.resume(throwing: error) }
         pendingControlRequests.removeAll()
         if !turnCompletion.resultReceived || turnWaiter != nil {
@@ -1061,7 +1136,7 @@ final class ClaudeSessionRunner {
         let mailboxTask = Task { @MainActor [weak self] in
             while let self, !Task.isCancelled, self.activeTurnID == turnID {
                 await ConversationSteerMailbox.service(threadID: self.sessionID, turnID: turnID) { text, images in
-                    let accepted = try self.sendSteerInput(text: text, imageDataURLs: images)
+                    let accepted = try await self.sendSteerInput(text: text, imageDataURLs: images)
                     if accepted { self.steerMessageHandler?(text, images) }
                     return accepted
                 } interrupt: {
@@ -2141,7 +2216,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         guard let runner = Self.activeRunnersBySessionID[threadID] else {
             return try await ConversationSteerMailbox.requestSteer(threadID: threadID, text: normalized, imageDataURLs: imageDataURLs)
         }
-        let accepted = try runner.sendSteerInput(text: normalized, imageDataURLs: imageDataURLs)
+        let accepted = try await runner.sendSteerInput(text: normalized, imageDataURLs: imageDataURLs)
         // The turn's own stream shows and records the steer, whoever sent it.
         if accepted { runner.steerMessageHandler?(normalized, imageDataURLs) }
         return accepted

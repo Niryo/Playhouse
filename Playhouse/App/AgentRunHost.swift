@@ -172,6 +172,105 @@ enum AgentRunHost {
     }
 }
 
+/// Writes newline-delimited messages into an agent's input FIFO, off the caller's actor.
+///
+/// Claude Code's runtime (Bun), like Node and other kqueue-based readers, reads stdin only after
+/// kqueue reports it readable. On macOS kqueue does not report a FIFO readable while a blocking
+/// write() of more than the FIFO holds is pending, so one such write (a message with an image,
+/// say) to an idle agent never completes. The descriptor is non-blocking, so no write() is ever
+/// left pending, and lines go out in `chunkSize` pieces; the writer waits for room with poll().
+/// The non-blocking descriptor also lets a line that makes no progress for `stallTimeout` fail
+/// instead of waiting forever. A failed line may be cut off in the agent's input, so the writer
+/// refuses every line after it.
+final class AgentInputWriter: @unchecked Sendable {
+    enum WriteError: LocalizedError, Equatable {
+        case stalled(seconds: Int)
+        case failed(code: Int32)
+        case closed
+
+        var errorDescription: String? {
+            switch self {
+            case .stalled(let seconds):
+                "The agent stopped reading its input for \(seconds) seconds."
+            case .failed(let code):
+                "Couldn't write to the agent's input (\(String(cString: strerror(code))))."
+            case .closed:
+                "The agent's input is closed."
+            }
+        }
+    }
+
+    /// Well under the smallest FIFO buffer macOS gives (8 KiB and above wake an idle reader;
+    /// a 16 KiB write does not).
+    static let chunkSize = 4096
+
+    let path: String
+    let stallTimeout: TimeInterval
+    private let queue = DispatchQueue(label: "com.playhouse.agent-input")
+    // Confined to `queue`.
+    private var descriptor: Int32 = -1
+    private var failure: WriteError?
+
+    init(path: String, stallTimeout: TimeInterval = 30) {
+        self.path = path
+        self.stallTimeout = stallTimeout
+    }
+
+    deinit {
+        if descriptor >= 0 { Darwin.close(descriptor) }
+    }
+
+    /// Queues `line`. Lines are written whole and one after another, in the order they were
+    /// queued; `completion` runs on the writer's queue once the line is written or has failed.
+    func enqueue(_ line: Data, completion: @escaping @Sendable (WriteError?) -> Void) {
+        queue.async { completion(self.writeNow(line)) }
+    }
+
+    /// Closes the descriptor once the lines already queued are done; later lines fail.
+    func close() {
+        queue.async {
+            if self.descriptor >= 0 { Darwin.close(self.descriptor) }
+            self.descriptor = -1
+            if self.failure == nil { self.failure = .closed }
+        }
+    }
+
+    private func writeNow(_ line: Data) -> WriteError? {
+        if let failure { return failure }
+        if descriptor < 0 {
+            // Opens without waiting: the agent holds its own end, so a reader always exists.
+            let opened = open(path, O_WRONLY | O_NONBLOCK | O_CLOEXEC)
+            guard opened >= 0 else { return .failed(code: errno) }
+            _ = fcntl(opened, F_SETNOSIGPIPE, 1)
+            descriptor = opened
+        }
+        let result: WriteError? = line.withUnsafeBytes { bytes in
+            guard let base = bytes.baseAddress else { return nil }
+            var offset = 0
+            var lastProgress = ProcessInfo.processInfo.systemUptime
+            while offset < bytes.count {
+                let written = Darwin.write(descriptor, base + offset, min(Self.chunkSize, bytes.count - offset))
+                if written > 0 {
+                    offset += written
+                    lastProgress = ProcessInfo.processInfo.systemUptime
+                    continue
+                }
+                let code = written < 0 ? errno : EIO
+                if code == EINTR { continue }
+                guard code == EAGAIN else { return .failed(code: code) }
+                let remaining = stallTimeout - (ProcessInfo.processInfo.systemUptime - lastProgress)
+                if remaining <= 0 { return .stalled(seconds: Int(stallTimeout.rounded())) }
+                // Waits for room, and looks again at least once a second.
+                var request = pollfd(fd: descriptor, events: Int16(POLLOUT), revents: 0)
+                _ = poll(&request, 1, Int32(min(remaining, 1) * 1000))
+            }
+            return nil
+        }
+        if let result { failure = result }
+        return result
+    }
+}
+
 /// Atomic JSON files: written to a temporary sibling and renamed into place, so a reader never
 /// sees half a manifest even when the writer is killed mid-write.
 enum AgentManifestFile {

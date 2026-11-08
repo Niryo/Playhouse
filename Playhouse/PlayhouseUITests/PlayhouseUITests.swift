@@ -10098,6 +10098,73 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("chat-image-\(imageID)-0").waitForExistence(timeout: 10), "Reopening the Claude conversation should render the exact published image.")
     }
 
+    // case-contract: test_claude_large_image_message_reaches_idle_agent | A Claude Code agent that has answered initialize and gone idle receives a user message carrying a screenshot larger than its input FIFO's buffer: the send completes with Claude's answer, the agent receives the whole image, the user message keeps that image when history is read over a fresh CLI/XPC connection and when the conversation is reopened, and a later text turn in the same conversation still completes. Claude Code's runtime, like the kqueue-reading fixture, is never woken by one oversized blocking write, so such a message must reach it without freezing the daemon. Codex agents talk over a socket and are not affected.
+    func test_claude_large_image_message_reaches_idle_agent() throws {
+        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-large-image")
+        try FileManager.default.copyItem(at: source, to: executable)
+        claudeFixtureExecutable = executable.path
+        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"))
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: executable.path + ".history"))
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try runCLI([
+            "task", "create", "--title", "Claude screenshot", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any]
+        let taskID = try XCTUnwrap(created?["id"] as? String)
+        openTask(named: "Claude screenshot")
+
+        // Random pixels barely compress, so the pasted screenshot is far larger than a FIFO's buffer.
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: 160, pixelsHigh: 160, bitsPerSample: 8, samplesPerPixel: 3,
+            hasAlpha: false, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ))
+        let pixels = try XCTUnwrap(bitmap.bitmapData)
+        for offset in 0..<(bitmap.bytesPerRow * bitmap.pixelsHigh) { pixels[offset] = UInt8.random(in: 0...255) }
+        let screenshotPNG = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setData(screenshotPNG, forType: .png)
+        composer.click()
+        composer.typeKey("v", modifierFlags: .command)
+        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "The pasted screenshot should appear in the composer.")
+        composer.typeText("Describe this screenshot.")
+        attachScreenshot(named: "Large screenshot ready to send to an idle Claude agent")
+        element("send-message-button").click()
+        // The send starts a fresh agent that answers initialize and goes idle before the message
+        // arrives; a single blocking write of the message would leave every conversation frozen.
+        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 20), "Claude's answer to the screenshot message should appear.")
+
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
+        let userMessage = try XCTUnwrap(messages.first { $0["role"] as? String == "user" && $0["text"] as? String == "Describe this screenshot." })
+        let messageID = try XCTUnwrap(userMessage["id"] as? String)
+        let imageURLs = try XCTUnwrap(userMessage["imageDataURLs"] as? [String])
+        XCTAssertEqual(imageURLs.count, 1, "A fresh CLI/XPC read keeps the screenshot on the user message.")
+        let encoded = try XCTUnwrap(imageURLs.first?.split(separator: ",", maxSplits: 1).last)
+        XCTAssertGreaterThan(encoded.count, 64 * 1024, "The screenshot must not fit in a FIFO's buffer.")
+        let turnsData = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
+        let turns = try XCTUnwrap((try JSONSerialization.jsonObject(with: turnsData) as? [String: Any])?["turns"] as? [[String: Any]])
+        let imageTurn = try XCTUnwrap(turns.last { ($0["userText"] as? String)?.hasSuffix("Describe this screenshot.") == true })
+        let received = try XCTUnwrap(imageTurn["images"] as? [[String: Any]])
+        XCTAssertEqual(received.count, 1)
+        XCTAssertEqual(received.first?["base64Length"] as? Int, encoded.count, "Claude Code should receive the whole image.")
+        XCTAssertTrue(element("chat-image-\(messageID)-0").waitForExistence(timeout: 10), "The sent screenshot should show in the transcript.")
+        attachScreenshot(named: "Claude answered the large screenshot message")
+
+        composer.click()
+        composer.typeText("Thanks, that is all.")
+        element("send-message-button").click()
+        let answers = app.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", "OK.", "OK."))
+        XCTAssertTrue(waitUntil({ answers.count >= 2 }, timeout: 20), "A later text turn in the same conversation should still complete.")
+        element("back-to-board-button").click()
+        openTask(named: "Claude screenshot")
+        XCTAssertTrue(element("chat-image-\(messageID)-0").waitForExistence(timeout: 10), "Reopening the conversation should still show the screenshot.")
+        attachScreenshot(named: "Reopened conversation keeps the screenshot and both answers")
+    }
+
     // case-contract: test_codex_agent_image_published_during_active_turn | While a Codex turn is active, CLI/XPC image publication avoids requesting provider history; the assistant image is tied to that turn, appears after its native response and before the next turn in ordered history, and remains visible after reopening the conversation.
     func test_codex_agent_image_published_during_active_turn() throws {
         let source = WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui")
