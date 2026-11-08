@@ -521,6 +521,7 @@ enum ConversationReattachResult: Equatable {
     case agentGone
 }
 
+@MainActor
 protocol ConversationProviderClient: AnyObject {
     var provider: ConversationProvider { get }
     var wasLastTurnInterrupted: Bool { get }
