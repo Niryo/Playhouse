@@ -654,11 +654,15 @@ final class ClaudeSessionRunner {
         if let bridge = workspace.skillBridge {
             for directory in bridge.claudeAddDirectories { arguments += ["--add-dir", directory] }
         }
-        // Turned-off rule files are excluded the same way, and AGENTS.md is read
-        // alongside a CLAUDE.md, so skills and rules share one --settings value.
-        if let settings = RuleBridgeLaunch.claudeSettingsJSON(skills: workspace.skillBridge, rules: workspace.ruleBridge) {
+        // Turned-off rule files are excluded the same way, AGENTS.md is read
+        // alongside a CLAUDE.md, and the working repository's .mcp.json servers
+        // are started or skipped, so they all share one --settings value.
+        if let settings = RuleBridgeLaunch.claudeSettingsJSON(skills: workspace.skillBridge, rules: workspace.ruleBridge, mcp: workspace.mcpBridge) {
             arguments += ["--settings", settings]
         }
+        // MCP servers Claude Code doesn't read itself, such as Codex's own or
+        // another task repository's, are added for this run only.
+        if let servers = workspace.mcpBridge?.claudeMcpConfig { arguments += ["--mcp-config", servers] }
         // Background Bash and Agent/Task calls report through Claude Code's task
         // events and keep the turn open, so Claude may end its response while
         // they run instead of blocking on a wait it cannot satisfy. Only a process

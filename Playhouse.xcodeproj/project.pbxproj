@@ -16,6 +16,9 @@
 		A10000000000000000000E01 /* SkillCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E01 /* SkillCatalog.swift */; };
 		A10000000000000000000E02 /* SkillsPageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E02 /* SkillsPageView.swift */; };
 		A10000000000000000000E03 /* RuleCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E03 /* RuleCatalog.swift */; };
+		A10000000000000000000E04 /* McpCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E04 /* McpCatalog.swift */; };
+		A10000000000000000000E05 /* CodexConfigTOML.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E05 /* CodexConfigTOML.swift */; };
+		A10000000000000000000E06 /* McpServersSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000E06 /* McpServersSectionView.swift */; };
 		A100000000000000000000E1 /* TaskTerminalPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000000000000000000E1 /* TaskTerminalPanel.swift */; };
 		A1000000000000000000F301 /* AgentsInfoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F301 /* AgentsInfoView.swift */; };
 		A1000000000000000000F401 /* TaskSchedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F401 /* TaskSchedule.swift */; };
@@ -72,6 +75,9 @@
 		A20000000000000000000E01 /* SkillCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillCatalog.swift; sourceTree = "<group>"; };
 		A20000000000000000000E02 /* SkillsPageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillsPageView.swift; sourceTree = "<group>"; };
 		A20000000000000000000E03 /* RuleCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleCatalog.swift; sourceTree = "<group>"; };
+		A20000000000000000000E04 /* McpCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = McpCatalog.swift; sourceTree = "<group>"; };
+		A20000000000000000000E05 /* CodexConfigTOML.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexConfigTOML.swift; sourceTree = "<group>"; };
+		A20000000000000000000E06 /* McpServersSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = McpServersSectionView.swift; sourceTree = "<group>"; };
 		A200000000000000000000E1 /* TaskTerminalPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskTerminalPanel.swift; sourceTree = "<group>"; };
 		A2000000000000000000F301 /* AgentsInfoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentsInfoView.swift; sourceTree = "<group>"; };
 		A2000000000000000000F401 /* TaskSchedule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskSchedule.swift; sourceTree = "<group>"; };
@@ -188,6 +194,9 @@
 				A20000000000000000000E01 /* SkillCatalog.swift */,
 				A20000000000000000000E02 /* SkillsPageView.swift */,
 				A20000000000000000000E03 /* RuleCatalog.swift */,
+				A20000000000000000000E04 /* McpCatalog.swift */,
+				A20000000000000000000E05 /* CodexConfigTOML.swift */,
+				A20000000000000000000E06 /* McpServersSectionView.swift */,
 				A200000000000000000000E1 /* TaskTerminalPanel.swift */,
 				A2000000000000000000F301 /* AgentsInfoView.swift */,
 				A2000000000000000000F401 /* TaskSchedule.swift */,
@@ -436,6 +445,8 @@
 				"$(SRCROOT)/Playhouse/App/ProviderRequestLog.swift",
 				"$(SRCROOT)/Playhouse/App/SkillCatalog.swift",
 				"$(SRCROOT)/Playhouse/App/RuleCatalog.swift",
+				"$(SRCROOT)/Playhouse/App/McpCatalog.swift",
+				"$(SRCROOT)/Playhouse/App/CodexConfigTOML.swift",
 			);
 			name = "Build CLI and bridge daemon";
 			outputPaths = (
@@ -477,6 +488,9 @@
 				A10000000000000000000E01 /* SkillCatalog.swift in Sources */,
 				A10000000000000000000E02 /* SkillsPageView.swift in Sources */,
 				A10000000000000000000E03 /* RuleCatalog.swift in Sources */,
+				A10000000000000000000E04 /* McpCatalog.swift in Sources */,
+				A10000000000000000000E05 /* CodexConfigTOML.swift in Sources */,
+				A10000000000000000000E06 /* McpServersSectionView.swift in Sources */,
 				A100000000000000000000E1 /* TaskTerminalPanel.swift in Sources */,
 				A1000000000000000000F301 /* AgentsInfoView.swift in Sources */,
 				A1000000000000000000F401 /* TaskSchedule.swift in Sources */,

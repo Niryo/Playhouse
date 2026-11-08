@@ -912,6 +912,8 @@ struct ConversationClients {
     var skills: SkillCatalogManager? = nil
     /// The shared agent rules, which a turn's launch bridges to its provider.
     var rules: RuleCatalogManager? = nil
+    /// The shared MCP servers, which a turn's launch bridges to its provider.
+    var mcp: McpCatalogManager? = nil
 
     func client(for provider: ConversationProvider) -> ConversationProviderClient {
         switch provider {

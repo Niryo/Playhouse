@@ -1060,6 +1060,16 @@ def main():
                 {"id": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol", "isDefault": False,
                  "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
             ]}})
+        elif message.get("method") == "mcpServerStatus/list":
+            # The servers a test seeds in `<executable>.mcp-status`, as Codex lists
+            # the ones its own configuration defines.
+            # `<executable>.mcp-status-fail` makes the request fail, as when Codex can't be asked.
+            if Path(str(sys.argv[0]) + ".mcp-status-fail").exists():
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32603, "message": "Fixture MCP status is unavailable."}})
+                return
+            seeded = Path(str(sys.argv[0]) + ".mcp-status")
+            servers = json.loads(seeded.read_text(encoding="utf-8")) if seeded.exists() else []
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"data": servers, "nextCursor": None}})
         elif message.get("method") == "thread/goal/get":
             goal = json.loads(goal_path.read_text(encoding="utf-8")) if goal_path.is_file() else None
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"goal": goal}})

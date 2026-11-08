@@ -164,11 +164,12 @@ struct RuleBridgeLaunch: Codable, Equatable, Sendable {
         return settings
     }
 
-    /// One `--settings` JSON for a Claude Code run, joining what skills and
-    /// rules each need, or nil when neither needs any.
-    static func claudeSettingsJSON(skills: SkillBridgeLaunch?, rules: RuleBridgeLaunch?) -> String? {
+    /// One `--settings` JSON for a Claude Code run, joining what skills, rules
+    /// and MCP servers each need, or nil when none needs any.
+    static func claudeSettingsJSON(skills: SkillBridgeLaunch?, rules: RuleBridgeLaunch?, mcp: McpBridgeLaunch? = nil) -> String? {
         var settings = skills?.claudeSettings ?? [:]
         settings.merge(rules?.claudeSettings ?? [:]) { _, new in new }
+        settings.merge(mcp?.claudeSettings ?? [:]) { _, new in new }
         guard !settings.isEmpty,
               let data = try? JSONSerialization.data(withJSONObject: settings, options: [.sortedKeys]) else { return nil }
         return String(data: data, encoding: .utf8)

@@ -17417,7 +17417,7 @@ final class PlayhouseUITests: XCTestCase {
 
     private func openRulesPage(file: StaticString = #filePath, line: UInt = #line) {
         openSkillsPage(file: file, line: line)
-        XCTAssertEqual(accessibleLabelOrValue(of: element("skills-title")), "Skills & Rules", "The page is titled Skills & Rules.", file: file, line: line)
+        XCTAssertEqual(accessibleLabelOrValue(of: element("skills-title")), "Skills, Rules & MCP", "The page is titled Skills, Rules & MCP.", file: file, line: line)
         selectSkillsTab("Rules", picker: "skills-kind-picker", file: file, line: line)
         XCTAssertTrue(element("rules-page").waitForExistence(timeout: 10), "The Rules picker shows the rules.", file: file, line: line)
         XCTAssertTrue(waitUntil({ !self.element("rules-loading").exists }, timeout: 10), "The rules finish loading.", file: file, line: line)
@@ -17448,7 +17448,7 @@ final class PlayhouseUITests: XCTestCase {
         return (history["turns"] as? [[String: Any]] ?? []).filter { ($0["userText"] as? String)?.isEmpty == false }
     }
 
-    // case-contract: test_rules_catalog_lists_repo_global_and_managed_rules | The Skills page, titled Skills & Rules, switches to its Rules list with a Skills | Rules picker. Rules lists each task repository's instruction files from its worktree (AGENTS.override.md, AGENTS.md, CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, and every .md file under .claude/rules, keyed by the source repository and the file's path), the user's global rules (~/.agents/AGENTS.md, Codex's AGENTS.md, and Claude's CLAUDE.md and rules folder), and the organization's managed CLAUDE.md. Each rule names the agents that follow it in Playhouse sessions and the ones that read it natively: a repository AGENTS.md beside a CLAUDE.md is followed by both but read natively only by Codex, ~/.agents/AGENTS.md is read natively by neither yet shared with both, a CLAUDE.md symlinked to AGENTS.md is one Linked rule read natively by both, AGENTS.override.md is Codex's own and leaves the AGENTS.md beside it to Claude, a .claude/rules file shows its paths globs, the managed CLAUDE.md is Claude's only and read-only, and an @import of a missing file is flagged as a problem. A repository without rules shows an empty state. Reading a rule returns its file exactly, and an unknown rule is not_found.
+    // case-contract: test_rules_catalog_lists_repo_global_and_managed_rules | The Skills page, titled Skills, Rules & MCP, switches to its Rules list with a Skills | Rules | MCP picker. Rules lists each task repository's instruction files from its worktree (AGENTS.override.md, AGENTS.md, CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, and every .md file under .claude/rules, keyed by the source repository and the file's path), the user's global rules (~/.agents/AGENTS.md, Codex's AGENTS.md, and Claude's CLAUDE.md and rules folder), and the organization's managed CLAUDE.md. Each rule names the agents that follow it in Playhouse sessions and the ones that read it natively: a repository AGENTS.md beside a CLAUDE.md is followed by both but read natively only by Codex, ~/.agents/AGENTS.md is read natively by neither yet shared with both, a CLAUDE.md symlinked to AGENTS.md is one Linked rule read natively by both, AGENTS.override.md is Codex's own and leaves the AGENTS.md beside it to Claude, a .claude/rules file shows its paths globs, the managed CLAUDE.md is Claude's only and read-only, and an @import of a missing file is flagged as a problem. A repository without rules shows an empty state. Reading a rule returns its file exactly, and an unknown rule is not_found.
     func test_rules_catalog_lists_repo_global_and_managed_rules() throws {
         let working = try makeSkillRepository("rules-catalog-repo", skills: [
             "AGENTS.md": "# Repository conventions\nUse tabs.\n",
@@ -18006,6 +18006,696 @@ final class PlayhouseUITests: XCTestCase {
         let resumedStart = try XCTUnwrap(resumed.range(of: "# Rules Playhouse shares with you"))
         XCTAssertEqual(String(resumed[resumedStart.lowerBound...]), String(instructions[rulesStart.lowerBound...]), "The resumed thread gets the same rules.")
         answerQuestionIfAsked()
+    }
+
+    // MARK: - MCP servers
+
+    private var mcpClaudeState: URL { skillsHome.appendingPathComponent(".claude.json") }
+    private var mcpCodexConfig: URL { skillsCodexHome.appendingPathComponent("config.toml") }
+    private var mcpManaged: URL { rulesManaged.appendingPathComponent("managed-mcp.json") }
+
+    private func writeMcpJSON(_ url: URL, _ value: Any) throws {
+        let data = try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
+        try writeRuleFile(url, String(decoding: data, as: UTF8.self) + "\n")
+    }
+
+    private func readMcpJSON(_ url: URL) throws -> [String: Any] {
+        try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+    }
+
+    private func mcpCatalog(taskID: String? = nil) throws -> [String: Any] {
+        var command = ["mcp", "list"]
+        if let taskID { command += ["--task", taskID] }
+        return try XCTUnwrap(try runCLI(command)["result"] as? [String: Any])
+    }
+
+    /// Every server in the catalog by ID, across repositories, global and managed.
+    private func mcpServersByID(_ catalog: [String: Any]) -> [String: [String: Any]] {
+        let sections = (catalog["repositories"] as? [[String: Any]]) ?? []
+        let servers = sections.flatMap { ($0["servers"] as? [[String: Any]]) ?? [] }
+            + ((catalog["global"] as? [[String: Any]]) ?? []) + ((catalog["managed"] as? [[String: Any]]) ?? [])
+        return Dictionary(uniqueKeysWithValues: servers.compactMap { server in (server["id"] as? String).map { ($0, server) } })
+    }
+
+    private func openMcpPage(file: StaticString = #filePath, line: UInt = #line) {
+        openSkillsPage(file: file, line: line)
+        XCTAssertEqual(accessibleLabelOrValue(of: element("skills-title")), "Skills, Rules & MCP", "The page is titled Skills, Rules & MCP.", file: file, line: line)
+        selectSkillsTab("MCP", picker: "skills-kind-picker", file: file, line: line)
+        XCTAssertTrue(element("mcp-page").waitForExistence(timeout: 10), "The MCP picker shows the servers.", file: file, line: line)
+        XCTAssertTrue(waitUntil({ !self.element("mcp-loading").exists }, timeout: 10), "The servers finish loading.", file: file, line: line)
+    }
+
+    /// Opens a server's actions menu, waiting out a closing panel's animation.
+    private func clickMcpMenuItem(server key: String, item identifier: String, title: String, file: StaticString = #filePath, line: UInt = #line) {
+        let actions = element("mcp-actions-\(key)")
+        XCTAssertTrue(waitUntil({ actions.exists && actions.isHittable && !self.element("mcp-editor-panel").exists }, timeout: 10),
+                      "\(key) should have an actions menu.", file: file, line: line)
+        actions.click()
+        let byIdentifier = app.menuItems.matching(identifier: identifier).firstMatch
+        if !byIdentifier.waitForExistence(timeout: 3), !app.menuItems[title].exists { actions.click() }
+        let item = byIdentifier.waitForExistence(timeout: 3) ? byIdentifier : app.menuItems[title]
+        XCTAssertTrue(item.waitForExistence(timeout: 5), "The actions menu should offer \(title).", file: file, line: line)
+        item.click()
+    }
+
+    private func replaceText(in field: XCUIElement, with text: String) {
+        field.click()
+        field.typeKey("a", modifierFlags: .command)
+        field.typeKey(.delete, modifierFlags: [])
+        if !text.isEmpty { field.typeText(text) }
+    }
+
+    // case-contract: test_mcp_catalog_lists_repo_global_and_managed_servers | The Skills page, titled Skills, Rules & MCP, switches to its MCP list with a Skills | Rules | MCP picker. MCP lists each task repository's servers from its worktree's .mcp.json and .codex/config.toml (keyed by the source repository and the server's name), the user's global servers from Claude Code's ~/.claude.json and Codex's config.toml, and the organization's managed-mcp.json. Each server shows its command or URL and only the names of its environment variables and headers, never their values, and names the agents that start it on their own and the ones Playhouse passes it to: a .mcp.json server is Claude's own and passed to Codex, a server defined the same way in both global files is one entry both CLIs start, a server only one CLI defines is passed to the other, an SSE server or one with a working folder reaches only the agent that can run it with the reason shown, a server Codex's config.toml turns off reaches neither, a server written inline in config.toml is listed but not editable, two global definitions that differ are flagged as a conflict, and the managed server is Claude's only and read-only. A repository without servers shows an empty state and an unreadable configuration file is reported. Reading a server returns its full definition, and an unknown server is not_found.
+    func test_mcp_catalog_lists_repo_global_and_managed_servers() throws {
+        let working = try makeSkillRepository("mcp-catalog-repo", skills: [
+            ".mcp.json": #"{"mcpServers": {"repo-docs": {"type": "stdio", "command": "node", "args": ["docs.js"], "env": {"DOCS_TOKEN": "${DOCS_TOKEN}", "DOCS_MODE": "secret-mode-value"}}, "repo-sse": {"type": "sse", "url": "https://sse.example.com/mcp"}}}"#,
+            ".codex/config.toml": "[mcp_servers.repo-codex]\ncommand = \"python3\"\nargs = [\"serve.py\"]\n",
+        ])
+        let other = try makeSkillRepository("mcp-other-repo", skills: [
+            ".mcp.json": #"{"mcpServers": {"other-api": {"type": "http", "url": "https://api.example.com/mcp", "headers": {"Authorization": "Bearer ${API_TOKEN}"}}}}"#,
+            ".codex/config.toml": "[mcp_servers.broken\ncommand = \n",
+        ])
+        let empty = try makeSkillRepository("mcp-empty-repo", skills: [:])
+        try writeMcpJSON(mcpClaudeState, ["numStartups": 5, "mcpServers": [
+            "shared": ["type": "stdio", "command": "npx", "args": ["-y", "shared-server"], "env": [:]],
+            "claude-only": ["type": "http", "url": "https://claude.example.com/mcp", "headers": ["X-Team": "core-secret-team"]],
+            "clash": ["type": "stdio", "command": "clash-a", "args": [], "env": [:]],
+        ]])
+        try writeRuleFile(mcpCodexConfig, [
+            "model = \"gpt-6-luna\"", "",
+            "[mcp_servers]", "inline-tool = { command = \"inline-tool\" }", "",
+            "[mcp_servers.shared]", "command = \"npx\"", "args = [\"-y\", \"shared-server\"]", "",
+            "[mcp_servers.codex-only]", "command = \"uvx\"", "args = [\"codex-tool\"]", "env_vars = [\"CODEX_TOOL_KEY\"]", "",
+            "[mcp_servers.clash]", "command = \"clash-b\"", "",
+            "[mcp_servers.folder-tool]", "command = \"./tool\"", "cwd = \".\"", "",
+            "[mcp_servers.off-tool]", "command = \"off-tool\"", "enabled = false", "",
+        ].joined(separator: "\n"))
+        try writeMcpJSON(mcpManaged, ["mcpServers": ["company": ["type": "http", "url": "https://mcp.company.example/mcp"]]])
+        _ = try installSkillsClaudeFixture("claude-fixture-mcp-catalog")
+        launchApp(defaultParent: fixture.parent.path)
+        let task = try createSkillsTask("MCP catalog", repositories: [working, other, empty])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        openTask(named: "MCP catalog")
+        openMcpPage()
+
+        for name in ["mcp-catalog-repo", "mcp-other-repo", "mcp-empty-repo"] {
+            XCTAssertTrue(element("mcp-repo-section-\(name)").waitForExistence(timeout: 10), "\(name) has a section.")
+        }
+        XCTAssertTrue(element("mcp-empty-mcp-empty-repo").exists, "A repository without servers shows an empty state.")
+        XCTAssertTrue(element("mcp-file-problem").exists, "An unreadable config file is reported.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("mcp-file-problem")).contains(".codex/config.toml"))
+        let docs = "mcp-catalog-repo:repo-docs"
+        XCTAssertTrue(element("mcp-row-\(docs)").exists)
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-summary-\(docs)")), "node docs.js", "A server shows its command.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-env-\(docs)")), "Environment: DOCS_MODE, DOCS_TOKEN",
+                       "Only the names of its environment variables are shown.")
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'secret-mode-value'")).firstMatch.exists, "Values are never shown.")
+        XCTAssertTrue(element("mcp-provider-\(docs)-claude").exists && element("mcp-provider-\(docs)-codex").exists)
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-\(docs)")), "Playhouse passes it to Codex.", ".mcp.json is Claude's own.")
+        let sse = "mcp-catalog-repo:repo-sse"
+        XCTAssertTrue(element("mcp-provider-\(sse)-claude").exists)
+        XCTAssertFalse(element("mcp-provider-\(sse)-codex").exists, "Codex can't run an SSE server.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("mcp-limitation-\(sse)")).contains("SSE"))
+        XCTAssertTrue(element("mcp-row-mcp-catalog-repo:repo-codex").exists, "The worktree's .codex/config.toml servers are listed.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-mcp-other-repo:other-api")), "Playhouse passes it to Claude and Codex.",
+                       "Neither agent reads another task repository's servers on its own.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-env-mcp-other-repo:other-api")), "Headers: Authorization")
+        attachScreenshot(named: "MCP Repo tab lists each repository's servers")
+
+        selectSkillsTab("Global", picker: "mcp-tab-picker")
+        XCTAssertTrue(element("mcp-row-shared").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("mcp-native-shared").exists, "A server both global files define the same way is one entry both CLIs start.")
+        XCTAssertFalse(element("mcp-shared-shared").exists)
+        XCTAssertTrue(element("mcp-conflict-clash").exists, "Two global definitions that differ are a conflict.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("mcp-issue-clash")).contains("differently"))
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-claude-only")), "Playhouse passes it to Codex.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-codex-only")), "Playhouse passes it to Claude.")
+        XCTAssertFalse(element("mcp-provider-folder-tool-claude").exists, "Claude Code can't run a server with a working folder.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("mcp-limitation-folder-tool")).contains("working folder"))
+        XCTAssertFalse(element("mcp-provider-off-tool-claude").exists || element("mcp-provider-off-tool-codex").exists,
+                       "A server Codex's config turns off reaches neither agent.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("mcp-limitation-off-tool")).contains("enabled = false"))
+        XCTAssertTrue(element("mcp-row-inline-tool").exists, "An inline config.toml server is listed.")
+        attachScreenshot(named: "MCP Global tab")
+        // The inline server is last on a long list, below the visible part of the page.
+        XCTAssertTrue(scrollFullyIntoView(element("mcp-row-inline-tool"), in: element("mcp-list")), "The inline server scrolls into view.")
+        element("mcp-row-inline-tool").click()
+        XCTAssertTrue(element("mcp-editor-panel").waitForExistence(timeout: 5), "An inline server opens to read.")
+        XCTAssertFalse(element("mcp-editor-save").exists, "An inline config.toml server opens without Save.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("mcp-editor-read-only")).contains("inline"), "The editor says why it is read-only.")
+        attachScreenshot(named: "An inline config.toml server opens read-only")
+        element("mcp-editor-cancel").click()
+        XCTAssertTrue(waitUntil({ !self.element("mcp-editor-panel").exists }, timeout: 5))
+        let inlineActions = element("mcp-actions-inline-tool")
+        XCTAssertTrue(waitUntil({ inlineActions.isHittable }, timeout: 5))
+        inlineActions.click()
+        XCTAssertTrue(app.menuItems["View…"].waitForExistence(timeout: 5), "An inline server offers View rather than Edit.")
+        XCTAssertFalse(app.menuItems["Delete…"].exists || app.menuItems["Make Available Outside Playhouse…"].exists,
+                       "An inline server offers no Delete or link.")
+        app.typeKey(.escape, modifierFlags: [])
+
+        selectSkillsTab("Managed", picker: "mcp-tab-picker")
+        let managed = "managed:company"
+        XCTAssertTrue(element("mcp-row-\(managed)").waitForExistence(timeout: 5), "The managed server is listed.")
+        XCTAssertTrue(element("mcp-provider-\(managed)-claude").exists)
+        XCTAssertFalse(element("mcp-provider-\(managed)-codex").exists, "The managed server is Claude's only.")
+        XCTAssertFalse(element("mcp-toggle-\(managed)").exists, "The managed server can't be turned off.")
+        attachScreenshot(named: "MCP Managed tab")
+
+        let byID = mcpServersByID(try mcpCatalog(taskID: taskID))
+        XCTAssertEqual(byID["repo:\(working.path)#repo-docs"]?["nativeProviders"] as? [String], ["claude"])
+        XCTAssertEqual(byID["global:shared"]?["availableOutsidePlayhouse"] as? Bool, true)
+        XCTAssertEqual(((byID["global:inline-tool"]?["locations"] as? [[String: Any]])?.first)?["editable"] as? Bool, false,
+                       "An inline config.toml server is not editable.")
+        XCTAssertEqual(byID["managed:company"]?["editable"] as? Bool, false)
+        let detail = try XCTUnwrap(try runCLI(["mcp", "get", "--task", taskID, "--server", "global:claude-only"])["result"] as? [String: Any])
+        XCTAssertEqual((detail["config"] as? [String: Any])?["headers"] as? [String: String], ["X-Team": "core-secret-team"], "Reading a server returns its full definition.")
+        assertCLIError(try runCLI(["mcp", "get", "--task", taskID, "--server", "global:no-such-server"], expectedStatus: 3), code: "not_found")
+
+        element("skills-back-button").click()
+        XCTAssertTrue(waitUntil({ !self.element("skills-page").exists }, timeout: 5), "Back returns to the conversation.")
+    }
+
+    // case-contract: test_mcp_create_update_and_delete_in_both_configs | New Server writes a global server straight into both Claude Code's ~/.claude.json mcpServers and Codex's config.toml [mcp_servers] table, with ${NAME} environment references written as Codex env_vars and every other setting, comment and server in both files kept; a repository server goes into the chosen task worktree's .mcp.json and the source checkout is left alone. An invalid name, a missing command, an SSE server, a URL that is not http, an environment reference Codex can't pass through, the managed scope, and an existing name are rejected with nothing written. Clicking a server opens its editor, and saving rewrites it in every file that defines it while keeping each provider's own keys, such as Codex's startup_timeout_sec and Claude's oauth; an invalid edit and an edit to a server written inline in config.toml are rejected while keeping the files. Deleting a server removes it from every file that defines it, and every change is visible to a fresh CLI process and on the page.
+    func test_mcp_create_update_and_delete_in_both_configs() throws {
+        let repository = try makeSkillRepository("mcp-manage-repo", skills: [:])
+        try writeMcpJSON(mcpClaudeState, ["numStartups": 7, "mcpServers": [
+            "legacy": ["type": "http", "url": "https://legacy.example.com/mcp", "oauth": ["clientId": "abc"]],
+        ]])
+        try writeRuleFile(mcpCodexConfig, [
+            "# my settings", "model = \"gpt-6-luna\"", "",
+            "[mcp_servers]", "inline-tool = { command = \"inline-tool\" }", "",
+            "[mcp_servers.legacy]", "url = \"https://legacy.example.com/mcp\"", "startup_timeout_sec = 45", "",
+            "[profiles.fast]", "model = \"gpt-6-mini\"", "",
+        ].joined(separator: "\n"))
+        try writeMcpJSON(mcpManaged, ["mcpServers": ["company": ["type": "http", "url": "https://mcp.company.example/mcp"]]])
+        _ = try installSkillsClaudeFixture("claude-fixture-mcp-manage")
+        launchApp(defaultParent: fixture.parent.path)
+        let task = try createSkillsTask("MCP manage", repositories: [repository])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String))
+        openTask(named: "MCP manage")
+        openMcpPage()
+
+        element("new-mcp-server-button").click()
+        XCTAssertTrue(element("mcp-editor-panel").waitForExistence(timeout: 5), "New Server opens its panel.")
+        typeIntoField(element("mcp-editor-name"), text: "bad name")
+        typeIntoField(element("mcp-editor-command"), text: "npx")
+        element("mcp-editor-save").click()
+        XCTAssertTrue(element("mcp-editor-error").waitForExistence(timeout: 5), "An invalid name is rejected in the panel.")
+        XCTAssertNil((try readMcpJSON(mcpClaudeState)["mcpServers"] as? [String: Any])?["bad name"], "A rejected server writes nothing.")
+        attachScreenshot(named: "New Server rejects an invalid name")
+        replaceText(in: element("mcp-editor-name"), with: "notes")
+        replaceText(in: element("mcp-editor-command"), with: "")
+        element("mcp-editor-save").click()
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("mcp-editor-error")).contains("command") }, timeout: 5),
+                      "A missing command is rejected in the panel.")
+        XCTAssertNil((try readMcpJSON(mcpClaudeState)["mcpServers"] as? [String: Any])?["notes"], "A rejected server writes nothing.")
+        replaceText(in: element("mcp-editor-command"), with: "npx")
+        typeIntoField(element("mcp-editor-args"), text: "-y\nnotes-server")
+        typeIntoField(element("mcp-editor-env"), text: "NOTES_TOKEN=${NOTES_TOKEN}\nMODE=fast")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("mcp-editor-target")).contains("config.toml"), "A global server is saved for both CLIs.")
+        attachScreenshot(named: "New Server panel for a global local command")
+        element("mcp-editor-save").click()
+        XCTAssertTrue(waitUntil({ !self.element("mcp-editor-panel").exists }, timeout: 10), "Creating closes the panel.")
+        XCTAssertTrue(element("mcp-row-notes").waitForExistence(timeout: 10), "The new global server shows on the Global tab.")
+        XCTAssertTrue(element("mcp-native-notes").exists, "A new global server is in both CLIs' configuration.")
+        let state = try readMcpJSON(mcpClaudeState)
+        let notes = try XCTUnwrap((state["mcpServers"] as? [String: Any])?["notes"] as? [String: Any])
+        XCTAssertEqual(notes["command"] as? String, "npx")
+        XCTAssertEqual(notes["args"] as? [String], ["-y", "notes-server"])
+        XCTAssertEqual(notes["env"] as? [String: String], ["NOTES_TOKEN": "${NOTES_TOKEN}", "MODE": "fast"])
+        XCTAssertEqual(state["numStartups"] as? Int, 7, "Claude Code's other state is kept.")
+        let codexText = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
+        for line in ["# my settings", "[mcp_servers.notes]", "command = \"npx\"", "args = [\"-y\", \"notes-server\"]", "env_vars = [\"NOTES_TOKEN\"]",
+                     "[mcp_servers.notes.env]", "MODE = \"fast\"", "[profiles.fast]"] {
+            XCTAssertTrue(codexText.contains(line), "Codex's config.toml has \(line).")
+        }
+        attachScreenshot(named: "A new global server both CLIs start")
+
+        element("new-mcp-server-button").click()
+        XCTAssertTrue(element("mcp-editor-panel").waitForExistence(timeout: 5))
+        element("mcp-editor-scope").click()
+        XCTAssertTrue(app.menuItems["mcp-manage-repo"].waitForExistence(timeout: 5), "New Server can save into the task's repository.")
+        app.menuItems["mcp-manage-repo"].click()
+        selectSkillsTab("Remote HTTP", picker: "mcp-editor-kind")
+        typeIntoField(element("mcp-editor-name"), text: "repo-search")
+        typeIntoField(element("mcp-editor-url"), text: "https://search.example.com/mcp")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("mcp-editor-target")).contains(".mcp.json"))
+        element("mcp-editor-save").click()
+        XCTAssertTrue(waitUntil({ !self.element("mcp-editor-panel").exists }, timeout: 10))
+        XCTAssertTrue(element("mcp-row-mcp-manage-repo:repo-search").waitForExistence(timeout: 10), "The repository server shows on the Repo tab.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-mcp-manage-repo:repo-search")), "Playhouse passes it to Codex.")
+        let projectJSON = try readMcpJSON(worktree.appendingPathComponent(".mcp.json"))
+        XCTAssertEqual(((projectJSON["mcpServers"] as? [String: Any])?["repo-search"] as? [String: Any])?["url"] as? String, "https://search.example.com/mcp")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repository.appendingPathComponent(".mcp.json").path), "The source checkout is left alone.")
+
+        let beforeRejected = (try String(contentsOf: mcpClaudeState, encoding: .utf8), try String(contentsOf: mcpCodexConfig, encoding: .utf8))
+        for arguments in [
+            ["--scope", "global", "--name", "no-command", "--command", ""],
+            ["--scope", "global", "--name", "events", "--config-json", #"{"transport": "sse", "url": "https://sse.example.com"}"#],
+            ["--scope", "global", "--name", "ftp-server", "--url", "ftp://files.example.com"],
+            ["--scope", "global", "--name", "renamed-env", "--command", "npx", "--env", "TOKEN=${OTHER_TOKEN}"],
+            ["--scope", "managed", "--name", "company-two", "--command", "npx"],
+        ] {
+            assertCLIError(try runCLI(["mcp", "create", "--task", taskID] + arguments, expectedStatus: 2), code: "invalid_argument")
+        }
+        assertCLIError(try runCLI(["mcp", "create", "--task", taskID, "--scope", "global", "--name", "notes", "--command", "npx"], expectedStatus: 1), code: "already_exists")
+        XCTAssertEqual(try String(contentsOf: mcpClaudeState, encoding: .utf8), beforeRejected.0, "A rejected server writes nothing to Claude Code's file.")
+        XCTAssertEqual(try String(contentsOf: mcpCodexConfig, encoding: .utf8), beforeRejected.1, "A rejected server writes nothing to Codex's file.")
+
+        selectSkillsTab("Global", picker: "mcp-tab-picker")
+        element("mcp-row-legacy").click()
+        XCTAssertTrue(element("mcp-editor-panel").waitForExistence(timeout: 5), "Clicking a server opens its editor.")
+        let url = element("mcp-editor-url")
+        XCTAssertEqual(url.value as? String, "https://legacy.example.com/mcp", "The editor opens the server's definition.")
+        replaceText(in: url, with: "ftp://legacy.example.com")
+        element("mcp-editor-save").click()
+        XCTAssertTrue(element("mcp-editor-error").waitForExistence(timeout: 5), "An invalid edit is rejected in the editor.")
+        XCTAssertTrue(try String(contentsOf: mcpCodexConfig, encoding: .utf8).contains("url = \"https://legacy.example.com/mcp\""), "A rejected edit keeps the files.")
+        replaceText(in: url, with: "https://legacy.example.com/v2")
+        attachScreenshot(named: "Editing a global server")
+        element("mcp-editor-save").click()
+        XCTAssertTrue(waitUntil({ !self.element("mcp-editor-panel").exists }, timeout: 10), "Saving closes the editor.")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("mcp-summary-legacy")) == "https://legacy.example.com/v2" }, timeout: 10))
+        let legacy = try XCTUnwrap((try readMcpJSON(mcpClaudeState)["mcpServers"] as? [String: Any])?["legacy"] as? [String: Any])
+        XCTAssertEqual(legacy["url"] as? String, "https://legacy.example.com/v2")
+        XCTAssertEqual(legacy["oauth"] as? [String: String], ["clientId": "abc"], "Claude's own keys are kept.")
+        let editedCodex = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
+        XCTAssertTrue(editedCodex.contains("url = \"https://legacy.example.com/v2\""), "An edit reaches Codex's config.toml.")
+        XCTAssertTrue(editedCodex.contains("startup_timeout_sec = 45"), "Codex's own keys are kept.")
+        let beforeInline = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
+        let inline = try runCLI(["mcp", "update", "--task", taskID, "--server", "global:inline-tool", "--command", "inline-tool-2"], expectedStatus: 2)
+        assertCLIError(inline, code: "invalid_argument")
+        XCTAssertTrue(((inline["error"] as? [String: Any])?["message"] as? String ?? "").contains("inline"))
+        XCTAssertEqual(try String(contentsOf: mcpCodexConfig, encoding: .utf8), beforeInline, "An edit to an inline server keeps the file.")
+
+        selectSkillsTab("Managed", picker: "mcp-tab-picker")
+        element("mcp-row-managed:company").click()
+        XCTAssertTrue(element("mcp-editor-panel").waitForExistence(timeout: 5), "The managed server opens to read.")
+        XCTAssertFalse(element("mcp-editor-save").exists, "The managed server opens read-only, without Save.")
+        element("mcp-editor-cancel").click()
+        XCTAssertTrue(waitUntil({ !self.element("mcp-editor-panel").exists }, timeout: 5))
+
+        selectSkillsTab("Global", picker: "mcp-tab-picker")
+        clickMcpMenuItem(server: "notes", item: "mcp-delete-notes", title: "Delete…")
+        clickDialogButton("confirm-delete-mcp", title: "Delete")
+        XCTAssertTrue(waitUntil({ !self.element("mcp-row-notes").exists }, timeout: 10), "Deleting removes the server from the page.")
+        XCTAssertNil((try readMcpJSON(mcpClaudeState)["mcpServers"] as? [String: Any])?["notes"], "Deleting removes the server from Claude Code's file.")
+        let afterDelete = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
+        XCTAssertFalse(afterDelete.contains("[mcp_servers.notes"), "Deleting removes the server from Codex's file.")
+        XCTAssertTrue(afterDelete.contains("# my settings"))
+        attachScreenshot(named: "A deleted server is gone from both files")
+        let fresh = mcpServersByID(try mcpCatalog(taskID: taskID))
+        XCTAssertNil(fresh["global:notes"])
+        XCTAssertNotNil(fresh["repo:\(repository.path)#repo-search"])
+    }
+
+    // case-contract: test_mcp_enable_state_and_link_persist | Turning a server off is stored by Playhouse rather than in either provider's configuration, survives fresh CLI processes and reopening the page, and can be turned back on; the managed server can't be turned off. A turned-off server in Claude Code's own configuration still lists Claude and the page says Claude still starts it, so turning it off applies to Codex only, while a turned-off server only Codex defines reaches neither agent. Make Available Outside Playhouse writes a Claude-only global server into Codex's config.toml, a Codex-only one into Claude Code's ~/.claude.json, and a repository .mcp.json server into the worktree's .codex/config.toml, after which each is one entry both CLIs start; a conflicting server can't be linked and nothing is written.
+    func test_mcp_enable_state_and_link_persist() throws {
+        let repository = try makeSkillRepository("mcp-link-repo", skills: [
+            ".mcp.json": #"{"mcpServers": {"repo-tool": {"type": "stdio", "command": "repo-tool", "args": [], "env": {}}}}"#,
+        ])
+        try writeMcpJSON(mcpClaudeState, ["mcpServers": [
+            "claude-tool": ["type": "stdio", "command": "claude-tool", "args": ["--serve"], "env": [:]],
+            "clash": ["type": "stdio", "command": "clash-a", "args": [], "env": [:]],
+        ]])
+        try writeRuleFile(mcpCodexConfig, "[mcp_servers.codex-tool]\ncommand = \"codex-tool\"\nenv_vars = [\"CODEX_KEY\"]\n\n[mcp_servers.clash]\ncommand = \"clash-b\"\n")
+        try writeMcpJSON(mcpManaged, ["mcpServers": ["company": ["type": "http", "url": "https://mcp.company.example/mcp"]]])
+        let beforeClaude = try String(contentsOf: mcpClaudeState, encoding: .utf8)
+        let beforeCodex = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
+        _ = try installSkillsClaudeFixture("claude-fixture-mcp-link")
+        launchApp(defaultParent: fixture.parent.path)
+        let task = try createSkillsTask("MCP links", repositories: [repository])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String))
+        func server(_ id: String) throws -> [String: Any]? { mcpServersByID(try mcpCatalog(taskID: taskID))[id] }
+        openTask(named: "MCP links")
+        openMcpPage()
+        selectSkillsTab("Global", picker: "mcp-tab-picker")
+
+        let toggle = element("mcp-toggle-claude-tool")
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(isOn(toggle))
+        toggle.click()
+        XCTAssertTrue(waitUntil({ !self.isOn(toggle) }, timeout: 0.75), "The switch flips as soon as it is clicked.")
+        XCTAssertTrue(waitUntil({ ((try? server("global:claude-tool"))??["enabled"] as? Bool) == false }, timeout: 10),
+                      "Turning a server off is saved where a fresh CLI process reads it.")
+        XCTAssertTrue(element("mcp-always-on-claude-tool").waitForExistence(timeout: 5), "The page says Claude still starts it itself.")
+        XCTAssertTrue(element("mcp-provider-claude-tool-claude").exists)
+        XCTAssertFalse(element("mcp-provider-claude-tool-codex").exists, "Turning it off stops Codex getting it.")
+        XCTAssertEqual(try String(contentsOf: mcpClaudeState, encoding: .utf8), beforeClaude, "Claude Code's configuration is not written.")
+        XCTAssertEqual(try String(contentsOf: mcpCodexConfig, encoding: .utf8), beforeCodex, "Codex's configuration is not written.")
+        attachScreenshot(named: "A server Claude starts itself, turned off")
+        element("skills-back-button").click()
+        openMcpPage()
+        selectSkillsTab("Global", picker: "mcp-tab-picker")
+        XCTAssertTrue(waitUntil({ self.element("mcp-toggle-claude-tool").exists && !self.isOn(self.element("mcp-toggle-claude-tool")) }, timeout: 10),
+                      "The off state survives reopening the page.")
+        element("mcp-toggle-claude-tool").click()
+        XCTAssertTrue(waitUntil({ ((try? server("global:claude-tool"))??["enabled"] as? Bool) == true }, timeout: 10))
+
+        element("mcp-toggle-codex-tool").click()
+        XCTAssertTrue(waitUntil({ !self.element("mcp-provider-codex-tool-claude").exists && !self.element("mcp-provider-codex-tool-codex").exists }, timeout: 10),
+                      "A server only Codex defines reaches neither agent once off.")
+        XCTAssertFalse(element("mcp-always-on-codex-tool").exists)
+        element("mcp-toggle-codex-tool").click()
+        XCTAssertTrue(waitUntil({ self.element("mcp-provider-codex-tool-claude").exists }, timeout: 10))
+        assertCLIError(try runCLI(["mcp", "disable", "--task", taskID, "--server", "managed:company"], expectedStatus: 2), code: "invalid_argument")
+
+        let actions = element("mcp-actions-clash")
+        XCTAssertTrue(waitUntil({ actions.exists && actions.isHittable }, timeout: 10))
+        actions.click()
+        XCTAssertTrue(app.menuItems["Reveal in Finder"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.menuItems["Make Available Outside Playhouse…"].exists, "A conflicting server can't be linked.")
+        app.typeKey(.escape, modifierFlags: [])
+        assertCLIError(try runCLI(["mcp", "link", "--task", taskID, "--server", "global:clash"], expectedStatus: 2), code: "invalid_argument")
+        XCTAssertEqual(try String(contentsOf: mcpCodexConfig, encoding: .utf8), beforeCodex, "Nothing is written for it.")
+
+        clickMcpMenuItem(server: "claude-tool", item: "mcp-link-claude-tool", title: "Make Available Outside Playhouse…")
+        clickDialogButton("confirm-link-mcp", title: "Add to Both CLIs")
+        XCTAssertTrue(element("mcp-native-claude-tool").waitForExistence(timeout: 10), "A linked server is one entry both CLIs start.")
+        let linkedCodex = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
+        XCTAssertTrue(linkedCodex.contains("[mcp_servers.claude-tool]") && linkedCodex.contains("args = [\"--serve\"]"),
+                      "A Claude-only server is written into Codex's config.toml.")
+        attachScreenshot(named: "A Claude server linked into Codex's config")
+        clickMcpMenuItem(server: "codex-tool", item: "mcp-link-codex-tool", title: "Make Available Outside Playhouse…")
+        clickDialogButton("confirm-link-mcp", title: "Add to Both CLIs")
+        XCTAssertTrue(element("mcp-native-codex-tool").waitForExistence(timeout: 10))
+        let codexTool = try XCTUnwrap((try readMcpJSON(mcpClaudeState)["mcpServers"] as? [String: Any])?["codex-tool"] as? [String: Any])
+        XCTAssertEqual(codexTool["env"] as? [String: String], ["CODEX_KEY": "${CODEX_KEY}"], "A Codex-only server is written into Claude Code's file.")
+
+        selectSkillsTab("Repo", picker: "mcp-tab-picker")
+        let repoTool = "mcp-link-repo:repo-tool"
+        clickMcpMenuItem(server: repoTool, item: "mcp-link-\(repoTool)", title: "Make Available Outside Playhouse…")
+        clickDialogButton("confirm-link-mcp", title: "Add to Both CLIs")
+        XCTAssertTrue(element("mcp-native-\(repoTool)").waitForExistence(timeout: 10))
+        XCTAssertTrue(try String(contentsOf: worktree.appendingPathComponent(".codex/config.toml"), encoding: .utf8).contains("[mcp_servers.repo-tool]"),
+                      "A repository server is written into the worktree's .codex/config.toml.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repository.appendingPathComponent(".codex").path), "The source checkout is left alone.")
+        attachScreenshot(named: "A repository server linked for both CLIs")
+    }
+
+    // case-contract: test_mcp_fix_with_agent_starts_task_for_conflicting_servers | A server whose definitions conflict offers Fix with Agent, which creates a task on the source task's provider whose saved prompt explains how both agents configure MCP servers and lists each server with its problem: repository servers by repository-relative file, to be fixed in the new task's own worktree and committed and pushed, and global servers by absolute file path, to be fixed in place with their folders opened as context folders. The view switches to the new task's conversation, which sends that prompt once and leaves no unsent draft. A server with no problem, a managed server, an unknown server, and a request without a task are rejected without opening a task.
+    func test_mcp_fix_with_agent_starts_task_for_conflicting_servers() throws {
+        let repository = try makeSkillRepository("mcp-fix-repo", skills: [
+            ".mcp.json": #"{"mcpServers": {"repo-clash": {"type": "stdio", "command": "clash-json", "args": [], "env": {}}, "fine": {"type": "stdio", "command": "fine", "args": [], "env": {}}}}"#,
+            ".codex/config.toml": "[mcp_servers.repo-clash]\ncommand = \"clash-toml\"\n",
+        ])
+        try writeMcpJSON(mcpClaudeState, ["mcpServers": ["clash": ["type": "stdio", "command": "clash-a", "args": [], "env": [:]]]])
+        try writeRuleFile(mcpCodexConfig, "[mcp_servers.clash]\ncommand = \"clash-b\"\n")
+        try writeMcpJSON(mcpManaged, ["mcpServers": ["company": ["type": "http", "url": "https://mcp.company.example/mcp"]]])
+        let executable = try installSkillsClaudeFixture("claude-fixture-mcp-fix")
+        let historyURL = URL(fileURLWithPath: executable.path + ".history")
+        launchApp(defaultParent: fixture.parent.path)
+        let source = try createSkillsTask("MCP fix source", repositories: [repository], provider: "claude")
+        let sourceID = try XCTUnwrap(source["id"] as? String)
+        let sourceWorktree = try XCTUnwrap((source["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String)
+        let tasksBefore = try boardTaskRecords().count
+        assertCLIError(try runCLI(["mcp", "fix", "--task", sourceID, "--server", "repo:\(repository.path)#fine"], expectedStatus: 2), code: "invalid_argument")
+        assertCLIError(try runCLI(["mcp", "fix", "--task", sourceID, "--server", "managed:company"], expectedStatus: 2), code: "invalid_argument")
+        assertCLIError(try runCLI(["mcp", "fix", "--task", sourceID, "--server", "global:no-such-server"], expectedStatus: 3), code: "not_found")
+        assertCLIError(try runCLI(["mcp", "fix", "--server", "global:clash"], expectedStatus: 2), code: "invalid_argument")
+        XCTAssertEqual(try boardTaskRecords().count, tasksBefore, "A rejected fix opens no task.")
+
+        openTask(named: "MCP fix source")
+        openMcpPage()
+        XCTAssertTrue(element("mcp-fix-mcp-fix-repo:repo-clash").waitForExistence(timeout: 10), "A conflicting server offers Fix with Agent.")
+        XCTAssertTrue(element("mcp-conflict-mcp-fix-repo:repo-clash").exists)
+        XCTAssertFalse(element("mcp-fix-mcp-fix-repo:fine").exists, "A server without a problem has nothing to fix.")
+        selectSkillsTab("Global", picker: "mcp-tab-picker")
+        XCTAssertTrue(element("mcp-fix-clash").waitForExistence(timeout: 5))
+        attachScreenshot(named: "A conflicting global server offers Fix with Agent")
+
+        element("mcp-fix-clash").click()
+        XCTAssertTrue(waitUntil({ !self.element("skills-page").exists }, timeout: 10), "Fixing closes the page.")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Fix MCP server clash" }, timeout: 15),
+                      "The view switches to the fixing task's conversation.")
+        let single = try XCTUnwrap(try boardTaskRecords().first { $0["title"] as? String == "Fix MCP server clash" })
+        XCTAssertEqual((single["repositoryWorktrees"] as? [Any])?.count, 0, "Fixing only global servers needs no repository.")
+        XCTAssertEqual(Set(((single["contextFolders"] as? [String]) ?? []).map(realPath)), [realPath(skillsHome.path), realPath(skillsCodexHome.path)],
+                       "The folders of the global files are opened to the agent.")
+        let singlePrompt = try XCTUnwrap(single["savedPrompt"] as? String)
+        XCTAssertTrue(singlePrompt.contains("not tracked by Git"))
+        XCTAssertTrue(singlePrompt.contains(mcpClaudeState.path) || singlePrompt.contains(realPath(mcpClaudeState.path)), "A global server is named by its file's absolute path.")
+        XCTAssertTrue(waitUntil({ self.claudeTurns(historyURL).contains { $0["userText"] as? String == singlePrompt } }, timeout: 20),
+                      "The fixing task sends its prompt as soon as it opens.")
+
+        openTask(named: "MCP fix source")
+        openMcpPage()
+        XCTAssertTrue(element("mcp-fix-mcp-fix-repo:repo-clash").waitForExistence(timeout: 10))
+        element("mcp-fix-mcp-fix-repo:repo-clash").click()
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Fix MCP server repo-clash" }, timeout: 15))
+        let fixing = try XCTUnwrap(try boardTaskRecords().first { $0["title"] as? String == "Fix MCP server repo-clash" })
+        let fixingID = try XCTUnwrap(fixing["id"] as? String)
+        let prompt = try XCTUnwrap(fixing["savedPrompt"] as? String)
+        XCTAssertEqual(fixing["conversationProvider"] as? String, "claude", "The fixing task uses the source task's provider.")
+        XCTAssertTrue(prompt.contains("Claude Code reads `mcpServers`"), "The prompt explains how both agents configure servers.")
+        XCTAssertTrue(prompt.contains("[mcp_servers.<name>]"))
+        XCTAssertTrue(prompt.contains("commit and push"))
+        XCTAssertTrue(prompt.contains("`repo-clash` in mcp-fix-repo: `.mcp.json`, `.codex/config.toml`"))
+        XCTAssertFalse(prompt.contains(sourceWorktree), "Repository files are relative, so they point into the fixing task's worktree.")
+        XCTAssertTrue(waitUntil({ self.claudeTurns(historyURL).contains { $0["userText"] as? String == prompt } }, timeout: 20), "The conversation sends the fixing prompt.")
+        XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String ?? "").isEmpty }, timeout: 10),
+                      "The sent prompt leaves the composer, so it cannot be sent twice.")
+        attachScreenshot(named: "The server-fixing task's conversation")
+        XCTAssertEqual(claudeTurns(historyURL).filter { $0["userText"] as? String == prompt }.count, 1, "The fixing prompt is sent exactly once.")
+        let started = try XCTUnwrap(try taskRecord(id: fixingID))
+        XCTAssertEqual(started["hasUnsentDraft"] as? Bool, false)
+        let worktree = try XCTUnwrap((started["repositoryWorktrees"] as? [[String: Any]])?.first)
+        XCTAssertEqual(worktree["repositoryPath"] as? String, repository.path)
+        XCTAssertNotEqual(realPath(worktree["worktreePath"] as? String ?? ""), realPath(sourceWorktree))
+    }
+
+    // case-contract: test_mcp_bridge_claude_launch_passes_shared_servers | A Claude turn starts the servers Claude Code does not read itself: its --mcp-config carries Codex's own global servers (with env_vars passed as ${NAME}), the working repository's .codex/config.toml servers, and the other task repository's .mcp.json servers, but not the servers Claude Code already reads or ones turned off on the page. Its --settings starts the working repository's .mcp.json servers that are on with enabledMcpjsonServers and skips turned-off ones with disabledMcpjsonServers, without writing to the repository or either provider's configuration. The resumed second turn carries the same servers, and turning a server back on adds it.
+    func test_mcp_bridge_claude_launch_passes_shared_servers() throws {
+        let repository = try makeSkillRepository("mcp-claude-repo", skills: [
+            ".mcp.json": #"{"mcpServers": {"repo-tool": {"type": "stdio", "command": "repo-tool", "args": [], "env": {}}, "repo-off": {"type": "stdio", "command": "repo-off", "args": [], "env": {}}}}"#,
+            ".codex/config.toml": "[mcp_servers.repo-codex]\ncommand = \"repo-codex\"\nargs = [\"--serve\"]\n",
+        ])
+        let extra = try makeSkillRepository("mcp-claude-extra", skills: [
+            ".mcp.json": #"{"mcpServers": {"extra-api": {"type": "http", "url": "https://extra.example.com/mcp"}}}"#,
+        ])
+        try writeMcpJSON(mcpClaudeState, ["mcpServers": ["claude-tool": ["type": "stdio", "command": "claude-tool", "args": [], "env": [:]]]])
+        try writeRuleFile(mcpCodexConfig, "[mcp_servers.codex-tool]\ncommand = \"codex-tool\"\nenv_vars = [\"CODEX_KEY\"]\n\n[mcp_servers.codex-off]\ncommand = \"codex-off\"\n")
+        let beforeClaude = try String(contentsOf: mcpClaudeState, encoding: .utf8)
+        let beforeCodex = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
+        let executable = try installSkillsClaudeFixture("claude-fixture-mcp-bridge")
+        let historyURL = URL(fileURLWithPath: executable.path + ".history")
+        launchApp(defaultParent: fixture.parent.path)
+        let task = try createSkillsTask("Claude MCP", repositories: [repository, extra], provider: "claude")
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first { $0["repositoryPath"] as? String == repository.path }?["worktreePath"] as? String))
+        openTask(named: "Claude MCP")
+        openMcpPage()
+        let repoOff = "mcp-claude-repo:repo-off"
+        XCTAssertTrue(element("mcp-toggle-\(repoOff)").waitForExistence(timeout: 10))
+        element("mcp-toggle-\(repoOff)").click()
+        XCTAssertTrue(waitUntil({ !self.isOn(self.element("mcp-toggle-\(repoOff)")) }, timeout: 10))
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-mcp-claude-extra:extra-api")), "Playhouse passes it to Claude and Codex.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-mcp-claude-repo:repo-codex")), "Playhouse passes it to Claude and Codex.")
+        selectSkillsTab("Global", picker: "mcp-tab-picker")
+        XCTAssertTrue(element("mcp-toggle-codex-off").waitForExistence(timeout: 5))
+        element("mcp-toggle-codex-off").click()
+        XCTAssertTrue(waitUntil({ !self.isOn(self.element("mcp-toggle-codex-off")) }, timeout: 10))
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-codex-tool")), "Playhouse passes it to Claude.")
+        attachScreenshot(named: "Servers a Claude turn will start, with one turned off")
+        element("skills-back-button").click()
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Use the tools.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ self.claudeTurns(historyURL).contains { $0["userText"] as? String == "Use the tools." } }, timeout: 20))
+        let first = try XCTUnwrap(claudeTurns(historyURL).first { $0["userText"] as? String == "Use the tools." })
+        let arguments = try XCTUnwrap(first["arguments"] as? [String])
+        let config = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(arguments[try XCTUnwrap(arguments.firstIndex(of: "--mcp-config")) + 1].utf8)) as? [String: Any])
+        let servers = try XCTUnwrap(config["mcpServers"] as? [String: Any])
+        XCTAssertEqual(Set(servers.keys), ["codex-tool", "extra-api", "repo-codex"],
+                       "Claude gets the servers it does not read itself, without the ones it reads or ones turned off.")
+        XCTAssertEqual((servers["codex-tool"] as? [String: Any])?["env"] as? [String: String], ["CODEX_KEY": "${CODEX_KEY}"])
+        XCTAssertEqual((servers["extra-api"] as? [String: Any])?["url"] as? String, "https://extra.example.com/mcp")
+        let settings = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(arguments[try XCTUnwrap(arguments.firstIndex(of: "--settings")) + 1].utf8)) as? [String: Any])
+        XCTAssertEqual(settings["enabledMcpjsonServers"] as? [String], ["repo-tool"], "The working repository's .mcp.json server that is on starts.")
+        XCTAssertEqual(settings["disabledMcpjsonServers"] as? [String], ["repo-off"], "A turned-off .mcp.json server is skipped for this run.")
+        XCTAssertEqual(try String(contentsOf: mcpClaudeState, encoding: .utf8), beforeClaude, "Claude Code's configuration is not written.")
+        XCTAssertEqual(try String(contentsOf: mcpCodexConfig, encoding: .utf8), beforeCodex, "Codex's configuration is not written.")
+        XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain"), "", "The worktree is not written to.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String).map { $0 != "In Progress" } == true }, timeout: 30),
+                      "The first turn should settle before the next message.")
+
+        openMcpPage()
+        selectSkillsTab("Global", picker: "mcp-tab-picker")
+        XCTAssertTrue(element("mcp-toggle-codex-off").waitForExistence(timeout: 5))
+        element("mcp-toggle-codex-off").click()
+        XCTAssertTrue(waitUntil({ self.isOn(self.element("mcp-toggle-codex-off")) }, timeout: 10))
+        element("skills-back-button").click()
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Use them again.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ self.claudeTurns(historyURL).contains { $0["userText"] as? String == "Use them again." } }, timeout: 20))
+        let second = try XCTUnwrap(claudeTurns(historyURL).last { $0["userText"] as? String == "Use them again." })
+        XCTAssertEqual(second["resumed"] as? Bool, true, "The second turn resumes the Claude session.")
+        let resumed = try XCTUnwrap(second["arguments"] as? [String])
+        let resumedConfig = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(resumed[try XCTUnwrap(resumed.firstIndex(of: "--mcp-config")) + 1].utf8)) as? [String: Any])
+        XCTAssertEqual(Set(((resumedConfig["mcpServers"] as? [String: Any]) ?? [:]).keys), ["codex-off", "codex-tool", "extra-api", "repo-codex"],
+                       "Turning a server back on adds it.")
+    }
+
+    // case-contract: test_mcp_bridge_codex_thread_gets_shared_servers | A Codex turn starts the servers Codex does not read itself: the thread's mcp_servers config carries the working repository's .mcp.json servers and Claude Code's own global servers, translated so ${NAME} environment references become env_vars and an Authorization bearer token becomes bearer_token_env_var, leaves out an SSE server Codex can't run and the servers Codex already reads, and turns off a server Codex may read itself (from its config.toml or the working repository's .codex/config.toml) that is turned off on the page with enabled = false, without writing Codex's config.toml. Turning servers on or off on the page resumes the thread on its next turn with the new mcp_servers config.
+    func test_mcp_bridge_codex_thread_gets_shared_servers() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let historyURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
+        let repository = try makeSkillRepository("mcp-codex-repo", skills: [
+            ".mcp.json": #"{"mcpServers": {"repo-tool": {"type": "stdio", "command": "repo-tool", "args": ["--serve"], "env": {"REPO_TOKEN": "${REPO_TOKEN}", "MODE": "fast"}}, "repo-sse": {"type": "sse", "url": "https://sse.example.com/mcp"}}}"#,
+            ".codex/config.toml": "[mcp_servers.repo-codex-off]\ncommand = \"repo-codex-off\"\n",
+        ])
+        try writeMcpJSON(mcpClaudeState, ["mcpServers": [
+            "claude-remote": ["type": "http", "url": "https://remote.example.com/mcp", "headers": ["Authorization": "Bearer ${REMOTE_TOKEN}", "X-Team": "core"]],
+        ]])
+        try writeRuleFile(mcpCodexConfig, "[mcp_servers.codex-tool]\ncommand = \"codex-tool\"\n\n[mcp_servers.codex-off]\ncommand = \"codex-off\"\n")
+        let beforeCodex = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
+        _ = try installSkillsClaudeFixture("claude-fixture-mcp-codex")
+        launchApp(defaultParent: fixture.parent.path)
+        let task = try createSkillsTask("Codex MCP", repositories: [repository])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        func history() -> [String: Any] {
+            guard let data = try? Data(contentsOf: historyURL) else { return [:] }
+            return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        }
+        func answerQuestionIfAsked() {
+            guard element("ai-question-form-title").waitForExistence(timeout: 10) else { return }
+            selectQuestionOption("Blue")
+            typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
+            element("submit-ai-answers-button").click()
+        }
+
+        openTask(named: "Codex MCP")
+        openMcpPage()
+        let sse = "mcp-codex-repo:repo-sse"
+        XCTAssertTrue(element("mcp-row-\(sse)").waitForExistence(timeout: 10))
+        XCTAssertFalse(element("mcp-provider-\(sse)-codex").exists, "Codex can't run an SSE server.")
+        let repoCodexOff = "mcp-codex-repo:repo-codex-off"
+        XCTAssertTrue(element("mcp-toggle-\(repoCodexOff)").exists)
+        element("mcp-toggle-\(repoCodexOff)").click()
+        XCTAssertTrue(waitUntil({ !self.isOn(self.element("mcp-toggle-\(repoCodexOff)")) }, timeout: 10))
+        selectSkillsTab("Global", picker: "mcp-tab-picker")
+        XCTAssertTrue(element("mcp-toggle-codex-off").waitForExistence(timeout: 5))
+        element("mcp-toggle-codex-off").click()
+        XCTAssertTrue(waitUntil({ !self.isOn(self.element("mcp-toggle-codex-off")) }, timeout: 10))
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-claude-remote")), "Playhouse passes it to Codex.")
+        attachScreenshot(named: "Servers a Codex turn will start, with one turned off")
+        element("skills-back-button").click()
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Use the tools.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ history()["userMessage"] as? String == "Use the tools." }, timeout: 20))
+        let servers = try XCTUnwrap((history()["threadStartConfig"] as? [String: Any])?["mcp_servers"] as? [String: Any])
+        XCTAssertEqual(Set(servers.keys), ["repo-tool", "claude-remote", "codex-off", "repo-codex-off"],
+                       "Codex gets the servers it does not read itself, without an SSE server or the ones it reads.")
+        let repoTool = try XCTUnwrap(servers["repo-tool"] as? [String: Any])
+        XCTAssertEqual(repoTool["env_vars"] as? [String], ["REPO_TOKEN"], "${NAME} references become env_vars.")
+        XCTAssertEqual(repoTool["env"] as? [String: String], ["MODE": "fast"])
+        let remote = try XCTUnwrap(servers["claude-remote"] as? [String: Any])
+        XCTAssertEqual(remote["bearer_token_env_var"] as? String, "REMOTE_TOKEN", "A bearer token becomes bearer_token_env_var.")
+        XCTAssertEqual(remote["http_headers"] as? [String: String], ["X-Team": "core"])
+        let off = try XCTUnwrap(servers["codex-off"] as? [String: Any])
+        XCTAssertEqual(off["enabled"] as? Bool, false, "A Codex server turned off on the page is turned off for the thread.")
+        XCTAssertEqual(off["command"] as? String, "codex-off")
+        XCTAssertEqual((servers["repo-codex-off"] as? [String: Any])?["enabled"] as? Bool, false,
+                       "A turned-off server in the working repository's .codex/config.toml is turned off for the thread.")
+        XCTAssertEqual(try String(contentsOf: mcpCodexConfig, encoding: .utf8), beforeCodex, "Codex's config.toml is not written.")
+        answerQuestionIfAsked()
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String).map { $0 != "In Progress" } == true }, timeout: 30),
+                      "The first turn should settle before the next message.")
+
+        let resumesBefore = history()["threadResumeCount"] as? Int ?? 0
+        openMcpPage()
+        selectSkillsTab("Global", picker: "mcp-tab-picker")
+        XCTAssertTrue(element("mcp-toggle-codex-off").waitForExistence(timeout: 5))
+        element("mcp-toggle-codex-off").click()
+        XCTAssertTrue(waitUntil({ self.isOn(self.element("mcp-toggle-codex-off")) }, timeout: 10))
+        selectSkillsTab("Repo", picker: "mcp-tab-picker")
+        XCTAssertTrue(element("mcp-toggle-mcp-codex-repo:repo-tool").waitForExistence(timeout: 5))
+        element("mcp-toggle-mcp-codex-repo:repo-tool").click()
+        XCTAssertTrue(waitUntil({ !self.isOn(self.element("mcp-toggle-mcp-codex-repo:repo-tool")) }, timeout: 10))
+        element("skills-back-button").click()
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 20))
+        composer.click()
+        composer.typeText("Use them again.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ history()["userMessage"] as? String == "Use them again." }, timeout: 20))
+        XCTAssertGreaterThan(history()["threadResumeCount"] as? Int ?? 0, resumesBefore, "Changing the servers resumes the thread.")
+        let resumed = try XCTUnwrap((history()["threadResumeConfig"] as? [String: Any])?["mcp_servers"] as? [String: Any])
+        XCTAssertEqual(Set(resumed.keys), ["claude-remote", "repo-codex-off"], "The resumed thread gets the new servers.")
+        answerQuestionIfAsked()
+    }
+
+    // case-contract: test_mcp_status_reports_sign_in_per_provider | Check Sign-In asks both agents about the servers they start: Claude Code, asked with the task's own MCP bridge, reports each server including the ones Playhouse passes it, and Codex reports its own; a server that needs a sign-in shows Sign in for Claude or Sign in for Codex on its row, and the claude.ai connectors and plugin servers Claude Code starts that no file defines are listed under Also started by Claude Code on the Managed tab. An agent that can't be asked is reported by name while the other agent's answer is still shown.
+    func test_mcp_status_reports_sign_in_per_provider() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let codexStatus = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".mcp-status")
+        let codexStatusFail = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".mcp-status-fail")
+        try? FileManager.default.removeItem(at: codexStatusFail)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: codexStatus)
+            try? FileManager.default.removeItem(at: codexStatusFail)
+        }
+        let repository = try makeSkillRepository("mcp-status-repo", skills: [:])
+        try writeMcpJSON(mcpClaudeState, ["mcpServers": ["claude-remote": ["type": "http", "url": "https://remote.example.com/mcp"]]])
+        try writeRuleFile(mcpCodexConfig, "[mcp_servers.codex-remote]\nurl = \"https://codex.example.com/mcp\"\n\n[mcp_servers.codex-tool]\ncommand = \"codex-tool\"\n")
+        let claude = try installSkillsClaudeFixture("claude-fixture-mcp-status")
+        try writeMcpJSON(URL(fileURLWithPath: claude.path + ".mcp-status"), [
+            ["name": "claude-remote", "status": "needs-auth"],
+            ["name": "claude.ai Notes", "status": "needs-auth"],
+            ["name": "plugin:kit:helper", "status": "connected"],
+        ])
+        try writeMcpJSON(codexStatus, [
+            ["name": "codex-remote", "authStatus": "notLoggedIn", "tools": [:]],
+            ["name": "codex-tool", "authStatus": "unsupported", "tools": [:]],
+        ])
+        launchApp(defaultParent: fixture.parent.path)
+        let task = try createSkillsTask("MCP status", repositories: [repository], provider: "claude")
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        openTask(named: "MCP status")
+        openMcpPage()
+        selectSkillsTab("Global", picker: "mcp-tab-picker")
+        XCTAssertTrue(element("mcp-row-claude-remote").waitForExistence(timeout: 10))
+        XCTAssertFalse(element("mcp-signin-claude-remote-claude").exists, "Sign-in state is known only after Check Sign-In.")
+
+        element("mcp-check-status").click()
+        XCTAssertTrue(element("mcp-signin-claude-remote-claude").waitForExistence(timeout: 30), "A server Claude can't start without a sign-in is marked.")
+        XCTAssertTrue(element("mcp-signin-codex-remote-codex").exists, "A server Codex can't start without a sign-in is marked.")
+        XCTAssertFalse(element("mcp-signin-codex-tool-codex").exists, "A server that needs no sign-in is not marked.")
+        XCTAssertFalse(element("mcp-error").exists, "Both agents answered.")
+        attachScreenshot(named: "Check Sign-In marks servers that need a sign-in")
+        selectSkillsTab("Managed", picker: "mcp-tab-picker")
+        XCTAssertTrue(element("mcp-connector-claude.ai Notes").waitForExistence(timeout: 5), "A claude.ai connector is listed.")
+        XCTAssertTrue(element("mcp-connector-plugin:kit:helper").exists, "A plugin server is listed.")
+        XCTAssertFalse(element("mcp-connector-claude-remote").exists, "A server a file defines is not repeated.")
+        attachScreenshot(named: "Servers Claude Code starts on its own")
+
+        try "Fail the status request.\n".write(to: codexStatusFail, atomically: true, encoding: .utf8)
+        selectSkillsTab("Global", picker: "mcp-tab-picker")
+        element("mcp-check-status").click()
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("mcp-error")).contains("Codex") }, timeout: 30),
+                      "An agent that can't be asked is reported by name.")
+        XCTAssertTrue(element("mcp-signin-claude-remote-claude").exists, "The other agent's answer is still shown.")
+        XCTAssertFalse(element("mcp-signin-codex-remote-codex").exists, "Codex's earlier answer is not kept as if it were current.")
+        attachScreenshot(named: "Check Sign-In when Codex can't be asked")
+        try FileManager.default.removeItem(at: codexStatusFail)
+
+        let report = try XCTUnwrap(try runCLI(["mcp", "status", "--task", taskID])["result"] as? [String: Any])
+        XCTAssertEqual((report["errors"] as? [String: Any])?.count, 0)
+        XCTAssertTrue(((report["claude"] as? [[String: Any]]) ?? []).contains { $0["name"] as? String == "codex-tool" && $0["status"] as? String == "connected" },
+                      "Claude is asked with the servers Playhouse passes it.")
+        try FileManager.default.removeItem(at: codexStatus)
+        let noCodex = try XCTUnwrap(try runCLI(["mcp", "status", "--task", taskID], extraEnvironment: ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": "none"])["result"] as? [String: Any])
+        XCTAssertNotNil((noCodex["errors"] as? [String: Any])?["codex"], "An agent that can't be asked is reported by name.")
+        XCTAssertTrue(((noCodex["claude"] as? [[String: Any]]) ?? []).contains { $0["name"] as? String == "claude-remote" }, "The other agent's answer is still shown.")
     }
 
     // case-contract: test_settings_cpu_usage_color_max_round_trip | The CPU usage color maximum defaults to one fully busy core per logical CPU, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting.

@@ -154,8 +154,11 @@ struct SkillEnvironment: Equatable, Sendable {
     /// The folder whose `.agents/skills` holds global skills.
     var homeDirectory: String
     var claudeConfigDirectory: String
+    /// Claude Code's state file, which holds its user MCP servers: `~/.claude.json`,
+    /// or `.claude.json` inside a configured `CLAUDE_CONFIG_DIR`.
+    var claudeStateFile: String
     var codexHome: String
-    /// Where an organization deploys Claude Code's managed CLAUDE.md.
+    /// Where an organization deploys Claude Code's managed CLAUDE.md and managed-mcp.json.
     var managedClaudeDirectory: String
     /// Playhouse-owned folder for bridge wrappers.
     var bridgeDirectory: String
@@ -168,10 +171,9 @@ struct SkillEnvironment: Equatable, Sendable {
     ) -> SkillEnvironment {
         let environment = PlayhouseProcessEnvironment.current
         let home = homeOverride ?? environment["HOME"] ?? NSHomeDirectory()
-        let claude = claudeConfigOverride
-            ?? (homeOverride.map { $0 + "/.claude" })
-            ?? environment["CLAUDE_CONFIG_DIR"].flatMap { $0.isEmpty ? nil : $0 }
-            ?? home + "/.claude"
+        let configuredClaude = claudeConfigOverride
+            ?? (homeOverride == nil ? environment["CLAUDE_CONFIG_DIR"].flatMap { $0.isEmpty ? nil : $0 } : nil)
+        let claude = configuredClaude ?? home + "/.claude"
         let codex = codexHomeOverride
             ?? (homeOverride.map { $0 + "/.codex" })
             ?? environment["CODEX_HOME"].flatMap { $0.isEmpty ? nil : $0 }
@@ -184,6 +186,7 @@ struct SkillEnvironment: Equatable, Sendable {
         return SkillEnvironment(
             homeDirectory: home,
             claudeConfigDirectory: claude,
+            claudeStateFile: configuredClaude.map { $0 + "/.claude.json" } ?? home + "/.claude.json",
             codexHome: codex,
             managedClaudeDirectory: homeOverride.map { $0 + "/managed/ClaudeCode" } ?? "/Library/Application Support/ClaudeCode",
             bridgeDirectory: URL(fileURLWithPath: data).appendingPathComponent("skill-bridge").path

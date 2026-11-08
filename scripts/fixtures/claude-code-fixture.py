@@ -1383,7 +1383,15 @@ def main():
                             "models": models,
                             "commands": fixture_commands(), "agents": []}
             elif request.get("subtype") == "mcp_status":
-                response = {"mcpServers": []}
+                # The servers a test seeds in `<executable>.mcp-status` (such as a
+                # claude.ai connector), then each server this run was passed with
+                # --mcp-config, as Claude Code reports the servers it starts.
+                seeded = Path(str(sys.argv[0]) + ".mcp-status")
+                servers = json.loads(seeded.read_text(encoding="utf-8")) if seeded.exists() else []
+                if "--mcp-config" in sys.argv:
+                    passed = json.loads(sys.argv[sys.argv.index("--mcp-config") + 1]).get("mcpServers", {})
+                    servers += [{"name": name, "status": "connected", "scope": "dynamic"} for name in sorted(passed)]
+                response = {"mcpServers": servers}
             elif request.get("subtype") == "get_usage":
                 # The plan's usage as `/usage` reads it; without a seeded file the
                 # account has none, as with an API-key login.
