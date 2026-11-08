@@ -32,6 +32,7 @@ The daemon accepts a versioned, length-prefixed JSON request over its socket, st
 | `task pr sync <task-id>` | Push every local change on the task's PR-linked branches: commit local work, merge new remote pull request commits (conflicts are resolved by the task's provider), and push. The same sync runs automatically before a completed turn reaches Review and when the board detects a diverged pull request head, so a reviewed task never holds local-only changes; on failure the task moves to Blocked with the sync error, and a successful rerun returns it to Review |
 | `workspace suggest --parent <path>` | Find Git repository roots below a parent folder |
 | `workspace repos list` | Return the configured repository root and its discovered Git repositories |
+| `plugin render (--file <plugin.js> \| --page <catalog-page>) [--props <json>] [--event <testID>:<event>[:<value>]...] [--advance <seconds>]` | Run a plugin headlessly through the app's renderer: report each commit's ops and the nodes it touched, the final node tree, and errors (exit 1 when there are any). Events go to the atom with that testID; `--advance` runs the timers that come due |
 | `settings get` | Read the default parent folder, saved repository defaults, and the recent repository history |
 | `settings set-parent <path>` / `settings clear-parent` | Change the default parent folder |
 | `task create ... [--provider <codex\|claude>]` | Create a task with a specific conversation provider instead of the default |
@@ -66,11 +67,6 @@ The daemon accepts a versioned, length-prefixed JSON request over its socket, st
 | `mcp update --server <server-id> (...)` / `mcp delete --server <server-id> [--server <server-id>...]` | Rewrite the server in every file that defines it, keeping each provider's own keys (such as `startup_timeout_sec` or `oauth`), or remove it from every file; servers written inline in `config.toml` and managed servers are read-only |
 | `mcp enable\|disable\|link --server <server-id>` / `mcp fix --task <task-id> --server <server-id>...` | Turn a server on or off in Playhouse sessions, write it into the configuration of the CLI that lacks it so both start it outside Playhouse, or open a task whose agent repairs conflicting or broken servers |
 | `mcp bridge --task <task-id>` / `mcp status [--task <task-id>]` | Report what the task's next launch passes each provider for MCP servers, or ask both providers which servers they start and which need a sign-in |
-| `plugin list` | List the plugin folders in `<data>/Plugins` with their views and validation issues |
-| `plugin validate --path <dir> \| --id <id>` | Validate a plugin folder against the component catalog: manifest fields, unknown components and props, binding syntax, and actions logic.js must define. Issues carry their file and JSON path; the command exits 1 when any are found |
-| `plugin components [--type <component>]` | The component catalog: sections, every component's typed props and events, the common props and semantic colors |
-| `plugin check-showcases [--path <showcase-root>]` | Check the Component Catalog's showcases (the app's bundled ones by default): each validates, every component appears in one, and components with events have an interactive one. Exits 1 when any check fails |
-| `plugin new --id <id> [--template view\|showcase] [--section <section>] [--path <parent>]` | Scaffold a working plugin, in `<data>/Plugins` by default; a showcase lands in `<path>/<section>/NN-<id>` |
 
 For example:
 
@@ -127,7 +123,7 @@ Claude Code has no per-run switch for a single server from its own configuration
 
 ## Plugins
 
-Plugins are folders in `<data>/Plugins/<plugin-id>/` holding `plugin.json`, `view.json` and an optional `logic.js`; see `docs/plugins/README.md`. They open from the app menu's Plugins menu, which also opens the Component Catalog. The plugin core (`Playhouse/App/Plugins/Core`) loads, validates and runs them, and is compiled into the app, the daemon (for the `plugin` commands) and `playhouse-plugin-dev`, which runs one plugin live without the app. The core may use only Foundation and JavaScriptCore: the runner is built with nothing else, so a SwiftUI import there breaks the build.
+A plugin is a JavaScript file that builds UI with React and `createElement` from native atoms; a custom React renderer in JavaScriptCore sends its commits to Swift as mutation ops, and SwiftUI draws the resulting node tree. See `Playhouse/App/Plugins/README.md` for the atoms, the op protocol and how to write one. The app menu's Plugins menu opens the Plugin Catalog, which renders every atom and the task item through the renderer. The plugin core (`Playhouse/App/Plugins/Core`, Foundation and JavaScriptCore only) is compiled into the app and the daemon, where `plugin render` runs a plugin headlessly through the same runtime and node tree.
 
 ## Shared implementation
 

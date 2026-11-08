@@ -17,8 +17,8 @@ These rules govern development work in this repository. They describe the develo
 
 ## Plugins
 
-- Keep the plugin core (`Playhouse/App/Plugins/Core`) free of SwiftUI, AppKit, SwiftData and app-target types. It is compiled into `playhouse-plugin-dev` with only Foundation and JavaScriptCore, and app-only behavior reaches it through its protocols (`PluginDaemonTransport`).
-- Every plugin component has a catalog spec, a renderer and at least one Component Catalog showcase; components with events or presentation get an interactive one. Follow `docs/plugins/adding-a-component.md` (also the `add-plugin-component` skill), and keep `playhouse-cli plugin check-showcases` and `scripts/test-showcases.sh` passing.
+- Keep the plugin core (`Playhouse/App/Plugins/Core`) free of SwiftUI, AppKit, SwiftData and app-target types; it uses only Foundation, JavaScriptCore and Observation and is also compiled into the daemon for `plugin render`.
+- Plugins compose only atoms; composites (the task item) are native SwiftUI built from the same atom views and are never exposed to JavaScript. Add an atom only when a native composite needs it, with its props struct, view, registry entry and a Plugin Catalog page; see `Playhouse/App/Plugins/README.md`.
 - Playhouse must never install skills, instructions, hooks or config into the user's home or repositories (`~/.claude`, `~/.agents`, `~/.codex`, a repository's `.claude/`). Agent guidance Playhouse provides is injected at runtime only, through launch flags, thread configuration or developer instructions.
 
 ## AI provider parity

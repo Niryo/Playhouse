@@ -1,69 +1,63 @@
 import Foundation
 
-// The plugin core shares `BridgeValue` (Bridge/BridgeContract.swift) as its JSON
-// value type for state, props, payloads and API results. Everything in
-// Plugins/Core must build with only Foundation and JavaScriptCore: the
-// `playhouse-plugin-dev` runner links nothing else (see scripts/build-bridge.sh).
+/// A JSON value as it crosses from the plugin's JavaScript into Swift: an op
+/// field, an atom prop, or an event's value.
+enum PluginValue: Codable, Equatable, Sendable {
+    case null
+    case bool(Bool)
+    case number(Double)
+    case string(String)
+    case array([PluginValue])
+    case object([String: PluginValue])
 
-extension BridgeValue {
-    /// Parses JSON text into a value. Top-level fragments (`3`, `"x"`, `null`) are allowed.
-    static func parsingJSON(_ text: String) throws -> BridgeValue {
-        try JSONDecoder().decode(BridgeValue.self, from: Data(text.utf8))
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .number(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode([PluginValue].self) {
+            self = .array(value)
+        } else {
+            self = .object(try container.decode([String: PluginValue].self))
+        }
     }
 
-    /// Compact JSON text with stable key order, for logs, the runner and JS.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .null: try container.encodeNil()
+        case .bool(let value): try container.encode(value)
+        case .number(let value): try container.encode(value)
+        case .string(let value): try container.encode(value)
+        case .array(let value): try container.encode(value)
+        case .object(let value): try container.encode(value)
+        }
+    }
+
+    var string: String? {
+        if case .string(let value) = self { return value }
+        return nil
+    }
+
+    var int: Int? {
+        if case .number(let value) = self, value.rounded() == value { return Int(value) }
+        return nil
+    }
+
+    var object: [String: PluginValue]? {
+        if case .object(let value) = self { return value }
+        return nil
+    }
+
+    /// Compact JSON with sorted keys, for logs and the CLI.
     var jsonText: String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        guard let data = try? encoder.encode(self), let text = String(data: data, encoding: .utf8) else { return "null" }
-        return text
-    }
-
-    var number: Double? {
-        switch self {
-        case .integer(let value): Double(value)
-        case .decimal(let value): value
-        default: nil
-        }
-    }
-
-    var array: [BridgeValue]? { if case .array(let value) = self { value } else { nil } }
-
-    var isNull: Bool { if case .null = self { true } else { false } }
-
-    /// JavaScript-style truthiness, used by `if` and the `!` binding operator.
-    var isTruthy: Bool {
-        switch self {
-        case .null: false
-        case .boolean(let value): value
-        case .integer(let value): value != 0
-        case .decimal(let value): value != 0 && !value.isNaN
-        case .string(let value): !value.isEmpty
-        case .array, .object: true
-        }
-    }
-
-    /// The text a binding interpolates into a larger string.
-    var interpolatedText: String {
-        switch self {
-        case .null: ""
-        case .string(let value): value
-        case .boolean(let value): value ? "true" : "false"
-        case .integer(let value): String(value)
-        case .decimal(let value):
-            value == value.rounded() && abs(value) < 1e15 ? String(Int(value)) : String(value)
-        case .array, .object: jsonText
-        }
-    }
-}
-
-/// Resolves a plugin's relative file props (`src`) against its folder.
-enum PluginFiles {
-    /// The file `path` names inside `directory`, or nil when it is absolute or climbs out of the folder.
-    static func resolve(_ path: String, in directory: URL) -> URL? {
-        guard !path.isEmpty, !path.hasPrefix("/"), !path.hasPrefix("~") else { return nil }
-        let root = directory.standardizedFileURL.resolvingSymlinksInPath()
-        let url = root.appendingPathComponent(path).standardizedFileURL.resolvingSymlinksInPath()
-        return url.path.hasPrefix(root.path + "/") ? url : nil
+        return (try? encoder.encode(self)).flatMap { String(data: $0, encoding: .utf8) } ?? "null"
     }
 }

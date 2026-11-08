@@ -1913,6 +1913,8 @@ private struct KanbanTaskDropDelegate: DropDelegate {
     }
 }
 
+/// A board card: the task's display model, rendered by the atom-built
+/// `TaskItemView`, wired to the board's actions.
 private struct TaskCardView: View {
     @AppStorage(WorkspaceSettings.tokenUsageColorMaxKey, store: WorkspaceSettings.preferencesStore)
     private var tokenUsageColorMax = WorkspaceSettings.defaultTokenUsageColorMax
@@ -1935,392 +1937,43 @@ private struct TaskCardView: View {
     let onMoveToReview: (() -> Void)?
 
     var body: some View {
-        // Card rows, top to bottom: the title, the live updates, the time with
-        // the live token counter, then the pull-request controls on the right
-        // (absent until the task has started and has a repository).
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                if task.title == "Generating title…" { ProgressView().controlSize(.small) }
-                Text(task.title)
-                    .lineSpacing(2)
-            }
-                .font(.system(size: 13, weight: .semibold))
-                .tracking(0.35)
-                .foregroundStyle(WorkspaceTheme.conversationText)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("task-title-\(task.id.uuidString)")
-                .allowsHitTesting(false)
-
-            if let progressLabel = task.progressLabel, !progressLabel.isEmpty {
-                HStack(alignment: .top, spacing: 6) {
-                    let progressType = TaskProgressType(rawValue: task.progressTypeRawValue ?? "")
-                    Image(systemName: progressType?.symbol ?? "sparkle")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                        .accessibilityLabel(progressType?.symbol ?? "sparkle")
-                        .accessibilityIdentifier("task-progress-icon-\(task.id.uuidString)")
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(progressLabel)
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(WorkspaceTheme.conversationText)
-                            .accessibilityIdentifier("task-progress-label-\(task.id.uuidString)")
-                        if let progressDetail = task.progressDetail, !progressDetail.isEmpty {
-                            Text(progressDetail)
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                                .accessibilityIdentifier("task-progress-detail-\(task.id.uuidString)")
-                        }
-                    }
+        TaskItemView(model: model, actions: TaskItemActions(
+            open: onOpen,
+            menu: { id in
+                switch id {
+                case "done": onMoveToDone?()
+                case "review": onMoveToReview?()
+                case "rename": onRename()
+                case "stats": onShowTokenStats()
+                case "delete": onDelete()
+                default: break
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("task-progress-report-\(task.id.uuidString)")
-                .accessibilityLabel([progressLabel, task.progressDetail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
-                .accessibilityValue("Progress icon: \(TaskProgressType(rawValue: task.progressTypeRawValue ?? "")?.symbol ?? "sparkle")")
-                .allowsHitTesting(false)
-            }
-
-            if task.scheduleKind == .once, let scheduledAt = task.scheduledAt {
-                Label(ScheduleFormatting.relativeTime(scheduledAt), systemImage: "clock")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(Color.accentColor)
-                    .accessibilityIdentifier("task-schedule-badge-\(task.id.uuidString)")
-                    .allowsHitTesting(false)
-            }
-
-            if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
-                Text(statusMessage)
-                    .font(.system(size: 10))
-                    .foregroundStyle(task.status == .blocked ? Color.red : Color.secondary)
-                    .lineLimit(3)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("task-status-message-\(task.id.uuidString)")
-                    .allowsHitTesting(false)
-            }
-
-            timeRow
-
-            if showPullRequestControls {
-                HStack(spacing: 8) {
-                    Spacer(minLength: 8)
-                    pullRequestControls
-                }
-                .frame(minHeight: 30)
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background {
-            // The open button sits behind the content and owns the card chrome.
-            // The content above it must not absorb clicks (no fill, no
-            // contentShape, and non-interactive rows disable hit testing), so a
-            // click anywhere on the card except the pull-request controls
-            // reaches this button.
-            Button(action: {
-                DispatchQueue.main.async(execute: onOpen)
-            }) {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(WorkspaceTheme.windowBackground)
-                    .shadow(color: .black.opacity(0.035), radius: 5, x: 0, y: 2)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
-                    }
-                    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .buttonHoverPointer()
-            .buttonStyle(.plain) // no-tooltip: clicking a card obviously opens it; VoiceOver gets the hint below.
-            .accessibilityLabel(task.title)
-            .accessibilityHint("Open task")
-            .accessibilityIdentifier("task-card-\(task.id.uuidString)")
-        }
-        .overlay(alignment: .leading) {
-            if let fraction = cpuFraction {
-                GeometryReader { proxy in
-                    // The gradient is rendered at the track's full height so a
-                    // given y-position always maps to the same color, then
-                    // masked down to the filled portion — a copy of the
-                    // gradient squeezed into just the fill height would remap
-                    // the whole green...red range into that sliver and show
-                    // red even at low usage.
-                    CPUUsageHeatmap.gradient
-                        .opacity(0.15)
-                    CPUUsageHeatmap.gradient
-                        .mask(alignment: .bottom) {
-                            Rectangle().frame(height: proxy.size.height * fraction)
-                        }
-                }
-                .frame(width: 4)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .padding(.vertical, 1)
-                .animation(.easeInOut(duration: 1.2), value: fraction)
-                .allowsHitTesting(false)
-                .accessibilityIdentifier("task-cpu-usage-bar-\(task.id.uuidString)")
-                .accessibilityLabel(CPUUsageHeatmap.label(percent: cpuPercent ?? 0))
-            }
-        }
-        .accessibilityElement(children: .contain)
-        .contextMenu {
-            if let onMoveToDone {
-                Button("Move to Done", systemImage: "checkmark.circle", action: onMoveToDone)
-                .buttonHoverPointer()
-                .help("Move to Done")
-                    .accessibilityIdentifier("move-task-to-done-menu-item")
-            }
-            if let onMoveToReview {
-                Button("Move to Review", systemImage: "eye", action: onMoveToReview)
-                .buttonHoverPointer()
-                .help("Move to Review")
-                    .accessibilityIdentifier("move-task-to-review-menu-item")
-            }
-            Button("Rename…", systemImage: "pencil", action: onRename)
-            .buttonHoverPointer()
-            .help("Rename")
-                .accessibilityIdentifier("rename-task-menu-item")
-            Button("Token Stats…", systemImage: "chart.bar", action: onShowTokenStats)
-            .buttonHoverPointer()
-            .help("Token Stats")
-                .accessibilityIdentifier("token-stats-task-menu-item")
-            Button("Delete Task", systemImage: "trash", role: .destructive, action: onDelete)
-            .buttonHoverPointer()
-            .help("Delete Task")
-                .accessibilityIdentifier("delete-task-menu-item")
-        }
+            },
+            showTokenStats: onShowTokenStats,
+            createPullRequests: onCreatePullRequests,
+            setPullRequestMode: { raw in
+                if let mode = PullRequestMode(rawValue: raw) { onSetPullRequestMode(mode) }
+            },
+            moveToDone: { onMoveToDone?() },
+            resolveConflicts: onResolveConflicts
+        ))
     }
 
-    private var linkedPullRequests: [RepositoryWorktreeRecord] {
-        task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
-    }
-
-    /// `nil` for a task with no running turn or no sample yet. For Codex
-    /// it's the task's working-directory share of the shared app-server
-    /// (see `TaskCPUUsageSnapshot`).
-    private var cpuPercent: Double? {
-        cpuUsageModel.percent(threadID: task.activeConversationID)
-    }
-
-    private var cpuFraction: Double? {
-        cpuPercent.map { CPUUsageHeatmap.fraction(percent: $0, max: cpuUsageColorMax) }
-    }
-
-    private var hasRepositoriesMissingPullRequests: Bool {
-        task.repositoryWorktrees.contains { !$0.isPending && ($0.pullRequestNumber == nil || $0.pullRequestURL == nil) }
-    }
-
-    private var showPullRequestControls: Bool {
-        task.status != .backlog && !task.repositoryWorktrees.isEmpty
-    }
-
-    /// While the task is still being worked on (before it reaches Review), the
-    /// Manual/PR/Green/Merge mode pill replaces the manual create button: once the task moves
-    /// to Review, the PR and Auto modes create the pull request themselves.
-    private var isAutoPRWorkingState: Bool {
-        switch task.status {
-        case .inProgress, .blocked, .waitingResponse: true
-        case .backlog, .review, .done: false
-        }
-    }
-
-    private var timeRow: some View {
-        HStack(spacing: 6) {
-            Group {
-                Image(systemName: "clock")
-                    .font(.system(size: 10))
-                if task.status == .inProgress {
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        Text(workingDuration(at: context.date))
-                            .font(.system(size: 10))
-                            .accessibilityIdentifier("task-working-duration-\(task.id.uuidString)")
-                    }
-                } else {
-                    Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
-                        .font(.system(size: 10))
-                }
-            }
-            .allowsHitTesting(false)
-            // A zero counter says nothing yet, so it stays hidden until the task has sent tokens.
-            if task.counterTokens > 0 {
-                tokenCounter
-            }
-        }
-        .foregroundStyle(.tertiary)
-    }
-
-    /// Everything the task has sent to the model so far, subagents included.
-    /// It climbs while a turn runs and keeps the heatmap colour, so the
-    /// configured ceiling still reads as "this task is getting expensive".
-    /// Clicking it opens Token Stats. The hover capsule pads the hit area well
-    /// past the small text, and the matching negative padding keeps that
-    /// larger target from growing the time row.
-    private var tokenCounter: some View {
-        let tokens = task.counterTokens
-        return Button(action: onShowTokenStats) {
-            Text(TokenUsageHeatmap.compact(tokens))
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(TokenUsageHeatmap.color(totalTokens: tokens, max: tokenUsageColorMax))
-                .contentTransition(.numericText())
-                .animation(.default, value: tokens)
-                .padding(.horizontal, 4)
-                .actionButtonHoverEmphasis(padding: 6)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .buttonHoverPointer()
-        .padding(.horizontal, -10)
-        .padding(.vertical, -6)
-        .nativeHelp("\(counterDescription). Click for Token Stats")
-        .accessibilityLabel(counterDescription)
-        .accessibilityHint("Open Token Stats")
-        .accessibilityIdentifier("task-token-usage-counter-\(task.id.uuidString)")
-    }
-
-    private var counterDescription: String {
-        guard task.hasCallUsage else { return TokenUsageHeatmap.label(totalTokens: task.totalTokens) }
-        return "\(TokenUsageHeatmap.compact(task.totalSentTokens)) tokens sent · \(task.totalCalls) \(task.totalCalls == 1 ? "call" : "calls") · \(TokenUsageHeatmap.compact(task.finalTranscriptTokens)) final transcript"
-    }
-
-    @ViewBuilder
-    private var pullRequestControls: some View {
-        HStack(spacing: 5) {
-            let linked = linkedPullRequests
-            if linked.isEmpty && isAutoPRWorkingState {
-                pullRequestModePill
-            } else if linked.isEmpty {
-                let hasMultipleRepositories = task.repositoryWorktrees.filter { !$0.isPending }.count > 1
-                Button(action: onCreatePullRequests) {
-                    if isCreatingPullRequests {
-                        ProgressView().controlSize(.mini)
-                    } else {
-                        Text(hasMultipleRepositories ? "PRs" : "PR").font(.system(size: 10, weight: .semibold))
-                            .frame(minWidth: 30, minHeight: 30)
-                    }
-                }
-                .actionButtonHoverEmphasis(padding: 10)
-                .buttonHoverPointer()
-                .nativeHelp("Create a pull request for each repository linked to this task")
-                .disabled(isCreatingPullRequests)
-                .frame(width: 30, height: 30)
-                .contentShape(Rectangle())
-                .accessibilityLabel(hasMultipleRepositories ? "PRs. Create pull requests for each repository linked to this task" : "PR. Create a pull request for each repository linked to this task")
-                .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
-            } else {
-                if hasRepositoriesMissingPullRequests {
-                    Button(action: onCreatePullRequests) {
-                        if isCreatingPullRequests {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Text(task.repositoryWorktrees.filter { !$0.isPending }.count > 1 ? "PRs" : "PR")
-                                .font(.system(size: 10, weight: .semibold))
-                        }
-                    }
-                    .actionButtonHoverEmphasis(padding: 10)
-                    .buttonHoverPointer()
-                    .nativeHelp("Create pull requests for repositories without a linked pull request")
-                    .disabled(isCreatingPullRequests)
-                    .frame(width: 30, height: 30)
-                    .contentShape(Rectangle())
-                    .accessibilityLabel(task.repositoryWorktrees.filter { !$0.isPending }.count > 1 ? "PRs. Create pull requests for repositories without a linked pull request" : "PR. Create a pull request for the repository without a linked pull request")
-                    .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
-                }
-                if isPullRequestMerged, let onMoveToDone {
-                    Button(action: onMoveToDone) {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.green)
-                    }
-                    .actionButtonHoverEmphasis(padding: 10)
-                    .buttonHoverPointer()
-                    .nativeHelp("Complete task: all linked pull requests have merged")
-                    .frame(width: 30, height: 30)
-                    .contentShape(Rectangle())
-                    .accessibilityLabel("Green checkmark. Complete task, all linked pull requests merged")
-                    .accessibilityIdentifier("task-complete-merged-pr-\(task.id.uuidString)")
-                } else {
-                    if hasPullRequestConflicts {
-                        Button(action: onResolveConflicts) {
-                            Image("ConflictIndicator")
-                                .resizable()
-                                .renderingMode(.template)
-                                .scaledToFit()
-                                .foregroundStyle(.orange)
-                                .frame(width: 16, height: 16)
-                                .accessibilityIdentifier("task-resolve-pr-conflicts-icon-\(task.id.uuidString)")
-                        }
-                        .actionButtonHoverEmphasis(padding: 10)
-                        .buttonHoverPointer()
-                        .nativeHelp("Resolve pull request conflicts with \(task.conversationProvider.displayName)")
-                        .accessibilityLabel("Resolve pull request conflicts")
-                        .accessibilityIdentifier("task-resolve-pr-conflicts-\(task.id.uuidString)")
-                        .frame(minWidth: 30, minHeight: 30)
-                        .contentShape(Rectangle())
-                    }
-                    pullRequestModePill
-                    ForEach(linked, id: \.repositoryPath) { record in
-                        if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
-                            let health = pullRequestHealth[number]
-                            Link(destination: url) {
-                                Text(verbatim: "#\(number)")
-                                    .foregroundStyle(health.map(Self.healthColor) ?? Color.accentColor)
-                            }
-                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                .actionButtonHoverEmphasis(padding: 5)
-                                .buttonHoverPointer()
-                                .nativeHelp(URL(fileURLWithPath: record.repositoryPath).lastPathComponent + (health.map { " · \(Self.healthDescription($0))" } ?? ""))
-                                // The chip stays compact; the click target keeps the 30 pt minimum of its sibling actions.
-                                .frame(minWidth: 30, minHeight: 30)
-                                .contentShape(Rectangle())
-                                .accessibilityValue(health?.rawValue ?? "unknown")
-                                .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
-                        }
-                    }
-                }
-            }
-        }
-        .buttonStyle(.borderless)
-    }
-
-    static func healthColor(_ health: PullRequestHealth) -> Color {
-        switch health {
-        case .green: .green
-        case .red: .red
-        case .pending: .blue
-        // GitHub's merged purple.
-        case .merged: Color(red: 0.64, green: 0.44, blue: 0.97)
-        }
-    }
-
-    static func healthDescription(_ health: PullRequestHealth) -> String {
-        switch health {
-        case .green: "checks passing"
-        case .red: "checks failing or conflicted"
-        case .pending: "checks running"
-        case .merged: "merged"
-        }
-    }
-
-    /// Shown in place of the manual "PR" button while the task is being worked on,
-    /// and beside linked PRs afterwards so autopilot and merge stay switchable.
-    private var pullRequestModePill: some View {
-        PullRequestModePill(taskID: task.id, mode: task.pullRequestMode, onSelect: onSetPullRequestMode)
-    }
-
-    private func workingDuration(at date: Date) -> String {
-        let activeInterval = task.inProgressStartedAt.map { max(0, date.timeIntervalSince($0)) } ?? 0
-        let activeText = Self.shortDuration(activeInterval)
-        guard task.totalInProgressSeconds > 0 else { return activeText }
-        return "\(activeText) (\(Self.shortDuration(task.totalInProgressSeconds + activeInterval)) total)"
-    }
-
-    private static func shortDuration(_ seconds: TimeInterval) -> String {
-        if seconds < 60 { return "\(Int(seconds))s" }
-        let minutes = Int(seconds / 60)
-        if minutes < 60 { return "\(minutes)m" }
-        let hours = minutes / 60
-        if hours < 24 { return "\(hours)h\(minutes % 60 == 0 ? "" : " \(minutes % 60)m")" }
-        let days = hours / 24
-        return "\(days)d\(hours % 24 == 0 ? "" : " \(hours % 24)h")"
+    /// For Codex the CPU share is the task's working-directory share of the
+    /// shared app-server (see `TaskCPUUsageSnapshot`); `nil` with no running turn or sample yet.
+    private var model: TaskItemModel {
+        TaskItemModel(
+            task: task,
+            cpuPercent: cpuUsageModel.percent(threadID: task.activeConversationID),
+            cpuUsageColorMax: cpuUsageColorMax,
+            tokenUsageColorMax: tokenUsageColorMax,
+            isCreatingPullRequests: isCreatingPullRequests,
+            isPullRequestMerged: isPullRequestMerged,
+            hasPullRequestConflicts: hasPullRequestConflicts,
+            pullRequestHealth: pullRequestHealth,
+            canMoveToDone: onMoveToDone != nil,
+            canMoveToReview: onMoveToReview != nil
+        )
     }
 }
 
@@ -3530,108 +3183,5 @@ private struct RenameTaskSheet: View {
         }
         .padding(24)
         .frame(width: 420)
-    }
-}
-
-/// A compact pill showing the task's PR mode. Clicking it slides the other modes
-/// out beside it; choosing one (or the current one again) selects it and folds the
-/// pill back. macOS has no native control for this, so it's drawn to fit the card.
-private struct PullRequestModePill: View {
-    let taskID: UUID
-    let mode: PullRequestMode
-    let onSelect: (PullRequestMode) -> Void
-    @State private var isExpanded = false
-    /// The mode just chosen, shown until the stored mode catches up with it.
-    @State private var chosenMode: PullRequestMode?
-    @Namespace private var selection
-
-    private var shownMode: PullRequestMode { chosenMode ?? mode }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            if isExpanded {
-                ForEach(Array(PullRequestMode.allCases.enumerated()), id: \.element) { index, option in
-                    if index > 0 {
-                        Rectangle()
-                            .fill(Color.primary.opacity(0.18))
-                            .frame(width: 1, height: 9)
-                            .opacity(option == shownMode || PullRequestMode.allCases[index - 1] == shownMode ? 0 : 1)
-                    }
-                    optionButton(option)
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .leading).combined(with: .opacity),
-                            removal: .opacity
-                        ))
-                }
-            } else {
-                Button {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { isExpanded = true }
-                } label: {
-                    HStack(spacing: 3) {
-                        Text(shownMode.label)
-                            .font(.system(size: 9, weight: .semibold))
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 7, weight: .bold))
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal, 7)
-                    .frame(height: 17)
-                    .background(Capsule().fill(Color.primary.opacity(0.14)).matchedGeometryEffect(id: "selected", in: selection))
-                    .frame(minHeight: 30)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .buttonHoverPointer()
-                .nativeHelp("How Playhouse handles this task's pull request. \(shownMode.helpText). Click to choose another mode.")
-                .accessibilityLabel("Pull request mode")
-                .accessibilityValue(shownMode.rawValue)
-                .accessibilityIdentifier("task-pr-mode-\(taskID.uuidString)")
-            }
-        }
-        .padding(.horizontal, 1)
-        .background(Capsule().fill(Color.primary.opacity(0.07)).frame(height: 19))
-        .clipShape(Capsule().inset(by: -6))
-        .fixedSize()
-        .accessibilityElement(children: .contain)
-        .onChange(of: mode) { _, stored in
-            if stored == chosenMode { chosenMode = nil }
-        }
-        // A choice the daemon rejected must not stick on the pill.
-        .task(id: chosenMode) {
-            guard chosenMode != nil else { return }
-            try? await Task.sleep(for: .seconds(5))
-            chosenMode = nil
-        }
-    }
-
-    private func optionButton(_ option: PullRequestMode) -> some View {
-        let isSelected = option == shownMode
-        return Button {
-            if !isSelected {
-                chosenMode = option
-                onSelect(option)
-            }
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { isExpanded = false }
-        } label: {
-            Text(option.label)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
-                .padding(.horizontal, 7)
-                .frame(height: 17)
-                .background {
-                    if isSelected {
-                        Capsule().fill(Color.primary.opacity(0.14)).matchedGeometryEffect(id: "selected", in: selection)
-                    }
-                }
-                .frame(minHeight: 30)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .buttonHoverPointer()
-        .nativeHelp(option.helpText)
-        .accessibilityLabel(option.label)
-        .accessibilityValue(isSelected ? "selected" : "")
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
-        .accessibilityIdentifier("task-pr-mode-\(option.rawValue)-\(taskID.uuidString)")
     }
 }

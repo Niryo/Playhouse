@@ -92,9 +92,7 @@ enum BridgeClientError: LocalizedError {
 
 extension BridgeRequest {
     /// This request with the caller's Playhouse settings attached: its data
-    /// directory, test overrides and forwardable session environment. Shared by
-    /// `playhouse-cli` and `playhouse-plugin-dev`, which both run from the app's
-    /// Contents/MacOS.
+    /// directory, test overrides and forwardable session environment.
     func configuredForCaller(environment: [String: String] = ProcessInfo.processInfo.environment) -> BridgeRequest {
         let dataDirectory = environment["PLAYHOUSE_DATA_DIRECTORY"]
         let defaultsSuite = environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"]

@@ -41,47 +41,6 @@ parser.add_argument("--legacy-store-seeder", required=True, type=Path)
 parser.add_argument("--case", action="append", default=[], dest="selected_cases")
 arguments = parser.parse_args()
 CONTRACT_PATH = Path(__file__).resolve().parent.parent / "Playhouse/BridgeTests/BridgeTestContracts.json"
-# The installed-plugin cases' logic.js: a counter plus two api.call actions.
-HELLO_PLUGIN_LOGIC = """export const initialState = { count: 0, daemon: "unknown", apiError: "none" };
-
-export const actions = {
-  increment(state) {
-    state.count += 1;
-  },
-  async checkDaemon(state, payload, api) {
-    const status = await api.call("status");
-    state.daemon = "bridge v" + status.bridgeVersion;
-  },
-  async callMissing(state, payload, api) {
-    try {
-      await api.call("no.such.command");
-      state.apiError = "none";
-    } catch (error) {
-      state.apiError = error.message;
-    }
-  }
-};
-"""
-FRAGILE_PLUGIN_LOGIC = """export const initialState = { count: 0 };
-
-export const actions = {
-  increment(state) {
-    state.count += 1;
-  },
-  explode() {
-    throw new Error("Kaboom");
-  },
-  spin() {
-    while (true) {}
-  }
-};
-"""
-FRAGILE_PLUGIN_VIEW = {"main": {"type": "vstack", "props": {"spacing": 10, "padding": 16}, "children": [
-    {"type": "text", "props": {"text": "Ready {{count}}"}},
-    {"type": "button", "props": {"title": "Increment", "onTap": {"action": "increment"}}},
-    {"type": "button", "props": {"title": "Explode", "onTap": {"action": "explode"}}},
-    {"type": "button", "props": {"title": "Spin", "onTap": {"action": "spin"}}},
-]}}
 # Mirrors TurnOutcome.maxContinuations: private continuation/nudge turns per request.
 MAX_OUTCOME_CONTINUATIONS = 5
 
@@ -9306,7 +9265,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         grdb_module = grdb.stdout.strip().splitlines()[-1]
         command.extend(["-I", grdb_module, "-I", str(root / "Vendor/GRDB.swift/Sources/GRDBSQLite"), "-L", grdb_module, "-lGRDB"])
         command.extend(str(root / "Playhouse" / "App" / f"{name}.swift") for name in core)
-        # BridgeCore's PluginManager uses the plugin core, as build-bridge.sh compiles it for the daemon.
+        # BridgeCore's plugin.render uses the plugin core, as build-bridge.sh compiles it for the daemon.
         command.extend(sorted(str(path) for path in (root / "Playhouse/App/Plugins/Core").glob("*.swift")))
         command.extend([str(root / "Playhouse/Bridge/BridgeContract.swift"),
                         str(root / "scripts/test-codex-question-ownership.swift"), "-o", str(probe)])
@@ -13742,84 +13701,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_failure(call("authenticate", "--provider", "claude", "--name", "", expected_status=2), "invalid_argument")
         self.assertEqual(logged(claude_executable + ".mcp-authenticate")[-1], {"serverName": "claude-other"}, "A rejected request starts nothing.")
 
-    # Plugins and the Component Catalog
+    # Plugins: React in JavaScriptCore rendered into native atoms
 
-    def plugin_runner(self, directory, extra_environment=None):
-        """playhouse-plugin-dev from the same app bundle as the CLI, in --json mode."""
-        environment = os.environ.copy()
-        environment["PLAYHOUSE_DATA_DIRECTORY"] = str(self.data_directory)
-        environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = self.defaults_suite
-        environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = arguments.service_name
-        environment.update(extra_environment or {})
-        process = subprocess.Popen(
-            [str(self.cli.parent / "playhouse-plugin-dev"), str(directory), "--json"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1, env=environment,
-        )
-        self.addCleanup(lambda: process.poll() is None and process.kill())
-        # A reader thread, because select() on a buffered text pipe misses lines already read ahead.
-        process.messages = queue.Queue()
-        process.events = []
-
-        def read():
-            for line in process.stdout:
-                if line.strip():
-                    process.messages.put(line)
-            process.messages.put(None)
-
-        threading.Thread(target=read, daemon=True).start()
-        return process
-
-    def runner_message(self, process, timeout=30):
-        try:
-            line = process.messages.get(timeout=timeout)
-        except queue.Empty:
-            self.fail("playhouse-plugin-dev did not reply in time.")
-        if line is None:
-            try:
-                status = process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                status = "still running with stdout closed"
-            self.fail(f"playhouse-plugin-dev exited ({status}): {process.stderr.read()}")
-        return json.loads(line)
-
-    def runner_send(self, process, command, timeout=60):
-        process.stdin.write(command + "\n")
-        process.stdin.flush()
-        name = command.split(" ", 1)[0]
-        while True:
-            message = self.runner_message(process, timeout)
-            if "event" in message:
-                process.events.append(message)
-            elif message.get("command") == name:
-                return message
-
-    def runner_wait_for_event(self, process, event, timeout=20):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            for message in process.events:
-                if message.get("event") == event:
-                    process.events.remove(message)
-                    return message
-            try:
-                line = process.messages.get(timeout=max(0.1, deadline - time.monotonic()))
-            except queue.Empty:
-                break
-            if line is None:
-                break
-            message = json.loads(line)
-            if message.get("event") == event:
-                return message
-            if "event" in message:
-                process.events.append(message)
-        self.fail(f"playhouse-plugin-dev never emitted {event}.")
-
-    def runner_node(self, nodes, **match):
-        for node in nodes:
-            if all(node.get(key) == value if key == "type" else node.get("props", {}).get(key) == value for key, value in match.items()):
-                return node
-        self.fail(f"No element matches {match}: {nodes}")
+    TASK_ITEM_ID = "C0FFEE00-0000-4000-8000-000000000001"
 
     @staticmethod
     def plugin_nodes(tree):
@@ -13828,528 +13712,158 @@ class PlayhouseBridgeTests(unittest.TestCase):
             nodes += PlayhouseBridgeTests.plugin_nodes(child)
         return nodes
 
-    def write_plugin(self, directory, manifest, view, logic=None):
-        directory.mkdir(parents=True)
-        (directory / "plugin.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        (directory / "view.json").write_text(json.dumps(view, indent=2), encoding="utf-8")
-        if logic is not None:
-            (directory / "logic.js").write_text(logic, encoding="utf-8")
+    def plugin_node(self, tree, test_id):
+        for node in self.plugin_nodes(tree):
+            if node.get("props", {}).get("testID") == test_id:
+                return node
+        self.fail(f"No atom has testID {test_id}.")
 
-    # case-contract: test_plugin_catalog_showcases_cover_every_component | The Plugins menu opens the Component Catalog, whose sidebar lists every bundled showcase section; each section page renders all of its showcases live through the real renderer with no unknown-component or error placeholders and lists its components' props reference. The progress-bar showcase's bar itself advances to 100% when Start is clicked, both in the Catalog and through playhouse-plugin-dev with no app running, where `tap` returns after the async action settles and `state` shows pct 100; the stage's Reset restarts it from initialState, Show Source shows its view.json and logic.js, and Show Node IDs overlays each element's number, matching the runner's numbering. Typing into the text-field showcase sends each edit's value to its action and shows it, removing the first row of the list showcase leaves the others in place with their element numbers, and an if shows its content only while its condition holds. `plugin components` lists every section and component spec with typed props and events and rejects an unknown component, and `plugin check-showcases` passes for the bundled showcases while a copy with a component used by no showcase, an empty section, an event-bearing component left without an interactive showcase, or an unknown component fails with issues naming them. `plugin components` also reports each event's value kind and which components are presentation components, and the catalog covers the app's atomic components: labels, badges, chips, status dots, images and avatars, icon buttons, copy buttons, fields, toggles, segmented controls, pickers, sliders, date pickers, cards, hints, empty states, scroll, menus, popovers, sheets, alerts and confirm dialogs.
-    def test_plugin_catalog_showcases_cover_every_component(self):
-        showcase_root = Path(__file__).resolve().parent.parent / "Playhouse/Resources/Showcase"
-        catalog = self.assert_success(self.call_cli("plugin", "components")[0])
-        section_ids = [section["id"] for section in catalog["sections"]]
-        for section in ["foundations", "layout", "separators", "typography", "media", "buttons", "text-input",
-                        "selection", "pickers", "progress-status", "feedback", "overlays", "navigation", "forms",
-                        "data", "charts", "structural", "terminal", "agent", "playhouse", "behaviors"]:
-            self.assertIn(section, section_ids)
-        components = {component["type"]: component for component in catalog["components"]}
-        for component_type in ["vstack", "hstack", "zstack", "spacer", "divider", "text", "heading", "icon", "button",
-                               "textfield", "progress-bar", "spinner", "if", "list"]:
-            self.assertIn(component_type, components)
-            self.assertIn(components[component_type]["section"], section_ids)
-        self.assertTrue(components["if"]["structural"] and components["list"]["structural"])
-        for component_type in ["label", "code", "kbd", "link", "image", "avatar", "icon-button", "copy-button", "secure-field",
-                               "text-editor", "search-field", "toggle", "segmented", "picker", "slider", "date-picker", "badge",
-                               "chip", "card", "status-dot", "empty-state", "hint", "scroll", "menu", "menu-item", "context-menu",
-                               "popover", "sheet", "alert", "confirm-dialog"]:
-            self.assertIn(component_type, components, f"The catalog covers {component_type}.")
-        def change(component_type):
-            return next(event for event in components[component_type]["events"] if event["name"] == "onChange")
-        self.assertEqual([change(kind)["valueKind"] for kind in ["toggle", "slider", "textfield"]], ["bool", "number", "string"])
-        self.assertEqual(change("segmented")["valueFrom"], "options")
-        self.assertEqual([name for name, component in sorted(components.items()) if component["presentation"]],
-                         ["alert", "confirm-dialog", "popover", "sheet"])
-        self.assertEqual(components["menu-item"]["parentTypes"], ["menu", "context-menu"])
-        self.assertEqual(components["menu"]["childTypes"], ["menu-item", "divider"])
-        self.assertIn("padding", [prop["name"] for prop in catalog["commonProps"]])
-        button = self.assert_success(self.call_cli("plugin", "components", "--type", "button")[0])
-        self.assertEqual([component["type"] for component in button["components"]], ["button"])
-        self.assertEqual([event["name"] for event in button["components"][0]["events"]], ["onTap"])
-        title = next(prop for prop in button["components"][0]["props"] if prop["name"] == "title")
-        self.assertEqual((title["kind"], title["required"]), ("string", True))
-        missing, _ = self.call_cli("plugin", "components", "--type", "no-such-component", expected_status=3)
-        self.assert_failure(missing, "not_found")
+    @staticmethod
+    def plugin_text(node):
+        return "".join(child["text"] for child in node.get("children", []) if child["type"] == "#text")
 
-        bundled = self.assert_success(self.call_cli("plugin", "check-showcases")[0])
-        self.assertTrue(bundled["valid"], bundled["issues"])
-        self.assertEqual(bundled["issues"], [])
-        self.assertTrue(bundled["root"].endswith("Contents/Resources/Showcase"), "Without --path, the app's bundled showcases are checked.")
-        bundled_sections = {section["id"]: section for section in bundled["sections"]}
-        self.assertEqual(sorted(bundled_sections), sorted(path.name for path in showcase_root.iterdir() if path.is_dir()))
-        used = {component for section in bundled["sections"] for showcase in section["showcases"] for component in showcase["components"]}
-        self.assertTrue(set(components) <= used, f"Components without a showcase: {set(components) - used}")
-        simulate = next(item for item in bundled_sections["progress-status"]["showcases"] if item["id"] == "02-progress-simulate")
-        self.assertTrue(simulate["interactive"])
-        self.assertIn("progress-bar", simulate["components"])
+    def render_plugin(self, source, *options, expected_status=0):
+        path = self.data_directory / f"plugin-{uuid.uuid4().hex[:8]}.js"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+        return self.call_cli("plugin", "render", "--file", path, *options, expected_status=expected_status)[0]
 
-        broken_root = self.data_directory / "broken-showcases"
-        shutil.copytree(showcase_root, broken_root)
-        shutil.rmtree(broken_root / "progress-status" / "03-spinners")
-        shutil.rmtree(broken_root / "media" / "01-icons")
-        shutil.rmtree(broken_root / "media" / "02-images-avatars")
-        (broken_root / "typography" / "04-links" / "logic.js").unlink()
-        self.write_plugin(
-            broken_root / "layout" / "09-unknown",
-            {"id": "unknown", "name": "Unknown", "version": "1.0.0", "contributes": {"views": [{"id": "main", "title": "Unknown"}]}},
-            {"main": {"type": "vstack", "children": [{"type": "fancy-widget", "props": {}}]}},
-        )
-        report, _ = self.call_cli("plugin", "check-showcases", "--path", broken_root, expected_status=1)
-        report = self.assert_success(report)
-        self.assertFalse(report["valid"])
-        messages = [issue["message"] for issue in report["issues"]]
-        self.assertTrue(any("spinner isn't used by any showcase" in message for message in messages), messages)
-        self.assertTrue(any("link has events, so it needs an interactive showcase" in message for message in messages), messages)
-        unknown = [issue for issue in report["issues"] if issue["showcase"] == "layout/09-unknown"]
-        self.assertTrue(any("Unknown component \"fancy-widget\"" in issue["message"] and issue["path"] == "main.children[0].type" for issue in unknown), unknown)
-        self.assertTrue(any(issue["file"] == "media/" and "no showcases" in issue["message"] for issue in report["issues"]), messages)
+    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card) and the Task Item example; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1, and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument.
+    def test_plugin_renderer_commits_minimal_ops_and_runs_handlers(self):
+        plugin = """
+function App() {
+  var on = React.useState(false);
+  var ticks = React.useState(0);
+  React.useEffect(function () {
+    var timer = setInterval(function () { ticks[1](function (count) { return count + 1; }); }, 1000);
+    return function () { clearInterval(timer); };
+  }, []);
+  return h(Stack, { axis: "v", spacing: 4, testID: "root" },
+    h(Text, { size: 13, testID: "label" }, on[0] ? "On" : "Off"),
+    h(Text, { size: 10, testID: "ticks" }, "Ticks: ", String(ticks[0])),
+    h(Button, { testID: "toggle", onPress: function () { on[1](!on[0]); } }, h(Text, null, "Toggle")),
+    h(Button, { testID: "explode", onPress: function () { throw new Error("Kaboom"); } }, h(Text, null, "Explode")));
+}
+Playhouse.render(h(App));
+"""
+        rendered = self.assert_success(self.render_plugin(plugin))
+        self.assertEqual(rendered["atoms"], ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card"],
+                         "Plugins compose exactly the task item's atoms.")
+        self.assertEqual(rendered["errors"], [])
+        self.assertEqual(len(rendered["commits"]), 1, "The first render is one commit.")
+        first = rendered["commits"][0]
+        self.assertIn("create", first["ops"])
+        self.assertIn("createText", first["ops"])
+        self.assertEqual(first["ops"][-1], "append", "The commit ends by appending the root atom to the container.")
+        tree = rendered["tree"]
+        label = self.plugin_node(tree, "label")
+        self.assertEqual(self.plugin_text(label), "Off")
+        self.assertEqual(self.plugin_node(tree, "toggle")["events"], ["onPress"], "Handlers stay in JavaScript; only their names reach Swift.")
+        self.assertNotIn("onPress", self.plugin_node(tree, "toggle").get("props", {}))
 
-        runner = self.plugin_runner(showcase_root / "progress-status" / "02-progress-simulate")
-        loaded = self.runner_message(runner)
-        self.assertEqual((loaded["event"], loaded["plugin"], loaded["ok"]), ("loaded", "progress-simulate", True))
-        tree = self.runner_send(runner, "view")["tree"]
-        nodes = self.plugin_nodes(tree)
-        start = next(node for node in nodes if node["type"] == "button" and node["props"]["title"] == "Start")
-        bar = next(node for node in nodes if node["type"] == "progress-bar")
-        self.assertEqual(bar["props"]["value"], 0)
-        self.assertEqual(start["events"]["onTap"]["action"], "start")
-        tapped = self.runner_send(runner, f"tap {start['id']}")
-        self.assertTrue(tapped["ok"], tapped)
-        self.assertEqual(self.runner_send(runner, "state")["state"], {"pct": 100, "running": False, "status": "done"},
-                         "tap returns only after the async action settles.")
-        after = self.plugin_nodes(self.runner_send(runner, "view")["tree"])
-        self.assertEqual(next(node for node in after if node["type"] == "progress-bar")["props"]["value"], 100)
-        self.assertEqual(next(node for node in after if node["type"] == "progress-bar")["id"], bar["id"], "Elements keep their numbers across renders.")
-        self.assertIn("100% done", [node["props"].get("text") for node in after if node["type"] == "text"])
-        missing_node = self.runner_send(runner, "tap 9999")
-        self.assertFalse(missing_node["ok"])
-        self.assertIn("no node 9999", missing_node["error"])
-        runner.stdin.write("quit\n")
-        runner.stdin.flush()
-        self.assertEqual(runner.wait(timeout=10), 0)
+        toggled = self.assert_success(self.render_plugin(plugin, "--event", "toggle:onPress", "--event", "toggle:onPress", "--event", "toggle:onPress"))
+        self.assertEqual(toggled["errors"], [])
+        label = self.plugin_node(toggled["tree"], "label")
+        label_text = label["children"][0]
+        self.assertEqual(self.plugin_text(label), "On", "Three presses ran the JavaScript handler three times.")
+        for commit in toggled["commits"][1:]:
+            self.assertEqual(commit["step"], "toggle:onPress")
+            self.assertEqual(commit["ops"], ["text"], "A toggled label commits one text op.")
+            self.assertEqual(commit["touchedNodes"], [label_text["id"]], "Only the label's string node changes.")
+        self.assertEqual(label_text["updates"], 3)
+        self.assertEqual(label["updates"], 0, "The Text atom's props never changed.")
+        self.assertEqual(self.plugin_node(toggled["tree"], "root")["updates"], 0, "Nothing else was updated.")
 
-        typing = self.plugin_runner(showcase_root / "text-input" / "01-textfield")
-        self.assertEqual(self.runner_message(typing)["event"], "loaded")
-        nodes = self.plugin_nodes(self.runner_send(typing, "view")["tree"])
-        field = self.runner_node(nodes, type="textfield")
-        add = self.runner_node(nodes, title="Add")
-        self.assertTrue(add["props"]["disabled"], "Add is disabled while the draft is empty.")
-        self.assertTrue(self.runner_send(typing, f"type {field['id']} hello there")["ok"])
-        self.assertEqual(self.runner_send(typing, "state")["state"]["draft"], "hello there", "type merges { value } into the onChange payload.")
-        nodes = self.plugin_nodes(self.runner_send(typing, "view")["tree"])
-        self.runner_node(nodes, text='11 characters: "hello there"')
-        self.assertEqual(self.runner_node(nodes, type="textfield")["props"]["value"], "hello there")
-        self.assertTrue(self.runner_send(typing, f"tap {add['id']}")["ok"])
-        self.runner_node(self.plugin_nodes(self.runner_send(typing, "view")["tree"]), text="• hello there")
-        typing.stdin.write("quit\n")
-        typing.stdin.flush()
-        self.assertEqual(typing.wait(timeout=10), 0)
+        advanced = self.assert_success(self.render_plugin(plugin, "--advance", "3"))
+        ticks = self.plugin_node(advanced["tree"], "ticks")
+        self.assertEqual(self.plugin_text(ticks), "Ticks: 3", "Three seconds of the interval ran.")
+        tick_commits = [commit for commit in advanced["commits"] if commit["step"] == "advance"]
+        self.assertEqual(len(tick_commits), 1)
+        self.assertEqual(set(tick_commits[0]["touchedNodes"]), {ticks["children"][1]["id"]}, "Each tick changes only its own string node.")
+        self.assertEqual(self.plugin_node(advanced["tree"], "label")["children"][0]["updates"], 0)
 
-        rows = self.plugin_runner(showcase_root / "structural" / "02-list")
-        self.assertEqual(self.runner_message(rows)["event"], "loaded")
-        nodes = self.plugin_nodes(self.runner_send(rows, "view")["tree"])
-        second = self.runner_node(nodes, text="Second item")
-        self.runner_node(nodes, text="First item")
-        self.assertTrue(self.runner_send(rows, f"tap {self.runner_node(nodes, title='Remove first')['id']}")["ok"])
-        after = self.plugin_nodes(self.runner_send(rows, "view")["tree"])
-        self.assertNotIn("First item", [node["props"].get("text") for node in after])
-        self.assertEqual(self.runner_node(after, text="Second item")["id"], second["id"], "A keyed list row keeps its element number when an earlier row goes.")
-        rows.stdin.write("quit\n")
-        rows.stdin.flush()
-        self.assertEqual(rows.wait(timeout=10), 0)
+        for page in ["Button", "Card", "Icon", "Label", "Link", "PillPicker", "Spacer", "Spinner", "Stack", "TaskItem", "Text"]:
+            page_render = self.assert_success(self.call_cli("plugin", "render", "--page", page)[0])
+            self.assertEqual(page_render["errors"], [], f"The {page} catalog page renders without errors.")
+            used = {node["type"] for node in self.plugin_nodes(page_render["tree"])}
+            if page != "TaskItem":
+                self.assertIn(page, used, f"The {page} page shows its atom.")
+        pressed = self.assert_success(self.call_cli("plugin", "render", "--page", "Button", "--event", "button-plain:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(pressed["tree"], "button-press-count")), "Pressed 1 times")
+        self.assertEqual(pressed["commits"][-1]["ops"], ["text"], "The Button page's press is one text op.")
 
-        toggle = self.plugin_runner(showcase_root / "structural" / "01-if")
-        self.assertEqual(self.runner_message(toggle)["event"], "loaded")
-        nodes = self.plugin_nodes(self.runner_send(toggle, "view")["tree"])
-        texts = [node["props"].get("text") for node in nodes]
-        self.assertIn("The details are hidden.", texts)
-        self.assertNotIn("The details are visible.", texts)
-        show = self.runner_node(nodes, title="Show details")
-        self.assertTrue(self.runner_send(toggle, f"tap {show['id']}")["ok"])
-        texts = [node["props"].get("text") for node in self.plugin_nodes(self.runner_send(toggle, "view")["tree"])]
-        self.assertIn("The details are visible.", texts, "if adds its children once cond is truthy.")
-        self.assertNotIn("The details are hidden.", texts)
-        toggle.stdin.write("quit\n")
-        toggle.stdin.flush()
-        self.assertEqual(toggle.wait(timeout=10), 0)
+        exploded = self.render_plugin(plugin, "--event", "explode:onPress", expected_status=1)
+        self.assertTrue(any("Kaboom" in error for error in exploded["result"]["errors"]), "A handler that throws is reported.")
+        for source, message in [
+            ('Playhouse.render(h("Div"));', "Unknown atom <Div>"),
+            ('Playhouse.render(h(Stack, { bogus: 1 }));', '<Stack> has no prop "bogus"'),
+            ('Playhouse.render(h(Text, { size: "large" }, "x"));', "<Text> has an invalid prop"),
+            ('Playhouse.render(h(Stack, null, "loose"));', "must be inside a <Text> atom"),
+            ('Playhouse.render(h(Label, { icon: "clock" }));', "<Label> has an invalid prop"),
+            ('Playhouse.render(h(Stack, { onTap: function () {} }));', '<Stack> has no event "onTap"'),
+            ('Playhouse.render(h(Icon, { name: "clock" }, h(Text, null, "x")));', "<Icon> can't hold <Text>"),
+        ]:
+            failed = self.render_plugin(source, expected_status=1)
+            self.assertTrue(failed["ok"], "A plugin that fails still reports its render.")
+            self.assertTrue(any(message in error for error in failed["result"]["errors"]), f"{source} reports {message}: {failed['result']['errors']}")
+        self.assert_failure(self.render_plugin(plugin, "--event", "missing:onPress", expected_status=2), "invalid_argument")
+        self.assert_failure(self.render_plugin(plugin, "--event", "label:onPress", expected_status=2), "invalid_argument")
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "NoSuchPage", expected_status=2)[0], "invalid_argument")
 
-    # case-contract: test_plugin_controls_report_typed_values_and_present_overlays | The app's atomic components are available to plugins in the Component Catalog. The Notifications switch reports false and the checkbox true, each shown in the showcase text; choosing Board in the segmented control and High in the picker shows layout = board and priority = high; the stepped slider moves to its last step and shows effort = 4. The Sort menu opens with its items and choosing Date shows Sorted by date; a right-click on the context-menu card offers Delete and reports it. The popover opens from its anchor with its content and closes on Got it; the sheet opens with a name field, saves the typed name and closes; the delete confirmation is cancelled (Result: Cancelled), then confirmed (Result: Deleted), and the alert is dismissed. The icon and copy buttons report their press (Last pressed: edit, Copied 1 times); the secure field, search field and text editor report what is typed (secret length 3, the query, the note's characters); removing a chip drops it (2 tags, then 1 tags); the date pickers show their ISO dates and a runner `type` sets one; a scroll region's last row starts outside its frame and scrolls into it; and the display components show their content (labels, badges, chips, avatars, cards, hints, empty states, status labels and an image's description). Through playhouse-plugin-dev the same showcases refuse bad values: a toggle takes only true or false, a slider only a number, a segmented control or picker only one of its options, and an event a component doesn't have is refused; a closed confirm dialog, alert, popover or sheet can't be answered and has no content in the tree until it is opened, after which onCancel and onConfirm run their actions. `plugin validate` reports an image whose file is missing or outside the plugin folder, an icon without name or src, an alert without open, a menu with a non-menu child and a menu-item outside a menu, each with its file and JSON path.
-    def test_plugin_controls_report_typed_values_and_present_overlays(self):
-        showcase_root = Path(__file__).resolve().parent.parent / "Playhouse/Resources/Showcase"
+    # case-contract: test_plugin_task_item_renders_from_atoms_like_native | The Plugin Catalog's Task Item page shows the task item composed in JavaScript from atoms beside the native SwiftUI task item built from the same atoms and sample data: both show the same title, progress report, status message, token counter, conflicts button, pull-request mode pill and pull-request link with the same sizes, and the JavaScript tree uses only atoms with the native card's identifiers and context menu. Blocking the JavaScript item changes only its status message and the toggle's label (one commit: text, update, text on three nodes) while the native item keeps its own state, clicking the JavaScript card runs its onPress handler (Opened 1 times, one text op), choosing Merge in its mode pill runs onChange (Last: mode merge) without re-rendering the title or the card, and right-clicking the JavaScript card offers the native card's menu, whose Move to Done runs onMenu with its id (Last: menu done).
+    def test_plugin_task_item_renders_from_atoms_like_native(self):
+        task = self.TASK_ITEM_ID
+        rendered = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "TaskItem",
+            "--event", "js-toggle-blocked:onPress",
+            "--event", f"task-card-{task}:onPress",
+            "--event", f"task-pr-mode-{task}:onChange:merge")[0])
+        self.assertEqual(rendered["errors"], [])
+        tree = rendered["tree"]
+        # The same identifiers the board's native TaskItemView gives its card.
+        for test_id in [f"task-card-{task}", f"task-title-{task}", f"task-progress-report-{task}", f"task-progress-icon-{task}",
+                        f"task-progress-label-{task}", f"task-progress-detail-{task}", f"task-status-message-{task}",
+                        f"task-token-usage-counter-{task}", f"task-resolve-pr-conflicts-{task}", f"task-resolve-pr-conflicts-icon-{task}",
+                        f"task-pr-mode-{task}", f"task-pr-link-{task}-193"]:
+            self.plugin_node(tree, test_id)
+        card = self.plugin_node(tree, f"task-card-{task}")
+        self.assertEqual(card["type"], "Card")
+        self.assertEqual(card["props"]["meterTestID"], f"task-cpu-usage-bar-{task}")
+        self.assertEqual([item["testID"] for item in card["props"]["menu"]],
+                         ["move-task-to-done-menu-item", "rename-task-menu-item", "token-stats-task-menu-item", "delete-task-menu-item"])
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, f"task-progress-label-{task}")), "Building")
+        types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
+        self.assertEqual(types, {"Card", "Stack", "Text", "Icon", "Button", "Link", "Spacer", "PillPicker"}, "The task item is atoms only.")
 
-        def open_showcase(section, name):
-            runner = self.plugin_runner(showcase_root / section / name)
-            self.assertTrue(self.runner_message(runner)["ok"])
-            return runner
+        status = self.plugin_node(tree, f"task-status-message-{task}")
+        self.assertEqual(self.plugin_text(status), "Blocked: 2 checks failing")
+        self.assertEqual(status["props"]["color"], "red")
+        toggle_label = self.plugin_node(tree, "js-toggle-blocked")["children"][0]
+        self.assertEqual(self.plugin_text(toggle_label), "Unblock")
+        commits = {commit["step"]: commit for commit in rendered["commits"]}
+        blocked = commits["js-toggle-blocked:onPress"]
+        self.assertEqual(sorted(blocked["ops"]), ["text", "text", "update"], "Blocking re-renders only the status message and the toggle's label.")
+        self.assertEqual(set(blocked["touchedNodes"]), {status["id"], status["children"][0]["id"], toggle_label["children"][0]["id"]})
 
-        def tree_nodes(runner):
-            return self.plugin_nodes(self.runner_send(runner, "view")["tree"])
+        opened = commits[f"task-card-{task}:onPress"]
+        opened_count = self.plugin_node(tree, "js-opened-count")
+        self.assertEqual(self.plugin_text(opened_count), "Opened 1 times", "The card's onPress ran in JavaScript.")
+        self.assertEqual(opened["ops"], ["text"])
+        self.assertEqual(opened["touchedNodes"], [opened_count["children"][1]["id"]])
 
-        def node(runner, **match):
-            return self.runner_node(tree_nodes(runner), **match)
+        mode = commits[f"task-pr-mode-{task}:onChange"]
+        pill = self.plugin_node(tree, f"task-pr-mode-{task}")
+        self.assertEqual(pill["props"]["selected"], "merge")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "js-last-action")), "Last: mode merge")
+        self.assertEqual(sorted(mode["ops"]), ["text", "update"], "Choosing a mode updates the pill and the readout only.")
+        self.assertIn(pill["id"], mode["touchedNodes"])
+        self.assertEqual(self.plugin_node(tree, f"task-title-{task}")["updates"], 0, "The title never re-rendered.")
+        self.assertEqual(card["updates"], 0, "The card's own props never changed.")
 
-        def state(runner):
-            return self.runner_send(runner, "state")["state"]
-
-        def accepted(runner, command):
-            reply = self.runner_send(runner, command)
-            self.assertTrue(reply["ok"], f"{command}: {reply}")
-
-        def refused(runner, command, reason):
-            reply = self.runner_send(runner, command)
-            self.assertFalse(reply["ok"], f"{command} should be refused.")
-            self.assertIn(reason, reply["error"], command)
-
-        toggles = open_showcase("selection", "01-toggles")
-        switch = node(toggles, type="toggle", label="Notifications")["id"]
-        checkbox = node(toggles, type="toggle", style="checkbox")["id"]
-        accepted(toggles, f"type {switch} false")
-        self.assertIs(state(toggles)["notify"], False, "A toggle reports a real boolean.")
-        accepted(toggles, f"fire {checkbox} onChange true")
-        self.assertIs(state(toggles)["autosave"], True)
-        refused(toggles, f"type {switch} maybe", "true or false")
-        refused(toggles, f"fire {switch} onChange 5", "expected true or false")
-        refused(toggles, f"fire {switch} onChange", "needs a bool value")
-        refused(toggles, f"fire {switch} onTap", "has no onTap action")
-        self.assertIs(state(toggles)["notify"], False, "A refused value leaves the state alone.")
-
-        sliders = open_showcase("selection", "03-slider")
-        effort = node(sliders, type="slider", label="Effort")["id"]
-        accepted(sliders, f"type {effort} 3")
-        self.assertEqual(state(sliders)["effort"], 3)
-        accepted(sliders, f"fire {effort} onChange 2.5")
-        self.assertEqual(state(sliders)["effort"], 2.5)
-        refused(sliders, f"type {effort} lots", "takes a number")
-        refused(sliders, f"fire {effort} onChange \"lots\"", "expected a number")
-
-        choices = open_showcase("selection", "02-segmented-and-picker")
-        layout = node(choices, type="segmented", value="list")["id"]
-        picker = node(choices, type="picker")["id"]
-        accepted(choices, f"fire {layout} onChange \"board\"")
-        self.assertEqual(state(choices)["layout"], "board")
-        refused(choices, f"fire {layout} onChange \"carousel\"", "isn't one of the options")
-        accepted(choices, f"type {picker} high")
-        self.assertEqual(state(choices)["priority"], "high")
-        refused(choices, f"type {picker} urgent", "isn't one of the options")
-        self.assertEqual((state(choices)["layout"], state(choices)["priority"]), ("board", "high"))
-
-        menus = open_showcase("overlays", "01-menus")
-        sort = node(menus, type="menu", title="Sort")
-        self.assertEqual([child["type"] for child in sort["children"]], ["menu-item", "menu-item", "divider", "menu-item", "menu-item"])
-        accepted(menus, f"tap {node(menus, type='menu-item', title='Date')['id']}")
-        self.assertEqual((state(menus)["byDate"], state(menus)["byName"], state(menus)["last"]), (True, False, "Sorted by date"))
-
-        popover = open_showcase("overlays", "03-popover")
-        closed = node(popover, type="popover")
-        self.assertEqual([child["type"] for child in closed["children"]], ["button"], "A closed popover keeps only its anchor.")
-        refused(popover, f"fire {closed['id']} onDismiss", "is closed")
-        accepted(popover, f"tap {closed['children'][0]['id']}")
-        self.assertEqual(len(node(popover, type="popover")["children"]), 4, "An open popover shows its content.")
-        accepted(popover, f"fire {closed['id']} onDismiss")
-        self.assertEqual(len(node(popover, type="popover")["children"]), 1)
-
-        sheet = open_showcase("overlays", "04-sheet")
-        self.assertEqual(node(sheet, type="sheet")["children"], [], "A closed sheet has no content.")
-        accepted(sheet, f"tap {node(sheet, type='button', title='Rename project…')['id']}")
-        self.assertEqual([child["type"] for child in node(sheet, type="sheet")["children"]], ["heading", "textfield", "hstack"])
-        accepted(sheet, f"type {node(sheet, type='textfield')['id']} Roadmap")
-        accepted(sheet, f"tap {node(sheet, type='button', title='Save')['id']}")
-        self.assertEqual((state(sheet)["name"], state(sheet)["open"]), ("Roadmap", False))
-        self.assertEqual(node(sheet, type="sheet")["children"], [])
-
-        dialogs = open_showcase("overlays", "05-dialogs")
-        confirm = node(dialogs, type="confirm-dialog")["id"]
-        alert = node(dialogs, type="alert")["id"]
-        refused(dialogs, f"fire {confirm} onConfirm", "is closed")
-        refused(dialogs, f"fire {alert} onDismiss", "is closed")
-        delete = node(dialogs, type="button", title="Delete project…")["id"]
-        accepted(dialogs, f"tap {delete}")
-        self.assertIs(state(dialogs)["confirming"], True)
-        accepted(dialogs, f"fire {confirm} onCancel")
-        self.assertEqual((state(dialogs)["result"], state(dialogs)["confirming"]), ("Cancelled", False))
-        refused(dialogs, f"fire {confirm} onCancel", "is closed")
-        accepted(dialogs, f"tap {delete}")
-        accepted(dialogs, f"fire {confirm} onConfirm")
-        self.assertEqual((state(dialogs)["result"], state(dialogs)["confirming"]), ("Deleted", False))
-        accepted(dialogs, f"tap {node(dialogs, type='button', title='Show alert')['id']}")
-        accepted(dialogs, f"fire {alert} onDismiss")
-        self.assertEqual(state(dialogs)["result"], "Alert dismissed")
-
-        pressed = open_showcase("buttons", "03-icon-buttons")
-        accepted(pressed, f"tap {node(pressed, type='icon-button', title='Edit')['id']}")
-        self.assertEqual(state(pressed)["last"], "edit", "An icon button reports its press.")
-        copying = open_showcase("buttons", "04-copy-button")
-        accepted(copying, f"fire {node(copying, type='copy-button', text='Copy all')['id']} onCopy")
-        self.assertEqual(state(copying)["copies"], 1)
-
-        fields = open_showcase("text-input", "02-fields")
-        accepted(fields, f"type {node(fields, type='secure-field')['id']} abc")
-        accepted(fields, f"type {node(fields, type='search-field')['id']} plugin")
-        accepted(fields, f"type {node(fields, type='text-editor')['id']} hello")
-        accepted(fields, f"fire {node(fields, type='search-field')['id']} onSubmit")
-        self.assertEqual([state(fields)[key] for key in ["secretLength", "query", "notes", "submits"]], [3, "plugin", "hello", 1])
-
-        chips = open_showcase("data", "02-chips")
-        first_chip = node(chips, type="chip", text="swift")["id"]
-        accepted(chips, f"fire {first_chip} onRemove")
-        self.assertEqual([tag["text"] for tag in state(chips)["tags"]], ["plugins"], "Removing a chip drops it.")
-
-        dates = open_showcase("pickers", "01-date-picker")
-        picker_id = node(dates, type="date-picker", label="Date")["id"]
-        self.assertEqual(state(dates)["day"], "2026-11-07T09:30:00Z")
-        accepted(dates, f"type {picker_id} 2026-12-01T08:00:00Z")
-        self.assertEqual(state(dates)["day"], "2026-12-01T08:00:00Z")
-
-        scroll = open_showcase("layout", "04-scroll")
-        self.assertEqual(len(node(scroll, type="scroll", axis="vertical")["children"]), 12)
-
-        display = [
-            ("typography", "03-labels-code-kbd", ["Pull request merged", "scripts/test-e2e.sh"]),
-            ("data", "01-badges", ["Ready", "success"]),
-            ("data", "03-cards", ["Panel", "Reviewing 3 pull requests"]),
-            ("feedback", "01-empty-states", ["No tasks yet", "Create a task to get started."]),
-            ("feedback", "02-hints", ["Add comment", "Merge conflict"]),
-            ("progress-status", "04-status-dots", ["In progress", "Blocked"]),
-            ("media", "02-images-avatars", ["Logo", "Ada Lovelace"]),
-        ]
-        for section, name, expected in display:
-            shown = {str(value) for item in tree_nodes(open_showcase(section, name))
-                     for key, value in item.get("props", {}).items() if key in ("text", "title", "message", "alt")}
-            for value in expected:
-                self.assertIn(value, shown, f"{section}/{name} shows {value}.")
-
-        bad = self.data_directory / "Plugins" / "bad-components"
-        self.write_plugin(
-            bad,
-            {"id": "bad-components", "name": "Bad components", "version": "1.0.0", "contributes": {"views": [{"id": "main", "title": "Bad"}]}},
-            {"main": {"type": "vstack", "children": [
-                {"type": "image", "props": {"src": "missing.png"}},
-                {"type": "image", "props": {"src": "../escape.png"}},
-                {"type": "icon", "props": {}},
-                {"type": "alert", "props": {"title": "Hi"}},
-                {"type": "menu", "children": [{"type": "text", "props": {"text": "Not an entry"}}]},
-                {"type": "menu-item", "props": {"title": "Stray"}},
-                {"type": "popover", "props": {"open": False}, "children": [{"type": "text", "props": {"text": "Anchor only"}}]},
-            ]}},
-        )
-        report, _ = self.call_cli("plugin", "validate", "--path", bad, expected_status=1)
-        issues = {(issue["file"], issue["path"]): issue["message"] for issue in self.assert_success(report)["issues"]}
-        self.assertIn("no file \"missing.png\"", issues[("view.json", "main.children[0].props.src")])
-        self.assertIn("inside the plugin folder", issues[("view.json", "main.children[1].props.src")])
-        self.assertIn("needs one of the props name, src", issues[("view.json", "main.children[2].props")])
-        self.assertIn("needs the prop \"open\"", issues[("view.json", "main.children[3].props")])
-        self.assertIn("only takes menu-item and divider", issues[("view.json", "main.children[4].children[0].type")])
-        self.assertIn("belongs directly inside menu or context-menu", issues[("view.json", "main.children[5].type")])
-        self.assertIn("needs at least 2 children", issues[("view.json", "main.children[6].children")])
-
-    # case-contract: test_plugin_installed_plugin_loads_validates_and_runs | A plugin folder in the data directory's Plugins folder appears in the Plugins menu with one Open item per view, and each view opens in its own window; clicking its button runs the logic.js action and updates the bound text, an action's api.call reaches the real daemon and shows its result while a call to an unknown command rejects with the daemon's error, the plugin's Reload item restarts the open window from initialState, and editing view.json reloads it. A plugin with problems shows its first problem in its submenu; the menu and `plugin list` validate through the same manager. `plugin new` scaffolds a valid plugin there and refuses an existing id, `plugin list` reports each installed plugin with its views and validation issues, and `plugin validate` reports unknown components, missing actions and reserved button contributions with their file and JSON path and exits non-zero. A showcase scaffold needs a showcase root and lands in its section as NN-<id> with a section.json. Through playhouse-plugin-dev the same plugin's button updates state, its api.call actions resolve and reject the same way and appear in its log, a disabled button refuses taps, and editing view.json reloads it.
-    def test_plugin_installed_plugin_loads_validates_and_runs(self):
-        plugins_directory = self.data_directory / "Plugins"
-        empty = self.assert_success(self.call_cli("plugin", "list")[0])
-        self.assertEqual(empty["plugins"], [])
-        self.assertEqual(os.path.realpath(empty["pluginsDirectory"]), os.path.realpath(plugins_directory))
-
-        created = self.assert_success(self.call_cli("plugin", "new", "--id", "hello-world")[0])
-        self.assertTrue(created["valid"], created["issues"])
-        hello = Path(created["directory"])
-        self.assertEqual(os.path.realpath(hello), os.path.realpath(plugins_directory / "hello-world"))
-        self.assertTrue((hello / "logic.js").is_file())
-        manifest = json.loads((hello / "plugin.json").read_text(encoding="utf-8"))
-        manifest["contributes"]["views"].append({"id": "details", "title": "Details"})
-        (hello / "plugin.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        scaffolded = json.loads((hello / "view.json").read_text(encoding="utf-8"))
-        scaffolded["details"] = {"type": "text", "props": {"text": "Details view: {{count}}"}}
-        (hello / "view.json").write_text(json.dumps(scaffolded, indent=2), encoding="utf-8")
-        duplicate, _ = self.call_cli("plugin", "new", "--id", "hello-world", expected_status=1)
-        self.assert_failure(duplicate, "already_exists")
-        bad_id, _ = self.call_cli("plugin", "new", "--id", "Bad Id", expected_status=2)
-        self.assert_failure(bad_id, "invalid_argument")
-
-        self.write_plugin(
-            plugins_directory / "broken",
-            {"id": "broken", "name": "Broken", "version": "1.0.0",
-             "contributes": {"views": [{"id": "main", "title": "Broken"}], "buttons": [{"id": "x"}]}},
-            {"main": {"type": "vstack", "children": [
-                {"type": "fancy-widget", "props": {}},
-                {"type": "button", "props": {"title": "Go", "onTap": {"action": "missing"}}},
-                {"type": "text", "props": {"text": "{{unclosed", "colour": "red"}},
-            ]}},
-            "export const initialState = {};\nexport const actions = { present() {} };\n",
-        )
-        listed = {plugin["id"]: plugin for plugin in self.assert_success(self.call_cli("plugin", "list")[0])["plugins"]}
-        self.assertEqual(sorted(listed), ["broken", "hello-world"])
-        self.assertTrue(listed["hello-world"]["valid"])
-        self.assertEqual(listed["hello-world"]["views"], [{"id": "main", "title": "Hello World"}, {"id": "details", "title": "Details"}],
-                         "Each contributed view is listed, in manifest order.")
-        self.assertFalse(listed["broken"]["valid"])
-
-        report, _ = self.call_cli("plugin", "validate", "--id", "broken", expected_status=1)
-        report = self.assert_success(report)
-        self.assertFalse(report["valid"])
-        issues = {(issue["file"], issue["path"]): issue["message"] for issue in report["issues"]}
-        self.assertIn("Unknown component \"fancy-widget\"", issues[("view.json", "main.children[0].type")])
-        self.assertIn("no action named \"missing\"", issues[("view.json", "main.children[1].props.onTap.action")])
-        self.assertIn("Unclosed binding", issues[("view.json", "main.children[2].props.text")])
-        self.assertIn("no prop \"colour\"", issues[("view.json", "main.children[2].props.colour")])
-        self.assertIn("reserved", issues[("plugin.json", "contributes.buttons")])
-        valid = self.assert_success(self.call_cli("plugin", "validate", "--path", hello)[0])
-        self.assertEqual((valid["valid"], valid["issues"]), (True, []))
-        unknown, _ = self.call_cli("plugin", "validate", "--id", "no-such-plugin", expected_status=3)
-        self.assert_failure(unknown, "not_found")
-
-        no_root, _ = self.call_cli("plugin", "new", "--id", "fresh", "--template", "showcase", "--section", "buttons", expected_status=2)
-        self.assert_failure(no_root, "invalid_argument")
-        showcase_root = self.data_directory / "showcase-root"
-        showcase = self.assert_success(self.call_cli("plugin", "new", "--id", "fresh", "--template", "showcase", "--section", "buttons", "--path", showcase_root)[0])
-        self.assertTrue(showcase["valid"], showcase["issues"])
-        self.assertEqual(os.path.realpath(showcase["directory"]), os.path.realpath(showcase_root / "buttons" / "01-fresh"))
-        self.assertEqual(json.loads((showcase_root / "buttons" / "section.json").read_text(encoding="utf-8"))["title"], "Buttons")
-
-        (hello / "view.json").write_text(json.dumps({"main": {"type": "vstack", "children": [
-            {"type": "text", "props": {"text": "Clicked {{count}} times"}},
-            {"type": "button", "props": {"title": "Click me", "onTap": {"action": "increment"}}},
-            {"type": "button", "props": {"title": "Locked", "disabled": "{{!count}}", "onTap": {"action": "increment"}}},
-            {"type": "button", "props": {"title": "Check daemon", "onTap": {"action": "checkDaemon"}}},
-            {"type": "button", "props": {"title": "Call missing", "onTap": {"action": "callMissing"}}},
-            {"type": "text", "props": {"text": "Daemon: {{daemon}}"}},
-            {"type": "text", "props": {"text": "API error: {{apiError}}"}},
-        ]}, "details": {"type": "text", "props": {"text": "Details view: {{count}}"}}}, indent=2), encoding="utf-8")
-        (hello / "logic.js").write_text(HELLO_PLUGIN_LOGIC, encoding="utf-8")
-        runner = self.plugin_runner(hello)
-        self.assertEqual(self.runner_message(runner)["event"], "loaded")
-        nodes = self.plugin_nodes(self.runner_send(runner, "view")["tree"])
-        click = next(node for node in nodes if node.get("props", {}).get("title") == "Click me")
-        locked = next(node for node in nodes if node.get("props", {}).get("title") == "Locked")
-        refused = self.runner_send(runner, f"tap {locked['id']}")
-        self.assertFalse(refused["ok"])
-        self.assertIn("is disabled", refused["error"])
-        self.assertTrue(self.runner_send(runner, f"tap {click['id']}")["ok"])
-        self.assertEqual(self.runner_send(runner, "state")["state"]["count"], 1)
-        texts = [node["props"].get("text") for node in self.plugin_nodes(self.runner_send(runner, "view")["tree"]) if node["type"] == "text"]
-        self.assertEqual(texts[0], "Clicked 1 times")
-        self.assertTrue(self.runner_send(runner, f"tap {self.runner_node(nodes, title='Check daemon')['id']}")["ok"])
-        self.assertEqual(self.runner_send(runner, "state")["state"]["daemon"], "bridge v1", "api.call reaches the real daemon and resolves with its result.")
-        self.assertTrue(self.runner_send(runner, f"tap {self.runner_node(nodes, title='Call missing')['id']}")["ok"])
-        self.assertIn("Unknown command 'no.such.command'", self.runner_send(runner, "state")["state"]["apiError"],
-                      "A failed api.call rejects with the daemon's error.")
-        log = [entry["message"] for entry in self.runner_send(runner, "log 100")["log"]]
-        self.assertTrue(any(message.startswith("api.call status") for message in log), log)
-        self.assertTrue(any("api.call no.such.command failed" in message for message in log), log)
-        self.assertTrue(self.runner_send(runner, f"tap {locked['id']}")["ok"], "Once count is 1 the bound disabled flag is cleared.")
-
-        (hello / "view.json").write_text(json.dumps({"main": {"type": "vstack", "children": [
-            {"type": "heading", "props": {"text": "Edited live"}},
-            {"type": "text", "props": {"text": "Clicked {{count}} times"}},
-        ]}, "details": {"type": "text", "props": {"text": "Details view: {{count}}"}}}, indent=2), encoding="utf-8")
-        deadline = time.monotonic() + 15
-        reloaded = None
-        while time.monotonic() < deadline and reloaded is None:
-            try:
-                line = runner.messages.get(timeout=max(0.1, deadline - time.monotonic()))
-            except queue.Empty:
-                break
-            message = json.loads(line) if line else {}
-            if message.get("event") == "reloaded":
-                reloaded = message
-        self.assertIsNotNone(reloaded, "Editing view.json reloads the plugin.")
-        after = self.plugin_nodes(self.runner_send(runner, "view")["tree"])
-        self.assertIn("Edited live", [node["props"].get("text") for node in after])
-        self.assertEqual(self.runner_send(runner, "state")["state"], {"count": 0, "daemon": "unknown", "apiError": "none"}, "A reload starts again from initialState.")
-        runner.stdin.write("quit\n")
-        runner.stdin.flush()
-        self.assertEqual(runner.wait(timeout=10), 0)
-    # case-contract: test_plugin_failures_show_errors_and_recover | A plugin action that throws reports its error: playhouse-plugin-dev's tap fails with it and logs the exception, and the plugin window shows it inline until an action succeeds, with the plugin still usable. An action that runs for about 10 seconds without yielding marks the plugin hung: the runner emits a hung event and refuses later taps, the window shows the hang, and reloading starts a fresh working copy. A logic.js that fails to load shows its error in the window and in the runner's loaded event, `plugin validate` reports it, and a logic.js whose top level never finishes is reported after 5 seconds by a short-lived check process that is killed, leaving the daemon responsive.
-    def test_plugin_failures_show_errors_and_recover(self):
-        plugins_directory = self.data_directory / "Plugins"
-        manifest = lambda plugin_id, name: {"id": plugin_id, "name": name, "version": "1.0.0", "contributes": {"views": [{"id": "main", "title": name}]}}
-        fragile = plugins_directory / "fragile"
-        self.write_plugin(fragile, manifest("fragile", "Fragile"), FRAGILE_PLUGIN_VIEW, FRAGILE_PLUGIN_LOGIC)
-        unparsable = plugins_directory / "unparsable"
-        self.write_plugin(unparsable, manifest("unparsable", "Unparsable"), {"main": {"type": "text", "props": {"text": "Never shown"}}},
-                          "export const actions = {\n")
-        runaway = plugins_directory / "runaway"
-        self.write_plugin(runaway, manifest("runaway", "Runaway"), {"main": {"type": "text", "props": {"text": "Never shown"}}}, "while (true) {}\n")
-
-        runner = self.plugin_runner(fragile)
-        self.assertEqual(self.runner_message(runner)["event"], "loaded")
-        nodes = self.plugin_nodes(self.runner_send(runner, "view")["tree"])
-        exploded = self.runner_send(runner, f"tap {self.runner_node(nodes, title='Explode')['id']}")
-        self.assertFalse(exploded["ok"])
-        self.assertIn("Kaboom", exploded["error"], "A throwing action fails its tap with the exception.")
-        log = [entry for entry in self.runner_send(runner, "log 100")["log"] if entry["level"] == "exception"]
-        self.assertTrue(any("Action explode failed: Kaboom" in entry["message"] for entry in log), log)
-        self.assertEqual(self.runner_send(runner, "state")["state"], {"count": 0})
-        self.assertTrue(self.runner_send(runner, f"tap {self.runner_node(nodes, title='Increment')['id']}")["ok"])
-        self.assertEqual(self.runner_send(runner, "state")["state"], {"count": 1}, "A failed action leaves the plugin usable.")
-
-        started = time.monotonic()
-        spun = self.runner_send(runner, f"tap {self.runner_node(nodes, title='Spin')['id']}", timeout=40)
-        self.assertFalse(spun["ok"])
-        self.assertIn("marked hung", spun["error"])
-        self.assertGreaterEqual(time.monotonic() - started, 9, "The watchdog waits about 10 seconds before calling a plugin hung.")
-        hung = self.runner_wait_for_event(runner, "hung")
-        self.assertIn("without yielding", hung["error"])
-        refused = self.runner_send(runner, f"tap {self.runner_node(nodes, title='Increment')['id']}")
-        self.assertFalse(refused["ok"])
-        self.assertIn("hung", refused["error"], "A hung plugin refuses further taps.")
-        self.assertEqual(self.runner_send(runner, "reload")["command"], "reload")
-        self.runner_wait_for_event(runner, "reloaded")
-        nodes = self.plugin_nodes(self.runner_send(runner, "view")["tree"])
-        self.assertTrue(self.runner_send(runner, f"tap {self.runner_node(nodes, title='Increment')['id']}")["ok"], "Reloading starts a fresh, working copy.")
-        self.assertEqual(self.runner_send(runner, "state")["state"], {"count": 1})
-        runner.stdin.write("quit\n")
-        runner.stdin.flush()
-        self.assertEqual(runner.wait(timeout=10), 0)
-
-        broken_runner = self.plugin_runner(unparsable)
-        loaded = self.runner_message(broken_runner)
-        self.assertEqual(loaded["event"], "loaded")
-        self.assertFalse(loaded["ok"])
-        self.assertIn("logic.js failed to load", loaded["error"])
-        self.assertFalse(self.runner_send(broken_runner, "view")["ok"])
-        broken_runner.stdin.write("quit\n")
-        broken_runner.stdin.flush()
-        self.assertEqual(broken_runner.wait(timeout=10), 0)
-
-        report, _ = self.call_cli("plugin", "validate", "--path", unparsable, expected_status=1)
-        issues = self.assert_success(report)["issues"]
-        self.assertTrue(any(issue["file"] == "logic.js" and "failed to load" in issue["message"] for issue in issues), issues)
-        # Validate the runaway plugin in the background and probe the daemon while its check runs.
-        outcome = {}
-
-        def validate_runaway():
-            started = time.monotonic()
-            outcome["report"] = self.call_cli("plugin", "validate", "--path", runaway, expected_status=1)[0]
-            outcome["seconds"] = time.monotonic() - started
-
-        worker = threading.Thread(target=validate_runaway)
-        worker.start()
-        check_process_seen = False
-        deadline = time.monotonic() + 4
-        while time.monotonic() < deadline and not check_process_seen:
-            running = subprocess.run(["pgrep", "-f", f"list-actions {runaway}"], capture_output=True, text=True).stdout.split()
-            check_process_seen = bool(running)
-            if not check_process_seen:
-                time.sleep(0.05)
-        self.assertTrue(check_process_seen, "logic.js is checked in a playhouse-plugin-dev child process, not inside the daemon.")
-        probe_started = time.monotonic()
-        status = self.assert_success(self.call_cli("status")[0])
-        probe_seconds = time.monotonic() - probe_started
-        self.assertTrue(worker.is_alive(), "The probe ran while the runaway check was still in progress.")
-        self.assertEqual(status["bridgeVersion"], 1)
-        self.assertLess(probe_seconds, 2.5, "The daemon keeps answering other requests while a logic.js check is waiting.")
-        worker.join(timeout=60)
-        self.assertFalse(worker.is_alive())
-        issues = self.assert_success(outcome["report"])["issues"]
-        self.assertTrue(any(issue["file"] == "logic.js" and "did not finish loading within 5 seconds" in issue["message"] for issue in issues), issues)
-        self.assertLess(outcome["seconds"], 20)
-        leftovers = subprocess.run(["pgrep", "-f", f"list-actions {runaway}"], capture_output=True, text=True).stdout.split()
-        self.assertEqual(leftovers, [], "The check process is killed on timeout.")
-        listed = {plugin["id"]: plugin for plugin in self.assert_success(self.call_cli("plugin", "list", timeout=120)[0])["plugins"]}
-        self.assertTrue(listed["fragile"]["valid"])
-        self.assertFalse(listed["unparsable"]["valid"])
-        self.assertFalse(listed["runaway"]["valid"])
+        menu = self.assert_success(self.call_cli("plugin", "render", "--page", "TaskItem", "--event", f"task-card-{task}:onMenu:done")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(menu["tree"], "js-last-action")), "Last: menu done", "A menu item runs onMenu with its id.")
+        self.assertEqual(menu["commits"][-1]["ops"], ["text"])
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "TaskItem", "--event", f"task-pr-mode-{task}:onPress", expected_status=2)[0], "invalid_argument")
 
     # Scheduled tasks. Firing goes through ConversationManager.send, the same path the
     # composer's Send and `conversation send` use for both providers, so the schedule

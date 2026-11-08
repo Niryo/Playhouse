@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "Playhouse" / "App"
 FILES = tuple(sorted(APP.rglob("*.swift")))
 # Files whose controls are menu-bar commands rather than views in the window.
-MENU_BAR_FILES = {"PlayhouseApp.swift", "DebugConversationImport/DebugConversationImport.swift", "Plugins/Renderer/PluginsMenu.swift"}
+MENU_BAR_FILES = {"PlayhouseApp.swift", "DebugConversationImport/DebugConversationImport.swift"}
 CONTROL = re.compile(r"\b(Button(?=\s*(?:\(|\{))|Link(?=\s*\()|Menu(?=\s*\{))")
 
 
