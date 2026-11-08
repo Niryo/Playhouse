@@ -102,6 +102,8 @@ shared_sources=(
   "${repository_root}/Playhouse/App/StandaloneChatStore.swift"
   "${repository_root}/Playhouse/App/SkillCatalog.swift"
   "${repository_root}/Playhouse/App/RuleCatalog.swift"
+  "${repository_root}/Playhouse/App/McpCatalog.swift"
+  "${repository_root}/Playhouse/App/CodexConfigTOML.swift"
   "${repository_root}/Playhouse/App/BridgeCore.swift"
   "${repository_root}/Playhouse/App/TaskSchedule.swift"
   "${repository_root}/Playhouse/Bridge/BridgeContract.swift"

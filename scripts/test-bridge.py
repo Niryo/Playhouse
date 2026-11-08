@@ -9214,7 +9214,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         probe = self.data_directory / "codex-question-ownership-probe"
         core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
                 "CodexSocketConnection", "AgentRunHost", "ConversationModel", "ClaudeCodeClient", "ProviderRequestLog", "ProcessCPUSampler", "AgentUsage", "AgentUsageStore", "ConversationTranscriptStore",
-                "StandaloneChatStore", "SkillCatalog", "RuleCatalog", "BridgeCore", "TaskSchedule"]
+                "StandaloneChatStore", "SkillCatalog", "RuleCatalog", "McpCatalog", "CodexConfigTOML", "BridgeCore", "TaskSchedule"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine", "JavaScriptCore"):
             command.extend(["-framework", framework])
@@ -12641,7 +12641,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
     def rule_section(self, catalog, name):
         return self.rules_by_name(next(section for section in catalog["repositories"] if section["name"] == name)["rules"])
 
-    # case-contract: test_rules_catalog_lists_repo_global_and_managed_rules | The Skills page, titled Skills & Rules, switches to its Rules list with a Skills | Rules picker. Rules lists each task repository's instruction files from its worktree (AGENTS.override.md, AGENTS.md, CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, and every .md file under .claude/rules, keyed by the source repository and the file's path), the user's global rules (~/.agents/AGENTS.md, Codex's AGENTS.md, and Claude's CLAUDE.md and rules folder), and the organization's managed CLAUDE.md. Each rule names the agents that follow it in Playhouse sessions and the ones that read it natively: a repository AGENTS.md beside a CLAUDE.md is followed by both but read natively only by Codex, ~/.agents/AGENTS.md is read natively by neither yet shared with both, a CLAUDE.md symlinked to AGENTS.md is one Linked rule read natively by both, AGENTS.override.md is Codex's own and leaves the AGENTS.md beside it to Claude, a .claude/rules file shows its paths globs, the managed CLAUDE.md is Claude's only and read-only, and an @import of a missing file is flagged as a problem. A repository without rules shows an empty state. Reading a rule returns its file exactly, and an unknown rule is not_found.
+    # case-contract: test_rules_catalog_lists_repo_global_and_managed_rules | The Skills page, titled Skills, Rules & MCP, switches to its Rules list with a Skills | Rules | MCP picker. Rules lists each task repository's instruction files from its worktree (AGENTS.override.md, AGENTS.md, CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, and every .md file under .claude/rules, keyed by the source repository and the file's path), the user's global rules (~/.agents/AGENTS.md, Codex's AGENTS.md, and Claude's CLAUDE.md and rules folder), and the organization's managed CLAUDE.md. Each rule names the agents that follow it in Playhouse sessions and the ones that read it natively: a repository AGENTS.md beside a CLAUDE.md is followed by both but read natively only by Codex, ~/.agents/AGENTS.md is read natively by neither yet shared with both, a CLAUDE.md symlinked to AGENTS.md is one Linked rule read natively by both, AGENTS.override.md is Codex's own and leaves the AGENTS.md beside it to Claude, a .claude/rules file shows its paths globs, the managed CLAUDE.md is Claude's only and read-only, and an @import of a missing file is flagged as a problem. A repository without rules shows an empty state. Reading a rule returns its file exactly, and an unknown rule is not_found.
     def test_rules_catalog_lists_repo_global_and_managed_rules(self):
         working = self.make_skill_repository("rules-catalog-repo", {
             "AGENTS.md": "# Repository conventions\nUse tabs.\n",
@@ -13025,6 +13025,639 @@ class PlayhouseBridgeTests(unittest.TestCase):
         rules_section = instructions[instructions.index("# Rules Playhouse shares with you"):]
         resumed = history["threadResumeDeveloperInstructions"][-1]
         self.assertEqual(resumed[resumed.index("# Rules Playhouse shares with you"):], rules_section, "The resumed thread gets the same rules.")
+
+    # MCP servers
+
+    @property
+    def mcp_claude_state(self):
+        """Claude Code's state file in the isolated home: its user MCP servers."""
+        return self.skills_home / ".claude.json"
+
+    @property
+    def mcp_codex_config(self):
+        return self.skills_codex_home / "config.toml"
+
+    @property
+    def mcp_managed(self):
+        return self.rules_managed / "managed-mcp.json"
+
+    def write_json(self, path, value):
+        self.write_file(path, json.dumps(value, indent=2) + "\n")
+
+    def read_json(self, path):
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+
+    def read_toml(self, path):
+        import tomllib
+        return tomllib.loads(Path(path).read_text(encoding="utf-8"))
+
+    def mcp_catalog(self, task_id=None):
+        command = ["mcp", "list"]
+        if task_id:
+            command += ["--task", task_id]
+        return self.assert_success(self.call_cli(*command)[0])
+
+    @staticmethod
+    def mcp_by_name(servers):
+        return {server["name"]: server for server in servers}
+
+    def mcp_section(self, catalog, name):
+        return self.mcp_by_name(next(section for section in catalog["repositories"] if section["name"] == name)["servers"])
+
+    def mcp_server(self, task_id, server_id):
+        return next(server for server in self.all_mcp_servers(self.mcp_catalog(task_id)) if server["id"] == server_id)
+
+    @staticmethod
+    def all_mcp_servers(catalog):
+        return [server for section in catalog["repositories"] for server in section["servers"]] + catalog["global"] + catalog["managed"]
+
+    def install_codex_fixture(self, name):
+        """Installs the Codex app-server fixture without running a turn, and returns its environment."""
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / name
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        return {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+
+    # case-contract: test_mcp_catalog_lists_repo_global_and_managed_servers | The Skills page, titled Skills, Rules & MCP, switches to its MCP list with a Skills | Rules | MCP picker. MCP lists each task repository's servers from its worktree's .mcp.json and .codex/config.toml (keyed by the source repository and the server's name), the user's global servers from Claude Code's ~/.claude.json and Codex's config.toml, and the organization's managed-mcp.json. Each server shows its command or URL and only the names of its environment variables and headers, never their values, and names the agents that start it on their own and the ones Playhouse passes it to: a .mcp.json server is Claude's own and passed to Codex, a server defined the same way in both global files is one entry both CLIs start, a server only one CLI defines is passed to the other, an SSE server or one with a working folder reaches only the agent that can run it with the reason shown, a server Codex's config.toml turns off reaches neither, a server written inline in config.toml is listed but not editable, two global definitions that differ are flagged as a conflict, and the managed server is Claude's only and read-only. A repository without servers shows an empty state and an unreadable configuration file is reported. Reading a server returns its full definition, and an unknown server is not_found.
+    def test_mcp_catalog_lists_repo_global_and_managed_servers(self):
+        working = self.make_skill_repository("mcp-catalog-repo", {
+            ".mcp.json": json.dumps({"mcpServers": {
+                "repo-docs": {"type": "stdio", "command": "node", "args": ["docs.js"],
+                              "env": {"DOCS_TOKEN": "${DOCS_TOKEN}", "DOCS_MODE": "secret-mode-value"}},
+                "repo-sse": {"type": "sse", "url": "https://sse.example.com/mcp"},
+            }}),
+            ".codex/config.toml": '[mcp_servers.repo-codex]\ncommand = "python3"\nargs = ["serve.py"]\n',
+        })
+        other = self.make_skill_repository("mcp-other-repo", {
+            ".mcp.json": json.dumps({"mcpServers": {
+                "other-api": {"type": "http", "url": "https://api.example.com/mcp", "headers": {"Authorization": "Bearer ${API_TOKEN}"}},
+            }}),
+            ".codex/config.toml": "[mcp_servers.broken\ncommand = \n",
+        })
+        empty = self.make_skill_repository("mcp-empty-repo", {})
+        self.write_json(self.mcp_claude_state, {"numStartups": 5, "mcpServers": {
+            "shared": {"type": "stdio", "command": "npx", "args": ["-y", "shared-server"], "env": {}},
+            "claude-only": {"type": "http", "url": "https://claude.example.com/mcp", "headers": {"X-Team": "core-secret-team"}},
+            "clash": {"type": "stdio", "command": "clash-a", "args": [], "env": {}},
+        }})
+        self.write_file(self.mcp_codex_config, "\n".join([
+            'model = "gpt-6-luna"', "",
+            "[mcp_servers]", 'inline-tool = { command = "inline-tool" }', "",
+            "[mcp_servers.shared]", 'command = "npx"', 'args = ["-y", "shared-server"]', "",
+            "[mcp_servers.codex-only]", 'command = "uvx"', 'args = ["codex-tool"]', 'env_vars = ["CODEX_TOOL_KEY"]', "",
+            "[mcp_servers.clash]", 'command = "clash-b"', "",
+            "[mcp_servers.folder-tool]", 'command = "./tool"', 'cwd = "."', "",
+            "[mcp_servers.off-tool]", 'command = "off-tool"', "enabled = false", "",
+        ]))
+        self.write_json(self.mcp_managed, {"mcpServers": {"company": {"type": "http", "url": "https://mcp.company.example/mcp"}}})
+
+        task = self.create_skills_task("MCP catalog", [working, other, empty])
+        worktrees = {record["repositoryPath"]: record["worktreePath"] for record in task["repositoryWorktrees"]}
+        catalog = self.mcp_catalog(task["id"])
+        self.assertEqual([section["name"] for section in catalog["repositories"]], ["mcp-catalog-repo", "mcp-other-repo", "mcp-empty-repo"])
+        self.assertEqual(catalog["repositories"][0]["repositoryPath"], str(working), "Servers are keyed by the source repository.")
+        self.assertSamePath(catalog["repositories"][0]["rootPath"], worktrees[str(working)])
+        self.assertEqual(catalog["repositories"][2]["servers"], [], "A repository without servers has an empty section.")
+        self.assertEqual([os.path.realpath(problem["path"]) for problem in catalog["problems"]],
+                         [os.path.realpath(Path(worktrees[str(other)]) / ".codex" / "config.toml")], "An unreadable config file is reported.")
+        serialized = json.dumps(catalog)
+        for secret in ["secret-mode-value", "core-secret-team", "Bearer ${API_TOKEN}", "${DOCS_TOKEN}"]:
+            self.assertNotIn(secret, serialized, "The list names variables and headers, never their values.")
+
+        repo = self.mcp_section(catalog, "mcp-catalog-repo")
+        self.assertEqual(list(repo), ["repo-codex", "repo-docs", "repo-sse"])
+        docs = repo["repo-docs"]
+        self.assertEqual(docs["id"], f"repo:{working}#repo-docs")
+        self.assertEqual(docs["summary"], "node docs.js")
+        self.assertEqual(docs["transport"], "stdio")
+        self.assertEqual(docs["envNames"], ["DOCS_MODE", "DOCS_TOKEN"])
+        self.assertEqual(docs["nativeProviders"], ["claude"], ".mcp.json is Claude Code's own.")
+        self.assertEqual(docs["providers"], ["claude", "codex"])
+        self.assertEqual(docs["sharedWith"], ["codex"], "Playhouse passes it to Codex.")
+        self.assertEqual([location["layout"] for location in docs["locations"]], ["projectJSON"])
+        self.assertTrue(docs["linkable"])
+        self.assertEqual(repo["repo-sse"]["providers"], ["claude"], "Codex can't run an SSE server.")
+        self.assertIn("SSE", repo["repo-sse"]["limitation"])
+        self.assertFalse(repo["repo-sse"]["linkable"])
+        self.assertEqual(repo["repo-codex"]["nativeProviders"], ["codex"])
+        self.assertEqual(repo["repo-codex"]["providers"], ["claude", "codex"])
+        other_api = self.mcp_section(catalog, "mcp-other-repo")["other-api"]
+        self.assertEqual(other_api["headerNames"], ["Authorization"])
+        self.assertEqual(other_api["sharedWith"], ["claude", "codex"], "Neither agent reads another task repository's servers on its own.")
+
+        global_servers = self.mcp_by_name(catalog["global"])
+        self.assertEqual(list(global_servers), ["clash", "claude-only", "codex-only", "folder-tool", "inline-tool", "off-tool", "shared"])
+        shared = global_servers["shared"]
+        self.assertEqual(shared["id"], "global:shared")
+        self.assertEqual([location["layout"] for location in shared["locations"]], ["claudeUser", "codexGlobal"], "Both files define one server.")
+        self.assertTrue(shared["availableOutsidePlayhouse"])
+        self.assertEqual(shared["sharedWith"], [])
+        self.assertFalse(shared["conflict"])
+        clash = global_servers["clash"]
+        self.assertTrue(clash["conflict"])
+        self.assertIn("differently", clash["issue"])
+        self.assertFalse(clash["linkable"])
+        self.assertEqual(global_servers["claude-only"]["sharedWith"], ["codex"])
+        self.assertEqual(global_servers["claude-only"]["headerNames"], ["X-Team"])
+        self.assertEqual(global_servers["codex-only"]["sharedWith"], ["claude"])
+        self.assertEqual(global_servers["codex-only"]["envNames"], ["CODEX_TOOL_KEY"])
+        self.assertEqual(global_servers["folder-tool"]["providers"], ["codex"], "Claude Code can't run a server with a working folder.")
+        self.assertIn("working folder", global_servers["folder-tool"]["limitation"])
+        self.assertEqual(global_servers["off-tool"]["providers"], [], "A server Codex's config turns off reaches neither agent.")
+        self.assertIn("enabled = false", global_servers["off-tool"]["limitation"])
+        self.assertFalse(global_servers["inline-tool"]["locations"][0]["editable"], "An inline config.toml server is left to the user.")
+        self.assertFalse(global_servers["inline-tool"]["editable"], "An inline config.toml server is not editable.")
+        self.assertEqual(global_servers["inline-tool"]["providers"], ["claude", "codex"])
+
+        managed = catalog["managed"]
+        self.assertEqual([server["id"] for server in managed], ["managed:company"])
+        self.assertEqual(managed[0]["providers"], ["claude"], "The managed server is Claude's only.")
+        self.assertFalse(managed[0]["editable"])
+
+        detail = self.assert_success(self.call_cli("mcp", "get", "--task", task["id"], "--server", "global:claude-only")[0])
+        self.assertEqual(detail["server"]["id"], "global:claude-only")
+        self.assertEqual(detail["config"]["url"], "https://claude.example.com/mcp")
+        self.assertEqual(detail["config"]["headers"], {"X-Team": "core-secret-team"}, "Reading a server returns its full definition.")
+        codex_detail = self.assert_success(self.call_cli("mcp", "get", "--task", task["id"], "--server", "global:codex-only")[0])["config"]
+        self.assertEqual(codex_detail["env"], {"CODEX_TOOL_KEY": "${CODEX_TOOL_KEY}"}, "Codex's env_vars read as ${NAME} references.")
+        self.assert_failure(self.call_cli("mcp", "get", "--task", task["id"], "--server", "global:no-such-server", expected_status=3)[0], "not_found")
+        without_task = self.mcp_catalog()
+        self.assertEqual(without_task["repositories"], [])
+        self.assertEqual([server["name"] for server in without_task["global"]], list(global_servers))
+
+    # case-contract: test_mcp_create_update_and_delete_in_both_configs | New Server writes a global server straight into both Claude Code's ~/.claude.json mcpServers and Codex's config.toml [mcp_servers] table, with ${NAME} environment references written as Codex env_vars and every other setting, comment and server in both files kept; a repository server goes into the chosen task worktree's .mcp.json and the source checkout is left alone. An invalid name, a missing command, an SSE server, a URL that is not http, an environment reference Codex can't pass through, the managed scope, and an existing name are rejected with nothing written. Clicking a server opens its editor, and saving rewrites it in every file that defines it while keeping each provider's own keys, such as Codex's startup_timeout_sec and Claude's oauth; an invalid edit and an edit to a server written inline in config.toml are rejected while keeping the files. Deleting a server removes it from every file that defines it, and every change is visible to a fresh CLI process and on the page.
+    def test_mcp_create_update_and_delete_in_both_configs(self):
+        repository = self.make_skill_repository("mcp-manage-repo", {})
+        task = self.create_skills_task("MCP manage", [repository])
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        self.write_json(self.mcp_claude_state, {"numStartups": 7, "projects": {"/elsewhere": {"allowedTools": []}}, "mcpServers": {
+            "legacy": {"type": "http", "url": "https://legacy.example.com/mcp", "oauth": {"clientId": "abc"}},
+        }})
+        codex_text = "\n".join([
+            "# my settings", 'model = "gpt-6-luna"', "",
+            "[mcp_servers]", 'inline-tool = { command = "inline-tool" }', "",
+            "[mcp_servers.legacy]", 'url = "https://legacy.example.com/mcp"', "startup_timeout_sec = 45", "",
+            "[profiles.fast]", 'model = "gpt-6-mini"', "",
+        ])
+        self.write_file(self.mcp_codex_config, codex_text)
+        self.write_json(self.mcp_managed, {"mcpServers": {"company": {"type": "http", "url": "https://mcp.company.example/mcp"}}})
+
+        def create(*arguments, expected_status=0):
+            return self.call_cli("mcp", "create", "--task", task["id"], *arguments, expected_status=expected_status)[0]
+
+        for arguments in [
+            ["--scope", "global", "--name", "bad name", "--command", "npx"],
+            ["--scope", "global", "--name", "no-command", "--command", ""],
+            ["--scope", "global", "--name", "events", "--config-json", '{"transport": "sse", "url": "https://sse.example.com"}'],
+            ["--scope", "global", "--name", "ftp-server", "--url", "ftp://files.example.com"],
+            ["--scope", "global", "--name", "renamed-env", "--command", "npx", "--env", "TOKEN=${OTHER_TOKEN}"],
+            ["--scope", "managed", "--name", "company-two", "--command", "npx"],
+        ]:
+            self.assert_failure(create(*arguments, expected_status=2), "invalid_argument")
+        self.assertNotIn("bad name", self.read_json(self.mcp_claude_state)["mcpServers"])
+        self.assertEqual(list(self.read_json(self.mcp_claude_state)["mcpServers"]), ["legacy"], "A rejected server writes nothing.")
+        self.assertEqual(self.mcp_codex_config.read_text(encoding="utf-8"), codex_text)
+
+        created = self.assert_success(create("--scope", "global", "--name", "notes", "--command", "npx", "--arg", "-y", "--arg", "notes-server",
+                                             "--env", "NOTES_TOKEN=${NOTES_TOKEN}", "--env", "MODE=fast"))
+        self.assertEqual(created["id"], "global:notes")
+        self.assertTrue(created["availableOutsidePlayhouse"], "A new global server is in both CLIs' configuration.")
+        state = self.read_json(self.mcp_claude_state)
+        self.assertEqual(state["mcpServers"]["notes"], {"type": "stdio", "command": "npx", "args": ["-y", "notes-server"],
+                                                        "env": {"NOTES_TOKEN": "${NOTES_TOKEN}", "MODE": "fast"}})
+        self.assertEqual(state["numStartups"], 7, "Claude Code's other state is kept.")
+        self.assertEqual(state["projects"], {"/elsewhere": {"allowedTools": []}})
+        config = self.read_toml(self.mcp_codex_config)
+        self.assertEqual(config["mcp_servers"]["notes"], {"command": "npx", "args": ["-y", "notes-server"], "env": {"MODE": "fast"}, "env_vars": ["NOTES_TOKEN"]},
+                         "${NAME} references become Codex env_vars.")
+        self.assertEqual(config["profiles"], {"fast": {"model": "gpt-6-mini"}}, "Codex's other settings are kept.")
+        self.assertEqual(config["model"], "gpt-6-luna")
+        self.assertIn("# my settings", self.mcp_codex_config.read_text(encoding="utf-8"), "Comments are kept.")
+        self.assert_failure(create("--scope", "global", "--name", "notes", "--command", "npx", expected_status=1), "already_exists")
+
+        remote = self.assert_success(create("--scope", "global", "--name", "remote-notes", "--url", "https://notes.example.com/mcp",
+                                            "--header", "Authorization: Bearer ${NOTES_API_TOKEN}", "--header", "X-Team: core"))
+        self.assertEqual(remote["transport"], "http")
+        self.assertEqual(self.read_toml(self.mcp_codex_config)["mcp_servers"]["remote-notes"],
+                         {"url": "https://notes.example.com/mcp", "bearer_token_env_var": "NOTES_API_TOKEN", "http_headers": {"X-Team": "core"}})
+        self.assertEqual(self.read_json(self.mcp_claude_state)["mcpServers"]["remote-notes"]["headers"],
+                         {"Authorization": "Bearer ${NOTES_API_TOKEN}", "X-Team": "core"})
+
+        repo_server = self.assert_success(create("--scope", "repo", "--root", str(repository), "--name", "repo-search",
+                                                 "--url", "https://search.example.com/mcp"))
+        self.assertEqual(repo_server["id"], f"repo:{repository}#repo-search")
+        self.assertEqual(repo_server["sharedWith"], ["codex"])
+        self.assertEqual(self.read_json(worktree / ".mcp.json"), {"mcpServers": {"repo-search": {"type": "http", "url": "https://search.example.com/mcp"}}})
+        self.assertFalse((repository / ".mcp.json").exists(), "The source checkout is left alone.")
+
+        def update(server_id, *arguments, expected_status=0):
+            return self.call_cli("mcp", "update", "--task", task["id"], "--server", server_id, *arguments, expected_status=expected_status)[0]
+
+        edited = self.assert_success(update("global:notes", "--config-json", json.dumps(
+            {"transport": "stdio", "command": "npx", "args": ["notes-server", "--stdio"], "env": {"NOTES_TOKEN": "${NOTES_TOKEN}"}})))
+        self.assertEqual(edited["summary"], "npx notes-server --stdio")
+        self.assertEqual(self.read_json(self.mcp_claude_state)["mcpServers"]["notes"]["args"], ["notes-server", "--stdio"])
+        self.assertEqual(self.read_toml(self.mcp_codex_config)["mcp_servers"]["notes"],
+                         {"command": "npx", "args": ["notes-server", "--stdio"], "env_vars": ["NOTES_TOKEN"]}, "An edit reaches both files.")
+        self.assert_success(update("global:legacy", "--url", "https://legacy.example.com/v2"))
+        legacy_claude = self.read_json(self.mcp_claude_state)["mcpServers"]["legacy"]
+        self.assertEqual(legacy_claude["url"], "https://legacy.example.com/v2")
+        self.assertEqual(legacy_claude["oauth"], {"clientId": "abc"}, "Claude's own keys are kept.")
+        legacy_codex = self.read_toml(self.mcp_codex_config)["mcp_servers"]["legacy"]
+        self.assertEqual(legacy_codex, {"url": "https://legacy.example.com/v2", "startup_timeout_sec": 45}, "Codex's own keys are kept.")
+
+        before_claude = self.mcp_claude_state.read_text(encoding="utf-8")
+        before_codex = self.mcp_codex_config.read_text(encoding="utf-8")
+        self.assert_failure(update("global:notes", "--command", "", expected_status=2), "invalid_argument")
+        self.assert_failure(update("global:notes", "--command", "npx", "--env", "TOKEN=${OTHER_TOKEN}", expected_status=2), "invalid_argument")
+        inline = update("global:inline-tool", "--command", "inline-tool-2", expected_status=2)
+        self.assert_failure(inline, "invalid_argument")
+        self.assertIn("inline", inline["error"]["message"])
+        self.assert_failure(update("managed:company", "--url", "https://other.example.com", expected_status=2), "invalid_argument")
+        self.assertEqual(self.mcp_claude_state.read_text(encoding="utf-8"), before_claude, "A rejected edit keeps the files.")
+        self.assertEqual(self.mcp_codex_config.read_text(encoding="utf-8"), before_codex)
+
+        self.assertEqual(self.assert_success(self.call_cli("mcp", "delete", "--task", task["id"], "--server", "global:notes")[0]), {"deleted": True})
+        self.assertNotIn("notes", self.read_json(self.mcp_claude_state)["mcpServers"], "Deleting removes the server from Claude Code's file.")
+        self.assertNotIn("notes", self.read_toml(self.mcp_codex_config)["mcp_servers"], "Deleting removes the server from Codex's file.")
+        self.assertIn("# my settings", self.mcp_codex_config.read_text(encoding="utf-8"))
+        self.assert_failure(self.call_cli("mcp", "delete", "--task", task["id"], "--server", "global:inline-tool", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("mcp", "delete", "--task", task["id"], "--server", "managed:company", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("mcp", "get", "--task", task["id"], "--server", "global:notes", expected_status=3)[0], "not_found")
+        fresh = self.mcp_catalog(task["id"])
+        self.assertEqual([server["name"] for server in fresh["global"]], ["inline-tool", "legacy", "remote-notes"])
+        self.assertEqual([server["name"] for server in fresh["repositories"][0]["servers"]], ["repo-search"])
+
+    # case-contract: test_mcp_enable_state_and_link_persist | Turning a server off is stored by Playhouse rather than in either provider's configuration, survives fresh CLI processes and reopening the page, and can be turned back on; the managed server can't be turned off. A turned-off server in Claude Code's own configuration still lists Claude and the page says Claude still starts it, so turning it off applies to Codex only, while a turned-off server only Codex defines reaches neither agent. Make Available Outside Playhouse writes a Claude-only global server into Codex's config.toml, a Codex-only one into Claude Code's ~/.claude.json, and a repository .mcp.json server into the worktree's .codex/config.toml, after which each is one entry both CLIs start; a conflicting server can't be linked and nothing is written.
+    def test_mcp_enable_state_and_link_persist(self):
+        repository = self.make_skill_repository("mcp-link-repo", {
+            ".mcp.json": json.dumps({"mcpServers": {"repo-tool": {"type": "stdio", "command": "repo-tool", "args": [], "env": {}}}}),
+        })
+        task = self.create_skills_task("MCP links", [repository])
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        self.write_json(self.mcp_claude_state, {"mcpServers": {
+            "claude-tool": {"type": "stdio", "command": "claude-tool", "args": ["--serve"], "env": {}},
+            "clash": {"type": "stdio", "command": "clash-a", "args": [], "env": {}},
+        }})
+        self.write_file(self.mcp_codex_config, '[mcp_servers.codex-tool]\ncommand = "codex-tool"\nenv_vars = ["CODEX_KEY"]\n\n[mcp_servers.clash]\ncommand = "clash-b"\n')
+        self.write_json(self.mcp_managed, {"mcpServers": {"company": {"type": "http", "url": "https://mcp.company.example/mcp"}}})
+        before_claude = self.mcp_claude_state.read_text(encoding="utf-8")
+        before_codex = self.mcp_codex_config.read_text(encoding="utf-8")
+
+        disabled = self.assert_success(self.call_cli("mcp", "disable", "--task", task["id"], "--server", "global:claude-tool")[0])
+        self.assertFalse(disabled["enabled"])
+        self.assertEqual(disabled["alwaysOnFor"], ["claude"], "Claude Code still starts a server from its own configuration.")
+        self.assertEqual(disabled["providers"], ["claude"])
+        self.assertFalse(self.mcp_server(task["id"], "global:claude-tool")["enabled"], "Turning a server off survives a fresh CLI process.")
+        off = self.assert_success(self.call_cli("mcp", "disable", "--task", task["id"], "--server", "global:codex-tool")[0])
+        self.assertEqual(off["providers"], [], "A server only Codex defines reaches neither agent once off.")
+        self.assertEqual(off["alwaysOnFor"], [])
+        self.assertEqual(self.mcp_claude_state.read_text(encoding="utf-8"), before_claude, "Claude Code's configuration is not written.")
+        self.assertEqual(self.mcp_codex_config.read_text(encoding="utf-8"), before_codex, "Codex's configuration is not written.")
+        self.assertFalse((self.rules_claude_config / "settings.json").exists())
+        self.assert_failure(self.call_cli("mcp", "disable", "--task", task["id"], "--server", "managed:company", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("mcp", "disable", "--server", "global:no-such-server", expected_status=3)[0], "not_found")
+        for server_id in ["global:claude-tool", "global:codex-tool"]:
+            self.assertTrue(self.assert_success(self.call_cli("mcp", "enable", "--task", task["id"], "--server", server_id)[0])["enabled"])
+        self.assertEqual(self.mcp_server(task["id"], "global:codex-tool")["providers"], ["claude", "codex"])
+
+        self.assert_failure(self.call_cli("mcp", "link", "--task", task["id"], "--server", "global:clash", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(self.mcp_claude_state.read_text(encoding="utf-8"), before_claude, "A conflicting server can't be linked.")
+        self.assertEqual(self.mcp_codex_config.read_text(encoding="utf-8"), before_codex)
+
+        linked = self.assert_success(self.call_cli("mcp", "link", "--task", task["id"], "--server", "global:claude-tool")[0])
+        self.assertTrue(linked["availableOutsidePlayhouse"])
+        self.assertFalse(linked["linkable"])
+        self.assertEqual(self.read_toml(self.mcp_codex_config)["mcp_servers"]["claude-tool"], {"command": "claude-tool", "args": ["--serve"]})
+        codex_linked = self.assert_success(self.call_cli("mcp", "link", "--task", task["id"], "--server", "global:codex-tool")[0])
+        self.assertEqual(codex_linked["nativeProviders"], ["claude", "codex"])
+        self.assertEqual(self.read_json(self.mcp_claude_state)["mcpServers"]["codex-tool"],
+                         {"type": "stdio", "command": "codex-tool", "args": [], "env": {"CODEX_KEY": "${CODEX_KEY}"}})
+        self.assertEqual([location["layout"] for location in self.mcp_server(task["id"], "global:codex-tool")["locations"]], ["claudeUser", "codexGlobal"],
+                         "The linked server is one entry.")
+
+        repo_linked = self.assert_success(self.call_cli("mcp", "link", "--task", task["id"], "--server", f"repo:{repository}#repo-tool")[0])
+        self.assertTrue(repo_linked["availableOutsidePlayhouse"])
+        self.assertEqual(self.read_toml(worktree / ".codex" / "config.toml")["mcp_servers"]["repo-tool"], {"command": "repo-tool"})
+        self.assertFalse((repository / ".codex").exists(), "The source checkout is left alone.")
+
+    # case-contract: test_mcp_fix_with_agent_starts_task_for_conflicting_servers | A server whose definitions conflict offers Fix with Agent, which creates a task on the source task's provider whose saved prompt explains how both agents configure MCP servers and lists each server with its problem: repository servers by repository-relative file, to be fixed in the new task's own worktree and committed and pushed, and global servers by absolute file path, to be fixed in place with their folders opened as context folders. The view switches to the new task's conversation, which sends that prompt once and leaves no unsent draft. A server with no problem, a managed server, an unknown server, and a request without a task are rejected without opening a task.
+    def test_mcp_fix_with_agent_starts_task_for_conflicting_servers(self):
+        repository = self.make_skill_repository("mcp-fix-repo", {
+            ".mcp.json": json.dumps({"mcpServers": {
+                "repo-clash": {"type": "stdio", "command": "clash-json", "args": [], "env": {}},
+                "fine": {"type": "stdio", "command": "fine", "args": [], "env": {}},
+            }}),
+            ".codex/config.toml": '[mcp_servers.repo-clash]\ncommand = "clash-toml"\n',
+        })
+        self.write_json(self.mcp_claude_state, {"mcpServers": {"clash": {"type": "stdio", "command": "clash-a", "args": [], "env": {}}}})
+        self.write_file(self.mcp_codex_config, '[mcp_servers.clash]\ncommand = "clash-b"\n')
+        self.write_json(self.mcp_managed, {"mcpServers": {"company": {"type": "http", "url": "https://mcp.company.example/mcp"}}})
+        environment = self.install_claude_fixture("claude-fixture-mcp-fix")
+        history_path = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".history")
+        source = self.create_skills_task("MCP fix source", [repository], provider="claude")
+        source_worktree = Path(source["repositoryWorktrees"][0]["worktreePath"])
+        tasks_before = len(self.assert_success(self.call_cli("board", "list")[0])["tasks"])
+
+        def fix(*servers, expected_status=0):
+            arguments = [argument for server in servers for argument in ("--server", server)]
+            return self.call_cli("mcp", "fix", "--task", source["id"], *arguments, expected_status=expected_status)[0]
+
+        self.assert_failure(fix(f"repo:{repository}#fine", expected_status=2), "invalid_argument")
+        self.assert_failure(fix("managed:company", expected_status=2), "invalid_argument")
+        self.assert_failure(fix("global:no-such-server", expected_status=3), "not_found")
+        self.assert_failure(self.call_cli("mcp", "fix", "--server", "global:clash", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(len(self.assert_success(self.call_cli("board", "list")[0])["tasks"]), tasks_before, "A rejected fix opens no task.")
+
+        created = self.assert_success(fix(f"repo:{repository}#repo-clash", "global:clash"))
+        task, prompt = created["task"], created["prompt"]
+        self.assertEqual(task["title"], "Fix 2 MCP servers")
+        self.assertEqual(task["conversationProvider"], "claude", "The fixing task uses the source task's provider.")
+        self.assertEqual([record["repositoryPath"] for record in task["repositoryWorktrees"]], [str(repository)])
+        self.assertEqual(sorted(os.path.realpath(folder) for folder in task["contextFolders"]),
+                         sorted([os.path.realpath(self.skills_home), os.path.realpath(self.skills_codex_home)]),
+                         "The folders of the global files are opened to the agent.")
+        self.assertEqual(task["savedPrompt"], prompt)
+        self.assertIn("Claude Code reads `mcpServers`", prompt)
+        self.assertIn("[mcp_servers.<name>]", prompt)
+        self.assertIn("commit and push", prompt)
+        self.assertIn("`repo-clash` in mcp-fix-repo: `.mcp.json`, `.codex/config.toml`", prompt)
+        self.assertNotIn(str(source_worktree), prompt, "Repository files are relative, so they point into the fixing task's worktree.")
+        self.assertTrue(str(self.mcp_claude_state) in prompt or os.path.realpath(self.mcp_claude_state) in prompt,
+                        "A global server is named by its absolute file path.")
+        self.assertIn("not tracked by Git", prompt)
+        self.assertNotIn("`fine`", prompt)
+
+        global_only = self.assert_success(fix("global:clash"))["task"]
+        self.assertEqual(global_only["title"], "Fix MCP server clash")
+        self.assertEqual(global_only["repositoryWorktrees"], [], "Fixing only global servers needs no repository.")
+
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", prompt, extra_environment=environment)[0])
+        turns = [turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText") == prompt]
+        self.assertEqual(len(turns), 1, "The fixing prompt is sent once.")
+        started = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertFalse(started["hasUnsentDraft"])
+        self.assertSamePath(turns[0]["cwd"], started["repositoryWorktrees"][0]["worktreePath"])
+
+    # case-contract: test_mcp_bridge_claude_launch_passes_shared_servers | A Claude turn starts the servers Claude Code does not read itself: its --mcp-config carries Codex's own global servers (with env_vars passed as ${NAME}), the working repository's .codex/config.toml servers, and the other task repository's .mcp.json servers, but not the servers Claude Code already reads or ones turned off on the page. Its --settings starts the working repository's .mcp.json servers that are on with enabledMcpjsonServers and skips turned-off ones with disabledMcpjsonServers, without writing to the repository or either provider's configuration. The resumed second turn carries the same servers, and turning a server back on adds it.
+    def test_mcp_bridge_claude_launch_passes_shared_servers(self):
+        repository = self.make_skill_repository("mcp-claude-repo", {
+            ".mcp.json": json.dumps({"mcpServers": {
+                "repo-tool": {"type": "stdio", "command": "repo-tool", "args": [], "env": {}},
+                "repo-off": {"type": "stdio", "command": "repo-off", "args": [], "env": {}},
+            }}),
+            ".codex/config.toml": '[mcp_servers.repo-codex]\ncommand = "repo-codex"\nargs = ["--serve"]\n',
+        })
+        extra = self.make_skill_repository("mcp-claude-extra", {
+            ".mcp.json": json.dumps({"mcpServers": {"extra-api": {"type": "http", "url": "https://extra.example.com/mcp"}}}),
+        })
+        self.write_json(self.mcp_claude_state, {"mcpServers": {"claude-tool": {"type": "stdio", "command": "claude-tool", "args": [], "env": {}}}})
+        self.write_file(self.mcp_codex_config, '[mcp_servers.codex-tool]\ncommand = "codex-tool"\nenv_vars = ["CODEX_KEY"]\n\n[mcp_servers.codex-off]\ncommand = "codex-off"\n')
+        environment = self.install_claude_fixture("claude-fixture-mcp-bridge")
+        history_path = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".history")
+        task = self.create_skills_task("Claude MCP", [repository, extra], provider="claude")
+        worktree = Path(next(record["worktreePath"] for record in task["repositoryWorktrees"] if record["repositoryPath"] == str(repository)))
+        for server_id in [f"repo:{repository}#repo-off", "global:codex-off"]:
+            self.assert_success(self.call_cli("mcp", "disable", "--task", task["id"], "--server", server_id)[0])
+        before_claude = self.mcp_claude_state.read_text(encoding="utf-8")
+        before_codex = self.mcp_codex_config.read_text(encoding="utf-8")
+
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", "Use the tools.", extra_environment=environment)[0])
+        turns = [turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText")]
+        arguments = turns[0]["arguments"]
+        servers = json.loads(arguments[arguments.index("--mcp-config") + 1])["mcpServers"]
+        self.assertEqual(sorted(servers), ["codex-tool", "extra-api", "repo-codex"],
+                         "Claude gets the servers it does not read itself, without the ones it reads or ones turned off.")
+        self.assertEqual(servers["codex-tool"], {"type": "stdio", "command": "codex-tool", "args": [], "env": {"CODEX_KEY": "${CODEX_KEY}"}})
+        self.assertEqual(servers["repo-codex"], {"type": "stdio", "command": "repo-codex", "args": ["--serve"], "env": {}})
+        self.assertEqual(servers["extra-api"], {"type": "http", "url": "https://extra.example.com/mcp"})
+        settings = json.loads(arguments[arguments.index("--settings") + 1])
+        self.assertEqual(settings["enabledMcpjsonServers"], ["repo-tool"], "The working repository's .mcp.json server that is on starts.")
+        self.assertEqual(settings["disabledMcpjsonServers"], ["repo-off"], "A turned-off .mcp.json server is skipped for this run.")
+        self.assertEqual(self.mcp_claude_state.read_text(encoding="utf-8"), before_claude, "Claude Code's configuration is not written.")
+        self.assertEqual(self.mcp_codex_config.read_text(encoding="utf-8"), before_codex, "Codex's configuration is not written.")
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain"), "", "The worktree is not written to.")
+        self.assertFalse((self.rules_claude_config / "settings.json").exists())
+
+        bridge = self.assert_success(self.call_cli("mcp", "bridge", "--task", task["id"])[0])
+        self.assertEqual(sorted(server["id"] for server in bridge["claudeShared"]),
+                         sorted(["global:codex-tool", f"repo:{repository}#repo-codex", f"repo:{extra}#extra-api"]))
+
+        self.assert_success(self.call_cli("mcp", "enable", "--task", task["id"], "--server", "global:codex-off")[0])
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", "Use them again.", extra_environment=environment)[0])
+        second = [turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText") == "Use them again."][-1]
+        self.assertTrue(second["resumed"], "The second turn resumes the Claude session.")
+        resumed = second["arguments"]
+        self.assertEqual(sorted(json.loads(resumed[resumed.index("--mcp-config") + 1])["mcpServers"]),
+                         ["codex-off", "codex-tool", "extra-api", "repo-codex"], "Turning a server back on adds it.")
+
+    # case-contract: test_mcp_bridge_codex_thread_gets_shared_servers | A Codex turn starts the servers Codex does not read itself: the thread's mcp_servers config carries the working repository's .mcp.json servers and Claude Code's own global servers, translated so ${NAME} environment references become env_vars and an Authorization bearer token becomes bearer_token_env_var, leaves out an SSE server Codex can't run and the servers Codex already reads, and turns off a server Codex may read itself (from its config.toml or the working repository's .codex/config.toml) that is turned off on the page with enabled = false, without writing Codex's config.toml. Turning servers on or off on the page resumes the thread on its next turn with the new mcp_servers config.
+    def test_mcp_bridge_codex_thread_gets_shared_servers(self):
+        repository = self.make_skill_repository("mcp-codex-repo", {
+            ".mcp.json": json.dumps({"mcpServers": {
+                "repo-tool": {"type": "stdio", "command": "repo-tool", "args": ["--serve"], "env": {"REPO_TOKEN": "${REPO_TOKEN}", "MODE": "fast"}},
+                "repo-sse": {"type": "sse", "url": "https://sse.example.com/mcp"},
+            }}),
+            ".codex/config.toml": '[mcp_servers.repo-codex-off]\ncommand = "repo-codex-off"\n',
+        })
+        self.write_json(self.mcp_claude_state, {"mcpServers": {
+            "claude-remote": {"type": "http", "url": "https://remote.example.com/mcp",
+                              "headers": {"Authorization": "Bearer ${REMOTE_TOKEN}", "X-Team": "core"}},
+        }})
+        self.write_file(self.mcp_codex_config, '[mcp_servers.codex-tool]\ncommand = "codex-tool"\n\n[mcp_servers.codex-off]\ncommand = "codex-off"\n')
+        before_codex = self.mcp_codex_config.read_text(encoding="utf-8")
+        task = self.create_skills_task("Codex MCP", [repository])
+        self.assert_success(self.call_cli("mcp", "disable", "--task", task["id"], "--server", "global:codex-off")[0])
+        self.assert_success(self.call_cli("mcp", "disable", "--task", task["id"], "--server", f"repo:{repository}#repo-codex-off")[0])
+
+        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-mcp", message="Use the tools.")
+        history = json.loads((self.data_directory / "codex-fixture-mcp.history").read_text(encoding="utf-8"))
+        servers = history["threadStartConfig"]["mcp_servers"]
+        self.assertEqual(servers, {
+            "repo-tool": {"command": "repo-tool", "args": ["--serve"], "env": {"MODE": "fast"}, "env_vars": ["REPO_TOKEN"]},
+            "claude-remote": {"url": "https://remote.example.com/mcp", "bearer_token_env_var": "REMOTE_TOKEN", "http_headers": {"X-Team": "core"}},
+            "codex-off": {"command": "codex-off", "enabled": False},
+            "repo-codex-off": {"command": "repo-codex-off", "enabled": False},
+        }, "Codex gets the servers it does not read itself, translated, and a turned-off server it may read itself is turned off.")
+        self.assertEqual(self.mcp_codex_config.read_text(encoding="utf-8"), before_codex, "Codex's config.toml is not written.")
+        bridge = self.assert_success(self.call_cli("mcp", "bridge", "--task", task["id"])[0])
+        self.assertEqual(sorted(server["name"] for server in bridge["codexShared"]), ["claude-remote", "repo-tool"])
+        self.assertEqual(sorted(bridge["codexDisabled"]), ["codex-off", "repo-codex-off"])
+
+        self.assert_success(self.call_cli("mcp", "enable", "--task", task["id"], "--server", "global:codex-off")[0])
+        self.assert_success(self.call_cli("mcp", "disable", "--task", task["id"], "--server", f"repo:{repository}#repo-tool")[0])
+        resumes_before = history.get("threadResumeCount", 0)
+        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-mcp", message="Use them again.")
+        history = json.loads((self.data_directory / "codex-fixture-mcp.history").read_text(encoding="utf-8"))
+        self.assertGreater(history.get("threadResumeCount", 0), resumes_before, "Changing the servers resumes the thread.")
+        self.assertEqual(history["threadResumeConfig"]["mcp_servers"], {
+            "claude-remote": {"url": "https://remote.example.com/mcp", "bearer_token_env_var": "REMOTE_TOKEN", "http_headers": {"X-Team": "core"}},
+            "repo-codex-off": {"command": "repo-codex-off", "enabled": False},
+        }, "The resumed thread gets the new servers.")
+
+    # case-contract: test_mcp_status_reports_sign_in_per_provider | Opening the MCP page asks both agents on its own, with no button to press, which servers they start and which need a sign-in, showing Checking sign-in… while they answer and asking again whenever the page is opened: Claude Code, asked with the task's own MCP bridge, reports each server including the ones Playhouse passes it, and Codex reports its own; a server that needs a sign-in shows a Sign in for Claude or Sign in for Codex badge on its row, and the claude.ai connectors and plugin servers Claude Code starts that no file defines are listed under Also started by Claude Code on the Managed tab, a connector that needs a sign-in with the same badge. Asking for one provider only asks that provider. An agent that can't be asked is reported by name on the page while the other agent's answer is still shown.
+    def test_mcp_status_reports_sign_in_per_provider(self):
+        repository = self.make_skill_repository("mcp-status-repo", {})
+        self.write_json(self.mcp_claude_state, {"mcpServers": {"claude-remote": {"type": "http", "url": "https://remote.example.com/mcp"}}})
+        self.write_file(self.mcp_codex_config, '[mcp_servers.codex-remote]\nurl = "https://codex.example.com/mcp"\n\n[mcp_servers.codex-tool]\ncommand = "codex-tool"\n')
+        claude = self.install_claude_fixture("claude-fixture-mcp-status")
+        codex = self.install_codex_fixture("codex-fixture-mcp-status")
+        self.write_json(claude["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".mcp-status", [
+            {"name": "claude-remote", "status": "needs-auth"},
+            {"name": "claude.ai Notes", "status": "needs-auth"},
+            {"name": "plugin:kit:helper", "status": "connected"},
+        ])
+        self.write_json(codex["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] + ".mcp-status", [
+            {"name": "codex-remote", "authStatus": "notLoggedIn", "tools": {}},
+            {"name": "codex-tool", "authStatus": "unsupported", "tools": {}},
+        ])
+        task = self.create_skills_task("MCP status", [repository], provider="claude")
+
+        report = self.assert_success(self.call_cli("mcp", "status", "--task", task["id"], extra_environment={**claude, **codex})[0])
+        self.assertEqual(report["errors"], {})
+        claude_status = {server["name"]: server for server in report["claude"]}
+        self.assertTrue(claude_status["claude-remote"]["needsSignIn"], "A server Claude can't start without a sign-in is reported.")
+        self.assertTrue(claude_status["claude.ai Notes"]["needsSignIn"])
+        self.assertFalse(claude_status["plugin:kit:helper"]["needsSignIn"])
+        self.assertEqual(claude_status["codex-tool"]["status"], "connected", "Claude is asked with the servers Playhouse passes it.")
+        codex_status = {server["name"]: server for server in report["codex"]}
+        self.assertTrue(codex_status["codex-remote"]["needsSignIn"])
+        self.assertEqual(codex_status["codex-remote"]["status"], "notLoggedIn")
+        self.assertFalse(codex_status["codex-tool"]["needsSignIn"])
+
+        Path(codex["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] + ".mcp-status-fail").write_text("Fail the status request.\n", encoding="utf-8")
+        failing = self.assert_success(self.call_cli("mcp", "status", "--task", task["id"], extra_environment={**claude, **codex})[0])
+        self.assertIn("codex", failing["errors"], "An agent that can't be asked is reported by name.")
+        self.assertEqual(failing["codex"], [])
+        self.assertNotIn("claude", failing["errors"])
+        self.assertTrue(any(server["name"] == "claude-remote" and server["needsSignIn"] for server in failing["claude"]),
+                        "The other agent's answer is still shown.")
+        only_claude = self.assert_success(self.call_cli("mcp", "status", "--task", task["id"], extra_environment=claude)[0])
+        self.assertIn("codex", only_claude["errors"], "An agent that isn't installed is reported by name.")
+        self.assertTrue(any(server["name"] == "claude-remote" for server in only_claude["claude"]))
+
+        Path(codex["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] + ".mcp-status-fail").unlink()
+        codex_only = self.assert_success(self.call_cli("mcp", "status", "--task", task["id"], "--provider", "codex", extra_environment={**claude, **codex})[0])
+        self.assertEqual(codex_only["claude"], [], "Asking for Codex alone doesn't ask Claude Code.")
+        self.assertEqual(codex_only["errors"], {})
+        self.assertTrue(any(server["name"] == "codex-remote" and server["needsSignIn"] for server in codex_only["codex"]))
+        claude_only = self.assert_success(self.call_cli("mcp", "status", "--task", task["id"], "--provider", "claude", extra_environment={**claude, **codex})[0])
+        self.assertEqual(claude_only["codex"], [], "Asking for Claude alone doesn't ask Codex.")
+        self.assertTrue(any(server["name"] == "claude-remote" and server["needsSignIn"] for server in claude_only["claude"]))
+        self.assert_failure(self.call_cli("mcp", "status", "--provider", "gemini", expected_status=2)[0], "invalid_argument")
+
+    # case-contract: test_mcp_authenticate_signs_in_each_provider | The Sign in for Claude or Sign in for Codex badge on a server is the button that signs in: it asks that agent to start the OAuth sign-in of that one server (Claude Code's mcp_authenticate, Codex's mcpServer/oauth/login) and returns the authorization link, which the page opens in the browser (a test build only records it, and never opens one) while the badge reads Waiting for sign-in…. A server both agents have shows one Sign in button per agent on the same row: each starts only its own agent's sign-in, waiting on one leaves the other clickable, and each badge clears on its own once that agent is signed in. The agent finishes the sign-in when the browser redirects back to it, and the page then checks again by itself and the badge goes away; waiting for it through the CLI keeps the bridge running and returns signed in. Starting one agent's sign-in never asks the other agent, a sign-in nobody finishes times out with a message that names the server, and waiting for a sign-in that was never started or was already reported with either agent, an unknown provider, and a blank server name are rejected or reported without starting anything.
+    def test_mcp_authenticate_signs_in_each_provider(self):
+        repository = self.make_skill_repository("mcp-auth-repo", {})
+        self.write_json(self.mcp_claude_state, {"mcpServers": {
+            "shared-remote": {"type": "http", "url": "https://remote.example.com/mcp"},
+            "claude-other": {"type": "http", "url": "https://other.example.com/mcp"},
+        }})
+        self.write_file(self.mcp_codex_config, '[mcp_servers.shared-remote]\nurl = "https://remote.example.com/mcp"\n\n[mcp_servers.codex-remote]\nurl = "https://codex.example.com/mcp"\n\n[mcp_servers.codex-other]\nurl = "https://codex-other.example.com/mcp"\n')
+        claude = self.install_claude_fixture("claude-fixture-mcp-auth")
+        codex = self.install_codex_fixture("codex-fixture-mcp-auth")
+        claude_executable = claude["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]
+        codex_executable = codex["PLAYHOUSE_E2E_CODEX_EXECUTABLE"]
+        self.write_json(claude_executable + ".mcp-status", [
+            {"name": "shared-remote", "status": "needs-auth"}, {"name": "claude-other", "status": "needs-auth"},
+        ])
+        self.write_json(codex_executable + ".mcp-status", [
+            {"name": "shared-remote", "authStatus": "notLoggedIn", "tools": {}},
+            {"name": "codex-remote", "authStatus": "notLoggedIn", "tools": {}}, {"name": "codex-other", "authStatus": "notLoggedIn", "tools": {}},
+        ])
+        environment = {**claude, **codex}
+        task = self.create_skills_task("MCP authenticate", [repository], provider="claude")
+
+        def call(*command, extra=None, expected_status=0):
+            return self.call_cli("mcp", *command, "--task", task["id"], extra_environment={**environment, **(extra or {})}, expected_status=expected_status)[0]
+
+        def logged(path):
+            return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()] if Path(path).exists() else []
+
+        def finish(provider, name, callback_path, extra=None):
+            """Waits for a started sign-in through the CLI while the "browser" redirects back."""
+            command = ["mcp", "authenticate-wait", "--provider", provider, "--name", name, "--task", task["id"]]
+            process = self.start_cli(*command, extra_environment={**environment, **(extra or {})})
+            time.sleep(1.5)
+            self.assertIsNone(process.poll(), "Waiting for the sign-in keeps the request, and so the bridge, running.")
+            with open(callback_path, "a", encoding="utf-8") as callback:
+                callback.write(name + "\n")
+            response, _ = self.finish_cli(process, command)
+            return self.assert_success(response)
+
+        started = self.assert_success(call("authenticate", "--provider", "claude", "--name", "shared-remote"))
+        self.assertEqual(started, {"provider": "claude", "name": "shared-remote",
+                                   "authorizationUrl": "https://auth.example.test/claude/authorize?server=shared-remote"})
+        self.assertEqual(logged(claude_executable + ".mcp-authenticate"), [{"serverName": "shared-remote"}], "Claude Code is asked for that server only.")
+        self.assertEqual(logged(codex_executable + ".mcp-login"), [], "Starting Claude's sign-in doesn't ask Codex.")
+        before = {server["name"]: server for server in self.assert_success(call("status", "--provider", "claude"))["claude"]}
+        self.assertTrue(before["shared-remote"]["needsSignIn"], "The server needs its sign-in until the browser redirects back.")
+        codex_before = {server["name"]: server for server in self.assert_success(call("status", "--provider", "codex"))["codex"]}
+        self.assertTrue(codex_before["shared-remote"]["needsSignIn"], "A server both agents have needs a sign-in for each of them.")
+        finished = finish("claude", "shared-remote", claude_executable + ".mcp-callback")
+        self.assertEqual(finished, {"provider": "claude", "name": "shared-remote", "signedIn": True})
+        after = {server["name"]: server for server in self.assert_success(call("status", "--provider", "claude"))["claude"]}
+        self.assertFalse(after["shared-remote"]["needsSignIn"], "The finished sign-in no longer needs one.")
+        codex_during = {server["name"]: server for server in self.assert_success(call("status", "--provider", "codex"))["codex"]}
+        self.assertTrue(codex_during["shared-remote"]["needsSignIn"], "Signing in for Claude doesn't sign the same server in for Codex.")
+        self.assertTrue(after["claude-other"]["needsSignIn"], "Other servers still need theirs.")
+
+        started = self.assert_success(call("authenticate", "--provider", "codex", "--name", "codex-remote"))
+        self.assertEqual(started, {"provider": "codex", "name": "codex-remote",
+                                   "authorizationUrl": "https://auth.example.test/codex/authorize?server=codex-remote"})
+        self.assertEqual(logged(codex_executable + ".mcp-login"), [{"name": "codex-remote"}], "Codex is asked for that server only.")
+        self.assertEqual(logged(claude_executable + ".mcp-authenticate"), [{"serverName": "shared-remote"}], "Starting Codex's sign-in doesn't ask Claude Code.")
+        finished = finish("codex", "codex-remote", codex_executable + ".mcp-callback")
+        self.assertEqual(finished, {"provider": "codex", "name": "codex-remote", "signedIn": True})
+        codex_after = {server["name"]: server for server in self.assert_success(call("status", "--provider", "codex"))["codex"]}
+        self.assertFalse(codex_after["codex-remote"]["needsSignIn"])
+        self.assertTrue(codex_after["codex-other"]["needsSignIn"])
+
+        quick = {"PLAYHOUSE_E2E_MCP_LOGIN_TIMEOUT_SECONDS": "2"}
+        self.assert_success(call("authenticate", "--provider", "claude", "--name", "claude-other", extra=quick))
+        timed_out = self.assert_success(call("authenticate-wait", "--provider", "claude", "--name", "claude-other", extra=quick))
+        self.assertFalse(timed_out["signedIn"], "A sign-in nobody finishes doesn't sign in.")
+        self.assertIn("claude-other", timed_out["error"])
+        self.assertIn("in time", timed_out["error"])
+        self.assert_success(call("authenticate", "--provider", "codex", "--name", "codex-other", extra=quick))
+        codex_timed_out = self.assert_success(call("authenticate-wait", "--provider", "codex", "--name", "codex-other", extra=quick))
+        self.assertFalse(codex_timed_out["signedIn"])
+        self.assertIn("codex-other", codex_timed_out["error"])
+
+        # A pending sign-in is background work for either agent: the daemon, which would
+        # idle-exit after 3 seconds here, stays up while the agent waits for the browser.
+        # (The window's own watchers keep a daemon up, so only this suite can show it.)
+        for provider, name, callback_path in [("claude", "claude-other", claude_executable + ".mcp-callback"),
+                                              ("codex", "codex-other", codex_executable + ".mcp-callback")]:
+            lifecycle = {"PLAYHOUSE_BRIDGE_SERVICE_NAME": f"{arguments.service_name}.mcp-login-{uuid.uuid4().hex[:8]}",
+                         "PLAYHOUSE_BRIDGE_IDLE_GRACE_SECONDS": "3"}
+            daemon_pid = self.assert_success(self.call_cli("status", extra_environment={**environment, **lifecycle})[0])["processID"]
+            self.assert_success(call("authenticate", "--provider", provider, "--name", name, extra=lifecycle))
+            time.sleep(5.5)
+            self.assertTrue(self.process_is_running(daemon_pid), f"The bridge stays up while a {provider} sign-in waits for the browser.")
+            with open(callback_path, "a", encoding="utf-8") as callback:
+                callback.write(name + "\n")
+            finished = self.assert_success(call("authenticate-wait", "--provider", provider, "--name", name, extra=lifecycle))
+            self.assertTrue(finished["signedIn"], "The sign-in finishes on the daemon that waited for it.")
+            deadline = time.monotonic() + 10
+            while self.process_is_running(daemon_pid) and time.monotonic() < deadline:
+                time.sleep(0.25)
+            self.assertFalse(self.process_is_running(daemon_pid), "Once the sign-in is over, the idle bridge exits again.")
+
+        never = self.assert_success(call("authenticate-wait", "--provider", "claude", "--name", "never-started"))
+        self.assertFalse(never["signedIn"], "Waiting for a sign-in that was never started reports it.")
+        self.assertIn("No sign-in", never["error"])
+        for provider, name in [("claude", "shared-remote"), ("codex", "codex-remote")]:
+            reported = self.assert_success(call("authenticate-wait", "--provider", provider, "--name", name))
+            self.assertFalse(reported["signedIn"], "A finished sign-in is reported once; waiting again finds none in progress.")
+            self.assertIn("No sign-in", reported["error"])
+        self.assert_failure(call("authenticate", "--provider", "gemini", "--name", "shared-remote", expected_status=2), "invalid_argument")
+        self.assert_failure(call("authenticate", "--provider", "claude", "--name", "", expected_status=2), "invalid_argument")
+        self.assertEqual(logged(claude_executable + ".mcp-authenticate")[-1], {"serverName": "claude-other"}, "A rejected request starts nothing.")
 
     # Plugins and the Component Catalog
 

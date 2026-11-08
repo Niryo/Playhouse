@@ -163,6 +163,15 @@ struct ConversationWorkspaceContext {
     var skillBridge: SkillBridgeLaunch?
     /// The rule files each provider is handed or told to skip. Only a turn's own launch sets it.
     var ruleBridge: RuleBridgeLaunch?
+    /// The MCP servers each provider is passed or told to skip. Only a turn's own launch sets it.
+    var mcpBridge: McpBridgeLaunch?
+
+    /// One Codex thread config joining what skills and MCP servers each need.
+    var codexThreadConfig: [String: Any]? {
+        var config = skillBridge?.codexThreadConfig ?? [:]
+        if let servers = mcpBridge?.codexServers { config["mcp_servers"] = servers }
+        return config.isEmpty ? nil : config
+    }
 
     init(roots: [URL]) throws {
         let normalized = roots.map(\.standardizedFileURL)

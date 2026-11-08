@@ -1383,7 +1383,35 @@ def main():
                             "models": models,
                             "commands": fixture_commands(), "agents": []}
             elif request.get("subtype") == "mcp_status":
-                response = {"mcpServers": []}
+                # The servers a test seeds in `<executable>.mcp-status` (such as a
+                # claude.ai connector), then each server this run was passed with
+                # --mcp-config, as Claude Code reports the servers it starts.
+                # `<executable>.mcp-status-delay` holds the seconds the answer takes,
+                # so a test can see the page while it is still checking.
+                delay = Path(str(sys.argv[0]) + ".mcp-status-delay")
+                if delay.exists():
+                    time.sleep(float(delay.read_text(encoding="utf-8").strip() or "0"))
+                seeded = Path(str(sys.argv[0]) + ".mcp-status")
+                servers = json.loads(seeded.read_text(encoding="utf-8")) if seeded.exists() else []
+                # A sign-in finishes when a test writes the server's name to
+                # `<executable>.mcp-callback`, as the browser's redirect would.
+                callback = Path(str(sys.argv[0]) + ".mcp-callback")
+                signed_in = set(callback.read_text(encoding="utf-8").split("\n")) if callback.exists() else set()
+                servers = [{**server, "status": "connected"} if server.get("name") in signed_in and server.get("status") == "needs-auth" else server
+                           for server in servers]
+                if "--mcp-config" in sys.argv:
+                    passed = json.loads(sys.argv[sys.argv.index("--mcp-config") + 1]).get("mcpServers", {})
+                    servers += [{"name": name, "status": "connected", "scope": "dynamic"} for name in sorted(passed)]
+                response = {"mcpServers": servers}
+            elif request.get("subtype") == "mcp_authenticate":
+                # Claude Code's sign-in start: the link to open, with Claude Code
+                # itself listening for the redirect. Each start is logged.
+                name = request.get("serverName")
+                with open(str(sys.argv[0]) + ".mcp-authenticate", "a", encoding="utf-8") as starts:
+                    starts.write(json.dumps({"serverName": name}) + "\n")
+                response = {"authUrl": f"https://auth.example.test/claude/authorize?server={name}",
+                            "requiresUserAction": True, "callbackExpected": True,
+                            "redirectScheme": "localhost", "callbackPort": 54321}
             elif request.get("subtype") == "get_usage":
                 # The plan's usage as `/usage` reads it; without a seeded file the
                 # account has none, as with an API-key login.

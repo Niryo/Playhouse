@@ -1,15 +1,16 @@
 import AppKit
 import SwiftUI
 
-/// The task's skill gallery and agent rules: its repositories' skills and
-/// instruction files, the user's global ones, and the ones that came with each
-/// provider. Every skill or rule a user adds works with both Claude and Codex,
+/// The task's skill gallery, agent rules and MCP servers: its repositories'
+/// skills, instruction files and servers, the user's global ones, and the ones
+/// that came with each provider. Every skill, rule or server a user adds works with both Claude and Codex,
 /// so the page shows where it lives and who can use it rather than which
 /// provider owns it.
 struct SkillsPageView: View {
     enum Kind: String, CaseIterable, Identifiable {
         case skills = "Skills"
         case rules = "Rules"
+        case mcp = "MCP"
         var id: String { rawValue }
     }
 
@@ -30,6 +31,8 @@ struct SkillsPageView: View {
     @State private var kind: Kind = .skills
     /// A rule's editor or New Rule panel is open over the Rules list.
     @State private var isPresentingRulePanel = false
+    /// A server's editor is open over the MCP list.
+    @State private var isPresentingMcpPanel = false
     @State private var tab: Tab = .repo
     @State private var catalog: SkillCatalog?
     @State private var search = ""
@@ -66,6 +69,7 @@ struct SkillsPageView: View {
             switch kind {
             case .skills: skillsBody
             case .rules: RulesSectionView(task: task, manager: manager, isPresentingPanel: $isPresentingRulePanel, onFixTask: onFixTask)
+            case .mcp: McpServersSectionView(task: task, manager: manager, isPresentingPanel: $isPresentingMcpPanel, onFixTask: onFixTask)
             }
         }
         .background(WorkspaceTheme.windowBackground)
@@ -199,13 +203,13 @@ struct SkillsPageView: View {
                     .background(Color.primary.opacity(0.07), in: Circle())
             }
             .buttonStyle(.plain)
-            .keyboardShortcut(isPresentingPanel || isPresentingRulePanel || isSelecting ? nil : .cancelAction)
+            .keyboardShortcut(isPresentingPanel || isPresentingRulePanel || isPresentingMcpPanel || isSelecting ? nil : .cancelAction)
             .buttonHoverPointer()
             .nativeHelp("Back to the conversation")
             .accessibilityLabel("Back to the conversation")
             .accessibilityIdentifier("skills-back-button")
 
-            Text("Skills & Rules")
+            Text("Skills, Rules & MCP")
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("skills-title")
 
@@ -215,8 +219,8 @@ struct SkillsPageView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
-            .disabled(isSelecting || isPresentingPanel || isPresentingRulePanel)
-            .nativeHelp("Show skills, or the rule files agents follow on every turn")
+            .disabled(isSelecting || isPresentingPanel || isPresentingRulePanel || isPresentingMcpPanel)
+            .nativeHelp("Show skills, the rule files agents follow on every turn, or the MCP servers that give them tools")
             .accessibilityIdentifier("skills-kind-picker")
 
             if kind == .skills {
@@ -231,7 +235,7 @@ struct SkillsPageView: View {
 
             Spacer()
 
-            if kind == .rules {
+            if kind != .skills {
                 EmptyView()
             } else if isSelecting {
                 selectionActions
@@ -613,7 +617,7 @@ struct SkillsPageView: View {
 // MARK: - Editor and New Skill panels
 
 /// A card that slides up over the gallery, sized to the window rather than a fixed sheet.
-private struct SkillPanel<Header: View, Content: View, Footer: View>: View {
+struct SkillPanel<Header: View, Content: View, Footer: View>: View {
     let identifier: String
     @ViewBuilder let header: Header
     @ViewBuilder let content: Content
@@ -992,7 +996,7 @@ private struct SkillMarkdownPreview: View {
 /// press and hold: SwiftUI's long-press gesture raced against a tap could stay
 /// tracking after a click opened the editor, and the window then ignored every
 /// click until it was minimized.
-private struct SkillRowPressArea: NSViewRepresentable {
+struct SkillRowPressArea: NSViewRepresentable {
     let showsPointingHand: Bool
     let onClick: () -> Void
     let onLongPress: () -> Void
@@ -1049,7 +1053,7 @@ private struct SkillRowPressArea: NSViewRepresentable {
 /// A plain-text editor for a skill's instructions. SwiftUI's `TextEditor`
 /// applies the system's smart dashes and quotes, which would turn Markdown's
 /// `---` into an em dash.
-private struct SkillTextEditor: NSViewRepresentable {
+struct SkillTextEditor: NSViewRepresentable {
     @Binding var text: String
     let identifier: String
     var isEditable = true

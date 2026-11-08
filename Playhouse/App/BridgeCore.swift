@@ -5128,8 +5128,9 @@ final class ConversationManager {
         clients.client(for: task.conversationProvider)
     }
 
-    /// The workspace a provider launch for `task` runs in, carrying the skill
-    /// and rule bridges so the provider sees the whole gallery and every rule. Every path that can start
+    /// The workspace a provider launch for `task` runs in, carrying the skill,
+    /// rule and MCP bridges so the provider sees the whole gallery, every rule and
+    /// every MCP server that is on. Every path that can start
     /// or load the task's own provider session (send, history, goals) uses this:
     /// Codex keeps a loaded thread's skill config, so the first load decides it.
     private func launchWorkspace(for task: any ConversationSubject, roots: [URL], message: String = "") throws -> ConversationWorkspaceContext {
@@ -5142,6 +5143,9 @@ final class ConversationManager {
         }
         if let rules = clients.rules {
             workspace.ruleBridge = rules.bridge(roots: SkillRoot.roots(for: task))
+        }
+        if let mcp = clients.mcp {
+            workspace.mcpBridge = mcp.bridge(roots: SkillRoot.roots(for: task))
         }
         return workspace
     }
@@ -6158,8 +6162,8 @@ final class ConversationManager {
     // MARK: - Providers
 
     /// Detected native capabilities, so switching can show what differs. Playhouse
-    /// starts Codex without MCP servers, apps, or hooks; Claude Code uses its own
-    /// configuration.
+    /// starts Codex without apps or hooks and with the MCP servers turned on in
+    /// the MCP page; Claude Code uses its own configuration.
     func providerCapabilities(taskID: UUID) async throws -> [ConversationProviderCapabilities] {
         let task = try tasks.conversationSubject(taskID)
         let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
@@ -6167,9 +6171,87 @@ final class ConversationManager {
             provider: .codex,
             isAvailable: clients.codex.isInstalled,
             supportsGoals: true,
-            notes: ["Playhouse runs Codex without MCP servers, apps, or hooks.", "Goals are available."]
+            notes: ["Playhouse runs Codex without apps or hooks, with the MCP servers turned on in Skills, Rules & MCP.", "Goals are available."]
         )
         return [codex, await clients.claude.capabilities(workspace: workspace)]
+    }
+
+    /// What each provider reports about the MCP servers it would start for the
+    /// task, such as one that needs the user to sign in. Claude Code is asked
+    /// with the task's own MCP bridge, so it also reports the servers Playhouse
+    /// passes it and its claude.ai connectors and plugin servers; Codex reports
+    /// the servers in its own configuration.
+    /// The workspace a provider is asked about the task's MCP servers in: the
+    /// task's folders with its MCP bridge, or an empty one without a task.
+    private func mcpWorkspace(taskID: UUID?) -> ConversationWorkspaceContext? {
+        let task = taskID.flatMap { try? tasks.conversationSubject($0) }
+        let roots = task.map { Self.historyRoots($0).map { URL(fileURLWithPath: $0, isDirectory: true) } } ?? []
+        guard var workspace = (try? ConversationWorkspaceContext(roots: roots)) ?? (try? ConversationWorkspaceContext(roots: [])) else { return nil }
+        if let task, let mcp = clients.mcp { workspace.mcpBridge = mcp.bridge(roots: SkillRoot.roots(for: task)) }
+        return workspace
+    }
+
+    /// With `provider`, only that provider is asked, so a sign-in that is being
+    /// waited on doesn't start the other one.
+    func mcpStatus(taskID: UUID?, provider: ConversationProvider? = nil) async -> McpStatusReport {
+        var report = McpStatusReport()
+        guard let workspace = mcpWorkspace(taskID: taskID) else {
+            report.errors = ["claude": "The task's folders are missing.", "codex": "The task's folders are missing."]
+            return report
+        }
+        if provider != .codex {
+            let claude = await clients.claude.capabilities(workspace: workspace)
+            if claude.isAvailable {
+                report.claude = claude.mcpServers.map { McpProviderStatus(name: $0.name, status: $0.status, needsSignIn: $0.status == "needs-auth") }
+            } else {
+                report.errors["claude"] = claude.error ?? "Claude Code is not installed."
+            }
+        }
+        if provider != .claude {
+            if clients.codex.isInstalled {
+                do {
+                    report.codex = try await clients.codex.mcpServerStatuses(workspace: workspace)
+                } catch {
+                    report.errors["codex"] = error.localizedDescription
+                }
+            } else {
+                report.errors["codex"] = "Codex is not installed."
+            }
+        }
+        PlayhouseDiagnostics.record("mcp.status.read", fields: [
+            "claudeCount": String(report.claude.count), "codexCount": String(report.codex.count),
+        ])
+        return report
+    }
+
+    /// Starts the sign-in of an MCP server in one provider and returns the link
+    /// to open in the browser. The provider finishes the sign-in when the browser
+    /// redirects back to it; `mcpLoginResult` waits for that.
+    func startMcpLogin(taskID: UUID?, provider: ConversationProvider, name: String) async throws -> McpLoginStart {
+        guard !name.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Name the MCP server to sign in to.")
+        }
+        guard let workspace = mcpWorkspace(taskID: taskID) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "The task's folders are missing.")
+        }
+        let link: String
+        switch provider {
+        case .claude: link = try await clients.claude.startMcpLogin(name: name, workspace: workspace)
+        case .codex:
+            guard clients.codex.isInstalled else { throw BridgeCommandError(code: "unavailable", message: "Codex is not installed.") }
+            link = try await clients.codex.startMcpLogin(name: name, workspace: workspace)
+        }
+        return McpLoginStart(provider: provider, name: name, authorizationUrl: link)
+    }
+
+    /// Waits for a started sign-in to finish: signed in, failed, or timed out.
+    func mcpLoginResult(taskID: UUID?, provider: ConversationProvider, name: String) async -> McpLoginResult {
+        switch provider {
+        case .claude: return await clients.claude.waitForMcpLogin(name: name)
+        case .codex:
+            guard let workspace = mcpWorkspace(taskID: taskID) else { return McpLogin.notStarted(provider: .codex, name: name) }
+            return await clients.codex.waitForMcpLogin(name: name, workspace: workspace)
+        }
     }
 
     /// Changes the provider that runs the task's next turn. A switch waits for the
@@ -8912,12 +8994,14 @@ final class PlayhouseBridgeRuntime {
             )
             let skills = SkillCatalogManager(environment: agentEnvironment, preferences: preferences)
             let rules = RuleCatalogManager(environment: agentEnvironment, preferences: preferences)
+            let mcp = McpCatalogManager(environment: agentEnvironment, preferences: preferences)
             func conversationClients() -> ConversationClients {
                 ConversationClients(
                     codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: callerCodexHome, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
                     claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, configDirectoryOverride: claudeConfigDirectory, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
                     skills: skills,
                     rules: rules,
+                    mcp: mcp,
                     observesGoalTurns: guiRuntime
                 )
             }
@@ -8948,6 +9032,21 @@ final class PlayhouseBridgeRuntime {
             func ruleIDs() throws -> [String] {
                 if let ids = request.arguments["ruleIDs"]?.strings, !ids.isEmpty { return ids }
                 return [try request.requiredString("ruleID")]
+            }
+            /// One MCP server as `serverID`, or several as `serverIDs`.
+            func mcpServerIDs() throws -> [String] {
+                if let ids = request.arguments["serverIDs"]?.strings, !ids.isEmpty { return ids }
+                return [try request.requiredString("serverID")]
+            }
+            func mcpConfig() throws -> McpServerConfig {
+                guard let value = request.arguments["config"], value != .null else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Give the server's command or URL.")
+                }
+                do {
+                    return try value.decoded(McpServerConfig.self)
+                } catch {
+                    throw BridgeCommandError(code: "invalid_argument", message: "The server needs a transport of stdio or http, with a command or a URL.")
+                }
             }
             /// Optional SKILL.md header fields, such as license, keyed by name.
             func skillFields() throws -> [String: String] {
@@ -9625,6 +9724,74 @@ final class PlayhouseBridgeRuntime {
                 result = .object(["task": try Self.value(created), "prompt": .string(plan.prompt)])
             case "rules.bridge":
                 result = try Self.value(rules.bridge(roots: skillRoots()))
+            case "mcp.list":
+                result = try Self.value(mcp.catalog(roots: skillRoots()))
+            case "mcp.get":
+                let roots = try skillRoots()
+                let serverID = try request.requiredString("serverID")
+                guard let record = mcp.catalog(roots: roots).server(id: serverID) else {
+                    throw BridgeCommandError(code: "not_found", message: "No MCP server matches \(serverID).")
+                }
+                result = .object(["server": try Self.value(record), "config": try Self.value(mcp.config(id: serverID, roots: roots))])
+            case "mcp.create":
+                let roots = try skillRoots()
+                guard let scope = McpScope(rawValue: try request.requiredString("scope")), scope != .managed else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Scope must be 'repo' or 'global'.")
+                }
+                result = try Self.value(mcp.create(
+                    name: request.requiredString("name"),
+                    config: mcpConfig(),
+                    scope: scope,
+                    root: scope == .repo ? try skillRoot(in: roots) : nil,
+                    roots: roots
+                ))
+            case "mcp.update":
+                result = try Self.value(mcp.update(id: request.requiredString("serverID"), config: mcpConfig(), roots: skillRoots()))
+            case "mcp.delete":
+                try mcp.delete(ids: mcpServerIDs(), roots: skillRoots())
+                result = .object(["deleted": .boolean(true)])
+            case "mcp.enable":
+                let value = request.arguments["enabled"]
+                guard let enabled = value?.bool ?? value?.string.flatMap({ ["true": true, "false": false][$0] }) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Enabled must be true or false.")
+                }
+                result = try Self.value(mcp.setEnabled(id: request.requiredString("serverID"), enabled: enabled, roots: skillRoots()))
+            case "mcp.link":
+                result = try Self.value(mcp.link(id: request.requiredString("serverID"), roots: skillRoots()))
+            case "mcp.fix":
+                let taskID = try request.requiredUUID("taskID")
+                let plan = try mcp.fixPlan(ids: mcpServerIDs(), roots: skillRoots())
+                let source = try taskManager.conversationSubject(taskID)
+                let created = try await taskManager.create(
+                    title: plan.title,
+                    repositories: plan.repositoryPaths.map { RepositoryWorktreeSpec(repositoryPath: $0, branch: nil, branchFrom: nil) },
+                    contextFolders: plan.contextFolders,
+                    provider: source.conversationProvider,
+                    pullRequestMode: settings.pullRequestModeDefault,
+                    prompt: plan.prompt
+                )
+                result = .object(["task": try Self.value(created), "prompt": .string(plan.prompt)])
+            case "mcp.bridge":
+                result = try Self.value(mcp.bridge(roots: skillRoots()))
+            case "mcp.status", "mcp.authenticate", "mcp.authenticate.wait":
+                let taskID = request.arguments["taskID"]?.string?.isEmpty == false ? try request.requiredUUID("taskID") : nil
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                let provider = try request.arguments["provider"]?.string.map { value -> ConversationProvider in
+                    guard let provider = ConversationProvider(rawValue: value) else {
+                        throw BridgeCommandError(code: "invalid_argument", message: "Provider must be 'claude' or 'codex'.")
+                    }
+                    return provider
+                }
+                switch request.command {
+                case "mcp.status":
+                    result = try Self.value(await conversations.mcpStatus(taskID: taskID, provider: provider))
+                case "mcp.authenticate":
+                    guard let provider else { throw BridgeCommandError(code: "invalid_argument", message: "Provider must be 'claude' or 'codex'.") }
+                    result = try Self.value(await conversations.startMcpLogin(taskID: taskID, provider: provider, name: request.requiredString("name")))
+                default:
+                    guard let provider else { throw BridgeCommandError(code: "invalid_argument", message: "Provider must be 'claude' or 'codex'.") }
+                    result = try Self.value(await conversations.mcpLoginResult(taskID: taskID, provider: provider, name: request.requiredString("name")))
+                }
             case "conversation.provider.capabilities":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .array(try await conversations.providerCapabilities(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })

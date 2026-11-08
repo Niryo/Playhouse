@@ -7144,7 +7144,7 @@ struct TaskConversationView: View {
         case .claude:
             parts.append("Claude uses its own settings: \(current.skills.count) skills and commands, \(current.mcpServers.count) MCP servers.")
         case .codex:
-            parts.append("Codex runs without MCP servers, apps, or hooks.")
+            parts.append("Codex runs without apps or hooks, with the MCP servers turned on in Skills, Rules & MCP.")
         }
         parts.append(provider.supportsGoals ? "Goals are available." : "Goals are available only with Codex.")
         parts.append("Earlier turns are shared as text context on the next message.")

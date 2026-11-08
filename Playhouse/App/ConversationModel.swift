@@ -918,6 +918,8 @@ struct ConversationClients {
     var skills: SkillCatalogManager? = nil
     /// The shared agent rules, which a turn's launch bridges to its provider.
     var rules: RuleCatalogManager? = nil
+    /// The shared MCP servers, which a turn's launch bridges to its provider.
+    var mcp: McpCatalogManager? = nil
     /// Whether this request comes from a window, whose history reads follow the thread's Codex
     /// Goal turns. A window and the CLI share one Codex client and app-server, so following
     /// is a property of the request rather than of the client.

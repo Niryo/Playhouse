@@ -365,6 +365,89 @@ struct RemoteConversationManager {
         return (try task.decoded(BoardTaskRecord.self), prompt)
     }
 
+    func mcpServers(taskID: UUID) async throws -> McpCatalog {
+        try await daemon.call("mcp.list", ["taskID": id(taskID)]).decoded(McpCatalog.self)
+    }
+
+    func mcpServerConfig(taskID: UUID, serverID: String) async throws -> McpServerConfig {
+        let result = try await daemon.call("mcp.get", ["taskID": id(taskID), "serverID": .string(serverID)])
+        guard let config = result.object?["config"] else {
+            throw BridgeCommandError(code: "invalid_response", message: "The bridge did not return the server's definition.")
+        }
+        return try config.decoded(McpServerConfig.self)
+    }
+
+    private static func value(_ config: McpServerConfig) -> BridgeValue {
+        var object: [String: BridgeValue] = [
+            "transport": .string(config.transport.rawValue),
+            "args": .array(config.args.map(BridgeValue.string)),
+            "env": .object(config.env.mapValues(BridgeValue.string)),
+            "headers": .object(config.headers.mapValues(BridgeValue.string)),
+        ]
+        if let command = config.command { object["command"] = .string(command) }
+        if let url = config.url { object["url"] = .string(url) }
+        return .object(object)
+    }
+
+    /// A global server goes into both providers' own configuration; a repository one into its `.mcp.json`.
+    func createMcpServer(taskID: UUID, name: String, config: McpServerConfig, scope: McpScope, root: String?) async throws -> McpServerRecord {
+        var arguments: [String: BridgeValue] = [
+            "taskID": id(taskID), "scope": .string(scope.rawValue), "name": .string(name), "config": Self.value(config),
+        ]
+        if let root { arguments["root"] = .string(root) }
+        return try await daemon.call("mcp.create", arguments).decoded(McpServerRecord.self)
+    }
+
+    func updateMcpServer(taskID: UUID, serverID: String, config: McpServerConfig) async throws -> McpServerRecord {
+        try await daemon.call("mcp.update", [
+            "taskID": id(taskID), "serverID": .string(serverID), "config": Self.value(config),
+        ]).decoded(McpServerRecord.self)
+    }
+
+    func deleteMcpServers(taskID: UUID, serverIDs: [String]) async throws {
+        _ = try await daemon.call("mcp.delete", ["taskID": id(taskID), "serverIDs": .array(serverIDs.map(BridgeValue.string))])
+    }
+
+    func setMcpServerEnabled(taskID: UUID, serverID: String, enabled: Bool) async throws -> McpServerRecord {
+        try await daemon.call("mcp.enable", [
+            "taskID": id(taskID), "serverID": .string(serverID), "enabled": .boolean(enabled),
+        ]).decoded(McpServerRecord.self)
+    }
+
+    func linkMcpServer(taskID: UUID, serverID: String) async throws -> McpServerRecord {
+        try await daemon.call("mcp.link", ["taskID": id(taskID), "serverID": .string(serverID)]).decoded(McpServerRecord.self)
+    }
+
+    /// Opens a task whose agent repairs the servers, and returns it with the prompt to send.
+    func fixMcpServers(taskID: UUID, serverIDs: [String]) async throws -> (task: BoardTaskRecord, prompt: String) {
+        let result = try await daemon.call("mcp.fix", ["taskID": id(taskID), "serverIDs": .array(serverIDs.map(BridgeValue.string))])
+        guard let task = result.object?["task"], let prompt = result.object?["prompt"]?.string else {
+            throw BridgeCommandError(code: "invalid_response", message: "The bridge did not return the new task.")
+        }
+        return (try task.decoded(BoardTaskRecord.self), prompt)
+    }
+
+    func mcpStatus(taskID: UUID, provider: ConversationProvider? = nil) async throws -> McpStatusReport {
+        var arguments: [String: BridgeValue] = ["taskID": id(taskID)]
+        if let provider { arguments["provider"] = .string(provider.rawValue) }
+        return try await daemon.call("mcp.status", arguments).decoded(McpStatusReport.self)
+    }
+
+    /// Starts the provider's sign-in to an MCP server and returns the link to open in the browser.
+    func startMcpLogin(taskID: UUID, provider: ConversationProvider, name: String) async throws -> McpLoginStart {
+        try await daemon.call("mcp.authenticate", [
+            "taskID": id(taskID), "provider": .string(provider.rawValue), "name": .string(name),
+        ]).decoded(McpLoginStart.self)
+    }
+
+    /// Returns once the started sign-in is finished, failed, or timed out. The
+    /// daemon stays up while it waits.
+    func mcpLoginResult(taskID: UUID, provider: ConversationProvider, name: String) async throws -> McpLoginResult {
+        try await daemon.call("mcp.authenticate.wait", [
+            "taskID": id(taskID), "provider": .string(provider.rawValue), "name": .string(name),
+        ]).decoded(McpLoginResult.self)
+    }
+
     func providerCapabilities(taskID: UUID) async throws -> [ConversationProviderCapabilities] {
         try await daemon.call("conversation.provider.capabilities", ["taskID": id(taskID)])
             .decoded([ConversationProviderCapabilities].self)

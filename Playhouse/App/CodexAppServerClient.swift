@@ -128,6 +128,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         let cwd: String
         let roots: [String]
         let developerInstructions: String?
+        /// The thread's MCP server config, so turning a server on or off resumes the thread.
+        var mcpServers: String? = nil
     }
     private var resumedThreadParameters: [String: ResumeParameters] = [:]
     private var activeTurnID: String?
@@ -398,7 +400,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             params["developerInstructions"] = developerInstructions
         }
         try await applySkillBridge(workspace)
-        if let config = workspace.skillBridge?.codexThreadConfig { params["config"] = config }
+        if let config = workspace.codexThreadConfig { params["config"] = config }
         let response = try await request(method: "thread/start", params: params)
 
         guard let thread = response["thread"] as? [String: Any],
@@ -407,11 +409,86 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
         try confirmModel(response["model"] as? String, expected: modelID)
         let parameters = ResumeParameters(
-            modelID: modelID, cwd: workspace.cwd.path, roots: workspace.roots.map(\.path), developerInstructions: developerInstructions
+            modelID: modelID, cwd: workspace.cwd.path, roots: workspace.roots.map(\.path), developerInstructions: developerInstructions,
+            mcpServers: workspace.mcpBridge?.codexServersJSON
         )
         resumedThreadParameters[threadID] = parameters
         recordServedThread(threadID, parameters)
         return threadID
+    }
+
+    /// The MCP servers Codex configures for itself, with whether each needs the
+    /// user to sign in (`codex mcp login`).
+    func mcpServerStatuses(workspace: ConversationWorkspaceContext) async throws -> [McpProviderStatus] {
+        try await ensureInitialized(workspace: workspace)
+        let response = try await request(method: "mcpServerStatus/list", params: [:])
+        return (response["data"] as? [[String: Any]] ?? []).compactMap { server in
+            guard let name = server["name"] as? String else { return nil }
+            let auth = server["authStatus"] as? String ?? "unknown"
+            return McpProviderStatus(name: name, status: auth, needsSignIn: auth == "notLoggedIn")
+        }
+    }
+
+    /// Asks Codex to start the OAuth sign-in of one of its MCP servers and
+    /// returns the link to open in the browser. Codex finishes the sign-in itself
+    /// when the browser redirects back to it.
+    func startMcpLogin(name: String, workspace: ConversationWorkspaceContext) async throws -> String {
+        try await ensureInitialized(workspace: workspace)
+        let response = try await request(method: "mcpServer/oauth/login", params: ["name": name])
+        guard let link = response["authorizationUrl"] as? String, !link.isEmpty else {
+            throw ClientError.protocolFailure("Codex did not return a sign-in link for \(name).")
+        }
+        startedMcpLogins.insert(name)
+        holdBridgeForMcpLogin(name)
+        PlayhouseDiagnostics.record("mcp.login.started", fields: ["provider": "codex"])
+        return link
+    }
+
+    /// The servers whose sign-in this client started and that no wait has reported on yet.
+    private var startedMcpLogins = Set<String>()
+    /// While a sign-in is pending the bridge counts as busy, so it doesn't idle-exit and
+    /// stop this app-server, which is the one listening for the browser's redirect.
+    private var mcpLoginHolds: [String: Task<Void, Never>] = [:]
+
+    private func holdBridgeForMcpLogin(_ name: String) {
+        releaseBridgeForMcpLogin(name)
+        BridgeBackgroundWork.onBegin?()
+        let timeout = McpLogin.timeout
+        mcpLoginHolds[name] = Task {
+            defer { BridgeBackgroundWork.onEnd?() }
+            try? await Task.sleep(for: timeout)
+        }
+    }
+
+    private func releaseBridgeForMcpLogin(_ name: String) {
+        mcpLoginHolds.removeValue(forKey: name)?.cancel()
+    }
+
+    /// Waits until Codex reports the server as signed in, or the sign-in times out.
+    func waitForMcpLogin(name: String, workspace: ConversationWorkspaceContext) async -> McpLoginResult {
+        guard startedMcpLogins.contains(name) else { return McpLogin.notStarted(provider: .codex, name: name) }
+        defer {
+            startedMcpLogins.remove(name)
+            releaseBridgeForMcpLogin(name)
+        }
+        let timeout = McpLogin.timeout
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline, !Task.isCancelled {
+            try? await Task.sleep(for: McpLogin.pollInterval(for: timeout))
+            do {
+                guard let server = try await mcpServerStatuses(workspace: workspace).first(where: { $0.name == name }) else {
+                    return McpLoginResult(provider: .codex, name: name, signedIn: false, error: "Codex doesn't have an MCP server named \(name).")
+                }
+                if !server.needsSignIn {
+                    PlayhouseDiagnostics.record("mcp.login.finished", fields: ["provider": "codex", "signedIn": "true"])
+                    return McpLoginResult(provider: .codex, name: name, signedIn: true, error: nil)
+                }
+            } catch {
+                return McpLoginResult(provider: .codex, name: name, signedIn: false, error: error.localizedDescription)
+            }
+        }
+        return McpLogin.timedOut(provider: .codex, name: name)
     }
 
     func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption] {
@@ -983,7 +1060,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             modelID: saved?.modelID ?? Self.modelID,
             cwd: saved?.cwd ?? workspace.cwd.path,
             roots: saved?.roots ?? workspace.roots.map(\.path),
-            developerInstructions: saved?.developerInstructions
+            developerInstructions: saved?.developerInstructions,
+            mcpServers: saved?.mcpServers
         )
         var resumeParameters: [String: Any] = [
             "threadId": threadID,
@@ -996,7 +1074,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             "runtimeWorkspaceRoots": parameters.roots,
         ]
         if let developerInstructions = parameters.developerInstructions { resumeParameters["developerInstructions"] = developerInstructions }
-        if let config = workspace.skillBridge?.codexThreadConfig { resumeParameters["config"] = config }
+        if let config = workspace.codexThreadConfig { resumeParameters["config"] = config }
         _ = try await request(method: "thread/resume", params: resumeParameters)
         resumedThreadParameters[threadID] = parameters
         let turns = try await request(method: "thread/turns/list", params: ["threadId": threadID, "limit": 1, "sortDirection": "desc"])
@@ -1317,7 +1395,6 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             "--disable", "apps",
             "--disable", "remote_plugin",
             "--disable", "hooks",
-            "-c", "mcp_servers={}",
             // Goals are always on: a window and the CLI share this app-server.
             "-c", "features.goals=true"
         ]
@@ -1415,7 +1492,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     ) async throws {
         let developerInstructions = RuleBridgeLaunch.combined(developerInstructions, workspace.ruleBridge?.codexInstructions)
         var currentParameters = ResumeParameters(
-            modelID: modelID, cwd: workspace.cwd.path, roots: workspace.roots.map(\.path), developerInstructions: developerInstructions
+            modelID: modelID, cwd: workspace.cwd.path, roots: workspace.roots.map(\.path), developerInstructions: developerInstructions,
+            mcpServers: workspace.mcpBridge?.codexServersJSON
         )
         // Goal reads and writes don't change how the thread runs, so any loaded
         // copy serves them. Resuming again would also fail for a thread started
@@ -1444,7 +1522,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 params["developerInstructions"] = developerInstructions
             }
             try await applySkillBridge(workspace)
-            if let config = workspace.skillBridge?.codexThreadConfig { params["config"] = config }
+            if let config = workspace.codexThreadConfig { params["config"] = config }
             response = try await request(method: "thread/resume", params: params)
         } catch {
             var fields = sensitiveConversation
@@ -1468,7 +1546,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             ]))
             currentParameters = ResumeParameters(
                 modelID: reportedModel, cwd: currentParameters.cwd, roots: currentParameters.roots,
-                developerInstructions: currentParameters.developerInstructions
+                developerInstructions: currentParameters.developerInstructions, mcpServers: currentParameters.mcpServers
             )
         }
         resumedThreadParameters[threadID] = currentParameters
@@ -2432,7 +2510,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     /// The flags every app-server of this client starts with. Goals are always on, since a
     /// window and the CLI share the server; whether a caller follows Goal turns is per request.
     private var sharedServerFlags: [String] {
-        ["--disable", "apps", "--disable", "remote_plugin", "--disable", "hooks", "-c", "mcp_servers={}", "-c", "features.goals=true"]
+        ["--disable", "apps", "--disable", "remote_plugin", "--disable", "hooks", "-c", "features.goals=true"]
     }
 
     private func launchEnvironment() -> [String: String] {
@@ -2461,7 +2539,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         guard let persistentServer, var manifest = serverManifest else { return }
         let thread = CodexServerManifest.Thread(
             modelID: parameters.modelID, cwd: parameters.cwd, roots: parameters.roots,
-            developerInstructions: parameters.developerInstructions
+            developerInstructions: parameters.developerInstructions, mcpServers: parameters.mcpServers
         )
         guard manifest.threads[threadID] != thread else { return }
         manifest.threads[threadID] = thread

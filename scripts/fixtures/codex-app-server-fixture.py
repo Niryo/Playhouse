@@ -1068,6 +1068,29 @@ def main():
                 {"id": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol", "isDefault": False,
                  "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
             ]}})
+        elif message.get("method") == "mcpServerStatus/list":
+            # The servers a test seeds in `<executable>.mcp-status`, as Codex lists
+            # the ones its own configuration defines.
+            # `<executable>.mcp-status-fail` makes the request fail, as when Codex can't be asked.
+            if Path(str(sys.argv[0]) + ".mcp-status-fail").exists():
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32603, "message": "Fixture MCP status is unavailable."}})
+                return
+            seeded = Path(str(sys.argv[0]) + ".mcp-status")
+            servers = json.loads(seeded.read_text(encoding="utf-8")) if seeded.exists() else []
+            # A sign-in finishes when a test writes the server's name to
+            # `<executable>.mcp-callback`, as the browser's redirect would.
+            callback = Path(str(sys.argv[0]) + ".mcp-callback")
+            signed_in = set(callback.read_text(encoding="utf-8").split("\n")) if callback.exists() else set()
+            servers = [{**server, "authStatus": "oAuth"} if server.get("name") in signed_in and server.get("authStatus") == "notLoggedIn" else server
+                       for server in servers]
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"data": servers, "nextCursor": None}})
+        elif message.get("method") == "mcpServer/oauth/login":
+            # Codex's sign-in start: the link to open. Each start is logged.
+            name = message.get("params", {}).get("name")
+            with open(str(sys.argv[0]) + ".mcp-login", "a", encoding="utf-8") as starts:
+                starts.write(json.dumps({"name": name}) + "\n")
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {
+                "authorizationUrl": f"https://auth.example.test/codex/authorize?server={name}", "loginId": f"fixture-login-{name}"}})
         elif message.get("method") == "thread/goal/get":
             goal = json.loads(goal_path.read_text(encoding="utf-8")) if goal_path.is_file() else None
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"goal": goal}})

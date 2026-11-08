@@ -536,6 +536,86 @@ enum PlayhouseCLI {
             default:
                 throw CLIError.usage("Unknown skills operation \(operation).")
             }
+        case "mcp":
+            guard let operation = rest.first else { throw CLIError.usage("Missing mcp operation.") }
+            let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: [
+                "--task", "--server", "--scope", "--name", "--root", "--command", "--arg", "--env", "--url", "--header", "--config-json", "--provider",
+            ])
+            var arguments: [String: BridgeValue] = [:]
+            if let task = flags["--task"]?.first { arguments["taskID"] = .string(task) }
+            if let root = flags["--root"]?.first { arguments["root"] = .string(root) }
+            func serverID() throws -> BridgeValue { .string(try requiredFlag("--server", flags: flags).first!) }
+            /// The definition from --config-json, or from --command/--arg/--env or --url/--header.
+            func config() throws -> BridgeValue {
+                if let json = flags["--config-json"]?.first {
+                    guard let data = json.data(using: .utf8),
+                          let value = try? JSONDecoder().decode(BridgeValue.self, from: data), value.object != nil else {
+                        throw CLIError.usage("--config-json must be a JSON object.")
+                    }
+                    return value
+                }
+                func pairs(_ flag: String, separator: Character) throws -> [String: BridgeValue] {
+                    var result: [String: BridgeValue] = [:]
+                    for entry in flags[flag] ?? [] {
+                        guard let index = entry.firstIndex(of: separator), index != entry.startIndex else {
+                            throw CLIError.usage(flag == "--env" ? "Use --env NAME=value." : "Use --header \"Name: value\".")
+                        }
+                        result[String(entry[..<index]).trimmingCharacters(in: .whitespaces)] =
+                            .string(String(entry[entry.index(after: index)...]).trimmingCharacters(in: .whitespaces))
+                    }
+                    return result
+                }
+                if let url = flags["--url"]?.first {
+                    return .object(["transport": .string("http"), "url": .string(url), "headers": .object(try pairs("--header", separator: ":"))])
+                }
+                guard let command = flags["--command"]?.first else { throw CLIError.usage("Use --command <command> or --url <url>, or --config-json.") }
+                return .object([
+                    "transport": .string("stdio"), "command": .string(command),
+                    "args": .array((flags["--arg"] ?? []).map(BridgeValue.string)), "env": .object(try pairs("--env", separator: "=")),
+                ])
+            }
+            switch operation {
+            case "list":
+                return BridgeRequest(command: "mcp.list", arguments: arguments)
+            case "get":
+                arguments["serverID"] = try serverID()
+                return BridgeRequest(command: "mcp.get", arguments: arguments)
+            case "create":
+                arguments["scope"] = .string(try requiredFlag("--scope", flags: flags).first!)
+                arguments["name"] = .string(try requiredFlag("--name", flags: flags).first!)
+                arguments["config"] = try config()
+                return BridgeRequest(command: "mcp.create", arguments: arguments)
+            case "update":
+                arguments["serverID"] = try serverID()
+                arguments["config"] = try config()
+                return BridgeRequest(command: "mcp.update", arguments: arguments)
+            case "enable", "disable":
+                arguments["serverID"] = try serverID()
+                arguments["enabled"] = .boolean(operation == "enable")
+                return BridgeRequest(command: "mcp.enable", arguments: arguments)
+            case "delete":
+                arguments["serverIDs"] = .array(try requiredFlag("--server", flags: flags).map(BridgeValue.string))
+                return BridgeRequest(command: "mcp.delete", arguments: arguments)
+            case "link":
+                arguments["serverID"] = try serverID()
+                return BridgeRequest(command: "mcp.link", arguments: arguments)
+            case "fix":
+                guard arguments["taskID"] != nil else { throw CLIError.usage("Use: playhouse mcp fix --task <task-id> --server <server-id> [--server <server-id>...]") }
+                arguments["serverIDs"] = .array(try requiredFlag("--server", flags: flags).map(BridgeValue.string))
+                return BridgeRequest(command: "mcp.fix", arguments: arguments)
+            case "bridge":
+                guard arguments["taskID"] != nil else { throw CLIError.usage("Use: playhouse mcp bridge --task <task-id>") }
+                return BridgeRequest(command: "mcp.bridge", arguments: arguments)
+            case "status":
+                if let provider = flags["--provider"]?.first { arguments["provider"] = .string(provider) }
+                return BridgeRequest(command: "mcp.status", arguments: arguments)
+            case "authenticate", "authenticate-wait":
+                arguments["provider"] = .string(try requiredFlag("--provider", flags: flags).first!)
+                arguments["name"] = .string(try requiredFlag("--name", flags: flags).first!)
+                return BridgeRequest(command: operation == "authenticate" ? "mcp.authenticate" : "mcp.authenticate.wait", arguments: arguments)
+            default:
+                throw CLIError.usage("Unknown mcp operation \(operation).")
+            }
         case "rules":
             guard let operation = rest.first else { throw CLIError.usage("Missing rules operation.") }
             let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: [
@@ -994,6 +1074,17 @@ enum PlayhouseCLI {
       playhouse rules delete --rule <rule-id> [--rule <rule-id>...] [--task <task-id>]
       playhouse rules fix --task <task-id> --rule <rule-id> [--rule <rule-id>...]
       playhouse rules bridge --task <task-id>
+      playhouse mcp list [--task <task-id>]
+      playhouse mcp get --server <server-id> [--task <task-id>]
+      playhouse mcp create --scope <repo|global> --name <name> (--command <command> [--arg <arg>...] [--env NAME=value...] | --url <url> [--header "Name: value"...] | --config-json <json>) [--task <task-id>] [--root <repo-path>]
+      playhouse mcp update --server <server-id> (--command ... | --url ... | --config-json <json>) [--task <task-id>]
+      playhouse mcp enable|disable|link --server <server-id> [--task <task-id>]
+      playhouse mcp delete --server <server-id> [--server <server-id>...] [--task <task-id>]
+      playhouse mcp fix --task <task-id> --server <server-id> [--server <server-id>...]
+      playhouse mcp bridge --task <task-id>
+      playhouse mcp status [--task <task-id>] [--provider <claude|codex>]
+      playhouse mcp authenticate --provider <claude|codex> --name <server-name> [--task <task-id>]
+      playhouse mcp authenticate-wait --provider <claude|codex> --name <server-name> [--task <task-id>]
       playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>
       playhouse task token-usage <task-id>
       playhouse task token-waste <task-id>

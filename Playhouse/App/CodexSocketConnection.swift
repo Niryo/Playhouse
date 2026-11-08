@@ -207,6 +207,7 @@ struct CodexServerManifest: Codable, Equatable {
         var cwd: String
         var roots: [String]
         var developerInstructions: String?
+        var mcpServers: String?
     }
 
     var version = 1
