@@ -28,11 +28,11 @@ struct CodexQuestionOwnershipProbe {
         let configuration = ModelConfiguration(schema: schema, url: directory.appendingPathComponent("Playhouse-v2.store"))
         let container = try ModelContainer(for: schema, configurations: [configuration])
         let tasks = BoardTaskManager(modelContext: container.mainContext)
-        let codex = CodexAppServerClient(codexExecutableOverride: arguments[2], goalRuntimeEnabled: true)
+        let codex = CodexAppServerClient(codexExecutableOverride: arguments[2])
         defer { codex.shutdown() }
         let suite = ProcessInfo.processInfo.environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"]!
         let preferences = UserDefaults(suiteName: suite)!
-        let manager = ConversationManager(tasks: tasks, clients: ConversationClients(codex: codex, claude: ClaudeCodeClient()), preferences: preferences)
+        let manager = ConversationManager(tasks: tasks, clients: ConversationClients(codex: codex, claude: ClaudeCodeClient(), observesGoalTurns: true), preferences: preferences)
         var requests: [UUID: [ConversationUserInputRequest]] = [:]
         func receive(_ taskID: UUID, _ update: ConversationUpdate) {
             if update.type == "user_input", let request = update.userInputRequest { requests[taskID, default: []].append(request) }
@@ -55,7 +55,7 @@ struct CodexQuestionOwnershipProbe {
         let store = try tasks.conversationTranscriptStore()
         try check(try store.readState(originalID).pendingUserInputRequest == original, "Original request persisted under wrong task.")
         try check(try store.readState(parallelID).pendingUserInputRequest == parallel, "Parallel request persisted under wrong task.")
-        // Exercise history switching on the GUI-configured shared production client.
+        // Exercise history switching as a window's requests do on the shared production client.
         _ = try await manager.history(taskID: parallelID)
         _ = try await manager.history(taskID: originalID)
         let answers = ["color": ["Blue"], "token": ["fixture-secret"]]

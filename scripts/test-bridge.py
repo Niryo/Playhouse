@@ -5,6 +5,7 @@ import base64
 import datetime
 import errno
 import fcntl
+import hashlib
 import json
 import re
 import plistlib
@@ -8950,6 +8951,171 @@ class PlayhouseBridgeTests(unittest.TestCase):
         replacement_reported_seconds = float(replacement_goal.get("timeUsedSeconds") or 0)
         expected_baseline = prior_reported_seconds if replacement_reported_seconds >= prior_reported_seconds else 0
         self.assertAlmostEqual(float(replacement_baseline), expected_baseline, places=3, msg="A new Goal must use only the prior total when Codex reports cumulative time.")
+
+    def recorded_codex_app_servers(self, launches):
+        """The app-servers a `-single-server` fixture recorded: socket servers, and stdio launches
+        that are not a socket server's own stdio child."""
+        records = [json.loads(line) for line in launches.read_text(encoding="utf-8").splitlines() if line.strip()] \
+            if launches.is_file() else []
+        socket_servers = {record["pid"] for record in records if record["listen"].startswith("unix://")}
+        return [record for record in records
+                if record["listen"].startswith("unix://") or record["parentPID"] not in socket_servers]
+
+    # case-contract: test_codex_window_and_cli_share_one_app_server | A window and the CLI use one Codex app-server per Codex home. Every Codex request against one data folder (sends on two tasks, Goal set/get/pause/clear, history and usage refreshes, from the CLI and, in the UI, from an open window as well) runs on the same recorded server process, which listens on the shared unix socket with features.goals=true and the caller's CODEX_HOME and is the one live Codex manifest; it keeps running after every CLI Goal call, including a rejected blank objective, and a CLI call that spells the same CODEX_HOME differently reuses it. A send on the second task while the first task's Goal is active leaves that Goal active. The work turn Codex runs for the Goal is active and interruptible whether the window or the CLI set it; a history read during it, even with another model selected, never resumes the thread, and once pausing the Goal ends the turn, history resumes the thread with the selected model. A usage read the server never answers times out without stopping the server and keeps the last known Codex account, and the next refresh reads it again. In the UI, the window sets a Goal and follows the turn Codex starts for it, which stays active and interruptible while the CLI sends on the second task and ends when the window pauses the Goal; a Goal the CLI sets appears in the open window without reopening the task, the window's pause and clear reach the CLI's Goal reads, and the Agents info block shows the Codex account read through that server.
+    def test_codex_window_and_cli_share_one_app_server(self):
+        name = "codex-fixture-single-server-goal-success"
+        state = self.data_directory / "single-server-fixture-state"
+        state.mkdir()
+        codex_home = self.data_directory / "codex-home"
+        codex_home.mkdir()
+        env = {
+            **self.install_codex_fixture(name),
+            "CODEX_HOME": str(codex_home),
+            "PLAYHOUSE_E2E_FIXTURE_STATE_DIRECTORY": str(state),
+        }
+        launches = state / f"{name}.app-servers"
+        task_id = self.create_task("Shared Codex server", provider="codex")["id"]
+
+        def assert_one_live_server(context, expected_pid=None):
+            servers = self.recorded_codex_app_servers(launches)
+            self.assertEqual(len(servers), 1, f"{context}: one app-server runs per Codex home, got {servers}")
+            server = servers[0]
+            self.assertTrue(self.process_is_running(server["pid"]), f"{context}: the shared app-server keeps running.")
+            live = [m for kind, _, m in self.agent_manifests() if kind == "codex" and self.agent_process_alive(m.get("process"))]
+            self.assertEqual([m["process"]["pid"] for m in live], [server["pid"]],
+                             f"{context}: the one live Codex manifest is the recorded server.")
+            if expected_pid is not None:
+                self.assertEqual(server["pid"], expected_pid, f"{context}: the same app-server serves every request.")
+            return server
+
+        sent, _ = self.call_cli("conversation", "send", task_id, "--message", "Hello from the CLI.", extra_environment=env)
+        self.assert_success(sent)
+        server = assert_one_live_server("After a CLI send")
+        pid = server["pid"]
+        self.assertTrue(server["listen"].startswith("unix://"), "The shared app-server listens on its unix socket.")
+        self.assertIn("features.goals=true", server["arguments"], "The one app-server always enables Codex Goals.")
+        self.assertEqual(server["codexHome"], str(codex_home), "The app-server runs on the caller's Codex home.")
+
+        objective = "Keep the shared server running."
+        goal = self.assert_success(self.call_cli("conversation", "goal", task_id, "set", "--text", objective, extra_environment=env)[0])
+        self.assertEqual(goal["objective"], objective)
+        assert_one_live_server("After a CLI Goal set", pid)
+
+        # Codex runs a work turn for the Goal. A history read meanwhile, even with another model
+        # selected, never resumes the thread under it, and the turn stays active and interruptible.
+        thread_id = self.task_for(task_id, env)["codexThreadID"]
+        resumes = state / f"{name}.resumes"
+        thread_resumes = lambda: [entry for entry in self.jsonl(resumes) if entry["threadId"] == thread_id]
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-sol")[0])
+        resumed_before = len(thread_resumes())
+        texts, _ = self.history_texts(task_id, env)
+        self.assertIn("Hello from the CLI.", texts)
+        self.assertEqual(thread_resumes()[resumed_before:], [], "A history read never resumes a thread under its running Goal turn.")
+        runtime = self.assert_success(self.call_cli("conversation", "runtime", extra_environment=env)[0])
+        self.assertIn(thread_id, runtime["activeThreadIDs"], "The Goal's work turn is active even when only the CLI set the Goal.")
+        self.assertIn(thread_id, runtime["interruptibleThreadIDs"])
+
+        # A send on another task, while this task's Goal is active, runs on the same server.
+        other_id = self.create_task("Second Codex task", provider="codex")["id"]
+        self.assert_success(self.call_cli("conversation", "send", other_id, "--message", "Hello from the second task.", extra_environment=env)[0])
+        self.assertNotEqual(self.task_for(other_id, env)["codexThreadID"], self.task_for(task_id, env)["codexThreadID"])
+        current = self.assert_success(self.call_cli("conversation", "goal", task_id, "get", extra_environment=env)[0])
+        self.assertEqual((current["objective"], current["status"]), (objective, "active"),
+                         "A send on another task leaves this task's Goal active.")
+        assert_one_live_server("After a send on the second task", pid)
+
+        paused = self.assert_success(self.call_cli("conversation", "goal", task_id, "pause", extra_environment=env)[0])
+        self.assertEqual(paused["status"], "paused")
+        self.wait_for(lambda: thread_id not in self.assert_success(self.call_cli("conversation", "runtime", extra_environment=env)[0])["activeThreadIDs"],
+                      "Pausing the Goal ends its work turn.")
+        assert_one_live_server("After a CLI Goal pause", pid)
+        blank, _ = self.call_cli("conversation", "goal", task_id, "set", "--text", "   ", expected_status=2, extra_environment=env)
+        self.assert_failure(blank, "invalid_argument")
+        assert_one_live_server("After a rejected CLI Goal set", pid)
+
+        texts, _ = self.history_texts(task_id, env)
+        self.assertIn("Hello from the CLI.", texts)
+        self.assertEqual(thread_resumes()[-1]["model"], "gpt-6-sol", "Once the turn ends, history resumes the thread with the selected model.")
+
+        def codex_usage(environment):
+            providers = self.assert_success(self.call_cli("usage", "get", "--refresh", timeout=20, extra_environment=environment)[0])["providers"]
+            return next(entry for entry in providers if entry["provider"] == "codex")
+        self.assertEqual(codex_usage(env).get("account"), "codex-fixture@example.com", "Usage is read through the shared app-server.")
+        assert_one_live_server("After CLI history and a usage refresh", pid)
+        # A read the server never answers times out without stopping it; the last account stays.
+        hang = state / f"{name}.account-read-hang"
+        hang.touch()
+        started = time.monotonic()
+        timed_out = codex_usage({**env, "PLAYHOUSE_E2E_CODEX_ACCOUNT_READ_TIMEOUT_SECONDS": "2"})
+        self.assertLess(time.monotonic() - started, 15, "An unanswered usage read gives up after its timeout.")
+        self.assertFalse(hang.exists(), "The refresh asked the shared server for the account.")
+        self.assertEqual(timed_out.get("account"), "codex-fixture@example.com", "A timed-out read keeps the last known account.")
+        assert_one_live_server("After an unanswered usage read", pid)
+        self.assertEqual(codex_usage(env).get("account"), "codex-fixture@example.com", "The next refresh reads the account again.")
+
+        # The same Codex home spelled differently is the same server.
+        respelled = {**env, "CODEX_HOME": str(codex_home) + "/."}
+        current = self.assert_success(self.call_cli("conversation", "goal", task_id, "get", extra_environment=respelled)[0])
+        self.assertEqual(current["status"], "paused")
+        assert_one_live_server("After a CLI call with CODEX_HOME spelled differently", pid)
+
+        self.assertIsNone(self.assert_success(self.call_cli("conversation", "goal", task_id, "clear", extra_environment=env)[0]))
+        self.assertIsNone(self.assert_success(self.call_cli("conversation", "goal", task_id, "get", extra_environment=env)[0]))
+        assert_one_live_server("After a CLI Goal clear", pid)
+
+    def rewrite_codex_manifest_as_legacy(self, manifest_path, manifest, codex_home):
+        """Renames a live server's manifest to the key a server started before one app-server
+        served every caller would have had: it also held the goal-feature and goal-runtime flags."""
+        parts = manifest["keyParts"]
+        legacy_parts = [parts[0], codex_home, "false", "false", parts[2]]
+        key_hash = hashlib.sha256("\x01".join(legacy_parts + [manifest["serviceName"]]).encode()).digest()[:12].hex()
+        runs = manifest_path.parent
+        (runs / f"{manifest['keyHash']}.log").rename(runs / f"{key_hash}.log")
+        (runs / f"{manifest['keyHash']}.owner.lock").unlink(missing_ok=True)
+        manifest_path.unlink()
+        legacy = {**manifest, "keyHash": key_hash, "keyParts": legacy_parts}
+        legacy_path = runs / f"{key_hash}.json"
+        legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+        return legacy_path
+
+    # case-contract: test_codex_legacy_keyed_server_retires_after_restart | A Codex app-server started under the earlier shared-client key, which also held two goal flags, is retired by the next daemon. When its daemon dies and a fresh daemon starts for the data folder, it reconnects to the legacy server only to retire it: with no turn left to follow, the server is stopped and its manifest removed, and the next Codex send, from the CLI or, in the UI, from the window, runs on one new server under the current key (executable, Codex home, data folder), leaving one live Codex server.
+    def test_codex_legacy_keyed_server_retires_after_restart(self):
+        name = "codex-fixture-single-server-goal-success"
+        executable = self.install_provider_fixture("codex", name)
+        state = self.data_directory / "legacy-server-fixture-state"
+        state.mkdir()
+        codex_home = self.data_directory / "codex-home"
+        codex_home.mkdir()
+        environment = self.restart_service_environment(
+            "codex", executable, CODEX_HOME=str(codex_home), PLAYHOUSE_E2E_FIXTURE_STATE_DIRECTORY=str(state))
+        service = environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"]
+        task_id = self.create_task("Legacy Codex server", provider="codex")["id"]
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Before the upgrade.", extra_environment=environment)[0])
+        path, manifest = next((p, m) for kind, p, m in self.agent_manifests() if kind == "codex" and m["serviceName"] == service)
+        self.assertEqual(len(manifest["keyParts"]), 3, "A current server's key is its executable, Codex home and data folder.")
+        legacy_server = manifest["process"]
+        self.kill_daemon(environment)
+        self.assertTrue(self.agent_process_alive(legacy_server), "The server outlives its daemon.")
+        legacy_path = self.rewrite_codex_manifest_as_legacy(path, manifest, str(codex_home))
+
+        # The fresh daemon's first request reconnects to the legacy server only to retire it. With
+        # a 30s idle limit the watch checks every 7.5s: only retiring stops the server in time.
+        environment["PLAYHOUSE_E2E_CODEX_SERVER_IDLE_SECONDS"] = "30"
+        self.assert_success(self.call_cli("task", "list", extra_environment=environment)[0])
+        self.wait_for(lambda: not self.agent_process_alive(legacy_server), "The legacy-keyed server is retired once idle.")
+        self.wait_for(lambda: not legacy_path.exists(), "The retired server's manifest is removed.")
+
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "After the upgrade.", extra_environment=environment)[0])
+        live = [m for kind, _, m in self.agent_manifests()
+                if kind == "codex" and m["serviceName"] == service and self.agent_process_alive(m.get("process"))]
+        self.assertEqual(len(live), 1, f"One live Codex server remains: {live}")
+        self.assertEqual(len(live[0]["keyParts"]), 3, "The new server uses the current key.")
+        self.assertNotEqual(live[0]["process"]["pid"], legacy_server["pid"])
+        running = [server for server in self.recorded_codex_app_servers(state / f"{name}.app-servers")
+                   if self.process_is_running(server["pid"])]
+        self.assertEqual([server["pid"] for server in running], [live[0]["process"]["pid"]], "One app-server runs on the Codex home.")
+        texts, _ = self.history_texts(task_id, environment)
+        self.assertIn("After the upgrade.", texts)
 
     def write_default(self, key, value):
         subprocess.run(["/usr/bin/defaults", "write", self.defaults_suite, key, value], check=True, capture_output=True)
