@@ -5696,12 +5696,9 @@ final class ConversationManager {
     ) async throws -> ConversationHistory? {
         guard let threadID = task.codexThreadID else { return nil }
         let taskID = task.id
-        // Codex allows one writer per thread: when another client already has it open (the
-        // GUI's runtime client, for a CLI caller), read through that one without loading, or
-        // a second app-server would resume it with history's defaults under a running turn.
-        let owner = CodexAppServerClient.sharedClient(loading: threadID, compatibleWith: clients.codex)
-        let codex = owner ?? clients.codex
-        let readsThroughOwner = owner != nil && owner !== clients.codex
+        // A window and the CLI share one client and app-server; only a window's read follows the
+        // thread's Goal turns and takes the action handler (see `loadThread`).
+        let codex = clients.codex
         let recoveryTranscript = try? transcripts.readState(taskID)
         let hasSensitiveRecoveryState = recoveryTranscript?.pendingUserInputRequest != nil
             || recoveryTranscript?.pendingSensitiveUserInputRedaction == true
@@ -5720,30 +5717,23 @@ final class ConversationManager {
             "taskStatus": task.status.rawValue
         ]))
         do {
-            let history: ConversationHistory
-            if readsThroughOwner, let owner {
-                // Loading would replace the owner's action handler and goal observation with
-                // this caller's, so only read what it already has open; this request then
-                // never emits action_request, which only the owner's own window acts on.
-                history = try await owner.readOpenThread(id: threadID)
-            } else {
-                history = try await codex.loadThread(
-                    id: threadID,
-                    workspace: workspace,
-                    modelID: try? modelID(taskID: taskID),
-                    developerInstructions: TaskThreadDeveloperInstructions.make(
-                        taskID: taskID,
-                        repositories: task.repositoryWorktrees,
-                        contextFolders: task.contextFolderPaths,
-                        repositoryRootPath: repositoryRoot?.path,
-                        isStandaloneChat: task.isStandaloneChat,
-                        missedPreviousPageSignal: task.isStandaloneChat ? ((try? tasks.standaloneChatManager().lastTurnMissedSignal()) ?? false) : false
-                    ),
-                    sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
-                    sensitiveConversation: hasSensitiveRecoveryState,
-                    onActionRequest: onActionRequest
-                )
-            }
+            let history = try await codex.loadThread(
+                id: threadID,
+                workspace: workspace,
+                modelID: try? modelID(taskID: taskID),
+                developerInstructions: TaskThreadDeveloperInstructions.make(
+                    taskID: taskID,
+                    repositories: task.repositoryWorktrees,
+                    contextFolders: task.contextFolderPaths,
+                    repositoryRootPath: repositoryRoot?.path,
+                    isStandaloneChat: task.isStandaloneChat,
+                    missedPreviousPageSignal: task.isStandaloneChat ? ((try? tasks.standaloneChatManager().lastTurnMissedSignal()) ?? false) : false
+                ),
+                sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
+                sensitiveConversation: hasSensitiveRecoveryState,
+                observeGoalTurns: clients.observesGoalTurns,
+                onActionRequest: onActionRequest
+            )
             let savedDurations = tasks.conversationActivityDurations(taskID: taskID)
             let activities = history.activities.map { activity -> ConversationActivity in
                 var activity = activity
@@ -8937,8 +8927,8 @@ final class PlayhouseBridgeRuntime {
             let codexExecutable = request.arguments["__codexExecutable"]?.string
             let claudeExecutable = request.arguments["__claudeExecutable"]?.string
             let claudeConfigDirectory = request.arguments["__claudeConfigDirectory"]?.string
-            // A window's requests run goals against one long-lived Codex client
-            // that observes goal turns, as the window's own client used to.
+            // A window's requests follow the Goal turns of the threads they read and set. The
+            // window and the CLI share one Codex client and app-server per Codex home.
             let guiRuntime = request.arguments["__guiRuntime"]?.bool == true
             // The caller's Codex home, so a window and the CLI read the same threads.
             let callerCodexHome = request.arguments["__codexHome"]?.string
@@ -8962,13 +8952,14 @@ final class PlayhouseBridgeRuntime {
             let skills = SkillCatalogManager(environment: agentEnvironment, preferences: preferences)
             let rules = RuleCatalogManager(environment: agentEnvironment, preferences: preferences)
             let mcp = McpCatalogManager(environment: agentEnvironment, preferences: preferences)
-            func conversationClients(codexHome: String? = nil, goalFeatureEnabled: Bool = false) -> ConversationClients {
+            func conversationClients() -> ConversationClients {
                 ConversationClients(
-                    codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: codexHome ?? callerCodexHome, goalFeatureEnabled: goalFeatureEnabled, goalRuntimeEnabled: guiRuntime, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
+                    codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: callerCodexHome, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
                     claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, configDirectoryOverride: claudeConfigDirectory, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
                     skills: skills,
                     rules: rules,
-                    mcp: mcp
+                    mcp: mcp,
+                    observesGoalTurns: guiRuntime
                 )
             }
             func skillRoots() throws -> [SkillRoot] {
@@ -9747,16 +9738,9 @@ final class PlayhouseBridgeRuntime {
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .array(try await conversations.providerCapabilities(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })
             case "conversation.goal":
-                var clients = conversationClients(goalFeatureEnabled: !guiRuntime)
-                // Codex allows one writer per thread: use the client that already has it open.
-                var ownsClient = !guiRuntime
-                if let threadID = try? taskManager.taskModel(request.requiredUUID("taskID")).codexThreadID,
-                   let owner = CodexAppServerClient.sharedClient(loading: threadID, compatibleWith: clients.codex), owner !== clients.codex {
-                    clients = ConversationClients(codex: owner, claude: clients.claude, skills: clients.skills, rules: clients.rules, mcp: clients.mcp)
-                    ownsClient = false
-                }
-                defer { if ownsClient { clients.codex.shutdown() } }
-                let conversations = ConversationManager(tasks: taskManager, clients: clients, settingsManager: settings, preferences: preferences)
+                // The shared app-server serves the window too, so a CLI Goal call only finishes
+                // its request; it never stops the server.
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
                 let goal = try await conversations.goal(
                     taskID: request.requiredUUID("taskID"),
                     objective: request.arguments["objective"]?.string,

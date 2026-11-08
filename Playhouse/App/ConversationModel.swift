@@ -794,20 +794,26 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
         var active = Set<String>()
         var interruptible = Set<String>()
         var interrupted = Set<String>()
+        var latestGoalEventOrder = 0
         for client in CodexAppServerClient.allSharedClients where scope == nil || client.runtimeScope == scope {
             active.formUnion(client.activeThreadIDsSnapshot)
             interruptible.formUnion(client.activeThreadIDsSnapshot.filter { client.canInterruptActiveTurn(threadID: $0) })
             interrupted.formUnion(client.interruptedThreadIDsSnapshot)
             snapshot.pendingUserInput.merge(client.pendingUserInputsSnapshot) { current, _ in current }
-            guard client.goalRuntimeEnabled else { continue }
-            snapshot.goal.stateThreadID = client.goalStateThreadID
-            snapshot.goal.stateRevision = client.goalStateRevision
-            snapshot.goal.turnRevision = client.goalTurnRevision
-            snapshot.goal.turnCompletedRevision = client.goalTurnCompletedRevision
-            snapshot.goal.turnCompletedTurnID = client.goalTurnCompletedTurnID
-            snapshot.goal.turnStartedThreadID = client.goalTurnStartedThreadID
-            snapshot.goal.observedThreadIDs = client.observedGoalThreadIDs
+            // Revisions add up over the clients, so a change in any of them is a change; the
+            // thread and turn IDs come from the one whose goal state changed last.
+            snapshot.goal.stateRevision += client.goalStateRevision
+            snapshot.goal.turnRevision += client.goalTurnRevision
+            snapshot.goal.turnCompletedRevision += client.goalTurnCompletedRevision
+            snapshot.goal.observedThreadIDs += client.observedGoalThreadIDs
+            if client.goalEventOrder > latestGoalEventOrder {
+                latestGoalEventOrder = client.goalEventOrder
+                snapshot.goal.stateThreadID = client.goalStateThreadID
+                snapshot.goal.turnCompletedTurnID = client.goalTurnCompletedTurnID
+                snapshot.goal.turnStartedThreadID = client.goalTurnStartedThreadID
+            }
         }
+        snapshot.goal.observedThreadIDs = Set(snapshot.goal.observedThreadIDs).sorted()
         for client in ClaudeCodeClient.allSharedPrimaryClients where scope == nil || client.runtimeScope == scope {
             active.formUnion(client.activeThreadIDsSnapshot)
             interruptible.formUnion(client.activeThreadIDsSnapshot.filter { client.canInterruptActiveTurn(threadID: $0) })
@@ -914,6 +920,10 @@ struct ConversationClients {
     var rules: RuleCatalogManager? = nil
     /// The shared MCP servers, which a turn's launch bridges to its provider.
     var mcp: McpCatalogManager? = nil
+    /// Whether this request comes from a window, whose history reads follow the thread's Codex
+    /// Goal turns. A window and the CLI share one Codex client and app-server, so following
+    /// is a property of the request rather than of the client.
+    var observesGoalTurns = false
 
     func client(for provider: ConversationProvider) -> ConversationProviderClient {
         switch provider {
