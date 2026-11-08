@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import CryptoKit
 import Darwin
 import Foundation
 import XCTest
@@ -657,7 +658,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitForDisappearance(sheet))
         // A switch would sign out through the fixture, which records the change in its account file.
         XCTAssertFalse(waitUntil({
-            FileManager.default.fileExists(atPath: codexAccount.path) || text("agents-info-codex-account") != "codex-fixture@example.com"
+            FileManager.default.fileExists(atPath: codexAccount.path) || text("agents-info-codex-account") != "codex-fixture@example.com Plus"
         }, timeout: 5), "Cancelling must not sign the account out.")
         try? FileManager.default.removeItem(at: holdMarker)
         try Data("release\n".utf8).write(to: turnRelease)
@@ -665,12 +666,12 @@ final class PlayhouseUITests: XCTestCase {
 
         // With nothing running, switching signs out and in again, and the new account's usage replaces the old.
         element("agents-info-switch-codex").click()
-        XCTAssertTrue(waitUntil({ text("agents-info-codex-account") == "codex-second@example.com" }, timeout: 40), "The switched Codex account should show.")
+        XCTAssertTrue(waitUntil({ text("agents-info-codex-account") == "codex-second@example.com Plus" }, timeout: 40), "The switched Codex account should show.")
         XCTAssertTrue(waitUntil({ text("agents-info-codex-window-primary").contains("7%") }, timeout: 20), "The new account's usage should replace the old.")
         XCTAssertFalse(app.sheets.firstMatch.exists, "Switching with nothing running needs no confirmation.")
         attachScreenshot(named: "Agents info after switching the Codex account")
         element("agents-info-switch-claude").click()
-        XCTAssertTrue(waitUntil({ text("agents-info-claude-account") == "claude-second@example.com" }, timeout: 40), "The switched Claude account should show.")
+        XCTAssertTrue(waitUntil({ text("agents-info-claude-account").hasPrefix("claude-second@example.com") }, timeout: 40), "The switched Claude account should show.")
         XCTAssertTrue(element("agents-info-claude-empty").waitForExistence(timeout: 10), "The old Claude account's usage must not carry over.")
 
         // A signed-out agent shows Log in instead of usage; logging in brings its usage back.
@@ -684,10 +685,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("agents-info-codex-window-primary").exists, "A signed-out agent shows no usage.")
         attachScreenshot(named: "Agents info with both agents signed out")
         element("agents-info-login-claude").click()
-        XCTAssertTrue(waitUntil({ text("agents-info-claude-account") == "claude-second@example.com" }, timeout: 40), "Logging in to Claude should restore its account.")
+        XCTAssertTrue(waitUntil({ text("agents-info-claude-account").hasPrefix("claude-second@example.com") }, timeout: 40), "Logging in to Claude should restore its account.")
         XCTAssertFalse(element("agents-info-login-claude").exists)
         element("agents-info-login-codex").click()
-        XCTAssertTrue(waitUntil({ text("agents-info-codex-account") == "codex-second@example.com" }, timeout: 40), "Logging in to Codex should restore its account.")
+        XCTAssertTrue(waitUntil({ text("agents-info-codex-account") == "codex-second@example.com Plus" }, timeout: 40), "Logging in to Codex should restore its account.")
         XCTAssertTrue(waitUntil({ text("agents-info-codex-window-primary").contains("7%") }, timeout: 20), "Logging in should bring Codex usage back.")
         attachScreenshot(named: "Agents info after logging in again")
 
@@ -7749,7 +7750,12 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(waitUntil({ !self.agentIsAlive(agent) }, timeout: 15), "The \(provider) agent exits without a result.")
             launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
             XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment))
-            XCTAssertNil(agentManifest(kind: provider, service: environment), "The dead agent's files are removed.")
+            // The relaunched window may already have started a fresh Codex server (its usage read);
+            // the dead agent's own manifest is what must be gone.
+            XCTAssertFalse(agentManifests().contains {
+                $0.kind == provider && ($0.manifest["process"] as? [String: Any])?["pid"] as? NSNumber == agent["pid"] as? NSNumber
+                    && ($0.manifest["process"] as? [String: Any])?["startTime"] as? NSNumber == agent["startTime"] as? NSNumber
+            }, "The dead agent's files are removed.")
             // Opening the task comes after: Codex then starts a fresh server to read its saved thread.
             openTask(named: title)
             let settled = try runCLI(["task", "get", taskID], extraEnvironment: environment)["result"] as? [String: Any]
@@ -12018,6 +12024,240 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("goal-expand-button").exists)
         XCTAssertFalse(element("goal-pause-resume-button").exists)
         XCTAssertFalse(element("goal-clear-button").exists)
+    }
+
+    // case-contract: test_codex_window_and_cli_share_one_app_server | A window and the CLI use one Codex app-server per Codex home. Every Codex request against one data folder (sends on two tasks, Goal set/get/pause/clear, history and usage refreshes, from the CLI and, in the UI, from an open window as well) runs on the same recorded server process, which listens on the shared unix socket with features.goals=true and the caller's CODEX_HOME and is the one live Codex manifest; it keeps running after every CLI Goal call, including a rejected blank objective, and a CLI call that spells the same CODEX_HOME differently reuses it. A send on the second task while the first task's Goal is active leaves that Goal active. The work turn Codex runs for the Goal is active and interruptible whether the window or the CLI set it; a history read during it, even with another model selected, never resumes the thread, and once pausing the Goal ends the turn, history resumes the thread with the selected model. A usage read the server never answers times out without stopping the server and keeps the last known Codex account, and the next refresh reads it again. In the UI, the window sets a Goal and follows the turn Codex starts for it, which stays active and interruptible while the CLI sends on the second task and ends when the window pauses the Goal; a Goal the CLI sets appears in the open window without reopening the task, the window's pause and clear reach the CLI's Goal reads, and the Agents info block shows the Codex account read through that server.
+    func test_codex_window_and_cli_share_one_app_server() throws {
+        let fixtureName = "codex-fixture-single-server-goal-success"
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent(fixtureName).path
+        let stateDirectory = dataDirectory.appendingPathComponent("single-server-fixture-state", isDirectory: true)
+        try FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
+        codexFixtureStateDirectory = stateDirectory
+        let codexHome = dataDirectory.appendingPathComponent("codex-home").path
+        try FileManager.default.createDirectory(atPath: codexHome, withIntermediateDirectories: true)
+        let launches = stateDirectory.appendingPathComponent("\(fixtureName).app-servers").path
+        // The app-servers the fixture recorded: socket servers, and stdio launches that are not a
+        // socket server's own stdio child.
+        func recordedServers() -> [[String: Any]] {
+            let records = jsonLines(launches).compactMap { $0 as? [String: Any] }
+            let socketServers = Set(records.filter { ($0["listen"] as? String)?.hasPrefix("unix://") == true }.compactMap { $0["pid"] as? Int })
+            return records.filter {
+                ($0["listen"] as? String)?.hasPrefix("unix://") == true || !socketServers.contains($0["parentPID"] as? Int ?? -1)
+            }
+        }
+        @discardableResult
+        func assertOneLiveServer(_ context: String, pid expectedPID: Int? = nil) throws -> [String: Any] {
+            let servers = recordedServers()
+            XCTAssertEqual(servers.count, 1, "\(context): one app-server runs per Codex home, got \(servers)")
+            let server = try XCTUnwrap(servers.first)
+            let pid = try XCTUnwrap(server["pid"] as? Int)
+            XCTAssertEqual(kill(pid_t(pid), 0), 0, "\(context): the shared app-server keeps running.")
+            let live = agentManifests().filter { $0.kind == "codex" && agentIsAlive($0.manifest["process"] as? [String: Any]) }
+            XCTAssertEqual(live.compactMap { (($0.manifest["process"] as? [String: Any])?["pid"] as? NSNumber)?.intValue }, [pid],
+                           "\(context): the one live Codex manifest is the recorded server.")
+            if let expectedPID { XCTAssertEqual(pid, expectedPID, "\(context): the same app-server serves the window and the CLI.") }
+            return server
+        }
+        func cliGoal(_ arguments: [String], environment: [String: String] = [:]) throws -> [String: Any]? {
+            try runCLI(["conversation", "goal"] + arguments, extraEnvironment: environment)["result"] as? [String: Any]
+        }
+
+        func runtimeState() throws -> [String: Any] {
+            try XCTUnwrap(try runCLI(["conversation", "runtime"])["result"] as? [String: Any])
+        }
+        func codexUsage(_ environment: [String: String] = [:]) throws -> [String: Any]? {
+            let providers = (try runCLI(["usage", "get", "--refresh"], extraEnvironment: environment)["result"] as? [String: Any])?["providers"] as? [[String: Any]]
+            return providers?.first { $0["provider"] as? String == "codex" }
+        }
+
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Shared Codex server", "--prompt", Self.fixtureTaskPrompt, "--root", fixture.primary.path, "--provider", "codex",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Shared Codex server")
+        sendFromComposer("Hello from the window.")
+        XCTAssertTrue(transcriptMessage("Hello from the window.").waitForExistence(timeout: 15))
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 30), "The window's Codex turn should finish.")
+        let server = try assertOneLiveServer("After the window's send")
+        let pid = try XCTUnwrap(server["pid"] as? Int)
+        XCTAssertTrue((server["listen"] as? String)?.hasPrefix("unix://") == true, "The shared app-server listens on its unix socket.")
+        XCTAssertTrue((server["arguments"] as? [String])?.contains("features.goals=true") == true, "The one app-server always enables Codex Goals.")
+        XCTAssertEqual(server["codexHome"] as? String, codexHome, "The app-server runs on the window's and the CLI's Codex home.")
+        let threadID = try XCTUnwrap(try taskRecord(id: taskID)?["codexThreadID"] as? String)
+        attachScreenshot(named: "shared-codex-server-1-window-turn")
+
+        // The window sets a Goal and follows the turn Codex starts for it.
+        let objective = "Keep the shared server running."
+        let modeMenu = element("conversation-mode-menu")
+        modeMenu.click()
+        app.menuItems["conversation-mode-goal"].click()
+        XCTAssertTrue(modeMenu.label.contains("Goal"))
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText(objective)
+        element("send-message-button").click()
+        let row = element("active-goal-progress-row")
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        // The window shows the followed Goal turn running with its stop control.
+        let goalWorking = { self.element("pause-response-button").exists }
+        XCTAssertTrue(waitUntil(goalWorking, timeout: 30), "The window should follow the Goal's work turn.")
+        XCTAssertEqual(try cliGoal([taskID, "get"])?["objective"] as? String, objective)
+        try assertOneLiveServer("After the window's Goal set", pid: pid)
+
+        // A CLI send on another task, on the same server, leaves the followed Goal turn running.
+        let other = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Second Codex task", "--prompt", Self.fixtureTaskPrompt, "--root", fixture.primary.path, "--provider", "codex",
+        ])["result"] as? [String: Any])
+        let otherID = try XCTUnwrap(other["id"] as? String)
+        XCTAssertEqual(try runCLI(["conversation", "send", otherID, "--message", "Hello from the second task."])["ok"] as? Bool, true)
+        XCTAssertNotEqual(try taskRecord(id: otherID)?["codexThreadID"] as? String, threadID)
+        let runtime = try runtimeState()
+        XCTAssertTrue((runtime["activeThreadIDs"] as? [String] ?? []).contains(threadID), "The followed Goal turn stays active: \(runtime)")
+        XCTAssertTrue((runtime["interruptibleThreadIDs"] as? [String] ?? []).contains(threadID), "The followed Goal turn stays interruptible: \(runtime)")
+        XCTAssertTrue(goalWorking(), "The window still shows the Goal working.")
+        try assertOneLiveServer("After a CLI send on the second task", pid: pid)
+        // A history read meanwhile, even with another model selected, never resumes the thread
+        // under the Goal's turn.
+        let resumes = stateDirectory.appendingPathComponent("\(fixtureName).resumes").path
+        let threadResumes = { self.jsonLines(resumes).compactMap { $0 as? [String: Any] }.filter { $0["threadId"] as? String == threadID } }
+        XCTAssertEqual(try runCLI(["conversation", "model", taskID, "set", "gpt-6-sol"])["ok"] as? Bool, true)
+        let resumedBefore = threadResumes().count
+        XCTAssertTrue(try historyTexts(taskID: taskID).contains("Hello from the window."))
+        XCTAssertEqual(threadResumes().count, resumedBefore, "A history read never resumes a thread under its running Goal turn.")
+        XCTAssertTrue((try runtimeState()["interruptibleThreadIDs"] as? [String] ?? []).contains(threadID), "The Goal turn keeps running.")
+        attachScreenshot(named: "shared-codex-server-2-window-goal-working-after-cli-send")
+
+        // The window pauses the Goal, which ends its turn; the CLI reads it, and a rejected CLI set
+        // leaves the server running.
+        element("goal-pause-resume-button").click()
+        XCTAssertTrue(waitUntil({ (try? cliGoal([taskID, "get"]))?["status"] as? String == "paused" }, timeout: 10),
+                      "The window's pause should reach the CLI's Goal read.")
+        XCTAssertTrue(waitUntil({ ((try? runtimeState())?["activeThreadIDs"] as? [String])?.contains(threadID) == false }, timeout: 10),
+                      "Pausing the Goal ends the turn the window followed.")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 10), "The window shows the followed turn ending.")
+        XCTAssertTrue(waitUntil({ accessibleLabelOrValue(of: self.element("active-goal-title")).contains("Paused goal") }, timeout: 10))
+        let blank = try runCLI(["conversation", "goal", taskID, "set", "--text", "   "], expectedStatus: 2)
+        XCTAssertEqual((blank["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
+        try assertOneLiveServer("After a window pause and a rejected CLI Goal set", pid: pid)
+        attachScreenshot(named: "shared-codex-server-3-window-paused-goal")
+
+        // CLI history, usage refreshes (one the server never answers) and a CLI call with
+        // CODEX_HOME spelled differently use the same server.
+        XCTAssertTrue(try historyTexts(taskID: taskID).contains("Hello from the window."))
+        XCTAssertEqual(threadResumes().last?["model"] as? String, "gpt-6-sol", "Once the turn ends, history resumes the thread with the selected model.")
+        XCTAssertEqual(try codexUsage()?["account"] as? String, "codex-fixture@example.com")
+        let hang = stateDirectory.appendingPathComponent("\(fixtureName).account-read-hang").path
+        touch(hang)
+        let readStarted = Date()
+        let timedOut = try codexUsage(["PLAYHOUSE_E2E_CODEX_ACCOUNT_READ_TIMEOUT_SECONDS": "2"])
+        XCTAssertLessThan(Date().timeIntervalSince(readStarted), 15, "An unanswered usage read gives up after its timeout.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: hang), "The refresh asked the shared server for the account.")
+        XCTAssertEqual(timedOut?["account"] as? String, "codex-fixture@example.com", "A timed-out read keeps the last known account.")
+        try assertOneLiveServer("After an unanswered usage read", pid: pid)
+        XCTAssertEqual(try codexUsage()?["account"] as? String, "codex-fixture@example.com", "The next refresh reads the account again.")
+        XCTAssertEqual(try cliGoal([taskID, "get"], environment: ["CODEX_HOME": codexHome + "/."])?["status"] as? String, "paused")
+        try assertOneLiveServer("After CLI history, usage refreshes and a respelled CODEX_HOME", pid: pid)
+
+        // The window clears the Goal; the CLI reads that it is gone.
+        element("goal-clear-button").click()
+        XCTAssertTrue(waitUntil({ !row.exists }, timeout: 10))
+        XCTAssertTrue(waitUntil({
+            (try? self.runCLI(["conversation", "goal", taskID, "get"])).map { $0["ok"] as? Bool == true && !($0["result"] is [String: Any]) } == true
+        }, timeout: 10), "The window's clear should reach the CLI's Goal read.")
+        try assertOneLiveServer("After a window Goal clear", pid: pid)
+
+        // A Goal the CLI sets on the shared server reaches the open window without reopening the task.
+        let cliObjective = "Set from the command line."
+        XCTAssertEqual(try cliGoal([taskID, "set", "--text", cliObjective])?["objective"] as? String, cliObjective)
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "The open window should show the Goal the CLI set on the same app-server.")
+        XCTAssertTrue(waitUntil({ accessibleLabelOrValue(of: self.element("active-goal-title")).contains(cliObjective) }, timeout: 10))
+        try assertOneLiveServer("After a CLI Goal set", pid: pid)
+        attachScreenshot(named: "shared-codex-server-4-cli-goal-in-window")
+        XCTAssertNil(try cliGoal([taskID, "clear"]))
+        XCTAssertTrue(waitUntil({ !row.exists }, timeout: 10), "The CLI's clear should reach the open window.")
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("agents-info-codex-account").waitForExistence(timeout: 15))
+        XCTAssertTrue(accessibleLabelOrValue(of: element("agents-info-codex-account")).contains("codex-fixture@example.com"),
+                      "Agents info shows the Codex account read through the shared app-server.")
+        try assertOneLiveServer("With the window and the CLI both done", pid: pid)
+        attachScreenshot(named: "shared-codex-server-5-board-agents-info")
+    }
+
+    // case-contract: test_codex_legacy_keyed_server_retires_after_restart | A Codex app-server started under the earlier shared-client key, which also held two goal flags, is retired by the next daemon. When its daemon dies and a fresh daemon starts for the data folder, it reconnects to the legacy server only to retire it: with no turn left to follow, the server is stopped and its manifest removed, and the next Codex send, from the CLI or, in the UI, from the window, runs on one new server under the current key (executable, Codex home, data folder), leaving one live Codex server.
+    func test_codex_legacy_keyed_server_retires_after_restart() throws {
+        let fixtureName = "codex-fixture-single-server-goal-success"
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent(fixtureName).path
+        let stateDirectory = dataDirectory.appendingPathComponent("legacy-server-fixture-state", isDirectory: true)
+        try FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
+        codexFixtureStateDirectory = stateDirectory
+        let codexHome = dataDirectory.appendingPathComponent("codex-home").path
+        try FileManager.default.createDirectory(atPath: codexHome, withIntermediateDirectories: true)
+        var environment = restartServiceEnvironment()
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Legacy Codex server", "--prompt", Self.fixtureTaskPrompt, "--root", fixture.primary.path, "--provider", "codex",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        // The window's private daemon starts the server under the current key.
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        openTask(named: "Legacy Codex server")
+        sendFromComposer("Before the upgrade.")
+        XCTAssertTrue(transcriptMessage("Before the upgrade.").waitForExistence(timeout: 15))
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 30), "The window's first turn should finish.")
+        let (path, manifest) = try XCTUnwrap(agentManifest(kind: "codex", service: environment))
+        let parts = try XCTUnwrap(manifest["keyParts"] as? [String])
+        XCTAssertEqual(parts.count, 3, "A current server's key is its executable, Codex home and data folder.")
+        let legacyServer = try XCTUnwrap(manifest["process"] as? [String: Any])
+        XCTAssertTrue(terminateAppAndWait(app))
+        try killDaemon(environment: environment)
+        XCTAssertTrue(agentIsAlive(legacyServer), "The server outlives its daemon.")
+
+        // Rename the manifest to the key a server started before one app-server served every
+        // caller had: it also held the goal-feature and goal-runtime flags.
+        let service = try XCTUnwrap(manifest["serviceName"] as? String)
+        let oldHash = try XCTUnwrap(manifest["keyHash"] as? String)
+        let legacyParts = [parts[0], codexHome, "false", "false", parts[2]]
+        let legacyHash = SHA256.hash(data: Data((legacyParts + [service]).joined(separator: "\u{1}").utf8))
+            .prefix(12).map { String(format: "%02x", $0) }.joined()
+        let runs = path.deletingLastPathComponent()
+        try FileManager.default.moveItem(at: runs.appendingPathComponent("\(oldHash).log"), to: runs.appendingPathComponent("\(legacyHash).log"))
+        try? FileManager.default.removeItem(at: runs.appendingPathComponent("\(oldHash).owner.lock"))
+        try FileManager.default.removeItem(at: path)
+        var legacy = manifest
+        legacy["keyHash"] = legacyHash
+        legacy["keyParts"] = legacyParts
+        let legacyPath = runs.appendingPathComponent("\(legacyHash).json")
+        try JSONSerialization.data(withJSONObject: legacy).write(to: legacyPath)
+
+        // The window's first requests start a fresh daemon, which retires the legacy server. With
+        // a 30s idle limit the watch checks every 7.5s: only retiring stops the server in time.
+        environment["PLAYHOUSE_E2E_CODEX_SERVER_IDLE_SECONDS"] = "30"
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        XCTAssertTrue(waitUntil({ !self.agentIsAlive(legacyServer) }, timeout: 20), "The legacy-keyed server is retired once idle.")
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: legacyPath.path) }, timeout: 10), "The retired server's manifest is removed.")
+
+        openTask(named: "Legacy Codex server")
+        sendFromComposer("After the upgrade.")
+        XCTAssertTrue(transcriptMessage("After the upgrade.").waitForExistence(timeout: 15))
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 30), "The window's send should finish on the new server.")
+        XCTAssertFalse(element("codex-chat-error").exists, "The send on the new server succeeds.")
+        XCTAssertTrue(try historyTexts(taskID: taskID, environment: environment).contains("After the upgrade."), "The new server holds the conversation.")
+        let live = agentManifests().filter {
+            $0.kind == "codex" && $0.manifest["serviceName"] as? String == service && agentIsAlive($0.manifest["process"] as? [String: Any])
+        }
+        XCTAssertEqual(live.count, 1, "One live Codex server remains: \(live.map(\.manifest))")
+        XCTAssertEqual((live.first?.manifest["keyParts"] as? [String])?.count, 3, "The new server uses the current key.")
+        let newPID = try XCTUnwrap(((live.first?.manifest["process"] as? [String: Any])?["pid"] as? NSNumber)?.intValue)
+        XCTAssertNotEqual(newPID, (legacyServer["pid"] as? NSNumber)?.intValue)
+        let records = jsonLines(stateDirectory.appendingPathComponent("\(fixtureName).app-servers").path).compactMap { $0 as? [String: Any] }
+        let socketServers = Set(records.filter { ($0["listen"] as? String)?.hasPrefix("unix://") == true }.compactMap { $0["pid"] as? Int })
+        let running = records.filter {
+            (($0["listen"] as? String)?.hasPrefix("unix://") == true || !socketServers.contains($0["parentPID"] as? Int ?? -1))
+                && ($0["pid"] as? Int).map { $0 > 0 && kill(pid_t($0), 0) == 0 } == true
+        }
+        XCTAssertEqual(running.compactMap { $0["pid"] as? Int }, [newPID], "One app-server runs on the Codex home.")
+        attachScreenshot(named: "legacy-codex-server-retired-window-send-on-new-server")
     }
 
     // case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Claude Code names its newest release only through an alias entry's resolved model, so that resolved version supersedes the older concrete Opus 5 and keeps Claude Code's own display name. Alias entries with no resolved model are omitted. A remembered selection the filtered list no longer offers moves to its family's newest offered model and is written back, surviving a later refresh whose list no longer offers that family, while a still-offered selection is left alone. A remembered bare alias migrates to its family's offered release, but a dated snapshot pinned through the CLI is left in place because its family's undated release is not a higher version. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.

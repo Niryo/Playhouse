@@ -837,6 +837,12 @@ def handle_account_request(message):
         "loggedIn": True, "email": "codex-fixture@example.com", "used": [30, 62]}
     method = message["method"]
     reply = lambda result: write({"jsonrpc": "2.0", "id": message["id"], "result": result})
+    # A one-shot marker leaves the next account read unanswered, as a hung app-server would.
+    hang = Path(os.environ.get("PLAYHOUSE_E2E_FIXTURE_STATE_DIRECTORY", str(Path(sys.argv[0]).parent))) \
+        / f"{Path(sys.argv[0]).name}.account-read-hang"
+    if method == "account/read" and hang.is_file():
+        hang.unlink(missing_ok=True)
+        return
     if method == "account/read":
         account = {"type": "chatgpt", "email": state["email"], "planType": "plus"} if state["loggedIn"] else None
         reply({"account": account, "requiresOpenaiAuth": True})
@@ -978,6 +984,8 @@ def main():
     mode = os.path.basename(sys.argv[0])
     answers = None
     isolation_turns = {}
+    # `-single-server` modes: the turn Codex runs for each thread's active Goal.
+    goal_turns = {}
     saw_question = False
     saw_turn = False
     turn_message = None
@@ -1072,9 +1080,28 @@ def main():
             goal.update({key: value for key, value in params.items() if key in {"objective", "status"}})
             goal_path.write_text(json.dumps(goal), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"goal": goal}})
+            if "-single-server" in mode:
+                # Like Codex, the server tells every client on it that the Goal changed, starts
+                # a work turn for an active Goal, and ends it when the Goal is paused.
+                write({"jsonrpc": "2.0", "method": "thread/goal/updated",
+                       "params": {"threadId": goal["threadId"], "goal": goal}})
+                goal_thread = goal["threadId"]
+                if goal["status"] == "active" and goal_thread not in goal_turns:
+                    goal_turns[goal_thread] = f"turn-goal-{uuid.uuid4()}"
+                    write({"jsonrpc": "2.0", "method": "turn/started", "params": {
+                        "threadId": goal_thread, "turn": {"id": goal_turns[goal_thread], "status": "inProgress"}}})
+                elif goal["status"] != "active" and goal_thread in goal_turns:
+                    write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                        "threadId": goal_thread, "turn": {"id": goal_turns.pop(goal_thread), "status": "completed"}}})
         elif "-goal" in mode and message.get("method") == "thread/goal/clear":
             goal_path.unlink(missing_ok=True)
             write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+            if "-single-server" in mode:
+                goal_thread = message.get("params", {}).get("threadId")
+                write({"jsonrpc": "2.0", "method": "thread/goal/cleared", "params": {"threadId": goal_thread}})
+                if goal_thread in goal_turns:
+                    write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                        "threadId": goal_thread, "turn": {"id": goal_turns.pop(goal_thread), "status": "completed"}}})
         elif message.get("method") == "skills/extraRoots/set":
             # Records the bridged skill folders Playhouse hands the shared app-server.
             history = serial_history()
@@ -1083,7 +1110,8 @@ def main():
             history_path.write_text(json.dumps(history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
         elif message.get("method") == "thread/start":
-            if "-question-isolation-" in mode:
+            # `-single-server` modes run several tasks' threads on one server.
+            if "-question-isolation-" in mode or "-single-server" in mode:
                 THREAD_ID = str(uuid.uuid4())
             thread_start_instructions = message.get("params", {}).get("developerInstructions")
             if serial_mode:
@@ -1109,8 +1137,11 @@ def main():
                 history_path.write_text(json.dumps(history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": message.get("params", {}).get("model", "gpt-6-luna")}})
         elif message.get("method") == "thread/resume":
-            if "-question-isolation-" in mode:
+            if "-question-isolation-" in mode or "-single-server" in mode:
                 THREAD_ID = message["params"]["threadId"]
+            if "-single-server" in mode:
+                with open(fixture_state_directory / f"{Path(sys.argv[0]).name}.resumes", "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"threadId": THREAD_ID, "model": message["params"].get("model")}) + "\n")
             resume_error = Path(str(sys.argv[0]) + ".resume-error")
             if resume_error.is_file():
                 resume_error.unlink(missing_ok=True)
@@ -1157,6 +1188,9 @@ def main():
                 kept_model.unlink(missing_ok=True)
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": resumed_model}})
         elif message.get("method") == "turn/start":
+            if "-single-server" in mode:
+                THREAD_ID = message["params"]["threadId"]
+                TURN_ID = f"turn-{uuid.uuid4()}"
             if "-question-isolation-" in mode:
                 THREAD_ID = message["params"]["threadId"]
                 TURN_ID = f"turn-{uuid.uuid4()}"
@@ -3010,8 +3044,22 @@ def serve_unix_socket(path):
     return child.returncode or 0
 
 
+def record_app_server_launch(socket_path):
+    """`-single-server` modes: every launch appends its process, transport, arguments and Codex
+    home, so a test can count the app-servers running on one Codex home. A socket server's
+    stdio child records itself too, with the server as its parent."""
+    state_directory = Path(os.environ.get("PLAYHOUSE_E2E_FIXTURE_STATE_DIRECTORY", str(Path(sys.argv[0]).parent)))
+    with open(state_directory / f"{Path(sys.argv[0]).name}.app-servers", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "pid": os.getpid(), "parentPID": os.getppid(), "listen": f"unix://{socket_path}" if socket_path else "stdio://",
+            "arguments": sys.argv[1:], "codexHome": os.environ.get("CODEX_HOME"),
+        }) + "\n")
+
+
 if __name__ == "__main__":
     socket_path = listen_path()
+    if "-single-server" in Path(sys.argv[0]).name:
+        record_app_server_launch(socket_path)
     if socket_path:
         raise SystemExit(serve_unix_socket(socket_path))
     raise SystemExit(main())
