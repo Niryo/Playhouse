@@ -1889,7 +1889,11 @@ final class BoardTaskManager {
         task.autoCreatePullRequestOnReview = pullRequestMode != .manual
         task.pullRequestAutopilot = pullRequestMode == .autopilot || pullRequestMode == .merge
         task.pullRequestAutoMerge = pullRequestMode == .merge
-        if let prompt, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { task.savedPrompt = prompt }
+        // A prompt given at creation has not been sent, so it is the composer's draft.
+        if let prompt, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            task.savedPrompt = prompt
+            task.hasUnsentDraft = true
+        }
         return try await withRepositoryAllocationLocks(worktrees.map(\.repositoryPath)) {
             try validateRepositoryAssignments(worktrees, excludingTaskID: nil)
             modelContext.insert(task)
@@ -3394,6 +3398,33 @@ final class BoardTaskManager {
         task.progressDetail = nil
     }
 
+    /// The prompt never reached the provider. A draft typed after sending it was saved
+    /// separately, so return both to the composer rather than one.
+    private func returnSubmittedPromptToDraft(_ task: any ConversationSubject, submittedPrompt: String) {
+        let draft = task.hasUnsentDraft ? task.savedPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" : ""
+        let submittedText = submittedPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if submittedText.isEmpty {
+            // An image-only send returns through its images, still in the draft.
+        } else if draft.isEmpty {
+            task.savedPrompt = submittedPrompt
+        } else if draft != submittedText {
+            task.savedPrompt = submittedPrompt + "\n\n" + (task.savedPrompt ?? "")
+        }
+        task.hasUnsentDraft = task.savedPrompt != nil || !task.draftImageDataURLs.isEmpty
+        task.pendingSubmittedPrompt = nil
+    }
+
+    /// A send that failed before any turn started has not delivered its prompt, so the prompt
+    /// returns to the composer as the unsent draft rather than staying as the last sent prompt.
+    func returnUnsentSubmittedPromptToDraft(_ id: UUID) async throws {
+        try await withTaskOperationLock(id) {
+            let task = try requireSubject(id)
+            guard let submittedPrompt = task.pendingSubmittedPrompt else { return }
+            returnSubmittedPromptToDraft(task, submittedPrompt: submittedPrompt)
+            try await saveTaskContext(taskID: id)
+        }
+    }
+
     func reconcileLifecycleStatusOnOpen(_ id: UUID, clients: ConversationClients) async throws -> BoardTaskRecord {
         let currentTask = try requireSubject(id)
         guard currentTask.activeConversationID != nil || currentTask.pendingSubmittedPrompt != nil else {
@@ -3409,19 +3440,7 @@ final class BoardTaskManager {
                         task.status = .waitingResponse
                         task.statusMessage = "Playhouse restarted before \(providerName) started this turn. Your prompt is saved; review it and continue when ready."
                     }
-                    // The prompt never reached the provider. A draft typed after sending it
-                    // was saved separately, so return both to the composer rather than one.
-                    let draft = task.hasUnsentDraft ? task.savedPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" : ""
-                    let submittedText = submittedPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if submittedText.isEmpty {
-                        // An image-only send returns through its images, still in the draft.
-                    } else if draft.isEmpty {
-                        task.savedPrompt = submittedPrompt
-                    } else if draft != submittedText {
-                        task.savedPrompt = submittedPrompt + "\n\n" + (task.savedPrompt ?? "")
-                    }
-                    task.hasUnsentDraft = task.savedPrompt != nil || !task.draftImageDataURLs.isEmpty
-                    task.pendingSubmittedPrompt = nil
+                    returnSubmittedPromptToDraft(task, submittedPrompt: submittedPrompt)
                     try await saveTaskContext(taskID: id)
                 }
                 return BoardTaskRecord(task: task)
@@ -3573,8 +3592,8 @@ final class BoardTaskManager {
             if !keepsUnsentDraft {
                 task.savedPrompt = normalizedPrompt.isEmpty ? nil : prompt
                 if let imageDataURLs { task.draftImageDataURLs = imageDataURLs }
-                // Only `saveDraft`, the composer's draft writer, marks an unsent draft.
-                task.hasUnsentDraft = false
+                // An unsubmitted prompt has not been sent, so it is the composer's unsent draft.
+                task.hasUnsentDraft = !submitted && !replacingDraft && (task.savedPrompt != nil || !task.draftImageDataURLs.isEmpty)
             }
             task.pendingSubmittedPrompt = submitted ? prompt : nil
             if let status {
@@ -3697,10 +3716,10 @@ final class BoardTaskManager {
             task.scheduledModeRawValue = request.mode.rawValue
             task.scheduledModelID = request.modelID
             task.schedulePaused = false
-            // The composer shows the confirmed prompt when the task is opened again.
+            // The composer shows the confirmed prompt as its draft when the task is opened again.
             task.savedPrompt = prompt.isEmpty ? nil : request.prompt
             task.draftImageDataURLs = request.imageDataURLs
-            task.hasUnsentDraft = false
+            task.hasUnsentDraft = task.savedPrompt != nil || !request.imageDataURLs.isEmpty
             if task.status != .backlog {
                 task.status = .backlog
                 task.statusMessage = nil
@@ -8110,9 +8129,10 @@ final class ConversationManager {
             }
         } catch {
             // No turn started: a rejected branch claim, title race, or missing
-            // root must not leave the task In Progress. The prompt stays saved
-            // as a draft.
+            // root must not leave the task In Progress. The prompt returns to the
+            // composer as the unsent draft.
             _ = try? await tasks.setLifecycleStatus(taskID, to: priorStatus, message: priorStatusMessage)
+            if !isPlayhouseNudge { try? await tasks.returnUnsentSubmittedPromptToDraft(taskID) }
             throw error
         }
         let started = try await tasks.setLifecycleStatus(taskID, to: .inProgress)

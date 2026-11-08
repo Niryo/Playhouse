@@ -1392,7 +1392,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(element("message-composer").value as? String, "Still usable")
     }
 
-    // case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store with in-progress timing columns and no submitted-prompt column waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before adding the missing VARCHAR prompt column as nullable with no default and preserves elapsed time at zero. The CLI preserves the task and draft, and the visible app opens the migrated store and preserves the draft through a subsequent restart with duration still zero; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only draft data survives import, and a subsequent edited draft survives restart without reimport.
+    // case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store with in-progress timing columns and no submitted-prompt column waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before adding the missing VARCHAR prompt column as nullable with no default and preserves elapsed time at zero. The CLI preserves the task and its saved prompt, which a store from before drafts were flagged does not restore as a draft, and the visible app opens the migrated store with an empty composer that keeps the saved prompt through a subsequent restart with duration still zero; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only saved prompt data survives import, and a subsequent edited draft survives restart without reimport.
     func test_task_store_repairs_missing_pending_prompt_column() throws {
         let title = "Legacy pending prompt store"
         let draft = "Committed WAL draft must survive import."
@@ -1492,7 +1492,21 @@ final class PlayhouseUITests: XCTestCase {
         })
         XCTAssertEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, draft)
         openTask(named: title)
-        XCTAssertEqual(element("message-composer").value as? String, draft)
+        XCTAssertTrue(element("message-composer").waitForExistence(timeout: 10), "The migrated task should open its composer.")
+        // The draft restores asynchronously after history loads, so hold the empty composer for a moment.
+        XCTAssertFalse(waitUntil({
+            !((element("message-composer").value as? String) ?? "").isEmpty
+        }, timeout: 2), "A store from before drafts were flagged does not restore its saved prompt as a draft.")
+        XCTAssertTrue(terminateAppAndWait(app))
+        launchApp(defaultParent: fixture.parent.path)
+        assertTaskVisible(title, inColumn: "Backlog")
+        openTask(named: title)
+        XCTAssertTrue(element("message-composer").waitForExistence(timeout: 10), "The migrated task should reopen its composer after a restart.")
+        XCTAssertFalse(waitUntil({
+            !((element("message-composer").value as? String) ?? "").isEmpty
+        }, timeout: 2), "The saved prompt should stay out of the composer after a restart.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, draft, "The saved prompt should survive the restart in the store.")
+        attachScreenshot(named: "Migrated store opens with an empty composer and keeps its saved prompt")
 
         let composer = element("message-composer")
         composer.click()
@@ -6639,7 +6653,7 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 30))
     }
 
-    // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
+    // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text. A prompt saved through the CLI without submitting is an unsent draft, so the composer shows it when the task is reopened. A send that fails before any turn starts, such as one into a folder that no longer exists, returns its prompt to the composer as the draft, clears the pending marker and leaves the task out of In Progress.
     func test_task_prompt_draft_persists_after_back() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-success-wait").path
         launchApp(defaultParent: fixture.parent.path)
@@ -6710,9 +6724,37 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Stable draft title")
         XCTAssertEqual(composer.value as? String, prompt, "Reopening should restore an unsent draft.")
         element("back-to-board-button").click()
+        // A prompt written through the CLI without submitting is the composer's unsent draft too.
+        _ = try runCLI(["task", "prompt", taskID, "--text", "Written by the CLI."])
+        openTask(named: "Stable draft title")
+        XCTAssertTrue(waitUntil({
+            (composer.value as? String) == "Written by the CLI."
+        }, timeout: 10), "A prompt saved through the CLI without submitting should appear in the composer.")
+        attachScreenshot(named: "Prompt written through the CLI is restored to the composer")
+        element("back-to-board-button").click()
         let stableTitle = try runCLI(["task", "get", taskID])["result"] as? [String: Any]
         XCTAssertEqual(stableTitle?["title"] as? String, "Stable draft title", "Returning with the saved draft should not restart title generation.")
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
+
+        // A send that fails before any turn starts returns its prompt to the composer as the draft.
+        let goneRoot = fixture.parent.appendingPathComponent("failed-send-root", isDirectory: true)
+        try FileManager.default.createDirectory(at: goneRoot, withIntermediateDirectories: true)
+        try createTaskFixture(title: "Failed send draft", roots: [goneRoot.path])
+        try FileManager.default.removeItem(at: goneRoot)
+        let failedTaskID = try XCTUnwrap(try taskRecord(named: "Failed send draft")?["id"] as? String)
+        let failedPrompt = "Send this to a folder that is gone."
+        _ = try runCLI(["conversation", "send", failedTaskID, "--message", failedPrompt], expectedStatus: 1)
+        let returnedRecord = try XCTUnwrap(try taskRecord(id: failedTaskID))
+        XCTAssertEqual(returnedRecord["hasUnsentDraft"] as? Bool, true, "A send that never started a turn returns its prompt as the draft.")
+        XCTAssertEqual(returnedRecord["savedPrompt"] as? String, failedPrompt)
+        XCTAssertNil(returnedRecord["pendingSubmittedPrompt"] as? String)
+        XCTAssertNotEqual(returnedRecord["status"] as? String, "In Progress")
+        openTask(named: "Failed send draft")
+        XCTAssertTrue(waitUntil({
+            (self.element("message-composer").value as? String) == failedPrompt
+        }, timeout: 10), "A prompt whose send never started a turn should be back in the composer.")
+        attachScreenshot(named: "Prompt from a send that never started is back in the composer")
+        element("back-to-board-button").click()
     }
 
     // case-contract: test_composer_draft_autosaves_during_active_turn | Composer text typed while the agent responds is autosaved as an unsent draft together with its attached image, without ending the turn's submitted prompt or changing its status, and malformed draft images fail validation without changing the draft. A follow-up queued from elsewhere and dispatched after the turn does not replace the draft, which stays saved after the turn ends and is restored to the composer with its image after navigating away and after an app restart. Text steered or queued from the composer leaves the saved draft and does not reappear after the turn, and sending the draft clears it, its images leaving once the turn starts. A submitted prompt whose turn never started returns to the composer with its images, together with the draft typed after it.
@@ -7093,6 +7135,8 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertEqual(element("message-composer").value as? String, "", "A submitted prompt must not reappear as a draft after returning during title generation.")
             let submittedPromptMessage = app.groups.matching(NSPredicate(format: "identifier BEGINSWITH %@", "user-message-")).firstMatch
             XCTAssertTrue(submittedPromptMessage.waitForExistence(timeout: 5), "The submitted prompt should remain visible as a conversation message after reopening.")
+            let promptBubbles = app.groups.matching(NSPredicate(format: "identifier BEGINSWITH %@", "user-message-"))
+            XCTAssertTrue(waitUntil({ promptBubbles.count == 1 }, timeout: 5), "The submitted prompt should render as exactly one user bubble after reopening; found \(promptBubbles.count).")
             XCTAssertTrue(element("pause-response-button").exists, "The reopened task should retain its active-send controls while the Codex thread is being prepared.")
             XCTAssertFalse(element("pause-response-button").isEnabled, "Pause must stay disabled until this task has an interruptible Codex turn.")
             XCTAssertFalse(element("send-message-button").exists, "A second message must not be sent while the submitted prompt is still active.")
@@ -7240,7 +7284,9 @@ final class PlayhouseUITests: XCTestCase {
                 ["Waiting Response", "Backlog"].contains(((try? self.taskRecord(id: recoveryTaskID)?["status"] as? String) ?? nil) ?? "")
                     && ((try? self.taskRecord(id: recoveryTaskID)?["pendingSubmittedPrompt"]) is NSNull || (try? self.taskRecord(id: recoveryTaskID)?["pendingSubmittedPrompt"]) == nil)
             }, timeout: 10), "Reopening a task whose send never reached Codex should clear the pending marker and leave the task ready to continue.")
-            XCTAssertEqual(element("message-composer").value as? String, recoveryPrompt, "A stale submitted prompt should return to the composer for retry.")
+            XCTAssertTrue(waitUntil({
+                (self.element("message-composer").value as? String) == recoveryPrompt
+            }, timeout: 10), "A stale submitted prompt should return to the composer for retry. composer=\(String(describing: element("message-composer").value)) record=\(draftStateSummary(recoveryTaskID))")
             XCTAssertFalse(transcriptMessage(recoveryPrompt).exists, "A turn that never reached Codex should not be shown as a sent message.")
 
             codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-failure").path
@@ -7599,7 +7645,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
     }
 
-    // case-contract: test_codex_turn_reattaches_after_daemon_restart | A Codex turn keeps running in its shared socket app-server when the daemon is killed: the next daemon reconnects to the same server (no second server, one connection per daemon), keeps the task In Progress with no restart notice, shows the output written before the restart exactly once, saves the question the server re-sends on resume and answers the re-sent approval exactly once, accepts a steered follow-up, streams the rest of the turn to a watcher, and settles it through the normal outcome path. A turn that finished while no daemon was connected settles from the server's state.
+    // case-contract: test_codex_turn_reattaches_after_daemon_restart | A Codex turn keeps running in its shared socket app-server when the daemon is killed: the next daemon reconnects to the same server (no second server, one connection per daemon), keeps the task In Progress with no restart notice, shows the output written before the restart exactly once, saves the question the server re-sends on resume and answers the re-sent approval exactly once, accepts a steered follow-up, streams the rest of the turn to a watcher, and settles it through the normal outcome path. A turn that finished while no daemon was connected settles from the server's state. A question the shared server raises on a thread no conversation owns gets no reply from the connected client, which leaves it for its owner instead of rejecting it.
     func test_codex_turn_reattaches_after_daemon_restart() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-reattach").path
         codexFixtureExecutable = executable
@@ -7635,6 +7681,15 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(transcriptMessage("Answer received: blue.").waitForExistence(timeout: 15))
         steerFromComposer("Also check the README.")
         XCTAssertTrue(waitUntil({ !self.jsonLines(executable + ".reattach-steers").isEmpty }, timeout: 15), "The follow-up steers the reattached turn.")
+        // The steer also makes the server raise a question on a thread no conversation owns; the
+        // connected client leaves it for its owner instead of rejecting it.
+        XCTAssertTrue(waitUntil({
+            ((try? self.diagnosticEvents()) ?? []).contains {
+                $0["event"] as? String == "codex.user_input.unowned_ignored" && $0["threadID"] as? String == "thread-owned-by-no-conversation"
+            }
+        }, timeout: 15), "The connected client should leave an unowned question unanswered.")
+        XCTAssertTrue(jsonLines(executable + ".reattach-replies").compactMap { $0 as? [String: Any] }.filter { $0["id"] as? String == "question-foreign" }.isEmpty,
+                      "No client should reply to a question it does not own.")
         touch(executable + ".reattach-release")
         XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20), "The window follows the reattached turn to its end.")
         XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment))
@@ -10973,6 +11028,59 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             scrollView.value as? String == "Showing latest 42 of 120 messages"
         }, timeout: 10), "Upward scrolling must still reveal earlier messages after an in-place reload.")
+    }
+
+    // case-contract: test_sent_prompt_stays_out_of_composer_past_history_page | A sent prompt followed by a 120-message turn, so that it lies outside the newest history page, never returns to the composer when the task is reopened: the composer is empty, the task keeps hasUnsentDraft false and its last sent prompt as the saved prompt, and the CLI newest page of 80 messages leaves out the earlier messages. Only the saved draft flag decides draft restoration, so the same task restores a real unsent draft after it is typed.
+    func test_sent_prompt_stays_out_of_composer_past_history_page() throws {
+        let fixtureCopy = WorkspaceFixture.root.appendingPathComponent("codex-fixture-long-history-with-prompt-success")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the long-history fixture before launch.")
+        codexFixtureExecutable = fixtureCopy.path
+        launchApp(defaultParent: fixture.primary.path)
+        try createTaskFixture(title: "Sent prompt past history page", roots: [fixture.primary.path])
+        openTask(named: "Sent prompt past history page")
+
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Create a long history.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            guard let record = try? self.taskRecord(named: "Sent prompt past history page") else { return false }
+            return record["status"] as? String != "In Progress" && (record["pendingSubmittedPrompt"] as? String) == nil
+        }, timeout: 20), "The long turn should settle before the conversation is reopened.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "The completed turn should return to the board before reopening.")
+
+        openTask(named: "Sent prompt past history page")
+        let scrollView = element("conversation-scroll-view")
+        XCTAssertTrue(waitUntil({
+            scrollView.value as? String == "Showing latest 2 of 121 messages"
+        }, timeout: 20), "Reopening should render only the newest page, which leaves the sent prompt's turn out.")
+        // The composer restores drafts asynchronously after the history loads, so keep
+        // checking that it stays empty for a moment rather than trusting the first frame.
+        XCTAssertFalse(waitUntil({
+            !((composer.value as? String) ?? "").isEmpty
+        }, timeout: 2), "A sent prompt must not return to the composer as an unsent draft.")
+        attachScreenshot(named: "Sent prompt stays out of composer after reopening past the history page")
+        let taskID = try taskID(named: "Sent prompt past history page")
+        let sentRecord = try XCTUnwrap(try taskRecord(id: taskID))
+        XCTAssertEqual(sentRecord["hasUnsentDraft"] as? Bool, false, "The task must not be marked as holding an unsent draft.")
+        XCTAssertEqual(sentRecord["savedPrompt"] as? String, "Create a long history.", "The last sent prompt stays the saved prompt.")
+
+        // A real draft typed on the same long conversation still survives reopening.
+        composer.click()
+        composer.typeText("Keep this draft.")
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["hasUnsentDraft"] as? Bool) == true
+        }, timeout: 10), "The typed draft should be saved as an unsent draft.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        openTask(named: "Sent prompt past history page")
+        XCTAssertTrue(waitUntil({
+            (self.element("message-composer").value as? String) == "Keep this draft."
+        }, timeout: 10), "Reopening should restore the real unsent draft.")
+        attachScreenshot(named: "Real unsent draft restored after reopening past the history page")
+        element("back-to-board-button").click()
     }
 
     // case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, scrolling straight down from that pin keeps the latest question near the top and the latest answer below it with no blank overscroll, and scrolling up then reads the older page from the store as the reader scrolls up until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again.
@@ -15729,6 +15837,17 @@ final class PlayhouseUITests: XCTestCase {
         let cleared = try XCTUnwrap(try runCLI(["schedule", "clear", clearedID])["result"] as? [String: Any])
         XCTAssertEqual(cleared["savedPrompt"] as? String, "Keep this prompt.", "Clearing a schedule keeps its prompt as the draft.")
         XCTAssertEqual(cleared["hasUnsentDraft"] as? Bool, true)
+        if element("back-to-board-button").exists { element("back-to-board-button").click() }
+        // A task opened from the Scheduled Tasks page returns to that page, which covers the board.
+        if element("scheduled-tasks-back-button").waitForExistence(timeout: 3) { element("scheduled-tasks-back-button").click() }
+        XCTAssertTrue(waitForDisappearance(element("scheduled-tasks-page")), "The Scheduled Tasks page should close before opening another task.")
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "The board should show before opening the cleared-schedule task.")
+        openTask(named: "Cleared schedule")
+        XCTAssertTrue(waitUntil({
+            (self.element("message-composer").value as? String) == "Keep this prompt."
+        }, timeout: 10), "Clearing a schedule keeps its prompt as the composer draft.")
+        attachScreenshot(named: "Cleared schedule keeps its prompt as the composer draft")
+        element("back-to-board-button").click()
     }
 
     // case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent, which is hidden while that total is still zero, whose tooltip names the sent total, call count and final transcript size, and both the Token Stats context-menu item and a click on the counter itself, a button that highlights on hover, open a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown. Excluding cache reads (uncached input + cache write + output, subagent included) is 855 per turn, doubling after a second turn, and also reaches the live stream when the session files cannot be read; an empty task reports it unavailable. A task saved before the cache split existed (call usage without the split, plus turn-level buckets) still loads, reports its call counts and total sent, omits the per-call excluding-cache figures, and falls back to the turn buckets minus cache reads (170 for 100 input, 50 output, 400 cache read and 20 cache write); its modal hides the Excluding cache reads headline. The modal also labels 'Excluding cache reads (incl. subagents)' with its main-agent and subagent split.
@@ -19017,6 +19136,12 @@ final class PlayhouseUITests: XCTestCase {
             return []
         }
         return Set(values.keys)
+    }
+
+    /// The stored draft state of a task, for failure messages.
+    private func draftStateSummary(_ id: String) -> String {
+        let record = (try? taskRecord(id: id)) ?? nil
+        return "status=\(String(describing: record?["status"])) hasUnsentDraft=\(String(describing: record?["hasUnsentDraft"])) savedPrompt=\(String(describing: record?["savedPrompt"])) pending=\(String(describing: record?["pendingSubmittedPrompt"]))"
     }
 
     private func createTaskFixture(title: String, roots: [String]) throws {

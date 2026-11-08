@@ -768,6 +768,12 @@ def run_reattach_server():
                 "id": f"item_steer_{uuid.uuid4()}", "type": "userMessage", "content": [{"type": "text", "text": text}]}})
             save_threads()
             reply({"turnId": turn["turn"]})
+            # A question on a thread no conversation owns, raised while a client is connected: the
+            # client must leave it for its owner rather than reject it.
+            write({"jsonrpc": "2.0", "id": "question-foreign", "method": "item/tool/requestUserInput", "params": {
+                "threadId": "thread-owned-by-no-conversation", "turnId": "turn-foreign", "itemId": "call-foreign", "isBlocking": True,
+                "questions": [{"id": "color", "header": "Color", "question": "Which color?", "isOther": False,
+                               "isSecret": False, "options": [{"label": "red"}]}]}})
         elif method == "turn/interrupt":
             reply({})
             thread_id = params.get("threadId")
@@ -2431,6 +2437,9 @@ def main():
                     contents.extend(follow_turn_items(finished=False))
             if "-long-history-" in mode:
                 contents = []
+                if "-with-prompt-" in mode:
+                    # The sent prompt is the first stored user message, outside the newest history page.
+                    contents.append({"id": "item_sent_prompt", "type": "userMessage", "content": [{"type": "text", "text": "Create a long history."}]})
                 for index in range(1, 61):
                     contents.extend([
                         {"id": f"item_long_history_user_{index}", "type": "userMessage", "content": [{"type": "text", "text": f"Long history user {index:02d}."}]},
@@ -2861,6 +2870,10 @@ def serve_unix_socket(path):
     child_buffer = b""
     next_id = [1_000_000]
     client_requests = {}  # child request id -> (connection, client id, method, params)
+    # Codex gives every server request its own id. The stdio fixture reuses a few (901, 902), so
+    # the front end renumbers them: a late reply to an earlier question can't answer a newer one.
+    server_request_child_ids = {}  # relay id -> the child's own request id
+    next_server_request_id = [500000]
     pending_server_requests = {}  # server request id -> message, until a client answers it
 
     def send_frame(connection, payload, opcode=1):
@@ -2900,6 +2913,7 @@ def serve_unix_socket(path):
                  "forwarded": message["id"] in pending_server_requests})
             if pending_server_requests.pop(message["id"], None) is None:
                 return
+            message = {**message, "id": server_request_child_ids.pop(message["id"])}
         child.stdin.write((json.dumps(message, separators=(",", ":")) + "\n").encode())
         child.stdin.flush()
 
@@ -2917,7 +2931,11 @@ def serve_unix_socket(path):
                         send_json(connection, request)
             return
         if "method" in message and "id" in message:
-            pending_server_requests[message["id"]] = message
+            relay_id = next_server_request_id[0]
+            next_server_request_id[0] += 1
+            server_request_child_ids[relay_id] = message["id"]
+            message = {**message, "id": relay_id}
+            pending_server_requests[relay_id] = message
         for connection in list(connections):
             send_json(connection, message)
 

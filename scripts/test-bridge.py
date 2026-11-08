@@ -839,7 +839,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
         return [message["text"] for message in history["messages"]], history
 
-    # case-contract: test_codex_turn_reattaches_after_daemon_restart | A Codex turn keeps running in its shared socket app-server when the daemon is killed: the next daemon reconnects to the same server (no second server, one connection per daemon), keeps the task In Progress with no restart notice, shows the output written before the restart exactly once, saves the question the server re-sends on resume and answers the re-sent approval exactly once, accepts a steered follow-up, streams the rest of the turn to a watcher, and settles it through the normal outcome path. A turn that finished while no daemon was connected settles from the server's state.
+    # case-contract: test_codex_turn_reattaches_after_daemon_restart | A Codex turn keeps running in its shared socket app-server when the daemon is killed: the next daemon reconnects to the same server (no second server, one connection per daemon), keeps the task In Progress with no restart notice, shows the output written before the restart exactly once, saves the question the server re-sends on resume and answers the re-sent approval exactly once, accepts a steered follow-up, streams the rest of the turn to a watcher, and settles it through the normal outcome path. A turn that finished while no daemon was connected settles from the server's state. A question the shared server raises on a thread no conversation owns gets no reply from the connected client, which leaves it for its owner instead of rejecting it.
     def test_codex_turn_reattaches_after_daemon_restart(self):
         executable = self.install_provider_fixture("codex", "codex-fixture-reattach")
         environment = self.restart_service_environment("codex", executable, PLAYHOUSE_E2E_CODEX_SERVER_IDLE_SECONDS="3")
@@ -889,6 +889,14 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "conversation", "steer", task["id"], "--message", "Also check the README.", extra_environment=environment)[0])
         self.assertTrue(steered.get("accepted"), steered)
         self.wait_for(lambda: self.jsonl(str(executable) + ".reattach-steers"), "The steer reaches the reattached turn.")
+        # The steer also makes the server raise a question on a thread no conversation owns. The
+        # connected client leaves it for its owner; rejecting it could fail another client's turn.
+        self.wait_for(lambda: any(
+            event.get("event") == "codex.user_input.unowned_ignored" and event.get("threadID") == "thread-owned-by-no-conversation"
+            for event in self.diagnostic_events()
+        ), "The connected client should leave an unowned question unanswered.")
+        self.assertFalse([r for r in self.jsonl(str(executable) + ".reattach-replies") if r["id"] == "question-foreign"],
+                         "No client should reply to a question it does not own.")
         replies = self.jsonl(str(executable) + ".reattach-replies")
         approval_replies = [r for r in replies if str(r["id"]).startswith("approval-")]
         question_replies = [r for r in replies if str(r["id"]).startswith("question-")]
@@ -2985,7 +2993,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(list(failure.glob(".store-import-*")))
         self.assertEqual(self.assert_success(self.call_cli("task", "list")[0])["tasks"][0]["title"], "Healthy board")
 
-    # case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store with in-progress timing columns and no submitted-prompt column waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before adding the missing VARCHAR prompt column as nullable with no default and preserves elapsed time at zero. The CLI preserves the task and draft, and the visible app opens the migrated store and preserves the draft through a subsequent restart with duration still zero; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only draft data survives import, and a subsequent edited draft survives restart without reimport.
+    # case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store with in-progress timing columns and no submitted-prompt column waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before adding the missing VARCHAR prompt column as nullable with no default and preserves elapsed time at zero. The CLI preserves the task and its saved prompt, which a store from before drafts were flagged does not restore as a draft, and the visible app opens the migrated store with an empty composer that keeps the saved prompt through a subsequent restart with duration still zero; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only saved prompt data survives import, and a subsequent edited draft survives restart without reimport.
     def test_task_store_repairs_missing_pending_prompt_column(self):
         seeded = subprocess.run(
             [str(arguments.legacy_store_seeder), str(self.data_directory)],
@@ -3032,6 +3040,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             barrier.release()
         reopened, _ = self.finish_cli(waiting, ("task", "get", task_id))
         self.assertEqual(self.assert_success(reopened)["savedPrompt"], draft)
+        self.assertFalse(self.assert_success(reopened)["hasUnsentDraft"], "A pre-flag saved prompt is not restored as a draft.")
         self.assertEqual(self.assert_success(reopened)["title"], "Legacy pending prompt store")
         self.assertTrue(any(
             event.get("event") == "persistence.store.schema_migration.write_lock_acquired"
@@ -5792,7 +5801,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         finally:
             write_lock.rmdir()
 
-    # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
+    # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text. A prompt saved through the CLI without submitting is an unsent draft, so the composer shows it when the task is reopened. A send that fails before any turn starts, such as one into a folder that no longer exists, returns its prompt to the composer as the draft, clears the pending marker and leaves the task out of In Progress.
     def test_task_prompt_draft_persists_after_back(self):
         suggestions, _ = self.call_cli("workspace", "suggest", "--parent", self.fixture / "suggested-parent")
         self.assertIn(str(self.primary), self.assert_success(suggestions)["repositories"])
@@ -5805,6 +5814,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "prompt", task_id, "--text", prompt, "--status", "Backlog")
         saved = self.assert_success(response)
         self.assertEqual(saved["savedPrompt"], prompt)
+        self.assertTrue(saved["hasUnsentDraft"], "A prompt saved without submitting is an unsent draft.")
         self.assertEqual(saved["status"], "Backlog")
         invalid, _ = self.call_cli("task", "prompt", task_id, "--text", "Changed", "--status", "Not a status", expected_status=2)
         self.assert_failure(invalid, "invalid_argument")
@@ -5818,6 +5828,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(reopened_task["status"], "Backlog")
         cleared, _ = self.call_cli("task", "prompt", task_id, "--text", "")
         self.assertIsNone(self.assert_success(cleared).get("savedPrompt"))
+        self.assertFalse(self.assert_success(cleared)["hasUnsentDraft"])
         restored, _ = self.call_cli("task", "prompt", task_id, "--text", prompt)
         self.assertEqual(self.assert_success(restored)["savedPrompt"], prompt)
         self.assertEqual(reopened_task["title"], "Stable draft title")
@@ -5877,6 +5888,25 @@ class PlayhouseBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
+
+        # A send that fails before any turn starts has not delivered its prompt, so the prompt
+        # returns to the composer as the unsent draft instead of staying as the last sent prompt.
+        gone_root = self.fixture / "failed-send-root"
+        gone_root.mkdir()
+        failed_task_id = self.create_task("Failed send draft", roots=[gone_root])["id"]
+        self.assert_success(self.call_cli("task", "draft", failed_task_id, "--text", "")[0])
+        shutil.rmtree(gone_root)
+        failed_prompt = "Send this to a folder that is gone."
+        failed_send, _ = self.call_cli(
+            "conversation", "send", failed_task_id, "--message", failed_prompt, expected_status=1,
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assertFalse(failed_send.get("ok", True), failed_send)
+        returned = self.assert_success(self.call_cli("task", "get", failed_task_id)[0])
+        self.assertTrue(returned["hasUnsentDraft"], f"A send that never started a turn returns its prompt as the draft. error={failed_send.get('error')} record={ {k: returned.get(k) for k in ('status', 'savedPrompt', 'pendingSubmittedPrompt', 'hasUnsentDraft')} }")
+        self.assertEqual(returned["savedPrompt"], failed_prompt)
+        self.assertIsNone(returned.get("pendingSubmittedPrompt"))
+        self.assertNotEqual(returned["status"], "In Progress")
     # case-contract: test_composer_draft_autosaves_during_active_turn | Composer text typed while the agent responds is autosaved as an unsent draft together with its attached image, without ending the turn's submitted prompt or changing its status, and malformed draft images fail validation without changing the draft. A follow-up queued from elsewhere and dispatched after the turn does not replace the draft, which stays saved after the turn ends and is restored to the composer with its image after navigating away and after an app restart. Text steered or queued from the composer leaves the saved draft and does not reappear after the turn, and sending the draft clears it, its images leaving once the turn starts. A submitted prompt whose turn never started returns to the composer with its images, together with the draft typed after it.
     def test_composer_draft_autosaves_during_active_turn(self):
         task_id = self.create_task(title="Draft beside an active turn")["id"]
@@ -5953,10 +5983,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(cleared.get("savedPrompt"))
         self.assertEqual(cleared["draftImageDataURLs"], [])
         self.assertFalse(cleared["hasUnsentDraft"])
-        # An image-only send unmarks its draft, and its image leaves once the turn starts.
+        # A CLI prompt write does not consume draft images, so the image stays the unsent draft.
         self.assert_success(self.call_cli("task", "draft", task_id, "--text", "", "--image", image)[0])
         unmarked = self.assert_success(self.call_cli("task", "prompt", task_id, "--text", "")[0])
-        self.assertFalse(unmarked["hasUnsentDraft"])
+        self.assertTrue(unmarked["hasUnsentDraft"], "Draft images stay an unsent draft through an unsubmitted CLI prompt write.")
         self.assertEqual(len(unmarked["draftImageDataURLs"]), 1, "An image waiting for its turn stays in the draft.")
         self.assert_success(self.call_cli(
             "conversation", "send", task_id, "--image", image,
@@ -5986,6 +6016,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(recovered["savedPrompt"], submitted + "\n\n" + later_draft)
         self.assertTrue(recovered["hasUnsentDraft"])
         never_started_image = self.create_task(title="Image prompt whose turn never started")["id"]
+        # The create-time prompt is an unsent draft that a send leaves alone; clear it so the sent prompt is the saved prompt.
+        self.assert_success(self.call_cli("task", "draft", never_started_image, "--text", "")[0])
         self.assert_success(self.call_cli(
             "task", "prompt", never_started_image, "--text", submitted, "--image", image,
             "--status", "In Progress", "--submitted", "true",
@@ -6094,6 +6126,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(task)["savedPrompt"], interrupted_followup)
 
         title_task = self.create_repo_task("Untitled task", [self.primary])
+        # The create-time prompt is an unsent draft that a send leaves alone; clear it so the sent prompt is the saved prompt.
+        self.assert_success(self.call_cli("task", "draft", title_task["id"], "--text", "")[0])
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-title-success"
         shutil.copyfile(fixture, executable)
@@ -6133,6 +6167,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         failure_executable.chmod(0o755)
         failure_prompt = "Explain how repository setup works for new contributors"
         failed_title_task = self.create_repo_task("Untitled task", [self.primary])
+        # The create-time prompt is an unsent draft that a send leaves alone; clear it so the sent prompt is the saved prompt.
+        self.assert_success(self.call_cli("task", "draft", failed_title_task["id"], "--text", "")[0])
         sent, _ = self.call_cli(
             "conversation", "send", failed_title_task["id"], "--message", failure_prompt,
             extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(failure_executable)},
@@ -6172,6 +6208,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertNotIn(failure_prompt, title_log)
 
         pending_task = self.create_task("Untitled task", roots=[self.primary])
+        # The create-time prompt is an unsent draft that a send leaves alone; clear it so the sent prompt is the saved prompt.
+        self.assert_success(self.call_cli("task", "draft", pending_task["id"], "--text", "")[0])
         pending_prompt = "Persist this prompt before title generation finishes."
         pending_executable = self.data_directory / "codex-fixture-title-success-wait"
         shutil.copyfile(fixture, pending_executable)
@@ -6233,6 +6271,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(renamed_auto_record["repositoryWorktrees"][0]["isPending"])
 
         stale_task = self.create_task("Untitled task", roots=[self.primary])
+        # The create-time prompt is an unsent draft that a send leaves alone; clear it so the sent prompt is the saved prompt.
+        self.assert_success(self.call_cli("task", "draft", stale_task["id"], "--text", "")[0])
         stale_prompt = "Restore a stale submitted prompt to the composer."
         saved, _ = self.call_cli(
             "task", "prompt", stale_task["id"], "--text", stale_prompt,
@@ -6698,6 +6738,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
             )[0])
             self.assertEqual(task["repositoryWorktrees"][0]["branch"], "auto")
             self.assertTrue(task["repositoryWorktrees"][0]["isPending"])
+            # The create-time prompt is an unsent draft that a send leaves alone; clear it so the sent prompt is the saved prompt.
+            self.assert_success(self.call_cli("task", "draft", task["id"], "--text", "")[0])
             self.assert_success(self.call_cli(
                 "conversation", "send", task["id"], "--message", prompt, extra_environment=environment
             )[0])
@@ -6831,6 +6873,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         second = self.assert_success(self.call_cli(
             "task", "create", "--title", "Unaffected Claude conversation", "--prompt", "Fixture task description.", "--root", self.secondary, "--provider", "claude"
         )[0])
+        # The create-time prompt is an unsent draft that a send leaves alone; clear it so the
+        # assertions below see only what the sent prompt does.
+        self.assert_success(self.call_cli("task", "draft", first["id"], "--text", "")[0])
         first_prompt = "Please fail-after-hold-claude-turn-for-concurrency."
         second_prompt = "Second Claude turn after failure."
         first_command = ["conversation", "send", first["id"], "--message", first_prompt]
@@ -8133,6 +8178,46 @@ class PlayhouseBridgeTests(unittest.TestCase):
                        and event.get("messageLimit") == "80"]
         self.assertEqual([read["source"] for read in paged_reads], ["composed", "composed"],
                          "A Codex thread is composed from the app-server before it is paged.")
+
+    # case-contract: test_sent_prompt_stays_out_of_composer_past_history_page | A sent prompt followed by a 120-message turn, so that it lies outside the newest history page, never returns to the composer when the task is reopened: the composer is empty, the task keeps hasUnsentDraft false and its last sent prompt as the saved prompt, and the CLI newest page of 80 messages leaves out the earlier messages. Only the saved draft flag decides draft restoration, so the same task restores a real unsent draft after it is typed.
+    def test_sent_prompt_stays_out_of_composer_past_history_page(self):
+        task_id = self.create_task(title="Sent prompt past history page")["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-long-history-with-prompt-success"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable), "PLAYHOUSE_FIXTURE_WORKSPACE": str(self.primary)}
+        # The create-time prompt is an unsent draft that a send leaves alone. Clear it, as the
+        # visible case clears the composer, so the sent prompt is the last sent prompt.
+        created = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertTrue(created["hasUnsentDraft"], "A prompt given at creation is an unsent draft.")
+        cleared_draft = self.assert_success(self.call_cli("task", "draft", task_id, "--text", "")[0])
+        self.assertFalse(cleared_draft["hasUnsentDraft"])
+        sent, _ = self.call_cli("conversation", "send", task_id, "--message", "Create a long history.", extra_environment=env)
+        self.assert_success(sent)
+        saved = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertFalse(saved["hasUnsentDraft"], "A sent prompt is the last sent prompt, not an unsent draft.")
+        self.assertEqual(saved["savedPrompt"], "Create a long history.")
+        full = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertEqual(len(full["messages"]), 121)
+        self.assertEqual(full["messages"][0]["text"], "Create a long history.", "The sent prompt is the first stored message.")
+        # The view reads the newest page on reopen; the sent prompt's turn is outside it.
+        reopened = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80", extra_environment=env)[0])
+        self.assertEqual(len(reopened["messages"]), 80)
+        self.assertEqual(reopened["earlierMessageCount"], 41)
+        self.assertNotIn("Create a long history.", [message["text"] for message in reopened["messages"]])
+        after_reopen = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertFalse(after_reopen["hasUnsentDraft"], "Reading a long history must not mark the sent prompt as a draft.")
+        self.assertEqual(after_reopen["savedPrompt"], "Create a long history.")
+        # A real unsent draft still survives reopening on the same long conversation.
+        drafted = self.assert_success(self.call_cli("task", "draft", task_id, "--text", "Keep this draft.")[0])
+        self.assertTrue(drafted["hasUnsentDraft"])
+        reread = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertTrue(reread["hasUnsentDraft"])
+        self.assertEqual(reread["savedPrompt"], "Keep this draft.")
 
     # case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, scrolling straight down from that pin keeps the latest question near the top and the latest answer below it with no blank overscroll, and scrolling up then reads the older page from the store as the reader scrolls up until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again.
     def test_conversation_history_pages_claude_transcript_from_store(self):
@@ -9885,6 +9970,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        # The create-time prompt is an unsent draft that a send leaves alone; clear it first.
+        self.assert_success(self.call_cli("task", "draft", task_id, "--text", "")[0])
         failed, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Ask a restart-safe structured question.", expected_status=1,
             extra_environment=env,
@@ -10221,6 +10308,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
     # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. The live turn's activity section renders open and folds away when the interrupted turn settles without an answer, on the conversation that stayed open; the interrupted turn adds no final answer and keeps the activity it reported. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     def test_codex_interrupted_turn_blocks_with_reason_and_can_retry(self):
         task_id = self.create_task("Interrupted turn", roots=[self.primary])["id"]
+        # The create-time prompt is an unsent draft that a send leaves alone; clear it so the sent prompt is the saved prompt.
+        self.assert_success(self.call_cli("task", "draft", task_id, "--text", "")[0])
         self.complete_fixture_turn(task_id, message="Create the conversation thread before interruption.")
         queued_text = "Follow up after the interrupted turn."
         queued = self.assert_success(self.call_cli("conversation", "queue", task_id, "--message", queued_text)[0])
@@ -10288,6 +10377,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["savedPrompt"], queued_text)
 
         restart_task = self.create_task("Restart recovery", roots=[self.primary])
+        # The create-time prompt is an unsent draft that a send leaves alone; clear it so the sent prompt is the saved prompt.
+        self.assert_success(self.call_cli("task", "draft", restart_task["id"], "--text", "")[0])
         restart_prompt = "Restore this submitted prompt after an unexpected restart."
         saved_prompt, _ = self.call_cli(
             "task", "prompt", restart_task["id"], "--text", restart_prompt,
@@ -13700,6 +13791,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(fresh["schedule"]["recurrence"], {"preset": "weekly", "hour": 17, "minute": 15, "weekday": 6})
         self.assertEqual(fresh["schedule"]["prompt"], "Summarize the week in detail.")
         self.assertEqual(fresh["savedPrompt"], "Summarize the week in detail.", "The composer reopens on the confirmed prompt.")
+        self.assertTrue(fresh["hasUnsentDraft"], "The confirmed prompt is the composer's draft.")
         self.assertIsNone(fresh.get("claudeSessionID"))
         self.assertIsNone(fresh.get("codexThreadID"), "Editing a schedule starts no turn.")
         self.assertEqual(self.parse_schedule_iso(fresh["schedule"]["scheduledAt"]).astimezone().weekday(), 4, "The next run falls on a Friday.")

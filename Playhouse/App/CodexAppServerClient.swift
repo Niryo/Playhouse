@@ -2134,6 +2134,13 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 return
             }
             guard let context = userInputContexts[threadID] else {
+                // A shared app-server sends the request to every connected client; the client whose
+                // turn raised it answers. Rejecting it here could win that race and fail the turn, and
+                // when no client owns it yet the server keeps it for the client that resumes the thread.
+                if socketConnection != nil {
+                    PlayhouseDiagnostics.record("codex.user_input.unowned_ignored", fields: diagnosticFields(["threadID": threadID]))
+                    return
+                }
                 sendServerError(requestID: requestID, code: -32000, message: "No conversation owns this question request.")
                 return
             }
@@ -2324,6 +2331,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
 
     /// Nothing a user waits on: no turn running or starting, no question, no operation, and
     /// no Goal this client follows. An active Goal nobody follows is checked with the server.
+    /// A question no conversation here owns is ignored, not added to `pendingUserInputs`, so
+    /// it never counts: the idle stop stays the backstop for a question nobody will answer.
     private var serverHasLocalWork: Bool {
         !turnContexts.isEmpty || !startingThreadIDs.isEmpty || !pendingUserInputs.isEmpty
             || goalObservationThreadID != nil || conversationOperationsInFlight > 0 || initializationTask != nil
