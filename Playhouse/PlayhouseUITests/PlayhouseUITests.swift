@@ -4745,7 +4745,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(final["isPending"] as? Bool, false)
     }
 
-    // case-contract: test_task_repository_branch_from_fetches_remote_branch | A branch-from that exists only on a Git remote and was never fetched is fetched when repository settings are saved, and the pending record stores its remote-tracking branch; a branch-from missing locally and on every remote is rejected without changing the saved settings; a remote that can't be reached reports the fetch failure instead of a missing branch and also keeps the saved settings; starting the task creates its worktree from the fetched remote commit without making the remote branch the task branch's upstream.
+    // case-contract: test_task_repository_branch_from_fetches_remote_branch | A branch-from that exists only on a Git remote and was never fetched is fetched when repository settings are saved, and the pending record stores its remote-tracking branch; a branch-from missing locally and on every remote is rejected without changing the saved settings; a remote that can't be reached reports the fetch failure instead of a missing branch and also keeps the saved settings; starting the task fetches the remote branch again, so its worktree starts from the remote's latest commit even after the remote branch moved ahead, without making the remote branch the task branch's upstream.
     func test_task_repository_branch_from_fetches_remote_branch() throws {
         let remoteBranch = "remote-only/branch-from"
         let trackingRef = "refs/remotes/origin/\(remoteBranch)"
@@ -4832,15 +4832,125 @@ final class PlayhouseUITests: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(waitForDisappearance(branchFromValue), "Dismissing the editor should close it before the turn starts.")
 
+        // The remote branch moves ahead after it was fetched; starting must use the newer commit.
+        let newerCommit = try runGitOutput(
+            fixture.primary, "commit-tree", "main^{tree}", "-p", remoteCommit, "-m", "Advance remote-only branch-from fixture"
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        try runGit(fixture.primary, "push", "--quiet", "origin", "\(newerCommit):refs/heads/\(remoteBranch)")
+        try runGit(fixture.primary, "update-ref", trackingRef, remoteCommit)
+
         try completeCurrentTaskWithFixtureAnswers(taskTitle: title)
         let started = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
         XCTAssertEqual(started["isPending"] as? Bool, false)
         XCTAssertEqual(started["branchFrom"] as? String, "origin/\(remoteBranch)")
         let worktree = URL(fileURLWithPath: try XCTUnwrap(started["worktreePath"] as? String), isDirectory: true)
         let taskBranch = try XCTUnwrap(started["branch"] as? String)
-        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines), remoteCommit)
+        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines), newerCommit)
         let upstream = try runGitOutput(worktree, "config", "--default", "", "--get", "branch.\(taskBranch).remote")
         XCTAssertEqual(upstream.trimmingCharacters(in: .whitespacesAndNewlines), "", "The remote branch-from must not become the task branch's upstream.")
+    }
+
+    // case-contract: test_task_repository_default_branch_from_uses_fresh_origin | With no branch-from given, a repository without an origin remote keeps its local default branch, while a repository whose origin has the default branch stores origin's remote-tracking branch as the pending branch-from. Starting the task fetches origin first, so the worktree starts from origin's latest commit even when the local default branch and its remote-tracking ref are stale and the local branch holds unpushed commits, without making the remote branch the task branch's upstream. When origin can't be reached at start, the task still starts from the last fetched origin commit.
+    func test_task_repository_default_branch_from_uses_fresh_origin() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        launchApp(defaultParent: fixture.parent.path)
+        let badge = element("conversation-repository-badge-primary")
+        let branchFromValue = element("conversation-repository-branch-from-value")
+        func showBranchFrom(taskTitle: String, expected: String, screenshot: String) {
+            openTask(named: taskTitle)
+            XCTAssertTrue(badge.waitToExist(timeout: 5))
+            badge.click()
+            XCTAssertTrue(branchFromValue.waitToExist(timeout: 5), app.debugDescription)
+            XCTAssertEqual(accessibleLabelOrValue(of: branchFromValue), expected, app.debugDescription)
+            attachScreenshot(named: screenshot)
+            app.typeKey(.escape, modifierFlags: [])
+            XCTAssertTrue(waitForDisappearance(branchFromValue), "Dismissing the editor should close it before the turn starts.")
+        }
+
+        let localTitle = "Default branch-from without origin"
+        let localTask = try runCLI([
+            "task", "create", "--title", localTitle, "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+        ])["result"] as? [String: Any]
+        let localTaskID = try XCTUnwrap(localTask?["id"] as? String)
+        XCTAssertEqual(try repositoryRecord(taskID: localTaskID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, "main")
+        showBranchFrom(taskTitle: localTitle, expected: "main", screenshot: "Without an origin the default branch-from stays local")
+
+        let remote = runDirectory.appendingPathComponent("default-branch-from-origin.git", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remote.path), "Each UI case should use a fresh owned bare remote.")
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        try runGit(remote, "init", "--bare")
+        try runGit(fixture.primary, "remote", "add", "origin", remote.path)
+        addTeardownBlock { [self] in try? runGit(fixture.primary, "remote", "remove", "origin") }
+        try runGit(fixture.primary, "push", "--quiet", "origin", "main")
+        let staleTracking = try runGitOutput(fixture.primary, "rev-parse", "refs/remotes/origin/main").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let title = "Default branch-from from origin"
+        let created = try runCLI([
+            "task", "create", "--title", title, "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+        ])["result"] as? [String: Any]
+        let taskID = try XCTUnwrap(created?["id"] as? String)
+        let pending = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
+        XCTAssertEqual(pending["isPending"] as? Bool, true)
+        XCTAssertEqual(pending["branchFrom"] as? String, "origin/main")
+        showBranchFrom(taskTitle: title, expected: "origin/main", screenshot: "With an origin the default branch-from is origin's branch")
+
+        // Origin moves ahead without this repository fetching, and local main gains an unpushed commit.
+        let clone = runDirectory.appendingPathComponent("default-branch-from-clone", isDirectory: true)
+        _ = try runGitOutput(runDirectory, "clone", "--quiet", "--branch", "main", remote.path, clone.path)
+        try "Landed on origin after the task was created.\n".write(to: clone.appendingPathComponent("origin-only.txt"), atomically: true, encoding: .utf8)
+        try runGit(clone, "add", "origin-only.txt")
+        try runGit(clone, "commit", "-m", "Origin-only commit")
+        try runGit(clone, "push", "--quiet", "origin", "main")
+        let originHead = try runGitOutput(clone, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines)
+        try "Unpushed local commit.\n".write(to: fixture.primary.appendingPathComponent("local-only.txt"), atomically: true, encoding: .utf8)
+        try runGit(fixture.primary, "add", "local-only.txt")
+        try runGit(fixture.primary, "commit", "-m", "Local-only commit")
+        let localHead = try runGitOutput(fixture.primary, "rev-parse", "main").trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(
+            try runGitOutput(fixture.primary, "rev-parse", "refs/remotes/origin/main").trimmingCharacters(in: .whitespacesAndNewlines),
+            staleTracking
+        )
+
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: title)
+        let started = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
+        XCTAssertEqual(started["isPending"] as? Bool, false)
+        XCTAssertEqual(started["branchFrom"] as? String, "origin/main")
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(started["worktreePath"] as? String), isDirectory: true)
+        let taskBranch = try XCTUnwrap(started["branch"] as? String)
+        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines), originHead)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.appendingPathComponent("origin-only.txt").path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: worktree.appendingPathComponent("local-only.txt").path),
+            "The local-only commit must not be the task's base."
+        )
+        XCTAssertEqual(
+            try runGitOutput(fixture.primary, "rev-parse", "refs/remotes/origin/main").trimmingCharacters(in: .whitespacesAndNewlines),
+            originHead
+        )
+        XCTAssertEqual(
+            try runGitOutput(fixture.primary, "rev-parse", "main").trimmingCharacters(in: .whitespacesAndNewlines),
+            localHead,
+            "Starting must not move local main."
+        )
+        let upstream = try runGitOutput(worktree, "config", "--default", "", "--get", "branch.\(taskBranch).remote")
+        XCTAssertEqual(upstream.trimmingCharacters(in: .whitespacesAndNewlines), "", "The origin base must not become the task branch's upstream.")
+        attachScreenshot(named: "Task started from origin's latest commit")
+
+        let offlineTitle = "Default branch-from while offline"
+        let offline = try runCLI([
+            "task", "create", "--title", offlineTitle, "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+        ])["result"] as? [String: Any]
+        let offlineID = try XCTUnwrap(offline?["id"] as? String)
+        XCTAssertEqual(try repositoryRecord(taskID: offlineID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, "origin/main")
+        try runGit(fixture.primary, "remote", "set-url", "origin", runDirectory.appendingPathComponent("unreachable-origin.git").path)
+        openTask(named: offlineTitle)
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: offlineTitle)
+        let offlineStarted = try XCTUnwrap(repositoryRecord(taskID: offlineID, repositoryPath: fixture.primary.path))
+        XCTAssertEqual(offlineStarted["isPending"] as? Bool, false)
+        XCTAssertEqual(offlineStarted["branchFrom"] as? String, "origin/main")
+        let offlineWorktree = URL(fileURLWithPath: try XCTUnwrap(offlineStarted["worktreePath"] as? String), isDirectory: true)
+        XCTAssertEqual(try runGitOutput(offlineWorktree, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines), originHead)
+        attachScreenshot(named: "Offline start uses the last fetched origin commit")
     }
 
     // case-contract: test_task_repository_edit_rejects_stale_validation_after_removal | If a pending repository is removed while its settings are being validated, the stale edit is rejected and the newer repository removal and context root remain saved.
