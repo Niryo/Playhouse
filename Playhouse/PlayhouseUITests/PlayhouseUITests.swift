@@ -15886,6 +15886,20 @@ final class PlayhouseUITests: XCTestCase {
         composer.typeText(text)
     }
 
+    /// Dismisses an open schedule hint with Escape (its Done button is disabled while the title is empty), then
+    /// returns from the task conversation to the Scheduled Tasks page, which is hidden while a task is open.
+    private func closeScheduleHintAndReturnToPage() {
+        let hint = element("schedule-hint")
+        if hint.exists {
+            app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
+            XCTAssertTrue(waitForDisappearance(hint, timeout: 5), "Escape dismisses the schedule hint.")
+        }
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitForDisappearance(element("back-to-board-button"), timeout: 10), "Going back leaves the task conversation.")
+        XCTAssertTrue(element("scheduled-tasks-empty").waitToExist(timeout: 10), "Going back returns to the empty Scheduled Tasks page.")
+        XCTAssertTrue(waitForStableFrame(element("scheduled-tasks-page")), "The page should finish sliding back in.")
+    }
+
     private func openScheduleHint() -> XCUIElement {
         let button = element("schedule-task-button")
         XCTAssertTrue(waitUntil({ button.exists && button.isHittable }, timeout: 10), "The composer should offer the schedule button beside Send.")
@@ -16151,7 +16165,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("task-card-\(templateID)").waitToExist(timeout: 10), "Clearing the schedule puts the task on the board.")
     }
 
-    // case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
+    // case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task (header, or the button on the empty page) opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
     func test_scheduled_task_edit_and_page_management() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-schedule-edit")
         launchApp(defaultParent: fixture.parent.path)
@@ -16160,7 +16174,15 @@ final class PlayhouseUITests: XCTestCase {
         // The page slides in over the board; clicks before it settles land on the board.
         XCTAssertTrue(waitForStableFrame(element("scheduled-tasks-page")), "The Scheduled Tasks page should finish sliding in.")
         XCTAssertTrue(element("scheduled-tasks-empty").exists, "An empty page says so plainly.")
+        XCTAssertTrue(element("scheduled-tasks-empty-new-task-button").exists, "The empty page offers New Task.")
         attachScreenshot(named: "Scheduled Tasks page with no schedules")
+
+        // The empty-state button and the header button both open the same conversation with the hint on Recurring.
+        element("scheduled-tasks-empty-new-task-button").click()
+        XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "The empty-state New Task opens the conversation with the schedule hint open.")
+        XCTAssertTrue(element("schedule-title-field").waitToExist(timeout: 5), "The empty-state New Task starts on Recurring.")
+        attachScreenshot(named: "Empty-state New Task opens the schedule hint")
+        closeScheduleHintAndReturnToPage()
 
         element("scheduled-new-task-button").click()
         XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "New Task opens the conversation with the schedule hint open.")
@@ -16233,6 +16255,16 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(((try runCLI(["schedule", "list"])["result"] as? [String: Any])?["tasks"] as? [Any])?.count, 0)
         XCTAssertTrue(element("scheduled-tasks-empty").waitToExist(timeout: 5))
         attachScreenshot(named: "Scheduled Tasks page after deleting the schedule")
+        element("scheduled-tasks-empty-new-task-button").click()
+        XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "The empty-state New Task still opens the schedule hint on an empty page.")
+        XCTAssertTrue(element("schedule-title-field").waitToExist(timeout: 5), "The empty-state New Task starts on Recurring after a deletion too.")
+        attachScreenshot(named: "Empty page New Task after deleting the schedule")
+        closeScheduleHintAndReturnToPage()
+        element("scheduled-new-task-button").click()
+        XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "The header New Task still opens the schedule hint on an empty page.")
+        XCTAssertTrue(element("schedule-title-field").waitToExist(timeout: 5), "The header New Task starts on Recurring after a deletion too.")
+        attachScreenshot(named: "Header New Task after deleting the schedule opens the schedule hint")
+        closeScheduleHintAndReturnToPage()
 
         // A one-time schedule removed in the hint: Send runs the task now and ends the schedule.
         let onceID = try XCTUnwrap((try runCLI([
