@@ -3360,7 +3360,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
                          {"style": "borderless", "emphasis": 10, "overhang": None, "width": 30, "height": 30})
         self.assertEqual([(child["type"], self.plugin_text(child)) for child in create["children"]], [("Text", "PR")])
 
-    # case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to Manual; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. The last switch choice is remembered: tasks created after turning it on start on, and tasks created after turning it off start off. Toggling Auto PR for an unknown task is rejected.
+    # case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to PR; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. Every new task starts in PR mode, whatever mode the previous task was left in; changing one task's mode never changes the default for later tasks. Toggling Auto PR for an unknown task is rejected.
     def test_task_auto_pr_toggle_creates_pull_request_on_review(self):
         missing, _ = self.call_cli("task", "pr", "auto", str(uuid.uuid4()), "on", expected_status=3)
         self.assert_failure(missing, "not_found")
@@ -3377,8 +3377,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
                 self.run_git(repository, "remote", "remove", "origin")
 
         task = self.create_repo_task("Auto PR toggle", [self.primary], merge_targets={self.primary: "main"})
-        self.assertFalse(task["autoCreatePullRequestOnReview"], "Auto PR must default to off so existing tasks are unaffected.")
-        self.assertEqual(task["pullRequestMode"], "manual")
+        self.assertTrue(task["autoCreatePullRequestOnReview"], "A new task must start in PR mode.")
+        self.assertEqual(task["pullRequestMode"], "pr")
         autopilot = self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "autopilot")[0])
         self.assertEqual(autopilot["pullRequestMode"], "autopilot")
         self.assertTrue(autopilot["autoCreatePullRequestOnReview"], "Autopilot opens the pull request too.")
@@ -3490,14 +3490,18 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Auto PR should create the pull request exactly once without the user clicking anything.",
         )
 
-        sticky_on = self.create_task("Sticky Auto PR on")
-        self.assertTrue(sticky_on["autoCreatePullRequestOnReview"], "A task created after turning Auto PR on should start on.")
-        turned_off = self.assert_success(self.call_cli("task", "pr", "auto", sticky_on["id"], "off")[0])
+        default_task = self.create_task("Default PR mode")
+        self.assertTrue(default_task["autoCreatePullRequestOnReview"], "A new task should start in PR mode.")
+        self.assertEqual(default_task["pullRequestMode"], "pr")
+        turned_off = self.assert_success(self.call_cli("task", "pr", "auto", default_task["id"], "off")[0])
         self.assertFalse(turned_off["autoCreatePullRequestOnReview"])
-        sticky_off = self.create_task("Sticky Auto PR off")
-        self.assertFalse(sticky_off["autoCreatePullRequestOnReview"], "A task created after turning Auto PR off should start off.")
+        after_off = self.create_task("Default PR mode after switching off")
+        self.assertTrue(after_off["autoCreatePullRequestOnReview"], "A new task should still start in PR mode after another task was switched off.")
+        self.assertEqual(after_off["pullRequestMode"], "pr")
 
-        manual_task = self.create_repo_task("Manual PR toggle default", [self.secondary], merge_targets={self.secondary: "main"})
+        manual_task = self.create_repo_task("Manual PR toggle", [self.secondary], merge_targets={self.secondary: "main"})
+        self.assertTrue(manual_task["autoCreatePullRequestOnReview"])
+        manual_task = self.assert_success(self.call_cli("task", "pr", "mode", manual_task["id"], "manual")[0])
         self.assertFalse(manual_task["autoCreatePullRequestOnReview"])
         self.complete_fixture_turn(manual_task["id"], executable_name="codex-fixture-manual-pr")
         manual_reviewed = self.assert_success(self.call_cli("task", "get", manual_task["id"])[0])
@@ -5223,6 +5227,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
             task = self.create_repo_task("Remote branch-from", [self.primary])
             task_id = task["id"]
+            # PR mode would publish the branch on Review, and publishing sets the upstream this case checks.
+            self.assert_success(self.call_cli("task", "pr", "mode", task_id, "manual")[0])
             changed, _ = self.call_cli(
                 "task", "repository", "edit", task_id,
                 "--repo", self.primary,

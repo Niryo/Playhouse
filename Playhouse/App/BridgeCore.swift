@@ -1897,6 +1897,7 @@ final class BoardTaskManager {
         guard !normalizedTitle.isEmpty else { throw PlayhouseManagerError.invalidTitle }
         let normalizedRoots = try Self.normalizeRoots(workspaceRoots)
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: normalizedRoots, conversationProvider: provider)
+        task.autoCreatePullRequestOnReview = true
         modelContext.insert(task)
         try await saveTaskContext(taskID: task.id)
         PlayhouseDiagnostics.record("task.create.succeeded", fields: [
@@ -1910,7 +1911,7 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, pullRequestMode: PullRequestMode = .manual, prompt: String? = nil) async throws -> BoardTaskRecord {
+    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, pullRequestMode: PullRequestMode = .pullRequest, prompt: String? = nil) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw PlayhouseManagerError.invalidTitle }
         let folders = try Self.normalizeOptionalRoots(contextFolders)
@@ -4640,21 +4641,6 @@ final class WorkspaceSettingsManager {
         }
         defaults.set(provider.rawValue, forKey: WorkspaceSettings.defaultConversationProviderKey)
         PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "defaultConversationProvider", "value": provider.rawValue])
-    }
-
-    /// The PR mode new tasks start with: whatever the user last chose on any task.
-    /// Before the mode existed, the on/off Auto PR choice was stored as a Bool.
-    var pullRequestModeDefault: PullRequestMode {
-        if let stored = defaults.string(forKey: WorkspaceSettings.pullRequestModeDefaultKey),
-           let mode = PullRequestMode(rawValue: stored) {
-            return mode
-        }
-        return defaults.bool(forKey: WorkspaceSettings.autoCreatePullRequestDefaultKey) ? .pullRequest : .manual
-    }
-
-    func setPullRequestModeDefault(_ mode: PullRequestMode) {
-        defaults.set(mode.rawValue, forKey: WorkspaceSettings.pullRequestModeDefaultKey)
-        PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "pullRequestModeDefault", "value": mode.rawValue])
     }
 
     var defaultParentFolderURL: URL? {
@@ -9171,7 +9157,7 @@ final class PlayhouseBridgeRuntime {
                 let prompt = try request.requiredString("prompt")
                 result = try Self.value(await taskManager.create(
                     title: title, repositories: repositories, contextFolders: roots, provider: provider,
-                    pullRequestMode: settings.pullRequestModeDefault,
+                    pullRequestMode: .pullRequest,
                     prompt: prompt
                 ))
             case "schedule.list":
@@ -9270,11 +9256,9 @@ final class PlayhouseBridgeRuntime {
             case "task.pr.auto":
                 let mode: PullRequestMode = request.arguments["enabled"]?.bool == true ? .pullRequest : .manual
                 result = try Self.value(await taskManager.setPullRequestMode(request.requiredUUID("taskID"), mode: mode))
-                settings.setPullRequestModeDefault(mode)
             case "task.pr.mode":
                 let mode = try PullRequestMode.parse(request.requiredString("mode"))
                 result = try Self.value(await taskManager.setPullRequestMode(request.requiredUUID("taskID"), mode: mode))
-                settings.setPullRequestModeDefault(mode)
             case "task.pr.autopilot":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = try Self.value(await conversations.runPullRequestAutopilot(
@@ -9710,7 +9694,7 @@ final class PlayhouseBridgeRuntime {
                     repositories: plan.repositoryPaths.map { RepositoryWorktreeSpec(repositoryPath: $0, branch: nil, branchFrom: nil) },
                     contextFolders: plan.contextFolders,
                     provider: source.conversationProvider,
-                    pullRequestMode: settings.pullRequestModeDefault,
+                    pullRequestMode: .pullRequest,
                     prompt: plan.prompt
                 )
                 result = .object(["task": try Self.value(created), "prompt": .string(plan.prompt)])
@@ -9788,7 +9772,7 @@ final class PlayhouseBridgeRuntime {
                     repositories: plan.repositoryPaths.map { RepositoryWorktreeSpec(repositoryPath: $0, branch: nil, branchFrom: nil) },
                     contextFolders: plan.contextFolders,
                     provider: source.conversationProvider,
-                    pullRequestMode: settings.pullRequestModeDefault,
+                    pullRequestMode: .pullRequest,
                     prompt: plan.prompt
                 )
                 result = .object(["task": try Self.value(created), "prompt": .string(plan.prompt)])
@@ -9837,7 +9821,7 @@ final class PlayhouseBridgeRuntime {
                     repositories: plan.repositoryPaths.map { RepositoryWorktreeSpec(repositoryPath: $0, branch: nil, branchFrom: nil) },
                     contextFolders: plan.contextFolders,
                     provider: source.conversationProvider,
-                    pullRequestMode: settings.pullRequestModeDefault,
+                    pullRequestMode: .pullRequest,
                     prompt: plan.prompt
                 )
                 result = .object(["task": try Self.value(created), "prompt": .string(plan.prompt)])

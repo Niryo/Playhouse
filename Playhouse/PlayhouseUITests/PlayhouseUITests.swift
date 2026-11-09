@@ -2448,6 +2448,8 @@ final class PlayhouseUITests: XCTestCase {
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
+        // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
+        _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
         XCTAssertEqual(created["status"] as? String, "Backlog")
         XCTAssertTrue(element("task-card-\(taskID)").waitToExist(timeout: 5), "The backlog task card should render before checking its PR controls.")
         XCTAssertFalse(element("task-create-pr-\(taskID)").exists, "Backlog cards must not expose a PR action.")
@@ -2528,7 +2530,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(current["status"] as? String, "Done")
     }
 
-    // case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to Manual; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. The last switch choice is remembered: tasks created after turning it on start on, and tasks created after turning it off start off. Toggling Auto PR for an unknown task is rejected.
+    // case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to PR; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. Every new task starts in PR mode, whatever mode the previous task was left in; changing one task's mode never changes the default for later tasks. Toggling Auto PR for an unknown task is rejected.
     func test_task_auto_pr_toggle_creates_pull_request_on_review() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
@@ -2570,11 +2572,11 @@ final class PlayhouseUITests: XCTestCase {
                 let text = self.pluginText(duration)
                 return duration.frame.width >= ceil(text.size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width) - 1
             }, timeout: 3), "The working time, grown from \(firstDuration), should keep its full width: \(self.pluginText(duration)) in \(duration.frame.width) pt")
-            XCTAssertEqual(pill.value as? String, "manual", "The closed pill shows the current mode, defaulting to Manual.")
+            XCTAssertEqual(pill.value as? String, "pr", "The closed pill shows the current mode, defaulting to PR.")
             XCTAssertFalse(self.element("task-pr-mode-merge-\(taskID)").exists, "A closed pill shows only the current mode.")
-            XCTAssertFalse(try XCTUnwrap(self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool), "Auto PR must default to off.")
-            XCTAssertEqual(try self.taskRecord(id: taskID)?["pullRequestMode"] as? String, "manual")
-            self.attachScreenshot(named: "Working task shows the closed mode pill on Manual", fullScreen: true)
+            XCTAssertTrue(try XCTUnwrap(self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool), "Auto PR must default to on.")
+            XCTAssertEqual(try self.taskRecord(id: taskID)?["pullRequestMode"] as? String, "pr")
+            self.attachScreenshot(named: "Working task shows the closed mode pill on PR", fullScreen: true)
 
             pill.click()
             for mode in ["manual", "pr", "autopilot", "merge"] {
@@ -2582,13 +2584,13 @@ final class PlayhouseUITests: XCTestCase {
                 XCTAssertTrue(option.waitToExist(timeout: 5), "The open pill should offer \(mode).")
                 XCTAssertGreaterThanOrEqual(option.frame.height, 30, "Each mode should keep a comfortable hit target.")
             }
-            XCTAssertEqual(self.element("task-pr-mode-manual-\(taskID)").value as? String, "selected")
+            XCTAssertEqual(self.element("task-pr-mode-pr-\(taskID)").value as? String, "selected")
             _ = self.settledPillOption("merge", taskID: taskID)
             self.attachScreenshot(named: "Clicking the pill slides out Manual, PR, Green, and Merge", fullScreen: true)
             // Choosing the current mode again just folds the pill.
-            self.settledPillOption("manual", taskID: taskID).click()
-            XCTAssertTrue(self.waitUntil({ pill.exists && (pill.value as? String) == "manual" && !self.element("task-pr-mode-merge-\(taskID)").exists }, timeout: 5), "Choosing the current mode should fold the pill.")
-            XCTAssertEqual(try self.taskRecord(id: taskID)?["pullRequestMode"] as? String, "manual")
+            self.settledPillOption("pr", taskID: taskID).click()
+            XCTAssertTrue(self.waitUntil({ pill.exists && (pill.value as? String) == "pr" && !self.element("task-pr-mode-merge-\(taskID)").exists }, timeout: 5), "Choosing the current mode should fold the pill.")
+            XCTAssertEqual(try self.taskRecord(id: taskID)?["pullRequestMode"] as? String, "pr")
 
             pill.click()
             self.settledPillOption("autopilot", taskID: taskID).click()
@@ -2630,29 +2632,31 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(element("task-pr-mode-\(taskID)").value as? String, "pr")
         attachScreenshot(named: "Auto PR created the pull request automatically once the task reached Review", fullScreen: true)
 
-        let stickyOn = try XCTUnwrap(try runCLI(["task", "create", "--title", "Sticky Auto PR on UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
-        XCTAssertEqual(stickyOn["autoCreatePullRequestOnReview"] as? Bool, true, "A task created after turning the switch on in the UI should start on.")
-        let stickyOnID = try XCTUnwrap(stickyOn["id"] as? String)
-        let autopilot = try XCTUnwrap(try runCLI(["task", "pr", "mode", stickyOnID, "autopilot"])["result"] as? [String: Any])
+        let defaultPR = try XCTUnwrap(try runCLI(["task", "create", "--title", "Default PR mode UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
+        XCTAssertEqual(defaultPR["autoCreatePullRequestOnReview"] as? Bool, true, "A new task should start in PR mode.")
+        XCTAssertEqual(defaultPR["pullRequestMode"] as? String, "pr")
+        let pullRequestTaskID = try XCTUnwrap(defaultPR["id"] as? String)
+        let autopilot = try XCTUnwrap(try runCLI(["task", "pr", "mode", pullRequestTaskID, "autopilot"])["result"] as? [String: Any])
         XCTAssertEqual(autopilot["pullRequestMode"] as? String, "autopilot")
         XCTAssertEqual(autopilot["autoCreatePullRequestOnReview"] as? Bool, true, "Autopilot opens the pull request too.")
-        let invalidMode = try runCLI(["task", "pr", "mode", stickyOnID, "sometimes"], expectedStatus: 2)
+        let invalidMode = try runCLI(["task", "pr", "mode", pullRequestTaskID, "sometimes"], expectedStatus: 2)
         XCTAssertEqual((invalidMode["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
-        XCTAssertEqual(try taskRecord(id: stickyOnID)?["pullRequestMode"] as? String, "autopilot", "A rejected mode must not change the task.")
-        _ = try runCLI(["task", "pr", "auto", stickyOnID, "off"])
-        let stickyOff = try XCTUnwrap(try runCLI(["task", "create", "--title", "Sticky Auto PR off UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
-        XCTAssertEqual(stickyOff["autoCreatePullRequestOnReview"] as? Bool, false, "A task created after turning the switch off should start off.")
+        XCTAssertEqual(try taskRecord(id: pullRequestTaskID)?["pullRequestMode"] as? String, "autopilot", "A rejected mode must not change the task.")
+        _ = try runCLI(["task", "pr", "auto", pullRequestTaskID, "off"])
+        let afterOff = try XCTUnwrap(try runCLI(["task", "create", "--title", "Default PR mode after off UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
+        XCTAssertEqual(afterOff["autoCreatePullRequestOnReview"] as? Bool, true, "A task created after switching another task off should still start in PR mode.")
 
         let manualCreated = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Manual PR toggle default UI", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path,
+            "task", "create", "--title", "Manual PR toggle UI", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path,
             "--merge-target", "\(fixture.secondary.path)=main",
         ])["result"] as? [String: Any])
         let manualTaskID = try XCTUnwrap(manualCreated["id"] as? String)
-        XCTAssertFalse(manualCreated["autoCreatePullRequestOnReview"] as? Bool ?? true, "Auto PR must default to off so existing manual tasks are unaffected.")
+        XCTAssertEqual(manualCreated["autoCreatePullRequestOnReview"] as? Bool, true, "New tasks start in PR mode.")
+        _ = try runCLI(["task", "pr", "mode", manualTaskID, "manual"])
         let missing = try runCLI(["task", "pr", "auto", "00000000-0000-0000-0000-000000000000", "on"], expectedStatus: 3)
         XCTAssertEqual((missing["error"] as? [String: Any])?["code"] as? String, "not_found")
-        openTask(named: "Manual PR toggle default UI")
-        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Manual PR toggle default UI")
+        openTask(named: "Manual PR toggle UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Manual PR toggle UI")
         element("back-to-board-button").click()
         XCTAssertEqual(try taskRecord(id: manualTaskID)?["status"] as? String, "Review")
         XCTAssertNil((try taskRecord(id: manualTaskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"], "With Auto PR off, reaching Review must not create a pull request by itself.")
@@ -2926,6 +2930,8 @@ final class PlayhouseUITests: XCTestCase {
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
+        // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
+        _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
         _ = try XCTUnwrap((created["repositoryWorktrees"] as? [[String: Any]])?.first)
         openTask(named: "PR conflict choice UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "PR conflict choice UI")
@@ -3013,6 +3019,8 @@ final class PlayhouseUITests: XCTestCase {
             "task", "create", "--title", "Active linked PR UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
         ])["result"] as? [String: Any])
         let activeTaskID = try XCTUnwrap(activeCreated["id"] as? String)
+        // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
+        _ = try runCLI(["task", "pr", "mode", activeTaskID, "manual"])
         openTask(named: "Active linked PR UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Active linked PR UI")
         element("back-to-board-button").click()
@@ -3132,6 +3140,8 @@ final class PlayhouseUITests: XCTestCase {
             "--merge-target", "\(fixture.primary.path)=main", "--merge-target", "\(fixture.secondary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
+        // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
+        _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
         openTask(named: "Skip unchanged UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Skip unchanged UI")
         element("back-to-board-button").click()
@@ -3192,6 +3202,8 @@ final class PlayhouseUITests: XCTestCase {
             "--merge-target", "\(fixture.secondary.path)=main",
         ])["result"] as? [String: Any])
         let unchangedID = try XCTUnwrap(unchanged["id"] as? String)
+        // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
+        _ = try runCLI(["task", "pr", "mode", unchangedID, "manual"])
         openTask(named: "Nothing to propose UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Nothing to propose UI")
         element("back-to-board-button").click()

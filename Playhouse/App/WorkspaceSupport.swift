@@ -107,8 +107,6 @@ enum WorkspaceSettings {
     /// Whether the Agents info section at the bottom of the board sidebar is minimized.
     static let agentsInfoSectionCollapsedKey = "agentsInfoSectionCollapsed"
     static let defaultConversationProviderKey = "defaultConversationProvider"
-    static let autoCreatePullRequestDefaultKey = "autoCreatePullRequestDefault"
-    static let pullRequestModeDefaultKey = "pullRequestModeDefault"
     static let tokenUsageColorMaxKey = "tokenUsageColorMax"
     static let defaultTokenUsageColorMax = TokenUsageHeatmap.defaultColorMax
     static let cpuUsageColorMaxKey = "cpuUsageColorMax"
