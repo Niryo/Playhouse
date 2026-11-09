@@ -563,6 +563,10 @@ enum WorkspaceChangeScanner {
     /// updated shows up as the task's own change. A local branch that is ahead of or diverged from
     /// its remote holds work the task was started from, so it stays the base.
     private static func comparisonBase(repository: URL, branchFrom: String) throws -> String {
+        // A base that is already a remote-tracking branch (origin/main) is its own upstream.
+        if try runGit(repository: repository, arguments: ["rev-parse", "--verify", "--quiet", "refs/remotes/\(branchFrom)^{commit}"]).status == 0 {
+            return branchFrom
+        }
         let remoteRef = "refs/remotes/origin/\(branchFrom)"
         guard try runGit(repository: repository, arguments: ["rev-parse", "--verify", "--quiet", "\(remoteRef)^{commit}"]).status == 0,
               try runGit(repository: repository, arguments: ["merge-base", "--is-ancestor", branchFrom, remoteRef]).status == 0 else {

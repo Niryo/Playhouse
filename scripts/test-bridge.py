@@ -5204,7 +5204,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(final_record["branchFrom"], "branch-source")
         self.assertEqual(final_record["mergeTarget"], "branch-source")
 
-    # case-contract: test_task_repository_branch_from_fetches_remote_branch | A branch-from that exists only on a Git remote and was never fetched is fetched when repository settings are saved, and the pending record stores its remote-tracking branch; a branch-from missing locally and on every remote is rejected without changing the saved settings; a remote that can't be reached reports the fetch failure instead of a missing branch and also keeps the saved settings; starting the task creates its worktree from the fetched remote commit without making the remote branch the task branch's upstream.
+    # case-contract: test_task_repository_branch_from_fetches_remote_branch | A branch-from that exists only on a Git remote and was never fetched is fetched when repository settings are saved, and the pending record stores its remote-tracking branch; a branch-from missing locally and on every remote is rejected without changing the saved settings; a remote that can't be reached reports the fetch failure instead of a missing branch and also keeps the saved settings; starting the task fetches the remote branch again, so its worktree starts from the remote's latest commit even after the remote branch moved ahead, without making the remote branch the task branch's upstream.
     def test_task_repository_branch_from_fetches_remote_branch(self):
         remote = self.data_directory / "branch-from-origin.git"
         remote_branch = "remote-only/branch-from"
@@ -5270,6 +5270,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
             fresh, _ = self.call_cli("task", "get", task_id)
             self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"][0]["branchFrom"], f"origin/{remote_branch}")
 
+            # The remote branch moves ahead after it was fetched; starting must use the newer commit.
+            newer_commit = self.run_git(
+                self.primary, "commit-tree", "main^{tree}", "-p", remote_commit, "-m", "Advance remote-only branch-from fixture",
+            ).strip()
+            self.run_git(self.primary, "push", "--quiet", "origin", f"{newer_commit}:refs/heads/{remote_branch}")
+            self.run_git(self.primary, "update-ref", tracking_ref, remote_commit)
+
             self.complete_fixture_turn(task_id)
             started, _ = self.call_cli("task", "get", task_id)
             started_record = self.assert_success(started)["repositoryWorktrees"][0]
@@ -5277,12 +5284,75 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assertEqual(started_record["branchFrom"], f"origin/{remote_branch}")
             worktree = Path(started_record["worktreePath"])
             self.assertTrue(worktree.is_dir())
-            self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), remote_commit)
+            self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), newer_commit)
             upstream = subprocess.run(
                 ["git", "-C", str(worktree), "config", "--get", "branch.remote-branch-from-task.remote"],
                 check=False, capture_output=True, text=True,
             )
             self.assertEqual(upstream.stdout.strip(), "", "The remote branch-from must not become the task branch's upstream.")
+        finally:
+            self.run_git(self.primary, "remote", "remove", "origin")
+
+    # case-contract: test_task_repository_default_branch_from_uses_fresh_origin | With no branch-from given, a repository without an origin remote keeps its local default branch, while a repository whose origin has the default branch stores origin's remote-tracking branch as the pending branch-from. Starting the task fetches origin first, so the worktree starts from origin's latest commit even when the local default branch and its remote-tracking ref are stale and the local branch holds unpushed commits, without making the remote branch the task branch's upstream. When origin can't be reached at start, the task still starts from the last fetched origin commit.
+    def test_task_repository_default_branch_from_uses_fresh_origin(self):
+        without_origin = self.create_repo_task("Default branch-from without origin", [self.primary])
+        self.assertEqual(without_origin["repositoryWorktrees"][0]["branchFrom"], "main")
+
+        remote = self.data_directory / "default-branch-from-origin.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+        self.run_git(self.primary, "remote", "add", "origin", str(remote))
+        try:
+            self.run_git(self.primary, "push", "--quiet", "origin", "main")
+            stale_tracking = self.run_git(self.primary, "rev-parse", "refs/remotes/origin/main").strip()
+            task = self.create_repo_task("Default branch-from from origin", [self.primary])
+            task_id = task["id"]
+            pending = task["repositoryWorktrees"][0]
+            self.assertTrue(pending["isPending"])
+            self.assertEqual(pending["branchFrom"], "origin/main")
+            fresh, _ = self.call_cli("task", "get", task_id)
+            self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"][0]["branchFrom"], "origin/main")
+
+            # Origin moves ahead without this repository fetching, and local main gains an unpushed commit.
+            clone = self.data_directory / "default-branch-from-clone"
+            subprocess.run(["git", "clone", "--quiet", "--branch", "main", str(remote), str(clone)], check=True, capture_output=True, text=True)
+            self.run_git(clone, "config", "user.name", "Playhouse Bridge Test")
+            self.run_git(clone, "config", "user.email", "playhouse-bridge-test@example.invalid")
+            (clone / "origin-only.txt").write_text("Landed on origin after the task was created.\n", encoding="utf-8")
+            self.run_git(clone, "add", "origin-only.txt")
+            self.run_git(clone, "commit", "-m", "Origin-only commit")
+            self.run_git(clone, "push", "--quiet", "origin", "main")
+            origin_head = self.run_git(clone, "rev-parse", "HEAD").strip()
+            (self.primary / "local-only.txt").write_text("Unpushed local commit.\n", encoding="utf-8")
+            self.run_git(self.primary, "add", "local-only.txt")
+            self.run_git(self.primary, "commit", "-m", "Local-only commit")
+            local_head = self.run_git(self.primary, "rev-parse", "main").strip()
+            self.assertEqual(self.run_git(self.primary, "rev-parse", "refs/remotes/origin/main").strip(), stale_tracking)
+
+            self.complete_fixture_turn(task_id)
+            started = self.assert_success(self.call_cli("task", "get", task_id)[0])["repositoryWorktrees"][0]
+            self.assertFalse(started["isPending"])
+            self.assertEqual(started["branchFrom"], "origin/main")
+            worktree = Path(started["worktreePath"])
+            self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), origin_head)
+            self.assertTrue((worktree / "origin-only.txt").is_file())
+            self.assertFalse((worktree / "local-only.txt").exists(), "The local-only commit must not be the task's base.")
+            self.assertEqual(self.run_git(self.primary, "rev-parse", "refs/remotes/origin/main").strip(), origin_head)
+            self.assertEqual(self.run_git(self.primary, "rev-parse", "main").strip(), local_head, "Starting must not move local main.")
+            upstream = subprocess.run(
+                ["git", "-C", str(worktree), "config", "--get", f"branch.{started['branch']}.remote"],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(upstream.stdout.strip(), "", "The origin base must not become the task branch's upstream.")
+
+            offline = self.create_repo_task("Default branch-from while offline", [self.primary])
+            offline_id = offline["id"]
+            self.assertEqual(offline["repositoryWorktrees"][0]["branchFrom"], "origin/main")
+            self.run_git(self.primary, "remote", "set-url", "origin", str(self.data_directory / "unreachable-origin.git"))
+            self.complete_fixture_turn(offline_id)
+            offline_started = self.assert_success(self.call_cli("task", "get", offline_id)[0])["repositoryWorktrees"][0]
+            self.assertFalse(offline_started["isPending"])
+            self.assertEqual(offline_started["branchFrom"], "origin/main")
+            self.assertEqual(self.run_git(Path(offline_started["worktreePath"]), "rev-parse", "HEAD").strip(), origin_head)
         finally:
             self.run_git(self.primary, "remote", "remove", "origin")
 
