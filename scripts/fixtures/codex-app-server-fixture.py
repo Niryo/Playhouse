@@ -871,6 +871,69 @@ def handle_account_request(message):
                "params": {"rateLimits": account_rate_limits(*state["used"])}})
 
 
+# Real Codex runs a thread's commands in the cwd its thread and turn requests name. One shared
+# socket app-server serves every task, so its own process cwd is whatever its first caller had.
+THREAD_CWDS = {}
+LAST_REQUESTED_CWD = None
+
+
+def remember_thread_cwd(message):
+    global LAST_REQUESTED_CWD
+    params = message.get("params") or {}
+    if message.get("method") in ("thread/start", "thread/resume", "turn/start") and params.get("cwd"):
+        LAST_REQUESTED_CWD = params["cwd"]
+        if params.get("threadId"):
+            THREAD_CWDS[params["threadId"]] = params["cwd"]
+
+
+def workspace_cwd():
+    return (os.environ.get("PLAYHOUSE_FIXTURE_WORKSPACE") or THREAD_CWDS.get(THREAD_ID)
+            or LAST_REQUESTED_CWD or os.getcwd())
+
+
+class StdinLines:
+    """Line reader over the stdio fd that keeps its own buffer, so a held turn can
+    tell whether a request is waiting. Python's buffered `sys.stdin.readline()`
+    pulls every message a write delivered into a buffer `select()` cannot see,
+    which left a request that arrived together with another one unanswered until
+    the hold ended."""
+
+    def __init__(self, fd):
+        self.fd = fd
+        self.buffer = b""
+        self.eof = False
+
+    def fileno(self):
+        return self.fd
+
+    def has_line(self):
+        return b"\n" in self.buffer or (self.eof and bool(self.buffer))
+
+    def readline(self):
+        while b"\n" not in self.buffer and not self.eof:
+            chunk = os.read(self.fd, 65536)
+            if chunk:
+                self.buffer += chunk
+            else:
+                self.eof = True
+        line, newline, self.buffer = self.buffer.partition(b"\n")
+        return (line + newline).decode("utf-8")
+
+    def __iter__(self):
+        while True:
+            line = self.readline()
+            if not line:
+                return
+            yield line
+
+
+def stdin_select(timeout):
+    """`select.select([sys.stdin], [], [], timeout)` that also counts a line already buffered."""
+    if isinstance(sys.stdin, StdinLines) and sys.stdin.has_line():
+        return [sys.stdin], [], []
+    return select.select([sys.stdin], [], [], timeout)
+
+
 def main():
     global THREAD_ID, TURN_ID
     if "-cpu-attribution" in os.path.basename(sys.argv[0]):
@@ -1032,6 +1095,7 @@ def main():
         nonlocal thread_start_instructions, tool_item, turn_error, turn_history, turn_id, turn_index
         nonlocal turn_input, turn_message, turn_status, turn_thread_id, turns, unassociated_restart_question
         nonlocal user_content, user_images, user_message, value, was_released
+        remember_thread_cwd(message)
         global THREAD_ID, TURN_ID
         if "-question-isolation-" in mode and message.get("method") in ("thread/items/list", "thread/turns/list"):
             requested = message.get("params", {}).get("threadId")
@@ -1365,7 +1429,7 @@ def main():
                     steered_text = None
                     steer_deadline = time.monotonic() + 60
                     while steered_text is None and time.monotonic() < steer_deadline:
-                        readable, _, _ = select.select([sys.stdin], [], [], 0.02)
+                        readable, _, _ = stdin_select(0.02)
                         if not readable:
                             continue
                         try:
@@ -1488,7 +1552,7 @@ def main():
                         "id": "item_fixture_stop_command",
                         "type": "commandExecution",
                         "command": "git status --short",
-                        "cwd": os.environ.get("PLAYHOUSE_FIXTURE_WORKSPACE", os.getcwd()),
+                        "cwd": workspace_cwd(),
                     },
                 }})
                 active = Path(str(sys.argv[0]) + ".interrupt-ready")
@@ -1496,7 +1560,7 @@ def main():
                 deadline = time.monotonic() + 30
                 received_interrupt = False
                 while time.monotonic() < deadline:
-                    ready, _, _ = select.select([sys.stdin], [], [], 0.02)
+                    ready, _, _ = stdin_select(0.02)
                     if not ready:
                         continue
                     interrupt_message = json.loads(sys.stdin.readline())
@@ -1593,7 +1657,7 @@ def main():
                     deadline = time.monotonic() + 120
                     steered_answer = None
                     while steered_answer is None and time.monotonic() < deadline:
-                        readable, _, _ = select.select([sys.stdin], [], [], 0.02)
+                        readable, _, _ = stdin_select(0.02)
                         if not readable:
                             continue
                         incoming = json.loads(sys.stdin.readline())
@@ -1653,7 +1717,7 @@ def main():
                 steer_requests = []
                 rejected_steer_requests = []
                 while not resume.exists() and time.monotonic() < deadline:
-                    readable, _, _ = select.select([sys.stdin], [], [], 0.02)
+                    readable, _, _ = stdin_select(0.02)
                     if readable:
                         try:
                             steer_request = json.loads(sys.stdin.readline())
@@ -1704,7 +1768,7 @@ def main():
                 steer_requests = []
                 rejected_steer_requests = []
                 while not release.exists() and time.monotonic() < deadline:
-                    readable, _, _ = select.select([sys.stdin], [], [], 0.02)
+                    readable, _, _ = stdin_select(0.02)
                     if not readable:
                         continue
                     try:
@@ -1962,7 +2026,7 @@ def main():
                         **dynamic_item, "status": "failed", "success": False, "durationMs": 37,
                     }}})
                     Path(str(sys.argv[0]) + ".tool-others-completed").write_text("done\n", encoding="utf-8")
-                for action_item in diagnostic_action_items(os.environ.get("PLAYHOUSE_FIXTURE_WORKSPACE", os.getcwd())):
+                for action_item in diagnostic_action_items(workspace_cwd()):
                     write({"jsonrpc": "2.0", "method": "item/started", "params": {
                         "threadId": THREAD_ID, "item": {**action_item, "status": "inProgress"},
                     }})
@@ -2210,7 +2274,7 @@ def main():
                             "id": "item_fixture_interrupted_command",
                             "type": "commandExecution",
                             "command": "git status --short",
-                            "cwd": os.environ.get("PLAYHOUSE_FIXTURE_WORKSPACE", os.getcwd()),
+                            "cwd": workspace_cwd(),
                         },
                     }})
                 question_request(901)
@@ -2476,7 +2540,7 @@ def main():
                     subagent_activity("completed", CHILD_THREAD_ID, "/agents/Sandbox review", model="gpt-6-sol", reasoning_effort="high"),
                     subagent_activity("interrupted", "00000000-0000-0000-0000-000000000003", "/agents/some_agent"),
                     subagent_activity("futureKind", "00000000-0000-0000-0000-000000000004", "/agents/Future review"),
-                    *diagnostic_action_items(os.environ.get("PLAYHOUSE_FIXTURE_WORKSPACE", os.getcwd())),
+                    *diagnostic_action_items(workspace_cwd()),
                 ]
             if mode.endswith("-context-compaction"):
                 contents = [
@@ -2830,7 +2894,7 @@ def main():
     def drain_pending_stdin():
         # Called from held-turn waits that poll a file marker.
         while True:
-            ready, _, _ = select.select([sys.stdin], [], [], 0)
+            ready, _, _ = stdin_select(0)
             if not ready:
                 return
             line = sys.stdin.readline()
@@ -3103,4 +3167,5 @@ if __name__ == "__main__":
         record_app_server_launch(socket_path)
     if socket_path:
         raise SystemExit(serve_unix_socket(socket_path))
+    sys.stdin = StdinLines(sys.stdin.fileno())
     raise SystemExit(main())

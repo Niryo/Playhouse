@@ -97,7 +97,9 @@ struct McpServersSectionView: View {
             }
             .accessibilityIdentifier("mcp-list")
         }
-        .overlay { panels }
+        // A closed panel's removal transition can leave the overlay catching clicks over the
+        // header (New Server stopped responding after a create), so it takes hits only while open.
+        .overlay { panels.allowsHitTesting(panel != nil) }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("mcp-page")
         .task {

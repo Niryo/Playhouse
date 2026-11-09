@@ -1112,6 +1112,10 @@ struct TaskConversationView: View {
     @State private var monacoError: String?
     @State private var diffChangeCount: Int?
     @State private var isLoadingHistory = false
+    /// False until this window's first history read finishes (messages, pending
+    /// question and restored draft are in place). Before that the transcript's
+    /// accessibility value says it is loading rather than reporting zero messages.
+    @State private var hasLoadedConversation = false
     @State private var isApplyingSavedRepositories = false
     @State private var isResponding = false
     @State private var isPreparingSubmittedMessage = false
@@ -3510,7 +3514,9 @@ struct TaskConversationView: View {
             .coordinateSpace(name: Self.conversationScrollCoordinateSpace)
             .scrollIndicators(.visible)
             .accessibilityIdentifier("conversation-scroll-view")
-            .accessibilityValue("Showing latest \(renderedConversationMessages.count) of \(conversationMessages.count + earlierStoredMessageCount) messages")
+            .accessibilityValue(hasLoadedConversation
+                ? "Showing latest \(renderedConversationMessages.count) of \(conversationMessages.count + earlierStoredMessageCount) messages"
+                : "Loading conversation history")
             .onPreferenceChange(ConversationTopMarkerPositionKey.self) { markerY in
                 // Exactly one source drives the reveal: the scroll observer
                 // where it exists, this marker where it does not.
@@ -5593,7 +5599,10 @@ struct TaskConversationView: View {
         let draftAtLoadStart = draft
         // A turn this window didn't send streams once the loaded history is in place.
         defer { watchRunningTurnIfNeeded() }
-        defer { isLoadingHistory = false }
+        defer {
+            isLoadingHistory = false
+            hasLoadedConversation = true
+        }
 
         do {
             // Standalone chat rotates one session per page, so the transcript asks for the
