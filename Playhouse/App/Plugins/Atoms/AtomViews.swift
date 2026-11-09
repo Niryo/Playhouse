@@ -115,14 +115,22 @@ extension View {
         modifier(AtomCommonModifier(common: common, group: group, frame: frame))
     }
 
-    /// The common size, fill and padding props.
+    /// The common size, fill and padding props, each applied only when set.
+    /// A flexible frame isn't a no-op even with every bound nil: it places a
+    /// row at exactly the width the row fitted, and a row placed that way gives
+    /// a nested stack one spacing too little, so its text wraps or truncates
+    /// (the task item's time showed "…"). Min sizes go through `AtomMinSize`.
     func atomFrame(_ common: AtomCommon) -> some View {
         self
-            .padding(.horizontal, CGFloat(common.paddingX ?? 0))
-            .frame(width: common.width.map { CGFloat($0) }, height: common.height.map { CGFloat($0) })
-            .frame(minWidth: common.minWidth.map { CGFloat($0) }, minHeight: common.minHeight.map { CGFloat($0) })
-            .frame(maxWidth: common.fillWidth == true ? .infinity : nil, alignment: .leading)
-            .padding(CGFloat(common.padding ?? 0))
+            .modifier(Applied(when: common.paddingX != nil) { $0.padding(.horizontal, CGFloat(common.paddingX ?? 0)) })
+            .modifier(Applied(when: common.width != nil || common.height != nil) {
+                $0.frame(width: common.width.map { CGFloat($0) }, height: common.height.map { CGFloat($0) })
+            })
+            .modifier(Applied(when: common.minWidth != nil || common.minHeight != nil) { content in
+                AtomMinSize(minWidth: common.minWidth.map { CGFloat($0) }, minHeight: common.minHeight.map { CGFloat($0) }) { content }
+            })
+            .modifier(Applied(when: common.fillWidth == true) { $0.frame(maxWidth: .infinity, alignment: .leading) })
+            .modifier(Applied(when: common.padding != nil) { $0.padding(CGFloat(common.padding ?? 0)) })
     }
 
     @ViewBuilder
@@ -138,6 +146,30 @@ extension View {
     @ViewBuilder
     func atomEmphasis(_ padding: Double?) -> some View {
         if let padding { actionButtonHoverEmphasis(padding: CGFloat(padding)) } else { self }
+    }
+}
+
+/// `frame(minWidth:minHeight:)` that places its content with the proposal it
+/// was given rather than the size it fitted (see `atomFrame`), centered.
+private struct AtomMinSize: Layout {
+    let minWidth: CGFloat?
+    let minHeight: CGFloat?
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let size = subviews.first?.sizeThatFits(clamped(proposal)) ?? .zero
+        return CGSize(width: max(size.width, minWidth ?? 0), height: max(size.height, minHeight ?? 0))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: CGPoint(x: bounds.midX, y: bounds.midY), anchor: .center, proposal: clamped(proposal))
+    }
+
+    /// Like a frame's: never less than the minimum.
+    private func clamped(_ proposal: ProposedViewSize) -> ProposedViewSize {
+        ProposedViewSize(
+            width: proposal.width.map { max($0, minWidth ?? 0) },
+            height: proposal.height.map { max($0, minHeight ?? 0) }
+        )
     }
 }
 

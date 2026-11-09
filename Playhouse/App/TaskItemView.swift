@@ -302,9 +302,7 @@ struct TaskItemView: View {
     }
 
     private var timeRow: some View {
-        // One flat row: with the time in a nested stack beside the overhanging
-        // token counter, a tick that widened the text ("59s" to "1m") kept the
-        // old width and truncated the time to "…".
+        // One row of clock, time and counter, as the card had before the atoms.
         AtomStack(props: StackProps(axis: "h", spacing: 6)) {
             AtomIcon(props: IconProps(name: "clock", size: 10, color: "tertiary"), common: AtomCommon(passThrough: true))
             if model.isWorking {
