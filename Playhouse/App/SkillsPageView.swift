@@ -287,6 +287,11 @@ struct SkillsPageView: View {
         case "link": pendingLink = skill
         case "delete": pendingDelete = [skill]
         default:
+            if item.hasPrefix("move-private:") {
+                let root = String(item.dropFirst("move-private:".count))
+                perform { _ = try await manager.moveSkill(taskID: task.id, skillID: skill.id, scope: .privateRepo, root: root) }
+                return
+            }
             guard item.hasPrefix("move-repo:") else { return }
             let root = String(item.dropFirst("move-repo:".count))
             perform { _ = try await manager.moveSkill(taskID: task.id, skillID: skill.id, scope: .repo, root: root) }
@@ -475,6 +480,8 @@ private struct NewSkillPanel: View {
     @State private var manifest = SkillManifest(name: "", description: "", body: "")
     /// "global", or the root path of one of the task's repositories.
     @State private var destination = "global"
+    /// A repository skill kept in Playhouse's store rather than in the repository.
+    @State private var isPrivate = false
     @State private var tab = SkillDocumentTab.edit
     @State private var errorMessage: String?
     @State private var isSaving = false
@@ -491,9 +498,19 @@ private struct NewSkillPanel: View {
                     }
                     .fixedSize()
                     .accessibilityIdentifier("new-skill-scope")
+                    if destination != "global" {
+                        Toggle("Private", isOn: $isPrivate)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .nativeHelp("Keep the skill out of the repository: Playhouse stores it and shares it only with this repository's sessions")
+                            .accessibilityIdentifier("new-skill-private")
+                    }
                 }
-                Text("Saved in the open Agent Skills layout (.agents/skills). Playhouse shares it with both Claude and Codex. The name uses lowercase letters, digits, and hyphens.")
+                Text(destination != "global" && isPrivate
+                     ? "Private: Playhouse stores the skill itself and writes nothing into the repository or its worktrees. Claude and Codex sessions on this repository use it like any other skill. The name uses lowercase letters, digits, and hyphens."
+                     : "Saved in the open Agent Skills layout (.agents/skills). Playhouse shares it with both Claude and Codex. The name uses lowercase letters, digits, and hyphens.")
                     .font(.callout).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("new-skill-destination-note")
                 TextField("skill-name", text: $manifest.name)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityLabel("Name")
@@ -545,10 +562,10 @@ private struct NewSkillPanel: View {
         Task { @MainActor in
             defer { isSaving = false }
             do {
-                let scope: SkillScope = destination == "global" ? .global : .repo
+                let scope: SkillScope = destination == "global" ? .global : isPrivate ? .privateRepo : .repo
                 var submitted = manifest
                 submitted.name = manifest.name.trimmingCharacters(in: .whitespaces)
-                try await onCreate(submitted, scope, scope == .repo ? destination : nil)
+                try await onCreate(submitted, scope, scope == .global ? nil : destination)
                 onClose()
             } catch {
                 errorMessage = error.localizedDescription

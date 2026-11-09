@@ -21,6 +21,10 @@ enum SkillLayout: String, Codable, Sendable {
     case claudeSynced
     /// Built into the Claude Code binary, with no folder on disk.
     case claudeBundled
+    /// `<Playhouse data>/private-skills/<repository key>/.claude/skills`: a
+    /// repository's private skills, which Playhouse keeps out of the repository
+    /// and bridges into both providers' sessions for that repository only.
+    case playhousePrivate
 
     var displayPath: String {
         switch self {
@@ -30,6 +34,7 @@ enum SkillLayout: String, Codable, Sendable {
         case .codexSystem: "Codex built-in"
         case .claudeSynced: "claude.ai synced"
         case .claudeBundled: "Claude Code built-in"
+        case .playhousePrivate: "Private, stored by Playhouse"
         }
     }
 }
@@ -38,6 +43,8 @@ enum SkillScope: String, Codable, Sendable, CaseIterable {
     case repo
     case global
     case builtin
+    /// Belongs to one repository but is never written into it or its worktrees.
+    case privateRepo = "private"
 }
 
 struct SkillLocation: Codable, Equatable, Sendable {
@@ -68,6 +75,27 @@ struct SkillRecord: Codable, Equatable, Identifiable, Sendable {
     let availableOutsidePlayhouse: Bool
     let conflict: Bool
     let issue: String?
+    /// What to type after `/` when it differs from `name`: a private skill whose
+    /// name an earlier repository's private skill of the task already uses is
+    /// namespaced as `<repository>:<name>`, the way Claude Code names it.
+    var invocationName: String? = nil
+    /// For a private skill no provider uses: where the skill with the same
+    /// name that takes precedence lives.
+    var shadowedBy: String? = nil
+
+    /// `/name`, or `/<repository>:<name>` for a namespaced private skill.
+    var invocationToken: String { "/" + (invocationName ?? name) }
+
+    fileprivate func adjusted(providers: [ConversationProvider]? = nil, issue: String?? = nil, invocationName: String?? = nil, shadowedBy: String?? = nil) -> SkillRecord {
+        var copy = SkillRecord(
+            id: id, name: name, description: description, scope: scope, repositoryPath: repositoryPath, rootPath: rootPath,
+            folderPath: folderPath, locations: locations, providers: providers ?? self.providers, enabled: enabled, editable: editable,
+            availableOutsidePlayhouse: availableOutsidePlayhouse, conflict: conflict, issue: issue ?? self.issue
+        )
+        copy.invocationName = invocationName ?? self.invocationName
+        copy.shadowedBy = shadowedBy ?? self.shadowedBy
+        return copy
+    }
 }
 
 struct SkillRepositorySection: Codable, Equatable, Sendable {
@@ -162,6 +190,8 @@ struct SkillEnvironment: Equatable, Sendable {
     var managedClaudeDirectory: String
     /// Playhouse-owned folder for bridge wrappers.
     var bridgeDirectory: String
+    /// Playhouse-owned store of private repository skills, one folder per repository.
+    var privateSkillsDirectory: String
 
     static func resolve(
         homeOverride: String? = nil,
@@ -189,7 +219,8 @@ struct SkillEnvironment: Equatable, Sendable {
             claudeStateFile: configuredClaude.map { $0 + "/.claude.json" } ?? home + "/.claude.json",
             codexHome: codex,
             managedClaudeDirectory: homeOverride.map { $0 + "/managed/ClaudeCode" } ?? "/Library/Application Support/ClaudeCode",
-            bridgeDirectory: URL(fileURLWithPath: data).appendingPathComponent("skill-bridge").path
+            bridgeDirectory: URL(fileURLWithPath: data).appendingPathComponent("skill-bridge").path,
+            privateSkillsDirectory: URL(fileURLWithPath: data).appendingPathComponent("private-skills").path
         )
     }
 }
@@ -258,7 +289,7 @@ final class SkillCatalogManager {
     /// Claude Code reports as built in; they have no folder to scan.
     func catalog(roots: [SkillRoot], bundledClaudeSkills: [(name: String, description: String)] = []) -> SkillCatalog {
         let disabled = disabledSkillIDs
-        let sections = roots.map { root in
+        var sections = roots.map { root in
             let scanned = scan(root.path + "/.agents/skills", layout: .agents)
                 + scan(root.path + "/.claude/skills", layout: .claude)
             return SkillRepositorySection(
@@ -269,6 +300,37 @@ final class SkillCatalogManager {
             )
         }
         let global = records(globalSkills(), scope: .global, root: nil, disabled: disabled)
+        let builtinNames = Set(builtinSkills().map(\.name)).union(bundledClaudeSkills.map(\.name))
+        // Committed repository skills and the user's own skills take precedence
+        // over a private skill of the same name, so both providers use the same
+        // one; a private skill another repository's private skill already named
+        // is namespaced as `<repository>:<name>`.
+        let shared = Set(sections.flatMap(\.skills).map(\.name)).union(global.map(\.name)).union(builtinNames)
+        var privateNames = Set<String>()
+        for (index, root) in roots.enumerated() {
+            let scanned = scan(privateSkillsFolder(repositoryPath: root.repositoryPath), layout: .playhousePrivate)
+            let privateSkills = records(scanned, scope: .privateRepo, root: root, disabled: disabled).map { record -> SkillRecord in
+                if shared.contains(record.name) {
+                    let owner = sections.first { $0.skills.contains { $0.name == record.name } }.map { "\($0.name)'s committed skills" }
+                        ?? (global.contains { $0.name == record.name } ? "your global skills" : "the built-in skills")
+                    return record.adjusted(
+                        providers: [],
+                        issue: .some(record.issue ?? "Not used: \(owner) also have a skill named \"\(record.name)\", and it takes precedence for both Claude and Codex. Rename or delete this private skill."),
+                        shadowedBy: .some(owner)
+                    )
+                }
+                // Only a skill the bridge passes on claims its name, the way Claude Code names them.
+                guard record.issue == nil, record.enabled else { return record }
+                return privateNames.insert(record.name).inserted
+                    ? record
+                    : record.adjusted(invocationName: .some("\(Self.wrapperFolderName(root.name)):\(record.name)"))
+            }
+            let section = sections[index]
+            sections[index] = SkillRepositorySection(
+                repositoryPath: section.repositoryPath, rootPath: section.rootPath, name: section.name,
+                skills: (section.skills + privateSkills).sorted { ($0.name, $0.scope == .privateRepo ? 1 : 0) < ($1.name, $1.scope == .privateRepo ? 1 : 0) }
+            )
+        }
         var builtin = records(builtinSkills(), scope: .builtin, root: nil, disabled: disabled)
         let fileBacked = Set(builtin.map(\.name))
         for bundled in bundledClaudeSkills where !fileBacked.contains(bundled.name) {
@@ -343,8 +405,7 @@ final class SkillCatalogManager {
             let id: String
             let providers: [ConversationProvider]
             switch scope {
-            case .repo: id = Self.repoID(repositoryPath: root?.repositoryPath ?? "", name: name)
-            case .global: id = Self.globalID(name: name)
+            case .repo, .privateRepo, .global: id = Self.id(scope: scope, repositoryPath: root?.repositoryPath, name: name)
             case .builtin: id = Self.builtinID(provider: primary.layout == .codexSystem ? .codex : .claude, name: name)
             }
             switch scope {
@@ -369,6 +430,48 @@ final class SkillCatalogManager {
     static func globalID(name: String) -> String { "global:\(name)" }
     static func repoID(repositoryPath: String, name: String) -> String { "repo:\(repositoryPath)#\(name)" }
     static func builtinID(provider: ConversationProvider, name: String) -> String { "builtin:\(provider.rawValue):\(name)" }
+    static func privateID(repositoryPath: String, name: String) -> String { "private:\(repositoryPath)#\(name)" }
+
+    /// The ID of a user skill: built-in skills are keyed by their provider instead.
+    static func id(scope: SkillScope, repositoryPath: String?, name: String) -> String {
+        switch scope {
+        case .repo: repoID(repositoryPath: repositoryPath ?? "", name: name)
+        case .privateRepo: privateID(repositoryPath: repositoryPath ?? "", name: name)
+        case .global, .builtin: globalID(name: name)
+        }
+    }
+
+    // MARK: Private store
+
+    /// A repository's folder in the private store. A task worktree's skills are
+    /// keyed by its source repository, so every worktree of that repository,
+    /// and the checkout itself, shares one set of private skills. The readable
+    /// name is for people browsing the folder; the hash keeps two repositories
+    /// with the same name apart.
+    func privateStoreRoot(repositoryPath: String) -> String {
+        let standardized = URL(fileURLWithPath: repositoryPath).standardizedFileURL.path
+        let readable = URL(fileURLWithPath: standardized).lastPathComponent
+            .replacingOccurrences(of: #"[^A-Za-z0-9._-]"#, with: "-", options: .regularExpression)
+        let hash = SHA256.hash(data: Data(standardized.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
+        return environment.privateSkillsDirectory + "/" + readable + "-" + hash
+    }
+
+    /// Laid out as `.claude/skills`, the standard skill layout, so the folder
+    /// stays a valid skills root for either provider.
+    func privateSkillsFolder(repositoryPath: String) -> String {
+        privateStoreRoot(repositoryPath: repositoryPath) + "/.claude/skills"
+    }
+
+    /// Records which repository a store folder belongs to, for people browsing it.
+    private func preparePrivateStore(repositoryPath: String) throws {
+        let root = privateStoreRoot(repositoryPath: repositoryPath)
+        try fileManager.createDirectory(atPath: root + "/.claude/skills", withIntermediateDirectories: true)
+        let marker = root + "/repository"
+        if !fileManager.fileExists(atPath: marker) {
+            try Data((URL(fileURLWithPath: repositoryPath).standardizedFileURL.path + "\n").utf8)
+                .write(to: URL(fileURLWithPath: marker), options: .atomic)
+        }
+    }
 
     func content(id: String, roots: [SkillRoot]) throws -> String {
         let record = try existing(id: id, roots: roots)
@@ -418,23 +521,41 @@ final class SkillCatalogManager {
         }
     }
 
-    /// Writes a new skill in the open Agent Skills layout, which both providers then see.
+    /// Writes a new skill in the open Agent Skills layout, which both providers
+    /// then see. A private skill goes to the Playhouse store instead, so nothing
+    /// is written to the repository or its worktrees.
     func create(name: String, description: String, body: String, fields: [String: String] = [:], scope: SkillScope, root: SkillRoot?, roots: [SkillRoot]) throws -> SkillRecord {
         try Self.validate(name: name)
         try Self.validate(description: description)
         try Self.validate(fields: fields)
         let summary = description.trimmingCharacters(in: .whitespacesAndNewlines)
         let base = try agentsFolder(scope: scope, root: root)
-        let current = catalog(roots: roots)
-        let taken = scope == .global ? current.global : current.repositories.first { $0.rootPath == root?.path }?.skills ?? []
-        guard !taken.contains(where: { $0.name == name }), !fileManager.fileExists(atPath: base + "/" + name) else {
+        guard !taken(name, by: nil, scope: scope, root: root, roots: roots), !fileManager.fileExists(atPath: base + "/" + name) else {
             throw BridgeCommandError(code: "already_exists", message: "A skill named \(name) already exists here.")
         }
+        if scope == .privateRepo, let root { try preparePrivateStore(repositoryPath: root.repositoryPath) }
         try fileManager.createDirectory(atPath: base + "/" + name, withIntermediateDirectories: true)
         try Data(Self.manifest(name: name, description: summary, body: body, fields: fields).utf8)
             .write(to: URL(fileURLWithPath: base + "/" + name + "/SKILL.md"), options: .atomic)
         PlayhouseDiagnostics.record("skills.created", fields: ["scope": scope.rawValue, "name": name])
-        return try existing(id: scope == .global ? Self.globalID(name: name) : Self.repoID(repositoryPath: root?.repositoryPath ?? "", name: name), roots: roots)
+        return try existing(id: Self.id(scope: scope, repositoryPath: root?.repositoryPath, name: name), roots: roots)
+    }
+
+    /// Whether another skill already uses `name` where a skill of `scope` would
+    /// go. A private skill also may not take a name its repository's committed
+    /// skills or the user's global skills use, since those take precedence.
+    private func taken(_ name: String, by id: String?, scope: SkillScope, root: SkillRoot?, roots: [SkillRoot]) -> Bool {
+        let current = catalog(roots: roots)
+        let section = current.repositories.first { $0.rootPath == root?.path }?.skills ?? []
+        let candidates: [SkillRecord]
+        switch scope {
+        case .global: candidates = current.global
+        case .repo: candidates = section.filter { $0.scope == .repo }
+        // Committed skills of any of the task's repositories, and built-ins, would shadow it.
+        case .privateRepo: candidates = section + current.repositories.flatMap(\.skills).filter { $0.scope == .repo } + current.global + current.builtin
+        case .builtin: candidates = []
+        }
+        return candidates.contains { $0.name == name && $0.id != id }
     }
 
     func update(id: String, content: String, roots: [SkillRoot]) throws -> SkillRecord {
@@ -521,7 +642,8 @@ final class SkillCatalogManager {
             return record
         }
         let repoSkills = records.filter { $0.scope == .repo }
-        let globalSkills = records.filter { $0.scope == .global }
+        // Private skills are in Playhouse's store, outside Git, so like global skills they are fixed in place.
+        let globalSkills = records.filter { $0.scope == .global || $0.scope == .privateRepo }
         func problem(_ record: SkillRecord) -> String { record.issue ?? "The skill is not valid." }
 
         var lines = [
@@ -548,10 +670,13 @@ final class SkillCatalogManager {
         if !globalSkills.isEmpty {
             lines += [
                 "",
-                "Global skills. These live in the user's home folder and are not tracked by Git: fix them directly in place. There is nothing to commit or push for them, and the fix takes effect immediately.",
+                globalSkills.contains { $0.scope == .privateRepo }
+                    ? "Global and private skills. These live in the user's home folder or in Playhouse's private skill store and are not tracked by Git: fix them directly in place. There is nothing to commit or push for them, and the fix takes effect immediately."
+                    : "Global skills. These live in the user's home folder and are not tracked by Git: fix them directly in place. There is nothing to commit or push for them, and the fix takes effect immediately.",
             ]
             for record in globalSkills {
-                lines.append("- `\(record.name)`: \(record.locations.map { "`\($0.path)`" }.joined(separator: ", ")). Problem: \(problem(record))")
+                let owner = record.scope == .privateRepo ? " (private to \(URL(fileURLWithPath: record.repositoryPath ?? "").lastPathComponent))" : ""
+                lines.append("- `\(record.name)`\(owner): \(record.locations.map { "`\($0.path)`" }.joined(separator: ", ")). Problem: \(problem(record))")
             }
         }
         lines += ["", "When you are done, list each skill and what you changed."]
@@ -583,29 +708,31 @@ final class SkillCatalogManager {
         return standardized.hasPrefix(prefix) ? String(standardized.dropFirst(prefix.count)) : standardized
     }
 
-    /// Moves a skill between a repository and the global gallery, into the
-    /// Agent Skills layout, keeping its enabled state.
+    /// Moves a skill between a repository, the global gallery and a
+    /// repository's private store, keeping its enabled state. A repository
+    /// skill lands in the Agent Skills layout of the task's worktree, so
+    /// converting a private skill to a repository skill is a change to commit;
+    /// making a repository skill private removes it from the worktree.
     func move(id: String, to scope: SkillScope, root: SkillRoot?, roots: [SkillRoot]) throws -> SkillRecord {
         let record = try editable(id: id, roots: roots)
         guard scope != .builtin else {
-            throw BridgeCommandError(code: "invalid_argument", message: "A skill can move to a repository or to the global gallery.")
+            throw BridgeCommandError(code: "invalid_argument", message: "A skill can move to a repository, to the global gallery, or to a repository's private skills.")
         }
         let base = try agentsFolder(scope: scope, root: root)
         let target = base + "/" + record.name
         guard URL(fileURLWithPath: target).standardizedFileURL.path != record.folderPath else {
             throw BridgeCommandError(code: "invalid_argument", message: "\(record.name) is already there.")
         }
-        let current = catalog(roots: roots)
-        let taken = scope == .global ? current.global : current.repositories.first { $0.rootPath == root?.path }?.skills ?? []
-        guard !taken.contains(where: { $0.name == record.name }), !fileManager.fileExists(atPath: target) else {
+        guard !taken(record.name, by: record.id, scope: scope, root: root, roots: roots), !fileManager.fileExists(atPath: target) else {
             throw BridgeCommandError(code: "already_exists", message: "A skill named \(record.name) already exists there.")
         }
         for location in record.locations where location.isSymlink {
             try removeVerifiedLink(location.path, to: record.folderPath!)
         }
+        if scope == .privateRepo, let root { try preparePrivateStore(repositoryPath: root.repositoryPath) }
         try fileManager.createDirectory(atPath: base, withIntermediateDirectories: true)
         try fileManager.moveItem(atPath: record.folderPath!, toPath: target)
-        let newID = scope == .global ? Self.globalID(name: record.name) : Self.repoID(repositoryPath: root?.repositoryPath ?? "", name: record.name)
+        let newID = Self.id(scope: scope, repositoryPath: root?.repositoryPath, name: record.name)
         var disabled = disabledSkillIDs
         if disabled.remove(id) != nil {
             disabled.insert(newID)
@@ -640,6 +767,12 @@ final class SkillCatalogManager {
     /// folder natively finds it outside Playhouse too.
     func link(id: String, roots: [SkillRoot]) throws -> SkillRecord {
         let record = try editable(id: id, roots: roots)
+        guard record.scope != .privateRepo else {
+            throw BridgeCommandError(
+                code: "invalid_argument",
+                message: "\(record.name) is private, so Playhouse keeps it out of the repository. Convert it to a repository skill to share it outside Playhouse."
+            )
+        }
         guard !record.conflict else {
             throw BridgeCommandError(code: "invalid_argument", message: record.issue ?? "Resolve the conflict first.")
         }
@@ -692,6 +825,11 @@ final class SkillCatalogManager {
                 throw BridgeCommandError(code: "invalid_argument", message: "Choose one of the task's repositories for a repository skill.")
             }
             return root.path + "/.agents/skills"
+        case .privateRepo:
+            guard let root else {
+                throw BridgeCommandError(code: "invalid_argument", message: "Choose one of the task's repositories for a private skill.")
+            }
+            return privateSkillsFolder(repositoryPath: root.repositoryPath)
         case .builtin:
             throw BridgeCommandError(code: "invalid_argument", message: "Built-in skills come with their provider.")
         }
@@ -741,7 +879,7 @@ final class SkillCatalogManager {
         func sources(_ record: SkillRecord, _ layouts: Set<SkillLayout>) -> Bool {
             record.locations.contains { layouts.contains($0.layout) }
         }
-        let repoRecords = catalog.repositories.flatMap { section in section.skills.map { (section.rootPath, $0) } }
+        let repoRecords = catalog.repositories.flatMap { section in section.skills.filter { $0.scope == .repo }.map { (section.rootPath, $0) } }
         let firstRoot = roots.first?.path
 
         // Claude Code reads every root's `.claude/skills` (the cwd and each --add-dir).
@@ -766,7 +904,9 @@ final class SkillCatalogManager {
             codexLinks.append((record.name, record.folderPath!))
         }
 
-        for record in catalog.allSkills where !record.enabled {
+        // A private skill that is off is simply left out of its wrapper; a name
+        // override would also turn off another skill with the same name.
+        for record in catalog.allSkills where !record.enabled && record.scope != .privateRepo {
             if record.scope != .builtin || record.providers.contains(.claude) { launch.claudeDisabledSkillNames.append(record.name) }
             for location in record.locations where !location.path.isEmpty && [.agents, .codexLegacy, .codexSystem].contains(location.layout) {
                 launch.codexDisabledSkillPaths.append(location.path + "/SKILL.md")
@@ -787,9 +927,30 @@ final class SkillCatalogManager {
         }
         let ownCodexWrapper = wrapper(kind: "codex", links: codexLinks, skillsSubpath: nil)
         launch.codexLinks = ownCodexWrapper?.links ?? []
+        var ownCodexRoots = Set([ownCodexWrapper?.root].compactMap { $0 })
+
+        // Each repository's private skills get their own wrapper, so they reach
+        // only tasks on that repository. Claude Code's wrapper is named after
+        // the repository: when two of a task's repositories have private
+        // skills with the same name, Claude Code calls the later one
+        // `/<repository>:<name>`, which is the name the Skills page shows.
+        // Codex keeps both, each under its own SKILL.md path.
+        for section in catalog.repositories {
+            let links = section.skills.filter { $0.scope == .privateRepo && usable($0) && !$0.providers.isEmpty }.map { ($0.name, $0.folderPath!) }
+            guard !links.isEmpty else { continue }
+            let folder = Self.wrapperFolderName(section.name)
+            if let claude = wrapper(kind: "claude", links: links, skillsSubpath: folder + "/.claude/skills", salt: "private:" + section.repositoryPath) {
+                launch.claudeAddDirectories.append(claude.root + "/" + folder)
+                launch.claudeLinks += claude.links
+            }
+            if let codex = wrapper(kind: "codex", links: links, skillsSubpath: nil, salt: "private:" + section.repositoryPath) {
+                ownCodexRoots.insert(codex.root)
+                launch.codexLinks += codex.links
+            }
+        }
         let codexWrappers = existingWrappers(kind: "codex")
         launch.codexExtraRoots = codexWrappers
-        for other in codexWrappers where other != ownCodexWrapper?.root {
+        for other in codexWrappers where !ownCodexRoots.contains(other) {
             for entry in ((try? fileManager.contentsOfDirectory(atPath: other)) ?? []).sorted() where !entry.hasPrefix(".") {
                 launch.codexDisabledSkillPaths.append(other + "/" + entry + "/SKILL.md")
             }
@@ -798,10 +959,11 @@ final class SkillCatalogManager {
         return launch
     }
 
-    /// Finds skills a message names as `/skill-name`, so Codex, which has no
-    /// slash commands, can be handed each skill as a structured input.
+    /// Finds skills a message names as `/skill-name`, or `/<repository>:<name>`
+    /// for a namespaced private skill, so Codex, which has no slash commands,
+    /// can be handed each skill as a structured input.
     func invocations(in text: String, roots: [SkillRoot]) -> [SkillInvocation] {
-        let pattern = #"(?:^|\s)/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)"#
+        let pattern = #"(?:^|\s)/((?:[A-Za-z0-9._-]+:)?[a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)"#
         guard let expression = try? NSRegularExpression(pattern: pattern) else { return [] }
         let names = expression.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
             Range($0.range(at: 1), in: text).map { String(text[$0]) }
@@ -811,9 +973,9 @@ final class SkillCatalogManager {
         var seen = Set<String>()
         return names.compactMap { name in
             guard seen.insert(name).inserted,
-                  let record = catalog.allSkills.first(where: { $0.name == name && $0.enabled && $0.providers.contains(.codex) && $0.folderPath != nil })
+                  let record = catalog.allSkills.first(where: { ($0.invocationName ?? $0.name) == name && $0.enabled && $0.providers.contains(.codex) && $0.folderPath != nil })
             else { return nil }
-            return SkillInvocation(name: name, path: record.folderPath! + "/SKILL.md")
+            return SkillInvocation(name: record.name, path: record.folderPath! + "/SKILL.md")
         }
     }
 
@@ -836,6 +998,13 @@ final class SkillCatalogManager {
         }
     }
 
+    /// A repository name as a single folder name, which Claude Code uses as the
+    /// namespace of a clashing skill.
+    static func wrapperFolderName(_ name: String) -> String {
+        let cleaned = name.replacingOccurrences(of: #"[^A-Za-z0-9._-]"#, with: "-", options: .regularExpression)
+        return cleaned.isEmpty || cleaned.hasPrefix(".") ? "repository" + cleaned : cleaned
+    }
+
     private func existingWrappers(kind: String) -> [String] {
         let base = environment.bridgeDirectory + "/" + kind
         return ((try? fileManager.contentsOfDirectory(atPath: base)) ?? []).sorted()
@@ -846,9 +1015,12 @@ final class SkillCatalogManager {
     /// A content-addressed wrapper: the same set of links always maps to the
     /// same folder, which is never changed once written, so concurrent
     /// launches can share it.
-    private func wrapper(kind: String, links: [(String, String)], skillsSubpath: String?) -> (root: String, links: [SkillBridgeLaunch.BridgedSkill])? {
+    /// `salt` keeps a private wrapper apart from a shared one that happens to
+    /// hold the same links.
+    private func wrapper(kind: String, links: [(String, String)], skillsSubpath: String?, salt: String? = nil) -> (root: String, links: [SkillBridgeLaunch.BridgedSkill])? {
         guard !links.isEmpty else { return nil }
-        let key = SHA256.hash(data: Data(links.map { "\($0.0)=\($0.1)" }.sorted().joined(separator: "\n").utf8))
+        let entries = links.map { "\($0.0)=\($0.1)" }.sorted() + (salt.map { ["salt=\($0)", "layout=\(skillsSubpath ?? "")"] } ?? [])
+        let key = SHA256.hash(data: Data(entries.joined(separator: "\n").utf8))
             .prefix(12).map { String(format: "%02x", $0) }.joined()
         let root = environment.bridgeDirectory + "/" + kind + "/" + key
         let skillsFolder = skillsSubpath.map { root + "/" + $0 } ?? root

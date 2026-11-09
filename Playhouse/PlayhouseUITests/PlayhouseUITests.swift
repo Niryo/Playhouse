@@ -4981,6 +4981,8 @@ final class PlayhouseUITests: XCTestCase {
             "task", "create", "--title", title, "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
         ])["result"] as? [String: Any]
         let taskID = try XCTUnwrap(created?["id"] as? String)
+        // Publishing on Review would set the branch's upstream itself and hide a tracked base.
+        _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
         let pending = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
         XCTAssertEqual(pending["isPending"] as? Bool, true)
         XCTAssertEqual(pending["branchFrom"] as? String, "origin/main")
@@ -18380,6 +18382,335 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(Set(resumedConfig.filter { $0["enabled"] as? Bool == false }.compactMap { $0["path"] as? String }.map(realPath)), disabled,
                        "The resumed thread gets the same per-thread skill config.")
         answerQuestionIfAsked()
+    }
+
+    /// The store folder Playhouse keeps a repository's private skills in.
+    private func privateSkillStore(_ repository: URL) -> URL {
+        let digest = SHA256.hash(data: Data(repository.path.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
+        return dataDirectory.appendingPathComponent("private-skills/\(repository.lastPathComponent)-\(digest)", isDirectory: true)
+    }
+
+    // case-contract: test_skills_private_create_list_convert_and_delete | A repository skill created with Private on is written only to Playhouse's private skill store, in a folder keyed by the source repository and laid out as .claude/skills/<name>/SKILL.md, with nothing written to the repository or the task worktree, whose git status stays clean. It is listed under its repository with scope private and a Private badge, every task on that repository sees it from its own worktree, and a task on another repository does not. A private skill cannot take a name that the committed skills of any of the task's repositories, the global skills, or the built-in skills already use, and a committed skill of the same name that appears later in a worktree takes precedence there: the private one is shown as Shadowed and used by neither provider. Editing saves the store's SKILL.md, a private skill cannot be linked outside Playhouse, Convert to Repository Skill moves it into the worktree's .agents/skills as a repository skill ready to commit, Make Private moves a repository skill back into the store and out of the worktree, Make Private to a repository moves a global skill into that repository's store, and Delete removes only its store folder.
+    func test_skills_private_create_list_convert_and_delete() throws {
+        let repository = try makeSkillRepository("skills-private-repo", skills: [
+            ".agents/skills/committed/SKILL.md": skillManifest("committed", "A committed repository skill"),
+        ])
+        let other = try makeSkillRepository("skills-private-other", skills: [:])
+        try writeSkill(in: skillsHome.appendingPathComponent(".agents/skills"), "global-taken", "A global skill")
+        // The Skills page reads Claude Code's built-ins from a provider session.
+        _ = try installSkillsClaudeFixture("claude-fixture-skills-private")
+        launchApp(defaultParent: fixture.parent.path)
+        let task = try createSkillsTask("Private skills", repositories: [repository])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String))
+        let store = privateSkillStore(repository)
+        let folder = store.appendingPathComponent(".claude/skills/deploy-notes")
+        let privateID = "private:\(repository.path)#deploy-notes"
+        func section(_ id: String = taskID) throws -> [[String: Any]] {
+            try XCTUnwrap((try skillCatalog(taskID: id)["repositories"] as? [[String: Any]])?.first?["skills"] as? [[String: Any]])
+        }
+        func privateRecord(_ id: String = taskID) throws -> [String: Any]? { try section(id).first { $0["id"] as? String == privateID } }
+        openTask(named: "Private skills")
+        openSkillsPage()
+
+        func fillNewSkill(name: String, description: String, body: String?) {
+            element("new-skill-button").click()
+            XCTAssertTrue(element("new-skill-name").waitToExist(timeout: 5), "New Skill should open its panel.")
+            typeIntoField(element("new-skill-name"), text: name)
+            typeIntoField(element("new-skill-description"), text: description)
+            if let body { typeIntoField(element("new-skill-body"), text: body) }
+            XCTAssertFalse(element("new-skill-private").exists, "A global skill has no Private switch.")
+            element("new-skill-scope").click()
+            let option = app.menuItems["skills-private-repo"]
+            XCTAssertTrue(option.waitToExist(timeout: 5), "Save to should offer the task's repository.")
+            option.click()
+            let privateSwitch = element("new-skill-private")
+            XCTAssertTrue(privateSwitch.waitToExist(timeout: 5), "A repository skill offers the Private switch.")
+            if !isOn(privateSwitch) { privateSwitch.click() }
+            XCTAssertTrue(waitUntil({ self.isOn(self.element("new-skill-private")) }, timeout: 5))
+        }
+
+        fillNewSkill(name: "committed", description: "Taken", body: nil)
+        element("new-skill-create").click()
+        XCTAssertTrue(element("new-skill-error").waitToExist(timeout: 5), "A private skill cannot take a committed skill's name.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path), "A rejected private skill writes nothing.")
+        element("new-skill-cancel").click()
+        XCTAssertTrue(waitUntil({ !self.element("new-skill-name").exists }, timeout: 5))
+        assertCLIError(try runCLI(["skills", "create", "--task", taskID, "--scope", "private", "--name", "global-taken", "--description", "Taken"], expectedStatus: 1), code: "already_exists")
+        try writeSkill(in: skillsCodexHome.appendingPathComponent("skills/.system"), "codex-system-skill", "Bundled with Codex")
+        assertCLIError(try runCLI(["skills", "create", "--task", taskID, "--scope", "private", "--name", "codex-system-skill", "--description", "Taken"], expectedStatus: 1), code: "already_exists")
+        let bothID = try XCTUnwrap(try createSkillsTask("Private skills two repositories", repositories: [repository, other])["id"] as? String)
+        assertCLIError(try runCLI(["skills", "create", "--task", bothID, "--scope", "private", "--root", other.path, "--name", "committed",
+                                   "--description", "Taken in the other repository"], expectedStatus: 1), code: "already_exists")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path), "A rejected private skill writes nothing.")
+
+        fillNewSkill(name: "deploy-notes", description: "Write deploy notes", body: "List the deploy steps.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("new-skill-destination-note")).hasPrefix("Private:"), "The panel explains that nothing is written to the repository.")
+        attachScreenshot(named: "New Skill with Private on for a repository skill")
+        element("new-skill-create").click()
+        XCTAssertTrue(waitUntil({ !self.element("new-skill-name").exists }, timeout: 10), "Creating closes the panel.")
+        XCTAssertTrue(element("skill-row-deploy-notes").waitToExist(timeout: 10), "The private skill shows on the Repo tab.")
+        XCTAssertTrue(element("skill-private-deploy-notes").exists, "The private skill has a Private badge.")
+        XCTAssertFalse(element("skill-private-committed").exists, "A committed skill has no Private badge.")
+        XCTAssertTrue(element("skill-provider-deploy-notes-claude").exists && element("skill-provider-deploy-notes-codex").exists)
+        XCTAssertTrue(accessibleLabelOrValue(of: element("skill-location-deploy-notes")).hasPrefix("Private to skills-private-repo"), "The row names the repository it belongs to.")
+        XCTAssertTrue(element("skills-repo-section-skills-private-repo").exists)
+        attachScreenshot(named: "A private skill on the Repo tab with its Private badge")
+        XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("SKILL.md"), encoding: .utf8),
+                       "---\nname: deploy-notes\ndescription: \"Write deploy notes\"\n---\n\nList the deploy steps.\n")
+        XCTAssertEqual(try String(contentsOf: store.appendingPathComponent("repository"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), repository.path)
+        XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain"), "", "Creating a private skill writes nothing into the worktree.")
+        XCTAssertEqual(try runGitOutput(repository, "status", "--porcelain"), "", "Creating a private skill writes nothing into the repository.")
+        let created = try XCTUnwrap(try privateRecord())
+        XCTAssertEqual(created["scope"] as? String, "private")
+        XCTAssertEqual(realPath(created["folderPath"] as? String ?? ""), realPath(folder.path))
+        XCTAssertEqual(((created["locations"] as? [[String: Any]]) ?? []).map { $0["layout"] as? String }, ["playhousePrivate"])
+        assertCLIError(try runCLI(["skills", "create", "--task", taskID, "--scope", "private", "--name", "deploy-notes", "--description", "Again"], expectedStatus: 1), code: "already_exists")
+
+        let again = try createSkillsTask("Private skills again", repositories: [repository])
+        let againID = try XCTUnwrap(again["id"] as? String)
+        XCTAssertNotNil(try privateRecord(againID), "Every task on the repository sees its private skills.")
+        let otherTask = try createSkillsTask("Private skills elsewhere", repositories: [other])
+        XCTAssertEqual(try section(try XCTUnwrap(otherTask["id"] as? String)).count, 0, "A task on another repository does not.")
+
+        XCTAssertTrue(openPanel("skill-editor-panel", with: element("skill-row-deploy-notes")), "Clicking the private skill opens its editor.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("skill-editor-location")).contains("private-skills"), "The editor shows the store's SKILL.md.")
+        let edited = skillManifest("deploy-notes", "Write short deploy notes", body: "Name each deployed service.")
+        let editor = element("skill-editor")
+        editor.click()
+        editor.typeKey("a", modifierFlags: .command)
+        editor.typeText(edited)
+        element("skill-editor-save").click()
+        XCTAssertTrue(waitUntil({ !self.element("skill-editor-panel").exists }, timeout: 10), "Saving closes the editor.")
+        XCTAssertTrue(waitUntil({ (try? String(contentsOf: folder.appendingPathComponent("SKILL.md"), encoding: .utf8)) == edited }, timeout: 10), "Editing saves the store's SKILL.md.")
+        XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain"), "", "Editing a private skill writes nothing into the worktree.")
+        element("skill-actions-deploy-notes").click()
+        XCTAssertTrue(app.menuItems["Convert to Repository Skill"].waitToExist(timeout: 5), "A private skill offers Convert to Repository Skill.")
+        XCTAssertFalse(app.menuItems["Make Available Outside Playhouse…"].exists, "A private skill cannot be linked outside Playhouse.")
+        XCTAssertFalse(app.menuItems["Make Private"].exists, "A private skill is not offered a move into its own store.")
+        attachScreenshot(named: "A private skill's actions menu offers Convert to Repository Skill")
+        app.typeKey(.escape, modifierFlags: [])
+        assertCLIError(try runCLI(["skills", "link", "--task", taskID, "--skill", privateID], expectedStatus: 2), code: "invalid_argument")
+
+        // A committed skill of the same name takes precedence in the worktree it appears in.
+        try writeSkill(in: worktree.appendingPathComponent(".claude/skills"), "deploy-notes", "A committed copy")
+        element("skills-back-button").click()
+        openSkillsPage()
+        XCTAssertTrue(element("skill-shadowed-deploy-notes").waitToExist(timeout: 10), "A shadowed private skill is flagged on the page.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("skill-issue-deploy-notes")).contains("takes precedence"), "The page explains which skill takes precedence.")
+        attachScreenshot(named: "A private skill shadowed by a committed skill of the same name")
+        let shadowed = try XCTUnwrap(try privateRecord())
+        XCTAssertEqual(shadowed["providers"] as? [String], [], "A shadowed private skill is used by neither provider.")
+        XCTAssertEqual(shadowed["shadowedBy"] as? String, "skills-private-repo's committed skills")
+        XCTAssertEqual(try privateRecord(againID)?["providers"] as? [String], ["claude", "codex"], "Another worktree without the copy still uses the private skill.")
+        try FileManager.default.removeItem(at: worktree.appendingPathComponent(".claude"))
+        element("skills-back-button").click()
+        openSkillsPage()
+        XCTAssertTrue(waitUntil({ !self.element("skill-shadowed-deploy-notes").exists && self.element("skill-private-deploy-notes").exists }, timeout: 10))
+
+        clickSkillMenuItem(skill: "deploy-notes", item: "skill-convert-repo-deploy-notes", title: "Convert to Repository Skill")
+        let converted = worktree.appendingPathComponent(".agents/skills/deploy-notes/SKILL.md")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: converted.path) }, timeout: 10), "Converting moves the skill into the worktree's Agent Skills folder.")
+        XCTAssertTrue(waitUntil({ !self.element("skill-private-deploy-notes").exists && self.element("skill-row-deploy-notes").exists }, timeout: 10),
+                      "The converted skill is a repository skill without the Private badge.")
+        XCTAssertEqual(try String(contentsOf: converted, encoding: .utf8), edited)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path), "Converting removes the skill from the store.")
+        XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain").trimmingCharacters(in: .whitespacesAndNewlines), "?? .agents/skills/deploy-notes/", "The converted skill is ready to commit.")
+        XCTAssertEqual(try section(taskID).first { $0["name"] as? String == "deploy-notes" }?["scope"] as? String, "repo")
+        XCTAssertNil(try privateRecord(againID), "A converted skill is no longer private to the repository's other tasks.")
+        attachScreenshot(named: "A private skill converted to a repository skill")
+
+        clickSkillMenuItem(skill: "deploy-notes", item: "skill-make-private-deploy-notes", title: "Make Private")
+        XCTAssertTrue(waitUntil({ self.element("skill-private-deploy-notes").exists }, timeout: 10), "Make Private shows the Private badge again.")
+        XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("SKILL.md"), encoding: .utf8), edited, "Make Private moves the skill back into the store.")
+        XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain"), "", "Make Private takes the skill out of the worktree.")
+        attachScreenshot(named: "A repository skill made private again")
+        assertCLIError(try runCLI(["skills", "move", "--task", taskID, "--skill", privateID, "--scope", "private"], expectedStatus: 2), code: "invalid_argument")
+
+        clickSkillMenuItem(skill: "deploy-notes", item: "skill-delete-deploy-notes", title: "Delete…")
+        clickDialogButton("confirm-delete-skill", title: "Delete")
+        XCTAssertTrue(waitUntil({ !self.element("skill-row-deploy-notes").exists }, timeout: 10), "A deleted private skill leaves the page.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path), "Deleting removes the private skill's store folder.")
+        XCTAssertTrue(element("skill-row-committed").exists, "Deleting a private skill leaves committed skills alone.")
+        XCTAssertEqual(try section().compactMap { $0["name"] as? String }, ["committed"])
+        XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain"), "")
+
+        // A global skill can be made private to one of the task's repositories.
+        selectSkillsTab("Global")
+        XCTAssertTrue(element("skill-row-global-taken").waitToExist(timeout: 10))
+        clickSkillMenuItem(skill: "global-taken", item: "skill-make-private-global-taken-skills-private-repo", title: "Make Private to skills-private-repo")
+        XCTAssertTrue(waitUntil({ !self.element("skill-row-global-taken").exists }, timeout: 10), "The skill leaves the Global tab.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.appendingPathComponent(".claude/skills/global-taken/SKILL.md").path),
+                      "The global skill moves into the repository's store.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: skillsHome.appendingPathComponent(".agents/skills/global-taken").path), "It leaves the global skills folder.")
+        selectSkillsTab("Repo")
+        XCTAssertTrue(element("skill-private-global-taken").waitToExist(timeout: 10), "It shows as private under its repository.")
+        XCTAssertEqual(try section().compactMap { $0["name"] as? String }.sorted(), ["committed", "global-taken"])
+        XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain"), "", "Making a global skill private writes nothing into the worktree.")
+        attachScreenshot(named: "A global skill made private to a repository")
+    }
+
+    // case-contract: test_skills_private_bridge_reaches_claude_and_codex_for_its_repository | A turn on a repository with private skills gets them as native skills, and a task on any other repository gets no extra folder, flag, or skill. Claude Code gets one more --add-dir, a Playhouse-owned wrapper named after the repository whose .claude/skills links to the store, so it lists the private skill and a /skill message reaches it unchanged; the link shows later edits, and a turned-off private skill is left out of the next turn without a skillOverrides entry and hidden from Codex threads. In a task with two repositories whose private skills share a name, each repository's wrapper is passed, and the later one is listed and invoked as /<repository>:<name>. Codex gets the repository's private wrapper among the shared app-server's extra skill roots, with other repositories' private skills disabled for its thread, and a /skill message, plain or namespaced, sends a structured skill input naming the private SKILL.md.
+    func test_skills_private_bridge_reaches_claude_and_codex_for_its_repository() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let codexHistoryURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
+        let repository = try makeSkillRepository("skills-private-bridge", skills: [
+            ".claude/skills/repo-claude/SKILL.md": skillManifest("repo-claude", "Claude reads this natively"),
+        ])
+        let second = try makeSkillRepository("skills-private-second", skills: [:])
+        let plain = try makeSkillRepository("skills-private-plain", skills: [:])
+        let executable = try installSkillsClaudeFixture("claude-fixture-private-bridge")
+        let historyURL = URL(fileURLWithPath: executable.path + ".history")
+        launchApp(defaultParent: fixture.parent.path)
+        let task = try createSkillsTask("Private Claude skills", repositories: [repository], provider: "claude")
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String))
+        func create(_ target: String, _ root: URL, _ name: String, _ description: String) throws -> [String: Any] {
+            try XCTUnwrap(try runCLI(["skills", "create", "--task", target, "--scope", "private", "--root", root.path, "--name", name, "--description", description])["result"] as? [String: Any])
+        }
+        let release = try create(taskID, repository, "release-check", "Check a release")
+        let shared = try create(taskID, repository, "shared-name", "The first repository's copy")
+        func turns() -> [[String: Any]] {
+            guard let data = try? Data(contentsOf: historyURL),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+            return (history["turns"] as? [[String: Any]] ?? []).filter { ($0["userText"] as? String)?.isEmpty == false }
+        }
+        func turn(_ text: String) -> [String: Any]? { turns().last { $0["userText"] as? String == text } }
+        func directories(_ entry: [String: Any]) -> [String] {
+            let arguments = entry["arguments"] as? [String] ?? []
+            return arguments.indices.filter { arguments[$0] == "--add-dir" }.map { arguments[$0 + 1] }
+        }
+        let composer = element("message-composer")
+        func send(_ text: String, typed: String? = nil) {
+            XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15))
+            if typed == nil { composer.click() }
+            composer.typeText(typed ?? text)
+            element("send-message-button").click()
+            XCTAssertTrue(waitUntil({ turn(text) != nil }, timeout: 20), "\(text) should reach Claude Code.")
+        }
+        func settle(_ id: String) {
+            XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: id)?["status"] as? String).map { $0 != "In Progress" } == true }, timeout: 30))
+        }
+
+        let plainID = try XCTUnwrap(try createSkillsTask("Plain Claude skills", repositories: [plain], provider: "claude")["id"] as? String)
+        openTask(named: "Plain Claude skills")
+        send("Hello plain.")
+        let plainTurn = try XCTUnwrap(turn("Hello plain."))
+        XCTAssertEqual(directories(plainTurn), [], "A repository without private skills adds no folder.")
+        XCTAssertFalse((plainTurn["arguments"] as? [String] ?? []).contains("--settings"))
+        XCTAssertFalse((plainTurn["skills"] as? [String] ?? []).contains("release-check"), "A task on another repository does not see the private skill.")
+        settle(plainID)
+
+        openTask(named: "Private Claude skills")
+        openSkillsPage()
+        XCTAssertTrue(element("skill-private-release-check").waitToExist(timeout: 10))
+        element("skill-use-release-check").click()
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "/release-check " }, timeout: 5), "Use puts /skill-name at the start of the composer.")
+        send("/release-check Run it.", typed: "Run it.")
+        let first = try XCTUnwrap(turn("/release-check Run it."))
+        let added = directories(first)
+        XCTAssertEqual(added.count, 1, "One private wrapper should be added: \(first["arguments"] ?? [])")
+        let wrapper = URL(fileURLWithPath: try XCTUnwrap(added.first))
+        XCTAssertEqual(wrapper.lastPathComponent, "skills-private-bridge", "The wrapper is named after the repository.")
+        XCTAssertEqual(realPath(wrapper.deletingLastPathComponent().deletingLastPathComponent().path), realPath(dataDirectory.appendingPathComponent("skill-bridge/claude").path))
+        let links = wrapper.appendingPathComponent(".claude/skills")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: links.path).sorted(), ["release-check", "shared-name"])
+        XCTAssertEqual(realPath(links.appendingPathComponent("release-check").path), realPath(release["folderPath"] as? String ?? ""))
+        XCTAssertTrue((first["skills"] as? [String] ?? []).contains("release-check"), "Claude Code lists the private skill natively.")
+        XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain"), "", "The worktree is not written to.")
+        attachScreenshot(named: "Claude turn invoking a private skill from the Skills page")
+        settle(taskID)
+
+        let edited = skillManifest("release-check", "Check a release carefully", body: "Compare the changelog.")
+        let editFile = dataDirectory.appendingPathComponent("private-skill-edit.md")
+        try edited.write(to: editFile, atomically: true, encoding: .utf8)
+        _ = try runCLI(["skills", "update", "--task", taskID, "--skill", try XCTUnwrap(release["id"] as? String), "--content-file", editFile.path])
+        XCTAssertEqual(try String(contentsOf: links.appendingPathComponent("release-check/SKILL.md"), encoding: .utf8), edited, "The wrapper shows the edited skill.")
+        let enabledBridge = try XCTUnwrap(try runCLI(["skills", "bridge", "--task", taskID])["result"] as? [String: Any])
+        let oldCodexRelease = URL(fileURLWithPath: try XCTUnwrap((enabledBridge["codexLinks"] as? [[String: String]])?.first { $0["name"] == "release-check" }?["link"]))
+        openSkillsPage()
+        let toggle = element("skill-toggle-release-check")
+        XCTAssertTrue(toggle.waitToExist(timeout: 10))
+        toggle.click()
+        XCTAssertTrue(waitUntil({ !self.isOn(self.element("skill-toggle-release-check")) }, timeout: 10))
+        element("skills-back-button").click()
+        send("Run it again.")
+        let resumed = try XCTUnwrap(turn("Run it again."))
+        XCTAssertEqual(resumed["resumed"] as? Bool, true)
+        let resumedSkills = resumed["skills"] as? [String] ?? []
+        XCTAssertFalse(resumedSkills.contains("release-check"), "A turned-off private skill is left out of the next turn.")
+        XCTAssertTrue(resumedSkills.contains("shared-name") && resumedSkills.contains("repo-claude"), "Turning a private skill off leaves other skills alone.")
+        XCTAssertFalse((resumed["arguments"] as? [String] ?? []).contains("--settings"), "A private skill is turned off without a skillOverrides entry.")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: URL(fileURLWithPath: try XCTUnwrap(directories(resumed).first)).appendingPathComponent(".claude/skills").path), ["shared-name"])
+        settle(taskID)
+
+        let both = try createSkillsTask("Two private repositories", repositories: [repository, second], provider: "claude")
+        let bothID = try XCTUnwrap(both["id"] as? String)
+        let namespaced = try create(bothID, second, "shared-name", "The second repository's copy")
+        openTask(named: "Two private repositories")
+        openSkillsPage()
+        XCTAssertTrue(element("skill-namespaced-shared-name").waitToExist(timeout: 10), "The later repository's private skill shows its namespaced name.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("skill-namespaced-shared-name").staticTexts.firstMatch), "/skills-private-second:shared-name",
+                       "The badge shows the namespaced name to type.")
+        attachScreenshot(named: "Two repositories' private skills with the same name, the later one namespaced")
+        let uses = app.descendants(matching: .any).matching(identifier: "skill-use-shared-name")
+        XCTAssertEqual(uses.count, 2, "Each repository lists its own shared-name.")
+        uses.element(boundBy: 1).click()
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "/skills-private-second:shared-name " }, timeout: 5), "Use inserts the namespaced name.")
+        send("/skills-private-second:shared-name Go.", typed: "Go.")
+        let bothTurn = try XCTUnwrap(turn("/skills-private-second:shared-name Go."))
+        XCTAssertEqual(directories(bothTurn).suffix(2).map { URL(fileURLWithPath: $0).lastPathComponent }, ["skills-private-bridge", "skills-private-second"],
+                       "Each repository's private wrapper is passed.")
+        XCTAssertTrue((bothTurn["skills"] as? [String] ?? []).contains("skills-private-second:shared-name"), "Claude Code namespaces the later repository's skill.")
+        let bridged = try XCTUnwrap(try runCLI(["skills", "bridge", "--task", bothID, "--message", "/skills-private-second:shared-name Go."])["result"] as? [String: Any])
+        let invocations = try XCTUnwrap(bridged["invocations"] as? [[String: String]])
+        XCTAssertEqual(invocations.map { $0["name"] }, ["shared-name"])
+        XCTAssertEqual(realPath(invocations.first?["path"] ?? ""), realPath((namespaced["folderPath"] as? String ?? "") + "/SKILL.md"))
+        let secondLink = try XCTUnwrap((bridged["codexLinks"] as? [[String: String]])?.first { realPath($0["source"] ?? "") == realPath(namespaced["folderPath"] as? String ?? "") })
+        let secondWrapper = URL(fileURLWithPath: try XCTUnwrap(secondLink["link"])).deletingLastPathComponent()
+        settle(bothID)
+
+        let codexTask = try createSkillsTask("Private Codex skills", repositories: [repository])
+        let codexID = try XCTUnwrap(codexTask["id"] as? String)
+        func codexHistory() -> [String: Any] {
+            guard let data = try? Data(contentsOf: codexHistoryURL) else { return [:] }
+            return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        }
+        openTask(named: "Private Codex skills")
+        openSkillsPage()
+        XCTAssertTrue(element("skill-private-shared-name").waitToExist(timeout: 10))
+        element("skill-use-shared-name").click()
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "/shared-name " }, timeout: 5))
+        composer.typeText("Complete this task.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ codexHistory()["userMessage"] as? String == "/shared-name Complete this task." }, timeout: 20))
+        let sent = codexHistory()
+        let skillInputs = try XCTUnwrap(sent["skillInputs"] as? [[String: String]])
+        XCTAssertEqual(skillInputs.map { $0["name"] }, ["shared-name"])
+        XCTAssertEqual(realPath(skillInputs.first?["path"] ?? ""), realPath((shared["folderPath"] as? String ?? "") + "/SKILL.md"),
+                       "Codex receives a structured skill input naming the private SKILL.md.")
+        let codexBridge = try XCTUnwrap(try runCLI(["skills", "bridge", "--task", codexID])["result"] as? [String: Any])
+        let ownLink = try XCTUnwrap((codexBridge["codexLinks"] as? [[String: String]])?.first { $0["name"] == "shared-name" })
+        let ownWrapper = URL(fileURLWithPath: try XCTUnwrap(ownLink["link"])).deletingLastPathComponent()
+        XCTAssertTrue(Set((sent["skillExtraRoots"] as? [String] ?? []).map(realPath)).contains(realPath(ownWrapper.path)),
+                      "The app-server gets the repository's private wrapper as an extra root.")
+        let config = (((sent["threadStartConfig"] as? [String: Any])?["skills"] as? [String: Any])?["config"] as? [[String: Any]]) ?? []
+        let disabled = Set(config.filter { $0["enabled"] as? Bool == false }.compactMap { $0["path"] as? String }.map(realPath))
+        XCTAssertTrue(disabled.contains(realPath(secondWrapper.appendingPathComponent("shared-name/SKILL.md").path)), "Another repository's private skill is hidden from this thread.")
+        XCTAssertTrue(disabled.contains(realPath(oldCodexRelease.appendingPathComponent("SKILL.md").path)), "A turned-off private skill is hidden from the Codex thread.")
+        XCTAssertFalse(((codexBridge["codexLinks"] as? [[String: String]]) ?? []).contains { $0["name"] == "release-check" }, "A turned-off private skill is left out of the Codex wrapper.")
+        XCTAssertFalse(disabled.contains { $0.hasPrefix(realPath(ownWrapper.path) + "/") }, "The thread's own private skills stay on.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: skillsCodexHome.appendingPathComponent("config.toml").path), "Codex's config.toml is not written.")
+        attachScreenshot(named: "Codex turn invoking a private skill from the Skills page")
+        if element("ai-question-form-title").waitToExist(timeout: 10) {
+            selectQuestionOption("Blue")
+            typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
+            element("submit-ai-answers-button").click()
+        }
+        let plainBridge = try XCTUnwrap(try runCLI(["skills", "bridge", "--task", plainID, "--message", "/shared-name Go."])["result"] as? [String: Any])
+        XCTAssertEqual((plainBridge["claudeAddDirectories"] as? [String])?.count, 0, "A repository without private skills adds no folder.")
+        XCTAssertEqual((plainBridge["codexLinks"] as? [Any])?.count, 0)
+        XCTAssertEqual((plainBridge["invocations"] as? [Any])?.count, 0, "Another repository's private skill cannot be invoked.")
     }
 
     // MARK: - Rules
