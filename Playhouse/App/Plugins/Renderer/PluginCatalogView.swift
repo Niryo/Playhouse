@@ -186,7 +186,7 @@ private struct TaskItemComparison: View {
     }
 
     static func sample(_ props: [String: PluginValue]) throws -> Sample {
-        try JSONDecoder().decode(Sample.self, from: JSONEncoder().encode(PluginValue.object(props)))
+        try PluginValueDecoder.decode(Sample.self, from: .object(props))
     }
 }
 

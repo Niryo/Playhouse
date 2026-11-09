@@ -111,9 +111,10 @@ enum AtomType: String, CaseIterable, Sendable {
 protocol AtomPropsDecodable: Decodable {}
 
 extension AtomPropsDecodable {
+    /// Decodes the props directly from their values, with no JSON in between;
+    /// it runs on every create/update and every render of the atom.
     static func decode(_ props: [String: PluginValue]) throws -> Self {
-        let data = try JSONEncoder().encode(PluginValue.object(props))
-        return try JSONDecoder().decode(Self.self, from: data)
+        try PluginValueDecoder.decode(Self.self, from: .object(props))
     }
 }
 
