@@ -2509,7 +2509,7 @@ final class BoardTaskManager {
         settingsManager: WorkspaceSettingsManager?
     ) async {
         guard record.autoCreatePullRequestOnReview,
-              record.repositoryWorktrees.contains(where: { !$0.isPending && ($0.pullRequestNumber == nil || $0.pullRequestURL == nil) }) else {
+              record.repositoryWorktrees.contains(where: \.awaitsPullRequest) else {
             return
         }
         do {
@@ -2705,7 +2705,6 @@ final class BoardTaskManager {
                 throw BridgeCommandError(code: "invalid_transition", message: "Start the task conversation before creating a pull request so its repository worktree is ready.")
             }
             var records = originalRecords
-            var unchangedPaths: Set<String> = []
             for index in records.indices where records[index].pullRequestNumber == nil || records[index].pullRequestURL == nil {
                 do {
                     // `--head` skips gh's push flow, and `gh pr list` also needs a
@@ -2715,12 +2714,14 @@ final class BoardTaskManager {
                 } catch {
                     throw BridgeCommandError(code: "operation_failed", message: "GitHub CLI couldn't publish the task branch. \(error.localizedDescription)")
                 }
+                records[index].pullRequestSkippedHead = nil
                 if let existing = try await pullRequestService.findOpen(records[index], executable: gh) {
                     records[index].pullRequestNumber = existing.number
                     records[index].pullRequestURL = existing.url
                 } else if try await !worktreeService.hasCommitsAheadOfMergeTarget(records[index]) {
-                    // A repository the task never changed has nothing to propose.
-                    unchangedPaths.insert(records[index].repositoryPath)
+                    // A repository the task never changed has nothing to propose;
+                    // the card stops offering it one until the task changes it.
+                    records[index].pullRequestSkippedHead = try await worktreeService.headOid(records[index])
                 }
             }
             let taskAfterLookup = try requireTask(id)
@@ -2729,13 +2730,10 @@ final class BoardTaskManager {
             }
             taskAfterLookup.repositoryWorktrees = records
             try await saveTaskContext(taskID: id)
-            return (gh, records, unchangedPaths, BoardTaskRecord(task: taskAfterLookup))
+            return (gh, records, BoardTaskRecord(task: taskAfterLookup))
         }
-        let (gh, records, unchangedPaths, lookedUpRecords) = lookup
-        func needsPullRequest(_ record: RepositoryWorktreeRecord) -> Bool {
-            (record.pullRequestNumber == nil || record.pullRequestURL == nil) && !unchangedPaths.contains(record.repositoryPath)
-        }
-        guard records.contains(where: needsPullRequest) else {
+        let (gh, records, lookedUpRecords) = lookup
+        guard records.contains(where: \.awaitsPullRequest) else {
             if records.allSatisfy({ $0.pullRequestNumber == nil }) {
                 throw BridgeCommandError(code: "invalid_transition", message: "No repository in this task has changes to open a pull request for.")
             }
@@ -2791,7 +2789,7 @@ final class BoardTaskManager {
             }
             var updatedRecords = records
             var expectedRecords = records
-            for index in updatedRecords.indices where needsPullRequest(updatedRecords[index]) {
+            for index in updatedRecords.indices where updatedRecords[index].awaitsPullRequest {
                 let record = updatedRecords[index]
                 let pullRequest: GitHubPullRequestManager.PullRequest
                 if let existing = try await pullRequestService.findOpen(record, executable: gh) {
@@ -3015,12 +3013,34 @@ final class BoardTaskManager {
                     results.append(TaskBranchSyncResult(repositoryPath: record.repositoryPath, action: "up-to-date"))
                 }
             }
+            try await reopenChangedSkippedRepositories(task)
             PlayhouseDiagnostics.record("task.review.sync.completed", fields: [
                 "taskID": id.uuidString,
                 "actions": results.map { "\($0.repositoryPath)=\($0.action)" }.joined(separator: ",")
             ])
             return results
         }
+    }
+
+    /// A repository pull request creation skipped as unchanged is offered a
+    /// pull request again once its branch moved or it holds local changes. A
+    /// repository Git can't read counts as changed, so the offer comes back.
+    private func reopenChangedSkippedRepositories(_ task: BoardTask) async throws {
+        var worktrees = task.repositoryWorktrees
+        var reopened = false
+        for index in worktrees.indices where worktrees[index].pullRequestNumber == nil {
+            guard let skippedHead = worktrees[index].pullRequestSkippedHead else { continue }
+            let record = worktrees[index]
+            let isClean = (try? await worktreeService.hasChanges(record)) == false
+            let head = try? await worktreeService.headOid(record)
+            if !isClean || head != skippedHead {
+                worktrees[index].pullRequestSkippedHead = nil
+                reopened = true
+            }
+        }
+        guard reopened else { return }
+        task.repositoryWorktrees = worktrees
+        try await saveTaskContext(taskID: task.id)
     }
 
     /// The review guarantee for a task already on the board: after this call the

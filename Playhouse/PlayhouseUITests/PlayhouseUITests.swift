@@ -3122,22 +3122,28 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Done archive shows the linked pull request")
     }
 
-    // case-contract: test_task_pr_create_skips_unchanged_repositories | PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error. A task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert.
+    // case-contract: test_task_pr_create_skips_unchanged_repositories | PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error and is remembered as skipped at its branch head, so the card offers no further create action; a review sync with no change keeps the skip, and once the primary's pull request merges and the task moves to Done, the Done archive shows the primary's PR link and no create action either. A two-repository task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved, and both repositories are remembered as skipped. After the task changes one of them, the review sync clears only that repository's skip, the card's create action counts it alone as a single PR, and creating it opens exactly one more pull request, for that repository. A later change to the still-skipped repository beside that linked PR brings back a single create action for the repository without a linked pull request, and creating it links that repository too. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert.
     func test_task_pr_create_skips_unchanged_repositories() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
-        let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Skip unchanged UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
-            "--merge-target", "\(fixture.primary.path)=main", "--merge-target", "\(fixture.secondary.path)=main",
-        ])["result"] as? [String: Any])
-        let taskID = try XCTUnwrap(created["id"] as? String)
-        openTask(named: "Skip unchanged UI")
-        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Skip unchanged UI")
-        element("back-to-board-button").click()
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
-        XCTAssertTrue(terminateAppAndWait(app), "Close Playhouse before clearing the fixture provider session.")
-        try clearTaskProviderSession(taskID: taskID)
+        var taskIDs: [String] = []
+        for title in ["Skip unchanged UI", "Nothing to propose UI"] {
+            let created = try XCTUnwrap(try runCLI([
+                "task", "create", "--title", title, "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
+                "--merge-target", "\(fixture.primary.path)=main", "--merge-target", "\(fixture.secondary.path)=main",
+            ])["result"] as? [String: Any])
+            let taskID = try XCTUnwrap(created["id"] as? String)
+            openTask(named: title)
+            try completeCurrentTaskWithFixtureAnswers(taskTitle: title)
+            element("back-to-board-button").click()
+            XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+            taskIDs.append(taskID)
+        }
+        let taskID = taskIDs[0]
+        let unchangedID = taskIDs[1]
+        XCTAssertTrue(terminateAppAndWait(app), "Close Playhouse before clearing the fixture provider sessions.")
+        for id in taskIDs { try clearTaskProviderSession(taskID: id) }
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
 
         let records = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]]))
@@ -3153,6 +3159,7 @@ final class PlayhouseUITests: XCTestCase {
                 try? runGit(repository, "remote", "remove", "origin")
             }
         }
+        // Remotes live in the source repositories' shared config, so the second task's worktrees see them too.
         for (index, record) in records.enumerated() {
             let remote = remoteRoot.appendingPathComponent("repository-\(index).git", isDirectory: true)
             try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
@@ -3162,6 +3169,7 @@ final class PlayhouseUITests: XCTestCase {
             try runGit(worktree, "push", "origin", "main")
         }
         let primaryWorktree = URL(fileURLWithPath: try XCTUnwrap(records[0]["worktreePath"] as? String), isDirectory: true)
+        let secondaryWorktree = URL(fileURLWithPath: try XCTUnwrap(records[1]["worktreePath"] as? String), isDirectory: true)
         try "Only the primary repository changed.\n".write(to: primaryWorktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
 
         let createPRButton = element("task-create-pr-\(taskID)")
@@ -3170,34 +3178,46 @@ final class PlayhouseUITests: XCTestCase {
         createPRButton.click()
         let primaryLink = app.links["task-pr-link-\(taskID)-501"]
         XCTAssertTrue(primaryLink.waitToExist(timeout: 30), "The changed repository should get its pull request.")
-        // The link can appear while the secondary repository is still being checked; wait for the operation to settle.
-        let remainingPRButton = element("task-create-pr-\(taskID)")
-        XCTAssertTrue(waitUntil({ remainingPRButton.exists && remainingPRButton.isEnabled }, timeout: 30), "The PR operation should finish for every repository.")
-        XCTAssertEqual(remainingPRButton.label, "PRs. Create pull requests for repositories without a linked pull request")
+        // The only repository without a PR is the unchanged one, so no create action remains.
+        XCTAssertTrue(waitUntil({ !createPRButton.exists }, timeout: 30), "The card must not offer a pull request for the unchanged repository.")
         XCTAssertFalse(app.sheets.firstMatch.exists, "An unchanged repository must not fail the PR operation.")
         let createdRecords = try XCTUnwrap(taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])
         XCTAssertEqual(createdRecords[0]["pullRequestNumber"] as? Int, 501)
         XCTAssertNil(createdRecords[1]["pullRequestNumber"], "The unchanged repository must keep no PR link.")
+        let secondaryHead = try runGitOutput(secondaryWorktree, "rev-parse", "HEAD")
+        XCTAssertEqual(createdRecords[1]["pullRequestSkippedHead"] as? String, secondaryHead, "The unchanged repository must be remembered as skipped.")
         let createLogPath = try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CREATE_LOG"])
-        let createTargets = try String(contentsOfFile: createLogPath, encoding: .utf8).components(separatedBy: "\n")
-            .filter { $0.hasPrefix("create\t") }
-            .compactMap { $0.split(separator: "\t", maxSplits: 2).dropFirst().first.map(String.init) }
-            .map { $0.replacingOccurrences(of: "/private/tmp/", with: "/tmp/") }
-        XCTAssertEqual(createTargets, [primaryWorktree.resolvingSymlinksInPath().path.replacingOccurrences(of: "/private/tmp/", with: "/tmp/")], "gh create must run only for the changed repository.")
+        func createTargets() throws -> [String] {
+            try String(contentsOfFile: createLogPath, encoding: .utf8).components(separatedBy: "\n")
+                .filter { $0.hasPrefix("create\t") }
+                .compactMap { $0.split(separator: "\t", maxSplits: 2).dropFirst().first.map(String.init) }
+                .map { $0.replacingOccurrences(of: "/private/tmp/", with: "/tmp/") }
+        }
+        func normalized(_ url: URL) -> String { url.resolvingSymlinksInPath().path.replacingOccurrences(of: "/private/tmp/", with: "/tmp/") }
+        XCTAssertEqual(try createTargets(), [normalized(primaryWorktree)], "gh create must run only for the changed repository.")
         attachScreenshot(named: "Only the changed repository gets a pull request")
 
-        // The secondary source repository keeps the origin its first task worktree added.
-        let unchanged = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Nothing to propose UI", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path,
-            "--merge-target", "\(fixture.secondary.path)=main",
-        ])["result"] as? [String: Any])
-        let unchangedID = try XCTUnwrap(unchanged["id"] as? String)
-        openTask(named: "Nothing to propose UI")
-        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Nothing to propose UI")
-        element("back-to-board-button").click()
-        XCTAssertEqual(try taskRecord(id: unchangedID)?["status"] as? String, "Review")
+        // The review sync keeps the skip while the repository stays unchanged.
+        XCTAssertEqual(try runCLI(["task", "pr", "sync", taskID], extraEnvironment: ghEnvironment)["ok"] as? Bool, true)
+        XCTAssertEqual((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?[1]["pullRequestSkippedHead"] as? String, secondaryHead)
+        XCTAssertFalse(waitUntil({ createPRButton.exists }, timeout: 3), "A sync with no change must keep the create action hidden.")
+
+        // The Done archive reads the same skip, so it offers no create action either.
+        try "501=merged\n".write(toFile: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STATE_PATH"]), atomically: true, encoding: .utf8)
+        revealOnBoard(element("task-card-\(taskID)"))
+        moveTaskToDone(taskID: taskID)
+        element("done-archive-button").click()
+        XCTAssertTrue(app.links["done-archive-pr-link-\(taskID)-501"].waitToExist(timeout: 10), "The archived task should show its pull request.")
+        XCTAssertFalse(element("done-archive-create-pr-\(taskID)").exists, "The archive must not offer a pull request for the unchanged repository.")
+        attachScreenshot(named: "Done archive offers no PR for the unchanged repository")
+        // The open archive panel covers the Review column, so close it before using the board.
+        element("close-done-archive-button").click()
+        XCTAssertTrue(waitUntil({ !self.app.scrollViews["done-archive-list"].exists }, timeout: 10), "The Done archive should close before the board is used again.")
+
+        // A task whose every repository is unchanged explains why no pull request was opened.
         let unchangedButton = element("task-create-pr-\(unchangedID)")
-        XCTAssertTrue(unchangedButton.waitToExist(timeout: 5))
+        XCTAssertTrue(unchangedButton.waitToExist(timeout: 10))
+        XCTAssertEqual(unchangedButton.label, "PRs. Create pull requests for each repository linked to this task")
         revealOnBoard(unchangedButton)
         unchangedButton.click()
         let alertSheet = app.sheets.firstMatch
@@ -3207,8 +3227,42 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 5), app.debugDescription)
         attachScreenshot(named: "A task with no changes explains why no pull request was opened")
         alertSheet.buttons["OK"].click()
-        XCTAssertNil((try taskRecord(id: unchangedID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"])
-        XCTAssertEqual(try String(contentsOfFile: createLogPath, encoding: .utf8).components(separatedBy: "\n").filter { $0.hasPrefix("create\t") }.count, 1, "An all-unchanged task must not call gh create.")
+        let skipped = try XCTUnwrap(try taskRecord(id: unchangedID)?["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertTrue(skipped.allSatisfy { $0["pullRequestNumber"] == nil })
+        XCTAssertTrue(skipped.allSatisfy { ($0["pullRequestSkippedHead"] as? String)?.isEmpty == false }, "Both unchanged repositories must be remembered as skipped.")
+        XCTAssertEqual(try createTargets().count, 1, "An all-unchanged task must not call gh create.")
+
+        // Once the task changes one repository, the review sync offers that one a single PR.
+        let laterWorktree = URL(fileURLWithPath: try XCTUnwrap(skipped[1]["worktreePath"] as? String), isDirectory: true)
+        try "The secondary repository changed later.\n".write(to: laterWorktree.appendingPathComponent("later-change.txt"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(try runCLI(["task", "pr", "sync", unchangedID], extraEnvironment: ghEnvironment)["ok"] as? Bool, true)
+        let singleLabel = "PR. Create a pull request for each repository linked to this task"
+        XCTAssertTrue(waitUntil({ unchangedButton.exists && unchangedButton.label == singleLabel }, timeout: 30), "Only the changed repository should count toward the PR action.")
+        let reopened = try XCTUnwrap(try taskRecord(id: unchangedID)?["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual(reopened[0]["pullRequestSkippedHead"] as? String, skipped[0]["pullRequestSkippedHead"] as? String, "The still-unchanged repository stays skipped.")
+        XCTAssertNil(reopened[1]["pullRequestSkippedHead"], "A changed repository must await a pull request again.")
+        attachScreenshot(named: "A later change to one skipped repository offers a single PR")
+        revealOnBoard(unchangedButton)
+        unchangedButton.click()
+        XCTAssertTrue(app.links["task-pr-link-\(unchangedID)-502"].waitToExist(timeout: 30), "The later-changed repository should get its pull request.")
+        XCTAssertTrue(waitUntil({ !unchangedButton.exists }, timeout: 30), "Every changed repository has a pull request, so no create action remains.")
+        XCTAssertFalse(app.sheets.firstMatch.exists)
+        XCTAssertEqual(try createTargets(), [normalized(primaryWorktree), normalized(laterWorktree)], "The later change must open exactly one more pull request, for the changed repository.")
+        attachScreenshot(named: "Only the later-changed repository gets the new pull request")
+
+        // Beside a linked PR, a later change to the still-skipped repository brings back a single PR action.
+        let laterPrimaryWorktree = URL(fileURLWithPath: try XCTUnwrap(skipped[0]["worktreePath"] as? String), isDirectory: true)
+        try "The primary repository changed later.\n".write(to: laterPrimaryWorktree.appendingPathComponent("later-change.txt"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(try runCLI(["task", "pr", "sync", unchangedID], extraEnvironment: ghEnvironment)["ok"] as? Bool, true)
+        XCTAssertTrue(unchangedButton.waitToExist(timeout: 30), "A repository changed beside a linked PR should be offered a pull request again.")
+        XCTAssertEqual(unchangedButton.label, "PR. Create a pull request for the repository without a linked pull request")
+        XCTAssertTrue(app.links["task-pr-link-\(unchangedID)-502"].exists)
+        attachScreenshot(named: "A later change beside a linked PR offers a single PR")
+        revealOnBoard(unchangedButton)
+        unchangedButton.click()
+        XCTAssertTrue(app.links["task-pr-link-\(unchangedID)-503"].waitToExist(timeout: 30), "The repository changed beside a linked PR should get its pull request.")
+        XCTAssertTrue(waitUntil({ !unchangedButton.exists }, timeout: 30), "Both repositories now have pull requests, so no create action remains.")
+        XCTAssertEqual(try createTargets(), [normalized(primaryWorktree), normalized(laterWorktree), normalized(laterPrimaryWorktree)])
     }
 
     // case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.

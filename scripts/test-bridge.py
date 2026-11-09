@@ -4193,7 +4193,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         fresh = self.assert_success(self.call_cli("task", "get", creating["id"])[0])
         self.assertEqual([record["pullRequestNumber"] for record in fresh["repositoryWorktrees"]], [501, 502])
 
-    # case-contract: test_task_pr_create_skips_unchanged_repositories | PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error. A task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert.
+    # case-contract: test_task_pr_create_skips_unchanged_repositories | PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error and is remembered as skipped at its branch head, so the card offers no further create action; a review sync with no change keeps the skip, and once the primary's pull request merges and the task moves to Done, the Done archive shows the primary's PR link and no create action either. A two-repository task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved, and both repositories are remembered as skipped. After the task changes one of them, the review sync clears only that repository's skip, the card's create action counts it alone as a single PR, and creating it opens exactly one more pull request, for that repository. A later change to the still-skipped repository beside that linked PR brings back a single create action for the repository without a linked pull request, and creating it links that repository too. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert.
     def test_task_pr_create_skips_unchanged_repositories(self):
         def remove_fixture_origin(repository, expected_url):
             current = subprocess.run(
@@ -4244,10 +4244,34 @@ class PlayhouseBridgeTests(unittest.TestCase):
         fresh = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(fresh["repositoryWorktrees"][0]["pullRequestNumber"], 501)
         self.assertIsNone(fresh["repositoryWorktrees"][1].get("pullRequestNumber"))
+        secondary_worktree = Path(task["repositoryWorktrees"][1]["worktreePath"])
+        secondary_head = self.run_git(secondary_worktree, "rev-parse", "HEAD").strip()
+        self.assertEqual(
+            fresh["repositoryWorktrees"][1].get("pullRequestSkippedHead"), secondary_head,
+            "The unchanged repository must be remembered as skipped so the card stops offering it a pull request.",
+        )
+        self.assertIsNone(fresh["repositoryWorktrees"][0].get("pullRequestSkippedHead"))
 
-        # The secondary source repository keeps the origin its first task worktree added.
+        # The review gate keeps the skip while the repository stays unchanged, and so does Done.
+        self.assert_success(self.call_cli("task", "pr", "sync", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(
+            self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][1].get("pullRequestSkippedHead"),
+            secondary_head,
+        )
+        gh_state.write_text("501=merged\n", encoding="utf-8")
+        self.assert_success(self.call_cli("task", "move", task["id"], "Done", extra_environment=gh_environment)[0])
+        archived = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(archived["status"], "Done")
+        self.assertEqual(archived["repositoryWorktrees"][0]["pullRequestNumber"], 501)
+        self.assertEqual(
+            archived["repositoryWorktrees"][1].get("pullRequestSkippedHead"), secondary_head,
+            "The Done archive reads the same skip, so it offers no create action either.",
+        )
+
+        # The source repositories keep the origins the first task's worktrees added.
         unchanged = self.create_repo_task(
-            "Nothing to propose", [self.secondary], merge_targets={self.secondary: "main"}, materialize=True,
+            "Nothing to propose", [self.primary, self.secondary],
+            merge_targets={self.primary: "main", self.secondary: "main"}, materialize=True,
         )
         self.clear_task_provider_session(unchanged["id"])
         rejected, _ = self.call_cli("task", "pr", "create", unchanged["id"], expected_status=1, extra_environment=gh_environment)
@@ -4257,7 +4281,36 @@ class PlayhouseBridgeTests(unittest.TestCase):
             sum(line.startswith("create\t") for line in create_log.read_text(encoding="utf-8").splitlines()), 1,
             "An all-unchanged task must not call gh create.",
         )
-        self.assertIsNone(self.assert_success(self.call_cli("task", "get", unchanged["id"])[0])["repositoryWorktrees"][0].get("pullRequestNumber"))
+        skipped = self.assert_success(self.call_cli("task", "get", unchanged["id"])[0])["repositoryWorktrees"]
+        self.assertTrue(all(record.get("pullRequestNumber") is None for record in skipped))
+        self.assertTrue(all(record.get("pullRequestSkippedHead") for record in skipped), "Both unchanged repositories must be remembered as skipped.")
+
+        # Once the task changes one repository, the review sync offers that one a pull request again.
+        later_worktree = Path(skipped[1]["worktreePath"])
+        (later_worktree / "later-change.txt").write_text("The secondary repository changed later.\n", encoding="utf-8")
+        self.assert_success(self.call_cli("task", "pr", "sync", unchanged["id"], extra_environment=gh_environment)[0])
+        reopened = self.assert_success(self.call_cli("task", "get", unchanged["id"])[0])["repositoryWorktrees"]
+        self.assertEqual(reopened[0].get("pullRequestSkippedHead"), skipped[0]["pullRequestSkippedHead"], "The still-unchanged repository stays skipped.")
+        self.assertIsNone(reopened[1].get("pullRequestSkippedHead"), "A changed repository must await a pull request again.")
+        created_later = self.assert_success(self.call_cli("task", "pr", "create", unchanged["id"], extra_environment=gh_environment)[0])
+        self.assertIsNone(created_later["repositoryWorktrees"][0].get("pullRequestNumber"))
+        self.assertEqual(created_later["repositoryWorktrees"][1]["pullRequestNumber"], 502)
+        create_targets = [line.split("\t", 2)[1] for line in create_log.read_text(encoding="utf-8").splitlines() if line.startswith("create\t")]
+        self.assertEqual(
+            create_targets, [str(primary_worktree.resolve()), str(later_worktree.resolve())],
+            "The later change must open exactly one more pull request, for the changed repository.",
+        )
+
+        # Beside a linked PR, a later change to the still-skipped repository offers it a pull request too.
+        later_primary_worktree = Path(skipped[0]["worktreePath"])
+        (later_primary_worktree / "later-change.txt").write_text("The primary repository changed later.\n", encoding="utf-8")
+        self.assert_success(self.call_cli("task", "pr", "sync", unchanged["id"], extra_environment=gh_environment)[0])
+        self.assertIsNone(self.assert_success(self.call_cli("task", "get", unchanged["id"])[0])["repositoryWorktrees"][0].get("pullRequestSkippedHead"))
+        both = self.assert_success(self.call_cli("task", "pr", "create", unchanged["id"], extra_environment=gh_environment)[0])
+        self.assertEqual([record.get("pullRequestNumber") for record in both["repositoryWorktrees"]], [503, 502])
+        create_targets = [line.split("\t", 2)[1] for line in create_log.read_text(encoding="utf-8").splitlines() if line.startswith("create\t")]
+        self.assertEqual(create_targets[-1], str(later_primary_worktree.resolve()))
+        self.assertEqual(len(create_targets), 3)
 
     # case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
     def test_task_lifecycle_rollout_clears_records_and_clean_worktrees(self):
