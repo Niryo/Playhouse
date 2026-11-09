@@ -92,7 +92,7 @@ Colors are `primary`, `secondary`, `tertiary`, `accent`, `text`, `red`,
 | `Text` | `text` (or string children), `size`, `weight`, `design` (`monospaced`), `color`, `lineLimit`, `tracking`, `lineSpacing`, `wrap` (grow vertically), `numeric` (animate digits) | | strings |
 | `Icon` | `name` (SF Symbol) or `asset` (template image), `size`, `weight`, `color` | | |
 | `Label` | `text`, `icon` (SF Symbol), `size`, `weight`, `color` | | |
-| `Button` | `style` (`plain` default, `borderless`), `emphasis` (hover capsule padding), `overhang` (capsule spills past the layout of a Button without a fixed size; keep its neighbours in one flat Stack, since a nested Stack beside it can keep a stale width when its text grows), `disabled` | `onPress()` | atoms (its label) |
+| `Button` | `style` (`plain` default, `borderless`), `emphasis` (hover capsule padding), `overhang` (capsule spills past the layout of a Button without a fixed size), `disabled` | `onPress()` | atoms (its label) |
 | `Link` | `url`, `emphasis` | | atoms (its label) |
 | `Spinner` | `size` (`small` default, `mini`) | | |
 | `Spacer` | `minLength` | | |

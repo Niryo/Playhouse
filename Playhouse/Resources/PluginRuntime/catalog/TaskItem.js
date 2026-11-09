@@ -110,8 +110,7 @@ function TaskItem(props) {
         size: 10, color: task.statusIsBlocked ? "red" : "secondary", lineLimit: 3,
         testID: "task-status-message-" + id, fillWidth: true, passThrough: true
       }, task.statusMessage) : null,
-      // One flat row, as in TaskItemView: nested beside the overhanging
-      // counter, a widening time kept its old width and truncated.
+      // One row of clock, time and counter, as in TaskItemView.
       h(Stack, { axis: "h", spacing: 6 },
         h(Icon, { name: "clock", size: 10, color: "tertiary", passThrough: true }),
         task.isWorking ? h(WorkingTime, { task: task }) : h(Text, { size: 10, color: "tertiary", testID: "task-created-time-" + id, passThrough: true }, task.createdText),

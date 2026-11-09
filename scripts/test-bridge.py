@@ -13981,7 +13981,7 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(self.plugin_text(self.plugin_node(tree, f"task-progress-label-{task}")), "Building")
         types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
         self.assertEqual(types, {"Card", "Stack", "Text", "Icon", "Button", "Link", "Spacer", "PillPicker"}, "The task item is atoms only.")
-        # Nested in its own stack beside the overhanging counter, a time that grew kept its old width and truncated.
+        # The clock, time and counter share one row, as TaskItemView builds it.
         created = self.plugin_node(tree, f"task-created-time-{task}")
         self.assertEqual(self.plugin_text(created), "Nov 8, 2026")
         counter = self.plugin_node(tree, f"task-token-usage-counter-{task}")

@@ -19541,7 +19541,7 @@ final class PlayhouseUITests: XCTestCase {
         let jsStatus = pair("task-status-message-").js, nativeStatus = pair("task-status-message-").native
         XCTAssertEqual(pluginText(jsStatus), "Waiting on CI checks")
         XCTAssertEqual(pluginText(nativeStatus), "Waiting on CI checks")
-        // Nested in its own stack beside the overhanging counter, the time kept a stale width and showed "…".
+        // Squeezed by the atoms' empty frames, the time wrapped or showed "…"; it must show in full.
         let createdWidth = ceil("Nov 8, 2026".size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width)
         for (time, counter) in [(pair("task-created-time-").js, pair("task-token-usage-counter-").js),
                                 (pair("task-created-time-").native, pair("task-token-usage-counter-").native)] {
