@@ -13850,7 +13850,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         path.write_text(source, encoding="utf-8")
         return self.call_cli("plugin", "render", "--file", path, *options, expected_status=expected_status)[0]
 
-    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter) and the Task Item and Agents Info examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
+    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar) and the Task Item, Agents Info and Token Stats examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
     def test_plugin_renderer_commits_minimal_ops_and_runs_handlers(self):
         plugin = """
 function App() {
@@ -13869,7 +13869,7 @@ function App() {
 Playhouse.render(h(App));
 """
         rendered = self.assert_success(self.render_plugin(plugin))
-        self.assertEqual(rendered["atoms"], ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter"],
+        self.assertEqual(rendered["atoms"], ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter", "Scroll", "Divider", "ChoiceBar"],
                          "Plugins compose exactly the native composites' atoms.")
         self.assertEqual(rendered["errors"], [])
         self.assertEqual(len(rendered["commits"]), 1, "The first render is one commit.")
@@ -13944,11 +13944,12 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertTrue(any("Invalid commit" in error and "integer" in error for error in out_of_range["result"]["errors"]),
                         f"An op whose node id is out of range is reported, not a crash: {out_of_range['result']['errors']}")
 
-        for page in ["AgentsInfo", "Button", "Card", "Disclosure", "Icon", "Label", "Link", "Meter", "Panel", "PillPicker", "Spacer", "Spinner", "Stack", "TaskItem", "Text"]:
+        for page in ["AgentsInfo", "Button", "Card", "ChoiceBar", "Disclosure", "Divider", "Icon", "Label", "Link", "Meter", "Panel", "PillPicker",
+                     "Scroll", "Spacer", "Spinner", "Stack", "TaskItem", "Text", "TokenStats"]:
             page_render = self.assert_success(self.call_cli("plugin", "render", "--page", page)[0])
             self.assertEqual(page_render["errors"], [], f"The {page} catalog page renders without errors.")
             used = {node["type"] for node in self.plugin_nodes(page_render["tree"])}
-            if page not in ("TaskItem", "AgentsInfo"):
+            if page not in ("TaskItem", "AgentsInfo", "TokenStats"):
                 self.assertIn(page, used, f"The {page} page shows its atom.")
         disclosure = self.assert_success(self.call_cli("plugin", "render", "--page", "Disclosure", "--event", "disclosure-demo:onToggle")[0])
         section = self.plugin_node(disclosure["tree"], "disclosure-demo")
@@ -13958,6 +13959,22 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.plugin_node(disclosure["tree"], "disclosure-first")
         self.assertEqual(sorted(disclosure["commits"][-1]["ops"]), ["text", "update"], "Collapsing keeps the children in the tree: the Disclosure's props and the readout change.")
         self.assertEqual(set(disclosure["commits"][-1]["touchedNodes"]), {section["id"], state["children"][0]["id"]})
+        chosen = self.assert_success(self.call_cli("plugin", "render", "--page", "ChoiceBar", "--event", "choice-bar:onChange:wasters")[0])
+        bar = self.plugin_node(chosen["tree"], "choice-bar")
+        selected = self.plugin_node(chosen["tree"], "choice-selected")
+        self.assertEqual(bar["events"], ["onChange"])
+        self.assertEqual(bar["props"]["selected"], "wasters", "The ChoiceBar page's onChange selected the chosen value.")
+        self.assertEqual([option["testID"] for option in bar["props"]["options"]], ["choice-overview", "choice-wasters", "choice-tools"])
+        self.assertEqual(self.plugin_text(selected), "Selected: wasters")
+        self.assertEqual(sorted(chosen["commits"][-1]["ops"]), ["text", "update"], "Choosing updates only the ChoiceBar's props and the readout.")
+        self.assertEqual(set(chosen["commits"][-1]["touchedNodes"]), {bar["id"], selected["children"][1]["id"]})
+        same = self.assert_success(self.call_cli("plugin", "render", "--page", "ChoiceBar", "--event", "choice-bar:onChange:overview")[0])
+        self.assertEqual(len(same["commits"]), 1, "Choosing the option already selected commits nothing.")
+        scrolled = self.assert_success(self.call_cli("plugin", "render", "--page", "Scroll", "--event", "scroll-add:onPress")[0])
+        scroll = self.plugin_node(scrolled["tree"], "scroll-demo")
+        self.assertEqual((scroll["type"], scroll["props"]["maxHeight"]), ("Scroll", 120))
+        self.assertEqual(len([child for child in scroll["children"] if child["type"] == "Text"]), 8, "Adding rows puts them inside the Scroll.")
+        self.assertEqual(self.plugin_text(self.plugin_node(scrolled["tree"], "scroll-count")), "8 rows")
         pressed = self.assert_success(self.call_cli("plugin", "render", "--page", "Button", "--event", "button-plain:onPress")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(pressed["tree"], "button-press-count")), "Pressed 1 times")
         self.assertEqual(pressed["commits"][-1]["ops"], ["text"], "The Button page's press is one text op.")
@@ -13974,6 +13991,10 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
             ('Playhouse.render(h(Label, { icon: "clock" }));', "<Label> has an invalid prop: text: missing"),
             ('Playhouse.render(h(Meter, { color: "red" }));', "<Meter> has an invalid prop: fraction: missing"),
             ('Playhouse.render(h(Disclosure, { title: "x", collapsed: "no" }));', "<Disclosure> has an invalid prop: collapsed: expected a boolean, found a string"),
+            ('Playhouse.render(h(ChoiceBar, { options: [{ value: "a", label: "A" }] }));', "<ChoiceBar> has an invalid prop: selected: missing"),
+            ('Playhouse.render(h(Scroll, { maxHeight: "tall" }));', "<Scroll> has an invalid prop: maxHeight: expected a number, found a string"),
+            ('Playhouse.render(h(Divider, { axis: "v" }));', '<Divider> has no prop "axis"'),
+            ('Playhouse.render(h(Divider, null, h(Text, null, "x")));', "<Divider> can't hold <Text>"),
             ('Playhouse.render(h(Stack, { onTap: function () {} }));', '<Stack> has no event "onTap"'),
             ('Playhouse.render(h(Icon, { name: "clock" }, h(Text, null, "x")));', "<Icon> can't hold <Text>"),
         ]:
@@ -14120,6 +14141,122 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(self.plugin_text(self.plugin_node(logged_in["tree"], "js-last-action")), "Last: login claude", "Log in ran its JavaScript handler.")
         self.plugin_node(logged_in["tree"], "agents-info-claude-window-five_hour")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "AgentsInfo", "--event", "agents-info:onPress", expected_status=2)[0], "invalid_argument")
+
+    # case-contract: test_plugin_token_stats_renders_from_atoms_like_native | The Plugin Catalog's Token Stats page shows the Token Stats modal composed in JavaScript from atoms above the native SwiftUI modal the board presents, built from the same atoms and sample data, each opened by the task item's token counter (the same overhanging Button atom, labelled with its description and hinted Open Token Stats). Both show the title and the task's title, the View raw input… button, a section bar of Overview, Wasters, Tools & MCP and Overhead with Overview selected, the call headlines (Final transcript size, Total sent (incl. subagents), Excluding cache reads (incl. subagents)), the main-agent and subagent split, the call and output lines, the total, the four buckets, the per-tool rollup and the per-turn rows, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Label, Button, Spacer, ChoiceBar, Divider, Scroll, Meter) with the board modal's identifiers. Choosing Wasters in the JavaScript section bar runs onChange with its value (Last: section wasters) and shows the largest items, each with a 72-point share bar, its kind, the removed-by-compaction flag, its request count and a small Show button, then the repeated result and the cache miss, while the native modal stays on Overview until its own bar moves it, after which both show the same rows at the same size. Show runs its JavaScript handler with the item's raw input target (Last: raw input claude #14) and View raw input… with the final transcript (Last: raw input final transcript), without re-rendering any row. Tools & MCP lists each tool's bar, calls and total and the MCP server, and Overhead lists what every request carries and each agent. The overview scrolls within at most 320 points and each map section within a fixed 420. Done closes the JavaScript modal (Last: done) and leaves the native one open, and the counter opens it again (Last: open). The section bar raises no onPress, so pressing it is refused as invalid_argument.
+    def test_plugin_token_stats_renders_from_atoms_like_native(self):
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "TokenStats")[0])
+        self.assertEqual(rendered["errors"], [])
+        tree = rendered["tree"]
+        # The same identifiers the board's native TokenStatsView gives its modal.
+        for test_id in ["token-stats", "token-stats-title", "token-stats-task-title", "token-stats-raw-input-button", "token-stats-sections",
+                        "token-stats-final-transcript", "token-stats-total-sent", "token-stats-excluding-cache", "token-stats-excluding-cache-split",
+                        "token-stats-total-calls", "token-stats-output", "token-stats-total", "token-stats-overview",
+                        "token-stats-tool-Bash", "token-stats-tool-Read", "token-stats-turn-turn-1", "token-stats-turn-turn-2", "close-token-stats-button"]:
+            self.plugin_node(tree, test_id)
+        types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
+        self.assertEqual(types, {"Panel", "Stack", "Text", "Label", "Button", "Spacer", "ChoiceBar", "Divider", "Scroll"},
+                         "The overview is atoms only.")
+
+        # The task item's counter opens the modal: the same Button atom as on the card.
+        counter = self.plugin_node(tree, "token-stats-counter")
+        self.assertEqual((counter["type"], counter["events"]), ("Button", ["onPress"]))
+        self.assertEqual((counter["props"]["emphasis"], counter["props"]["overhang"], counter["props"]["paddingX"]), (6, True, 4))
+        self.assertEqual((counter["props"]["label"], counter["props"]["hint"]), ("3.7K tokens sent · 8 calls · 650 final transcript", "Open Token Stats"))
+        self.assertEqual(self.plugin_text(counter["children"][0]), "3.7K")
+        self.assertEqual((counter["children"][0]["props"]["design"], counter["children"][0]["props"]["numeric"]), ("monospaced", True))
+
+        modal = self.plugin_node(tree, "token-stats")
+        self.assertEqual((modal["props"]["width"], modal["props"]["padding"], modal["props"]["group"]), (672, 24, True), "720 points wide, padding included.")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "token-stats-title")), "Token stats")
+        self.assertEqual(self.plugin_node(tree, "token-stats-title")["props"]["design"], "rounded")
+        raw_input = self.plugin_node(tree, "token-stats-raw-input-button")
+        self.assertEqual((raw_input["props"]["style"], raw_input["props"]["disabled"]), ("bordered", False))
+        self.assertEqual((raw_input["children"][0]["type"], raw_input["children"][0]["props"]["text"]), ("Label", "View raw input…"))
+        sections = self.plugin_node(tree, "token-stats-sections")
+        self.assertEqual(sections["props"]["selected"], "overview", "Token Stats opens on its Overview section.")
+        self.assertEqual([(option["label"], option["testID"]) for option in sections["props"]["options"]], [
+            ("Overview", "token-stats-section-overview"), ("Wasters", "token-stats-section-wasters"),
+            ("Tools & MCP", "token-stats-section-tools"), ("Overhead", "token-stats-section-overhead")])
+        for test_id, text in [("token-stats-final-transcript", "650"), ("token-stats-total-sent", "3,680"), ("token-stats-excluding-cache", "1,710"),
+                              ("token-stats-excluding-cache-split", "Excluding cache reads: 720 main agent · 990 subagents"),
+                              ("token-stats-total-calls", "8 model calls · 4 main, 4 across 2 subagents"), ("token-stats-output", "Output 170"),
+                              ("token-stats-total", "3,200")]:
+            self.assertEqual(self.plugin_text(self.plugin_node(tree, test_id)), text)
+        scroll = self.plugin_node(tree, "token-stats-overview")
+        self.assertEqual((scroll["type"], scroll["props"]["maxHeight"], scroll["props"]["spacing"]), ("Scroll", 320, 18))
+        tool = self.plugin_node(tree, "token-stats-tool-Bash")
+        self.assertEqual((tool["props"]["align"], tool["props"]["group"]), ("baseline", True))
+        self.assertEqual([self.plugin_text(child) for child in tool["children"] if child["type"] == "Text"], ["Bash", "2 turns", "3,200"])
+        texts = [self.plugin_text(node) for node in self.plugin_nodes(tree) if node["type"] == "Text"]
+        for label, value in [("Input", "240"), ("Output", "170"), ("Cache read", "2,400"), ("Cache write", "390")]:
+            index = texts.index(label)
+            self.assertEqual(texts[index + 1], value, f"The {label} bucket reads {value}.")
+        done = self.plugin_node(tree, "close-token-stats-button")
+        self.assertEqual((done["props"]["style"], done["props"]["shortcut"]), ("prominent", "default"))
+
+        wasters = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "TokenStats",
+            "--event", "token-stats-sections:onChange:wasters",
+            "--event", "token-stats-waster-0-show:onPress",
+            "--event", "token-stats-raw-input-button:onPress")[0])
+        self.assertEqual(wasters["errors"], [])
+        tree = wasters["tree"]
+        self.assertEqual(self.plugin_node(tree, "token-stats-sections")["props"]["selected"], "wasters")
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(tree)}
+        self.assertNotIn("token-stats-total", test_ids, "Wasters replaces the overview.")
+        self.assertEqual(self.plugin_node(tree, "token-stats-map")["props"]["height"], 420, "Each map section scrolls within a fixed 420 points.")
+        first = self.plugin_node(tree, "token-stats-waster-0")
+        self.assertEqual([child["type"] for child in first["children"]], ["Meter", "Stack", "Spacer", "Text", "Text", "Button"],
+                         "Share bar, label and preview, the request count, the tokens, then Show.")
+        bar = first["children"][0]["props"]
+        self.assertEqual((bar["width"], bar["thickness"], bar["trackOpacity"], bar["minFill"], bar["fraction"]), (72, 6, 0.07, 2, 1))
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "token-stats-waster-0-label")), "fixturelogs/query_logs")
+        label_row = first["children"][1]["children"][0]
+        self.assertEqual([self.plugin_text(child) for child in label_row["children"]], ["fixturelogs/query_logs", "Tool result", "removed by compaction"],
+                         "The label, its kind, then the compaction flag.")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "token-stats-waster-0-requests")), "×63")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "token-stats-waster-0-tokens")), "18,000")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "token-stats-waster-0-removed")), "removed by compaction")
+        self.assertNotIn("token-stats-waster-1-removed", test_ids, "An item still in the final transcript isn't flagged.")
+        show = self.plugin_node(tree, "token-stats-waster-0-show")
+        self.assertEqual((show["props"]["style"], show["props"]["controlSize"]), ("bordered", "small"))
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "token-stats-duplicate-0-copies")), "2 copies of 2,400")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "token-stats-cache-miss-0-request")), "Request 34")
+        commits = {commit["step"]: commit for commit in wasters["commits"]}
+        last_action = self.plugin_node(tree, "js-last-action")
+        self.assertEqual(self.plugin_text(last_action), "Last: raw input final transcript", "View raw input… ran its handler with the final transcript.")
+        shown = commits["token-stats-waster-0-show:onPress"]
+        self.assertEqual((shown["ops"], shown["touchedNodes"]), (["text"], [last_action["children"][1]["id"]]),
+                         "Show ran its JavaScript handler without re-rendering any row.")
+        self.assertIn("update", commits["token-stats-sections:onChange"]["ops"], "Choosing a section updates the ChoiceBar's selection.")
+        shown_text = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "TokenStats", "--event", "token-stats-sections:onChange:wasters", "--event", "token-stats-waster-0-show:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(shown_text["tree"], "js-last-action")), "Last: raw input claude #14",
+                         "Show passes the item's raw input target.")
+
+        tools = self.assert_success(self.call_cli("plugin", "render", "--page", "TokenStats", "--event", "token-stats-sections:onChange:tools")[0])
+        tree = tools["tree"]
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "token-stats-measured-tool-fixturelogs/query_logs-total")), "18,000")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "token-stats-measured-tool-Read-calls")), "2 calls · largest 2,400 · average 2,400")
+        self.assertEqual(self.plugin_node(tree, "token-stats-measured-tool-Bash")["children"][0]["type"], "Meter")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "token-stats-server-fixturelogs-detail")), "2 tools · 1 calls · definitions 1,200")
+
+        overhead = self.assert_success(self.call_cli("plugin", "render", "--page", "TokenStats", "--event", "token-stats-sections:onChange:overhead")[0])
+        tree = overhead["tree"]
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "token-stats-overhead-0-label")), "System prompt (part 1)")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "token-stats-overhead-0-requests")), "× every request")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "token-stats-overhead-2-requests")), "×63")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "token-stats-agent-claude/fxw-sent")), "31,200")
+
+        closed = self.assert_success(self.call_cli("plugin", "render", "--page", "TokenStats", "--event", "close-token-stats-button:onPress")[0])
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(closed["tree"])}
+        self.assertNotIn("token-stats", test_ids, "Done closed the modal.")
+        self.assertEqual(self.plugin_text(self.plugin_node(closed["tree"], "js-last-action")), "Last: done")
+        reopened = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "TokenStats", "--event", "close-token-stats-button:onPress", "--event", "token-stats-counter:onPress")[0])
+        self.plugin_node(reopened["tree"], "token-stats-total")
+        self.assertEqual(self.plugin_text(self.plugin_node(reopened["tree"], "js-last-action")), "Last: open", "The counter opened it again.")
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "TokenStats", "--event", "token-stats-sections:onPress", expected_status=2)[0], "invalid_argument")
 
     # Scheduled tasks. Firing goes through ConversationManager.send, the same path the
     # composer's Send and `conversation send` use for both providers, so the schedule

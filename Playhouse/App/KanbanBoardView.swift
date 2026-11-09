@@ -1994,83 +1994,25 @@ private struct RawInputFocus: Identifiable {
     let inFinalTranscript: Bool
 }
 
-/// How each kind of context item is named on screen.
-private func contextKindName(_ kind: String) -> String {
-    switch ProviderContextKind(rawValue: kind) {
-    case .systemPrompt: "System prompt"
-    case .toolDefinition: "Tool definition"
-    case .hiddenOverhead: "Hidden overhead"
-    case .systemReminder: "Injected text"
-    case .userText: "User"
-    case .assistantText: "Assistant"
-    case .thinking: "Thinking"
-    case .toolCall: "Tool call"
-    case .toolResult: "Tool result"
-    case .image: "Image"
-    case .other, nil: "Other"
-    }
-}
-
-/// A bar whose length and heat follow an item's share of the largest one in view.
-private struct TokenShareBar: View {
-    let tokens: Int
-    let maxTokens: Int
-
-    var body: some View {
-        let fraction = maxTokens > 0 ? min(1, Double(tokens) / Double(maxTokens)) : 0
-        ZStack(alignment: .leading) {
-            Capsule().fill(Color.primary.opacity(0.07))
-            Capsule()
-                .fill(TokenUsageHeatmap.color(totalTokens: tokens, max: max(1, maxTokens)))
-                .frame(width: max(2, 72 * fraction))
-        }
-        .frame(width: 72, height: 6)
-        .accessibilityHidden(true)
-    }
-}
-
-/// A row of mutually exclusive choices, each its own button so it can be found by identifier.
-private struct ChoiceBar<Choice: Hashable>: View {
+/// The `ChoiceBar` atom over a string-backed choice, so the raw input sheet's
+/// scope and export bars share the Token Stats section bar's view.
+private struct ChoiceBar<Choice: RawRepresentable & Hashable>: View where Choice.RawValue == String {
     let choices: [(value: Choice, title: String, id: String)]
     @Binding var selection: Choice
 
     var body: some View {
-        HStack(spacing: 2) {
-            ForEach(choices, id: \.id) { choice in
-                Button {
-                    selection = choice.value
-                } label: {
-                    Text(choice.title)
-                        .font(.system(size: 11, weight: selection == choice.value ? .semibold : .regular))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(RoundedRectangle(cornerRadius: 5).fill(selection == choice.value ? Color.accentColor.opacity(0.2) : Color.clear))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .buttonHoverPointer()
-                .nativeHelp(choice.title)
-                .accessibilityIdentifier(choice.id)
-                .accessibilityAddTraits(selection == choice.value ? .isSelected : [])
-            }
+        AtomChoiceBar(
+            props: ChoiceBarProps(options: choices.map { .init(value: $0.value.rawValue, label: $0.title, testID: $0.id) }, selected: selection.rawValue)
+        ) { value in
+            if let choice = Choice(rawValue: value) { selection = choice }
         }
-        .padding(2)
-        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
     }
 }
 
-/// A task's token accounting: the totals, the per-turn detail, and what each
-/// tool took part in, plus a map of what filled the context, read from the
-/// providers' own session files.
+/// The board's Token Stats modal: a task's token accounting, re-read every
+/// two seconds while it is open, around the atom-built `TokenStatsView`. It
+/// holds the selected section and opens the raw input sheet.
 private struct TokenStatsSheet: View {
-    private enum Section: String, CaseIterable, Identifiable {
-        case overview = "Overview"
-        case wasters = "Wasters"
-        case tools = "Tools & MCP"
-        case overhead = "Overhead"
-        var id: String { String(describing: self) }
-    }
-
     @Environment(\.dismiss) private var dismiss
     let taskID: UUID
     let taskTitle: String
@@ -2078,53 +2020,19 @@ private struct TokenStatsSheet: View {
     @State private var summary: TaskTokenUsageSummary?
     @State private var waste: TaskTokenWasteReport?
     @State private var didLoad = false
-    @State private var section = Section.overview
+    @State private var section = "overview"
     @State private var rawInputFocus: RawInputFocus?
 
-    private static let number = IntegerFormatStyle<Int>().grouping(.automatic)
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Token stats")
-                        .font(.system(size: 19, weight: .semibold, design: .rounded))
-                    Text(taskTitle)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-                Spacer()
-                Button("View raw input…", systemImage: "doc.text.magnifyingglass") {
-                    rawInputFocus = RawInputFocus(agent: nil, item: nil, inFinalTranscript: true)
-                }
-                .buttonHoverPointer()
-                .nativeHelp("Open the full input the model was sent, item by item")
-                .disabled(waste?.available != true)
-                .accessibilityIdentifier("token-stats-raw-input-button")
-            }
-            ChoiceBar(
-                choices: Section.allCases.map { ($0, $0.rawValue, "token-stats-section-\($0.id)") },
-                selection: $section
+        TokenStatsView(
+            model: TokenStatsModel(taskTitle: taskTitle, summary: summary, waste: waste, loaded: didLoad),
+            section: section,
+            actions: TokenStatsActions(
+                selectSection: { section = $0 },
+                showRawInput: { rawInputFocus = RawInputFocus(agent: $0.agent, item: $0.item, inFinalTranscript: $0.inFinalTranscript) },
+                done: { dismiss() }
             )
-            switch section {
-            case .overview: overview
-            case .wasters: map { wasters($0) }
-            case .tools: map { measuredTools($0) }
-            case .overhead: map { overhead($0) }
-            }
-            HStack {
-                Spacer()
-                Button("Done") { dismiss() }
-                    .buttonHoverPointer()
-                    .nativeHelp("Done")
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-                    .accessibilityIdentifier("close-token-stats-button")
-            }
-        }
-        .padding(24)
-        .frame(width: 720)
+        )
         // Keeps reading while the sheet is open, so a running turn's calls
         // show up live. The map extends its parsed logs from where they
         // stopped, so a poll only reads what the session files gained.
@@ -2139,384 +2047,6 @@ private struct TokenStatsSheet: View {
         }
         .sheet(item: $rawInputFocus) { focus in
             RawInputSheet(taskID: taskID, taskTitle: taskTitle, modelContext: modelContext, focus: focus)
-        }
-    }
-
-    @ViewBuilder
-    private var overview: some View {
-        if let summary, summary.totalTokens > 0 || summary.callUsage.available {
-            totals(summary)
-            Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    tools(summary)
-                    turns(summary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(maxHeight: 320)
-        } else if didLoad {
-            Text("No tokens recorded for this task yet.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("token-stats-empty")
-        }
-    }
-
-    /// A map section, or why there is no map: the providers only log their
-    /// requests once a conversation has run with a version that writes them.
-    @ViewBuilder
-    private func map<Content: View>(@ViewBuilder _ content: @escaping (TaskTokenWasteReport) -> Content) -> some View {
-        if let waste, waste.available {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) { content(waste) }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(height: 420)
-        } else if didLoad {
-            Text("No request log for this task yet. Claude Code and Codex write one to their session files as the conversation runs.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("token-stats-map-unavailable")
-        }
-    }
-
-    private func sectionHeader(_ title: String, _ caption: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-            Text(caption)
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-        }
-    }
-
-    private func tokens(_ value: Int, id: String) -> some View {
-        Text(value.formatted(Self.number))
-            .font(.system(size: 11, weight: .medium))
-            .monospacedDigit()
-            .accessibilityIdentifier(id)
-    }
-
-    private func detail(_ text: String, id: String? = nil) -> some View {
-        Text(text)
-            .font(.system(size: 10))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .accessibilityIdentifier(id ?? "")
-    }
-
-    private func agentLabel(_ id: String, in report: TaskTokenWasteReport) -> String {
-        report.agents.first { $0.id == id }?.label ?? id
-    }
-
-    @ViewBuilder
-    private func wasters(_ report: TaskTokenWasteReport) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            sectionHeader(
-                "Largest items",
-                "Ranked by the tokens each item added. ×N is how many requests carried it; show one to read its full text."
-            )
-            let largest = report.wasters.first?.tokens ?? 0
-            ForEach(Array(report.wasters.enumerated()), id: \.element.id) { index, item in
-                HStack(alignment: .center, spacing: 8) {
-                    TokenShareBar(tokens: item.tokens, maxTokens: largest)
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text(item.label)
-                                .font(.system(size: 11, weight: .medium))
-                                .lineLimit(1)
-                                .accessibilityIdentifier("token-stats-waster-\(index)-label")
-                            Text(contextKindName(item.kind))
-                                .font(.system(size: 9))
-                                .foregroundStyle(.tertiary)
-                            if !item.inFinalTranscript {
-                                Text("removed by compaction")
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.orange)
-                                    .accessibilityIdentifier("token-stats-waster-\(index)-removed")
-                            }
-                        }
-                        detail(item.preview)
-                    }
-                    Spacer(minLength: 8)
-                    detail("×\(item.requests)", id: "token-stats-waster-\(index)-requests")
-                    tokens(item.tokens, id: "token-stats-waster-\(index)-tokens")
-                    Button("Show") {
-                        rawInputFocus = RawInputFocus(agent: item.agent, item: item.item, inFinalTranscript: item.inFinalTranscript)
-                    }
-                    .buttonHoverPointer()
-                    .nativeHelp("Show the full text the model received")
-                    .controlSize(.small)
-                    .accessibilityIdentifier("token-stats-waster-\(index)-show")
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("token-stats-waster-\(index)")
-            }
-        }
-        if !report.duplicates.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                sectionHeader("Repeated results", "Tool results whose text was sent more than once in the same agent.")
-                ForEach(Array(report.duplicates.enumerated()), id: \.element.id) { index, duplicate in
-                    HStack(spacing: 8) {
-                        Text(duplicate.label)
-                            .font(.system(size: 11))
-                            .lineLimit(1)
-                        detail("\(duplicate.copies) copies of \(duplicate.tokensPerCopy.formatted(Self.number))", id: "token-stats-duplicate-\(index)-copies")
-                        Spacer(minLength: 8)
-                        tokens(duplicate.wastedTokens, id: "token-stats-duplicate-\(index)-wasted")
-                    }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("token-stats-duplicate-\(index)")
-                }
-            }
-        }
-        if !report.cacheMisses.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                sectionHeader("Cache misses", "Requests that re-sent most of the previous request's context without the prompt cache, paying for it again.")
-                ForEach(Array(report.cacheMisses.enumerated()), id: \.element.id) { index, miss in
-                    HStack(spacing: 8) {
-                        Text("Request \(miss.request)")
-                            .font(.system(size: 11))
-                            .accessibilityIdentifier("token-stats-cache-miss-\(index)-request")
-                        detail("\(agentLabel(miss.agent, in: report)) · \(miss.contextTokens.formatted(Self.number)) in context")
-                        Spacer(minLength: 8)
-                        tokens(miss.rewrittenTokens, id: "token-stats-cache-miss-\(index)-rewritten")
-                    }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("token-stats-cache-miss-\(index)")
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func measuredTools(_ report: TaskTokenWasteReport) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            sectionHeader("Tools", "Tokens each tool's calls and results added to the context, across every agent.")
-            let largest = report.tools.first?.totalTokens ?? 0
-            ForEach(report.tools) { tool in
-                HStack(spacing: 8) {
-                    TokenShareBar(tokens: tool.totalTokens, maxTokens: largest)
-                    Text(tool.id)
-                        .font(.system(size: 11))
-                        .lineLimit(1)
-                    Spacer(minLength: 8)
-                    detail("\(tool.calls) \(tool.calls == 1 ? "call" : "calls") · largest \(tool.largestResultTokens.formatted(Self.number)) · average \(tool.averageResultTokens.formatted(Self.number))",
-                           id: "token-stats-measured-tool-\(tool.id)-calls")
-                    tokens(tool.totalTokens, id: "token-stats-measured-tool-\(tool.id)-total")
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("token-stats-measured-tool-\(tool.id)")
-            }
-        }
-        if !report.servers.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                sectionHeader("MCP servers", "What each server's calls added, and what its tool definitions cost on every request.")
-                ForEach(report.servers) { server in
-                    HStack(spacing: 8) {
-                        Text(server.id)
-                            .font(.system(size: 11))
-                            .lineLimit(1)
-                        Spacer(minLength: 8)
-                        detail("\(server.tools) tools · \(server.calls) calls · definitions \(server.definitionTokens.formatted(Self.number))",
-                               id: "token-stats-server-\(server.id)-detail")
-                        tokens(server.totalTokens, id: "token-stats-server-\(server.id)-total")
-                    }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("token-stats-server-\(server.id)")
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func overhead(_ report: TaskTokenWasteReport) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            sectionHeader("Sent with every request", "The system prompt and tool definitions each main agent carries, whatever the conversation does.")
-            let largest = report.overhead.first?.tokens ?? 0
-            ForEach(Array(report.overhead.enumerated()), id: \.element.id) { index, entry in
-                HStack(spacing: 8) {
-                    TokenShareBar(tokens: entry.tokens, maxTokens: largest)
-                    Text(entry.label)
-                        .font(.system(size: 11))
-                        .lineLimit(1)
-                        .accessibilityIdentifier("token-stats-overhead-\(index)-label")
-                    Spacer(minLength: 8)
-                    detail(entry.everyRequest ? "× every request" : "×\(entry.requests)", id: "token-stats-overhead-\(index)-requests")
-                    tokens(entry.tokens, id: "token-stats-overhead-\(index)-tokens")
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("token-stats-overhead-\(index)")
-            }
-        }
-        VStack(alignment: .leading, spacing: 6) {
-            sectionHeader("Agents", "Each agent's own requests, everything they sent, and the size of its final transcript.")
-            ForEach(report.agents) { agent in
-                HStack(spacing: 8) {
-                    Text(agent.label)
-                        .font(.system(size: 11))
-                        .lineLimit(1)
-                    Spacer(minLength: 8)
-                    detail("\(agent.requests) requests · final \(agent.finalTranscriptTokens.formatted(Self.number))\(agent.compactions > 0 ? " · \(agent.compactions) compacted" : "")",
-                           id: "token-stats-agent-\(agent.id)-detail")
-                    tokens(agent.sentTokens, id: "token-stats-agent-\(agent.id)-sent")
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("token-stats-agent-\(agent.id)")
-            }
-        }
-    }
-
-    private func totals(_ summary: TaskTokenUsageSummary) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            callTotals(summary.callUsage)
-            Text(summary.totalTokens.formatted(Self.number))
-                .font(.system(size: 30, weight: .semibold, design: .rounded))
-                .accessibilityIdentifier("token-stats-total")
-            let turnsTotal = summary.turns.reduce(0) { $0 + $1.totalTokens }
-            Text("tokens across \(summary.turnCount) \(summary.turnCount == 1 ? "turn" : "turns")")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            if turnsTotal != summary.totalTokens {
-                // A private recovery turn contributes to the total with no
-                // visible row, so the two numbers can legitimately differ;
-                // say so rather than let it read as a miscount.
-                Text("Includes tokens from private turns not shown below.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .accessibilityIdentifier("token-stats-hidden-turns-note")
-            }
-            HStack(spacing: 18) {
-                bucket("Input", summary.usage.inputTokens)
-                bucket("Output", summary.usage.outputTokens)
-                bucket("Cache read", summary.usage.cacheReadTokens)
-                bucket("Cache write", summary.usage.cacheCreationTokens)
-            }
-        }
-    }
-
-    /// The two numbers a task is judged by: how large its transcript grew, and
-    /// how much it re-sent over all of its model calls, subagents included.
-    @ViewBuilder
-    private func callTotals(_ usage: TaskTokenUsageSummary.CallUsage) -> some View {
-        if usage.available {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .top, spacing: 28) {
-                    headline("Final transcript size", usage.finalTranscriptTokens, id: "token-stats-final-transcript")
-                    headline("Total sent (incl. subagents)", usage.totalSentTokens, id: "token-stats-total-sent")
-                    if let excluding = usage.totalTokensExcludingCacheReads {
-                        headline("Excluding cache reads (incl. subagents)", excluding, id: "token-stats-excluding-cache")
-                    }
-                }
-                if let main = usage.mainAgent.tokensExcludingCacheReads, let subs = usage.subagents.tokensExcludingCacheReads {
-                    Text("Excluding cache reads: \(main.formatted(Self.number)) main agent · \(subs.formatted(Self.number)) subagents")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("token-stats-excluding-cache-split")
-                }
-                let subagents = usage.subagents
-                Text("\(usage.totalCalls) model \(usage.totalCalls == 1 ? "call" : "calls") · \(usage.mainAgent.calls) main, \(subagents.calls) across \(subagents.count) \(subagents.count == 1 ? "subagent" : "subagents")")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("token-stats-total-calls")
-                Text("Output \(usage.totalOutputTokens.formatted(Self.number))")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("token-stats-output")
-                Divider()
-                Text("Main agent turns")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-            }
-        } else {
-            Text("Call-level stats are not recorded for this task yet.")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-                .accessibilityIdentifier("token-stats-calls-unavailable")
-        }
-    }
-
-    private func headline(_ name: String, _ value: Int, id: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(name)
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-            Text(value.formatted(Self.number))
-                .font(.system(size: 22, weight: .semibold, design: .rounded))
-                .accessibilityIdentifier(id)
-        }
-    }
-
-    private func bucket(_ name: String, _ value: Int) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(name)
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-            Text(value.formatted(Self.number))
-                .font(.system(size: 13, weight: .medium))
-        }
-    }
-
-    @ViewBuilder
-    private func tools(_ summary: TaskTokenUsageSummary) -> some View {
-        if !summary.tools.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("By tool, skill and MCP")
-                    .font(.system(size: 12, weight: .semibold))
-                // Providers report usage once per turn, so a turn's cost counts
-                // toward every tool that ran in it. Say so rather than implying
-                // these totals add up to the task total.
-                Text("Cost of the turns each ran in; turns with several tools count toward each.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                ForEach(summary.tools) { tool in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(tool.id)
-                            .font(.system(size: 11))
-                            .lineLimit(1)
-                        Spacer(minLength: 8)
-                        Text("\(tool.turnCount) \(tool.turnCount == 1 ? "turn" : "turns")")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                        Text(tool.totalTokens.formatted(Self.number))
-                            .font(.system(size: 11, weight: .medium))
-                            .monospacedDigit()
-                    }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("token-stats-tool-\(tool.id)")
-                }
-            }
-        }
-    }
-
-    private func turns(_ summary: TaskTokenUsageSummary) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("By turn")
-                .font(.system(size: 12, weight: .semibold))
-            ForEach(summary.turns) { turn in
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(turn.recordedAt.formatted(date: .abbreviated, time: .shortened))
-                            .font(.system(size: 11))
-                        Text(turn.provider.displayName)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                        Spacer(minLength: 8)
-                        Text(turn.totalTokens.formatted(Self.number))
-                            .font(.system(size: 11, weight: .medium))
-                            .monospacedDigit()
-                    }
-                    if !turn.tools.isEmpty {
-                        Text(turn.tools.joined(separator: " · "))
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("token-stats-turn-\(turn.id)")
-            }
         }
     }
 }
@@ -2948,7 +2478,7 @@ private struct RawInputRowView: View {
                     .accessibilityIdentifier("\(row.accessibilityID)-tokens")
             }
             HStack(spacing: 6) {
-                TokenShareBar(tokens: row.tokens, maxTokens: maxTokens)
+                TokenShareBar(bar: TokenStatsModel.bar(row.tokens, largest: maxTokens))
                 Text(row.preview)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
