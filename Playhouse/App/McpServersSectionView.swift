@@ -395,7 +395,7 @@ struct McpServersSectionView: View {
                 Spacer(minLength: 8)
             }
             .overlay {
-                SkillRowPressArea(showsPointingHand: true, onClick: { openEditor(server) }, onLongPress: {})
+                PressAreaView(showsPointingHand: true, onClick: { openEditor(server) }, onLongPress: {})
             }
             // Outside the click-to-open area above, so the buttons get their own clicks.
             signInButtons(server, key: key)

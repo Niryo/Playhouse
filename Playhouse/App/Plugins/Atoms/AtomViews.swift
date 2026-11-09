@@ -2,11 +2,12 @@ import SwiftUI
 
 // The atoms' SwiftUI views. Plugins reach them through `AtomRegistry`, and
 // native composites (the task item, the Agents info section, the Token
-// Stats modal) build them directly with the same props
+// Stats modal, the Skills page) build them directly with the same props
 // structs, so both share one implementation.
 
 /// Colors a prop may name: primary, secondary, tertiary, accent, text (the
-/// conversation text color), red, green, orange, blue, purple, or #RRGGBB.
+/// conversation text color), panel and window (the workspace's panel and
+/// window backgrounds), red, green, orange, blue, purple, or #RRGGBB.
 enum AtomColor {
     static func style(_ name: String?) -> AnyShapeStyle? {
         guard let name else { return nil }
@@ -16,6 +17,8 @@ enum AtomColor {
         case "tertiary": return AnyShapeStyle(.tertiary)
         case "accent": return AnyShapeStyle(Color.accentColor)
         case "text": return AnyShapeStyle(WorkspaceTheme.conversationText)
+        case "panel": return AnyShapeStyle(WorkspaceTheme.panelBackground)
+        case "window": return AnyShapeStyle(WorkspaceTheme.windowBackground)
         case "red": return AnyShapeStyle(Color.red)
         case "green": return AnyShapeStyle(Color.green)
         case "orange": return AnyShapeStyle(Color.orange)
@@ -294,6 +297,7 @@ struct AtomButton<Content: View>: View {
         styled
             .modifier(Applied(when: props.controlSize == "small") { $0.controlSize(.small) })
             .modifier(Applied(when: props.shortcut == "default") { $0.keyboardShortcut(.defaultAction) })
+            .modifier(Applied(when: props.shortcut == "cancel") { $0.keyboardShortcut(.cancelAction) })
             .padding(.horizontal, overhangs ? -CGFloat((props.emphasis ?? 0) + (common.paddingX ?? 0)) : 0)
             .padding(.vertical, overhangs ? -CGFloat(props.emphasis ?? 0) : 0)
             .disabled(props.disabled == true)
@@ -319,23 +323,25 @@ struct AtomButton<Content: View>: View {
             .contentShape(Rectangle())
     }
 
+    private var role: ButtonRole? { props.destructive == true ? .destructive : nil }
+
     @ViewBuilder
     private var styled: some View {
         switch props.style {
         case "borderless":
-            Button(action: action) { label }
+            Button(role: role, action: action) { label }
                 .buttonStyle(.borderless)
                 .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
         case "bordered":
-            Button(action: action) { label }
+            Button(role: role, action: action) { label }
                 .buttonStyle(.bordered)
                 .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
         case "prominent":
-            Button(action: action) { label }
+            Button(role: role, action: action) { label }
                 .buttonStyle(.borderedProminent)
                 .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
         default:
-            Button(action: action) { label }
+            Button(role: role, action: action) { label }
                 .buttonStyle(.plain)
                 .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
         }
@@ -367,7 +373,7 @@ struct AtomSpinner: View {
 
     var body: some View {
         ProgressView()
-            .controlSize(props.size == "mini" ? .mini : .small)
+            .controlSize(props.size == "mini" ? .mini : props.size == "regular" ? .regular : .small)
             .atomCommon(common)
     }
 }
@@ -601,12 +607,15 @@ struct AtomPanel<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: CGFloat(props.cornerRadius ?? 8), style: .continuous)
         VStack(alignment: .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
             .atomFrame(common)
-            .background(
-                (AtomColor.style(props.fill) ?? AnyShapeStyle(.primary)).opacity(props.fillOpacity ?? 0.05),
-                in: RoundedRectangle(cornerRadius: CGFloat(props.cornerRadius ?? 8), style: .continuous)
-            )
+            .background((AtomColor.style(props.fill) ?? AnyShapeStyle(.primary)).opacity(props.fillOpacity ?? 0.05), in: shape)
+            .overlay {
+                if let stroke = AtomColor.style(props.stroke) {
+                    shape.strokeBorder(stroke.opacity(props.strokeOpacity ?? 1))
+                }
+            }
             .atomCommon(common, group: true, frame: false)
     }
 }
@@ -645,8 +654,15 @@ struct AtomScroll<Content: View>: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Group {
+                if props.lazy == true {
+                    LazyVStack(alignment: .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
+                } else {
+                    VStack(alignment: .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
+                }
+            }
+            .padding(CGFloat(props.inset ?? 0))
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .modifier(Applied(when: props.maxHeight != nil) { $0.frame(maxHeight: CGFloat(props.maxHeight ?? 0)) })
         .atomCommon(common)
@@ -695,5 +711,195 @@ struct AtomChoiceBar: View {
         .padding(2)
         .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
         .atomCommon(common, group: true)
+    }
+}
+
+/// A switch with no visible label. A click asks the owner to flip `isOn`
+/// (`onToggle`); it shows whatever `isOn` it is given.
+struct AtomToggle: View {
+    var props: ToggleProps
+    var common = AtomCommon()
+    let onToggle: () -> Void
+
+    var body: some View {
+        Toggle(common.label ?? "", isOn: Binding(get: { props.isOn }, set: { if $0 != props.isOn { onToggle() } }))
+            .toggleStyle(.switch)
+            .controlSize(controlSize)
+            .labelsHidden()
+            .disabled(props.disabled == true)
+            .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
+            .atomCommon(common)
+    }
+
+    private var controlSize: ControlSize {
+        switch props.size {
+        case "mini": .mini
+        case "small": .small
+        default: .regular
+        }
+    }
+}
+
+/// A rounded one-line text field. It edits its own copy of `text` so typing
+/// never waits on the owner, reports each edit through `onChange`, and takes
+/// the owner's `text` whenever that changes.
+struct AtomTextField: View {
+    var props: TextFieldProps
+    var common = AtomCommon()
+    let onChange: (String) -> Void
+    @State private var text: String
+
+    init(props: TextFieldProps, common: AtomCommon = AtomCommon(), onChange: @escaping (String) -> Void) {
+        self.props = props
+        self.common = common
+        self.onChange = onChange
+        _text = State(initialValue: props.text)
+    }
+
+    var body: some View {
+        TextField(props.placeholder ?? "", text: Binding(get: { text }, set: { text = $0; onChange($0) }))
+            .textFieldStyle(.roundedBorder)
+            .onChange(of: props.text) { _, owned in
+                if owned != text { text = owned }
+            }
+            .atomCommon(common)
+    }
+}
+
+/// A segmented control showing `selected`; choosing a segment calls
+/// `onChange` with its value. Without a `width` it fits its segments.
+struct AtomSegmented: View {
+    var props: SegmentedProps
+    var common = AtomCommon()
+    let onChange: (String) -> Void
+
+    var body: some View {
+        Picker(common.label ?? "", selection: Binding(get: { props.selected }, set: { if $0 != props.selected { onChange($0) } })) {
+            ForEach(props.options, id: \.value) { option in
+                Text(verbatim: option.label).tag(option.value)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .modifier(Applied(when: common.width == nil) { $0.fixedSize() })
+        .disabled(props.disabled == true)
+        .atomCommon(common)
+    }
+}
+
+/// A borderless pull-down menu labelled by an SF Symbol. The common width and
+/// height frame the symbol, so they are the click target; a separator sits
+/// between the item groups.
+struct AtomMenu: View {
+    var props: MenuProps
+    var common = AtomCommon()
+    let onMenu: (String) -> Void
+
+    var body: some View {
+        var label = common
+        label.testID = nil
+        label.label = nil
+        label.help = nil
+        let groups = props.items.filter { !$0.isEmpty }
+        return Menu {
+            ForEach(Array(groups.enumerated()), id: \.offset) { index, group in
+                if index > 0 { Divider() }
+                ForEach(group, id: \.id) { item in
+                    Button(item.title, role: item.destructive == true ? .destructive : nil) { onMenu(item.id) }
+                        .buttonHoverPointer()
+                        .help(item.help ?? item.title)
+                        .modifier(Applied(when: item.testID != nil) { $0.accessibilityIdentifier(item.testID ?? "") })
+                }
+            }
+        } label: {
+            Image(systemName: props.icon)
+                .atomFont(AtomFont.font(size: props.size, weight: props.weight))
+                .foregroundStyle(AtomColor.style(props.color) ?? AnyShapeStyle(.secondary))
+                .atomFrame(label)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
+        .atomCommon(common, frame: false)
+    }
+}
+
+/// A leading column whose clicks and presses AppKit tells apart: a click
+/// calls `onPress` and a press and hold calls `onLongPress`. It covers its
+/// children, so it holds only the part of a row the press is for. It is one
+/// accessibility container, so its identifier never replaces theirs.
+struct AtomPressArea<Content: View>: View {
+    var props = PressAreaProps()
+    var common = AtomCommon()
+    let onPress: () -> Void
+    let onLongPress: () -> Void
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
+            .overlay {
+                PressAreaView(showsPointingHand: props.pointer == true, onClick: onPress, onLongPress: onLongPress)
+            }
+            .atomCommon(common, group: true)
+    }
+}
+
+/// AppKit's own mouse tracking tells a click from a press and hold: SwiftUI's
+/// long-press gesture raced against a tap could stay tracking after a click
+/// opened the editor, and the window then ignored every click until it was
+/// minimized.
+struct PressAreaView: NSViewRepresentable {
+    let showsPointingHand: Bool
+    let onClick: () -> Void
+    let onLongPress: () -> Void
+
+    func makeNSView(context: Context) -> PressView { PressView() }
+
+    func updateNSView(_ view: PressView, context: Context) {
+        view.onClick = onClick
+        view.onLongPress = onLongPress
+        if view.showsPointingHand != showsPointingHand {
+            view.showsPointingHand = showsPointingHand
+            view.window?.invalidateCursorRects(for: view)
+        }
+    }
+
+    final class PressView: NSView {
+        static let holdDuration: TimeInterval = 0.45
+        var onClick: () -> Void = {}
+        var onLongPress: () -> Void = {}
+        var showsPointingHand = false
+
+        override func isAccessibilityElement() -> Bool { false }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func resetCursorRects() {
+            if showsPointingHand { addCursorRect(bounds, cursor: .pointingHand) }
+        }
+
+        /// Tracks the press to its mouse-up here, so no gesture state outlives it.
+        override func mouseDown(with event: NSEvent) {
+            guard let window else { return }
+            let deadline = Date(timeIntervalSinceNow: Self.holdDuration)
+            var held = false
+            while true {
+                let next = window.nextEvent(
+                    matching: [.leftMouseUp, .leftMouseDragged],
+                    until: held ? .distantFuture : deadline,
+                    inMode: .eventTracking,
+                    dequeue: true
+                )
+                guard let next else {
+                    held = true
+                    onLongPress()
+                    continue
+                }
+                guard next.type == .leftMouseUp else { continue }
+                if !held, bounds.contains(convert(next.locationInWindow, from: nil)) { onClick() }
+                return
+            }
+        }
     }
 }

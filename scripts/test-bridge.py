@@ -14199,7 +14199,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         path.write_text(source, encoding="utf-8")
         return self.call_cli("plugin", "render", "--file", path, *options, expected_status=expected_status)[0]
 
-    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar) and the Task Item, Agents Info and Token Stats examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
+    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea) and the Task Item, Agents Info, Token Stats and Skills Page examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
     def test_plugin_renderer_commits_minimal_ops_and_runs_handlers(self):
         plugin = """
 function App() {
@@ -14218,7 +14218,8 @@ function App() {
 Playhouse.render(h(App));
 """
         rendered = self.assert_success(self.render_plugin(plugin))
-        self.assertEqual(rendered["atoms"], ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter", "Scroll", "Divider", "ChoiceBar"],
+        self.assertEqual(rendered["atoms"], ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter",
+                                             "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea"],
                          "Plugins compose exactly the native composites' atoms.")
         self.assertEqual(rendered["errors"], [])
         self.assertEqual(len(rendered["commits"]), 1, "The first render is one commit.")
@@ -14293,12 +14294,12 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertTrue(any("Invalid commit" in error and "integer" in error for error in out_of_range["result"]["errors"]),
                         f"An op whose node id is out of range is reported, not a crash: {out_of_range['result']['errors']}")
 
-        for page in ["AgentsInfo", "Button", "Card", "ChoiceBar", "Disclosure", "Divider", "Icon", "Label", "Link", "Meter", "Panel", "PillPicker",
-                     "Scroll", "Spacer", "Spinner", "Stack", "TaskItem", "Text", "TokenStats"]:
+        for page in ["AgentsInfo", "Button", "Card", "ChoiceBar", "Disclosure", "Divider", "Icon", "Label", "Link", "Menu", "Meter", "Panel", "PillPicker",
+                     "PressArea", "Scroll", "Segmented", "SkillsPage", "Spacer", "Spinner", "Stack", "TaskItem", "Text", "TextField", "Toggle", "TokenStats"]:
             page_render = self.assert_success(self.call_cli("plugin", "render", "--page", page)[0])
             self.assertEqual(page_render["errors"], [], f"The {page} catalog page renders without errors.")
             used = {node["type"] for node in self.plugin_nodes(page_render["tree"])}
-            if page not in ("TaskItem", "AgentsInfo", "TokenStats"):
+            if page not in ("TaskItem", "AgentsInfo", "TokenStats", "SkillsPage"):
                 self.assertIn(page, used, f"The {page} page shows its atom.")
         disclosure = self.assert_success(self.call_cli("plugin", "render", "--page", "Disclosure", "--event", "disclosure-demo:onToggle")[0])
         section = self.plugin_node(disclosure["tree"], "disclosure-demo")
@@ -14324,6 +14325,33 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual((scroll["type"], scroll["props"]["maxHeight"]), ("Scroll", 120))
         self.assertEqual(len([child for child in scroll["children"] if child["type"] == "Text"]), 8, "Adding rows puts them inside the Scroll.")
         self.assertEqual(self.plugin_text(self.plugin_node(scrolled["tree"], "scroll-count")), "8 rows")
+        toggled = self.assert_success(self.call_cli("plugin", "render", "--page", "Toggle", "--event", "toggle-demo:onToggle")[0])
+        switch = self.plugin_node(toggled["tree"], "toggle-demo")
+        state = self.plugin_node(toggled["tree"], "toggle-state")
+        self.assertEqual((switch["events"], switch["props"]["isOn"], switch["props"]["size"]), (["onToggle"], False, "mini"), "onToggle flipped the switch off.")
+        self.assertEqual(self.plugin_text(state), "Off")
+        self.assertEqual(sorted(toggled["commits"][-1]["ops"]), ["text", "update"], "Toggling updates only the Toggle's props and the readout.")
+        self.assertEqual(set(toggled["commits"][-1]["touchedNodes"]), {switch["id"], state["children"][0]["id"]})
+        typed = self.assert_success(self.call_cli("plugin", "render", "--page", "TextField", "--event", "text-field-demo:onChange:release")[0])
+        field = self.plugin_node(typed["tree"], "text-field-demo")
+        self.assertEqual((field["events"], field["props"]["text"], field["props"]["placeholder"]), (["onChange"], "release", "Search skills"))
+        self.assertEqual(self.plugin_text(self.plugin_node(typed["tree"], "text-field-value")), "Text: release", "onChange received the new text.")
+        segmented = self.assert_success(self.call_cli("plugin", "render", "--page", "Segmented", "--event", "segmented-demo:onChange:global")[0])
+        picker = self.plugin_node(segmented["tree"], "segmented-demo")
+        self.assertEqual((picker["events"], picker["props"]["selected"]), (["onChange"], "global"))
+        self.assertEqual([option["label"] for option in picker["props"]["options"]], ["Repo", "Global", "Built-in"])
+        self.assertEqual(self.plugin_text(self.plugin_node(segmented["tree"], "segmented-selected")), "Selected: global")
+        menu = self.assert_success(self.call_cli("plugin", "render", "--page", "Menu", "--event", "menu-demo:onMenu:delete")[0])
+        demo_menu = self.plugin_node(menu["tree"], "menu-demo")
+        self.assertEqual((demo_menu["events"], demo_menu["props"]["icon"]), (["onMenu"], "ellipsis"))
+        self.assertEqual([[item["id"] for item in group] for group in demo_menu["props"]["items"]], [["edit", "reveal"], [], ["delete"]])
+        self.assertEqual(self.plugin_text(self.plugin_node(menu["tree"], "menu-chosen")), "Chosen: delete", "onMenu received the item's id.")
+        pressed_area = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "PressArea", "--event", "press-area-demo:onPress", "--event", "press-area-demo:onLongPress", "--event", "press-area-demo:onLongPress")[0])
+        area = self.plugin_node(pressed_area["tree"], "press-area-demo")
+        self.assertEqual((sorted(area["events"]), area["props"]["pointer"]), (["onLongPress", "onPress"], True))
+        self.assertEqual(self.plugin_text(self.plugin_node(pressed_area["tree"], "press-area-count")), "Clicked 1 · held 2",
+                         "A click and a press and hold reach different handlers.")
         pressed = self.assert_success(self.call_cli("plugin", "render", "--page", "Button", "--event", "button-plain:onPress")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(pressed["tree"], "button-press-count")), "Pressed 1 times")
         self.assertEqual(pressed["commits"][-1]["ops"], ["text"], "The Button page's press is one text op.")
@@ -14344,6 +14372,11 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
             ('Playhouse.render(h(Scroll, { maxHeight: "tall" }));', "<Scroll> has an invalid prop: maxHeight: expected a number, found a string"),
             ('Playhouse.render(h(Divider, { axis: "v" }));', '<Divider> has no prop "axis"'),
             ('Playhouse.render(h(Divider, null, h(Text, null, "x")));', "<Divider> can't hold <Text>"),
+            ('Playhouse.render(h(Toggle, { size: "mini" }));', "<Toggle> has an invalid prop: isOn: missing"),
+            ('Playhouse.render(h(TextField, { text: 3 }));', "<TextField> has an invalid prop: text: expected a string, found 3"),
+            ('Playhouse.render(h(Segmented, { options: [{ value: "a", label: "A" }], selected: "a", onToggle: function () {} }));', '<Segmented> has no event "onToggle"'),
+            ('Playhouse.render(h(Menu, { icon: "ellipsis", items: [{ id: "a", title: "A" }] }));', "<Menu> has an invalid prop: items.0"),
+            ('Playhouse.render(h(Toggle, { isOn: true }, h(Text, null, "x")));', "<Toggle> can't hold <Text>"),
             ('Playhouse.render(h(Stack, { onTap: function () {} }));', '<Stack> has no event "onTap"'),
             ('Playhouse.render(h(Icon, { name: "clock" }, h(Text, null, "x")));', "<Icon> can't hold <Text>"),
         ]:
@@ -14606,6 +14639,187 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.plugin_node(reopened["tree"], "token-stats-total")
         self.assertEqual(self.plugin_text(self.plugin_node(reopened["tree"], "js-last-action")), "Last: open", "The counter opened it again.")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "TokenStats", "--event", "token-stats-sections:onPress", expected_status=2)[0], "invalid_argument")
+
+    # case-contract: test_plugin_skills_page_renders_from_atoms_like_native | The Plugin Catalog's Skills Page shows the Skills page's header and skill gallery composed in JavaScript from atoms above the native SwiftUI header and gallery the Skills page uses, built from the same atoms and sample data, each opened by the composer's Skills button (the same plain Button atom with the sparkles icon, labelled Skills). Both show the back button, the Skills, Rules & MCP title, the Skills | Rules | MCP and Repo | Global | Built-in segmented pickers, the search field and New Skill, the hint, a repository section whose skill rows show their name, provider, Conflict and Invalid badges, description, issue and location, a small Fix with Agent button on a broken skill, the mini switch, a small Use button that is disabled for a skill no provider can use, and the actions menu, and an empty repository's empty state, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer, Divider, Scroll, Segmented, TextField, Toggle, Menu, PressArea) with the Skills page's identifiers. Choosing Global in the JavaScript source picker runs onChange (Last: tab global) and shows the Linked and switched-off global skills while the native page stays on Repo. Clicking a JavaScript switch runs onToggle (Last: toggle release-notes off), which turns it off and disables its Use button, and Use runs its handler (Last: use release-notes) without re-rendering any row. Clicking a skill's text runs onPress (Last: open release-notes); pressing and holding it runs onLongPress, which starts selecting (Last: select release-notes): its row shows a checked checkbox and the accent highlight, the rows' own controls hide, built-in skills show no checkbox, and the header shows 1 selected with Fix with Agent, Delete and Done; a click on another row adds it (2 selected), and Done ends selecting (Last: done selecting). The actions menu runs onMenu with the chosen item's id (Last: menu release-notes edit), typing in the search runs onChange with the text, choosing Rules hides the source picker and the search, and the back button closes the JavaScript page (Last: back) while the native one stays open, until the Skills button opens it again (Last: open). The search field raises no onPress, so pressing it is refused as invalid_argument.
+    def test_plugin_skills_page_renders_from_atoms_like_native(self):
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage")[0])
+        self.assertEqual(rendered["errors"], [])
+        tree = rendered["tree"]
+        # The same identifiers the Skills page's native header and gallery give their atoms.
+        for test_id in ["skills-page", "skills-back-button", "skills-title", "skills-kind-picker", "skills-tab-picker", "skills-search", "new-skill-button",
+                        "skills-provider-timing", "skills-list", "skills-repo-section-login-app", "skills-repo-section-docs-site", "skills-empty-docs-site",
+                        "skill-row-release-notes", "skill-text-release-notes", "skill-name-release-notes", "skill-provider-release-notes-claude",
+                        "skill-provider-release-notes-codex", "skill-description-release-notes", "skill-location-release-notes", "skill-toggle-release-notes",
+                        "skill-use-release-notes", "skill-actions-release-notes", "skill-conflict-review-login", "skill-issue-review-login",
+                        "skill-fix-review-login", "skill-invalid-broken-skill", "skill-fix-broken-skill"]:
+            self.plugin_node(tree, test_id)
+        types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
+        self.assertEqual(types, {"Panel", "Stack", "Text", "Icon", "Label", "Button", "Spacer", "Divider", "Scroll", "Segmented", "TextField", "Toggle", "Menu", "PressArea"},
+                         "The page is atoms only.")
+
+        # The composer's Skills button opens it: a plain Button atom with the sparkles icon.
+        opener = self.plugin_node(tree, "open-skills-button")
+        self.assertEqual((opener["type"], opener["events"], opener["props"].get("style")), ("Button", ["onPress"], None))
+        self.assertEqual((opener["props"]["label"], opener["props"]["help"]), ("Skills", "Skills"))
+        self.assertEqual((opener["children"][0]["type"], opener["children"][0]["props"]["name"]), ("Icon", "sparkles"))
+
+        back = self.plugin_node(tree, "skills-back-button")
+        self.assertEqual((back["props"]["shortcut"], back["props"]["label"]), ("cancel", "Back to the conversation"), "Escape goes back while nothing is open.")
+        circle = back["children"][0]
+        self.assertEqual((circle["type"], circle["props"]["width"], circle["props"]["height"], circle["props"]["cornerRadius"]), ("Panel", 26, 26, 13))
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "skills-title")), "Skills, Rules & MCP")
+        kinds = self.plugin_node(tree, "skills-kind-picker")
+        self.assertEqual(([option["label"] for option in kinds["props"]["options"]], kinds["props"]["selected"], kinds["props"]["disabled"]),
+                         (["Skills", "Rules", "MCP"], "skills", False))
+        tabs = self.plugin_node(tree, "skills-tab-picker")
+        self.assertEqual(([option["label"] for option in tabs["props"]["options"]], tabs["props"]["selected"], tabs["props"]["width"]),
+                         (["Repo", "Global", "Built-in"], "repo", 260))
+        search = self.plugin_node(tree, "skills-search")
+        self.assertEqual((search["props"]["text"], search["props"]["placeholder"], search["props"]["width"]), ("", "Search skills", 200))
+        new_skill = self.plugin_node(tree, "new-skill-button")
+        self.assertEqual((new_skill["props"]["style"], new_skill["children"][0]["props"]["text"]), ("bordered", "New Skill"))
+        self.assertTrue(self.plugin_text(self.plugin_node(tree, "skills-provider-timing")).startswith("Click a skill to open it, or press and hold one"))
+        scroll = self.plugin_node(tree, "skills-list")
+        self.assertEqual((scroll["props"]["lazy"], scroll["props"]["inset"], scroll["props"]["spacing"]), (True, 20, 10))
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "skills-empty-docs-site")), "No skills in docs-site.")
+
+        row = self.plugin_node(tree, "skill-row-release-notes")
+        self.assertEqual((row["type"], row["props"]["fill"], row["props"]["fillOpacity"], row["props"]["cornerRadius"], row["props"].get("stroke")),
+                         ("Panel", "panel", 1, 10, None), "An unselected row is a panel-colored rounded card.")
+        self.assertEqual([child["type"] for child in row["children"][0]["children"]], ["PressArea", "Toggle", "Button", "Menu"], "The skill's text, then its switch, Use and its menu.")
+        self.assertEqual(self.plugin_node(tree, "skill-text-release-notes")["props"]["pointer"], True, "A skill with a folder opens on click.")
+        badge = self.plugin_node(tree, "skill-provider-release-notes-claude")
+        self.assertEqual((badge["type"], badge["props"]["fill"], badge["props"]["fillOpacity"]), ("Panel", "green", 0.12))
+        self.assertEqual((badge["children"][0]["props"]["text"], badge["children"][0]["props"]["icon"]), ("Claude", "checkmark"))
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "skill-location-release-notes")), ".agents/skills")
+        toggle = self.plugin_node(tree, "skill-toggle-release-notes")
+        self.assertEqual((toggle["props"]["isOn"], toggle["props"]["size"], toggle["props"]["label"]), (True, "mini", "release-notes enabled"))
+        use = self.plugin_node(tree, "skill-use-release-notes")
+        self.assertEqual((use["props"]["style"], use["props"]["controlSize"], use["props"]["disabled"], use["props"]["help"]),
+                         ("bordered", "small", False, "Insert /release-notes into the message"))
+        actions = self.plugin_node(tree, "skill-actions-release-notes")
+        self.assertEqual((actions["props"]["icon"], actions["props"]["width"], actions["props"]["height"], actions["props"]["label"]),
+                         ("ellipsis", 24, 24, "Actions for release-notes"))
+        self.assertEqual([[item["testID"] for item in group] for group in actions["props"]["items"]], [
+            ["skill-edit-release-notes", "skill-reveal-release-notes"],
+            ["skill-move-global-release-notes", "skill-move-repo-release-notes-docs-site"],
+            ["skill-link-release-notes"], ["skill-delete-release-notes"]])
+        self.assertEqual(actions["props"]["items"][3][0]["destructive"], True)
+        conflict = self.plugin_node(tree, "skill-row-review-login")
+        self.assertEqual([child["type"] for child in conflict["children"][0]["children"]], ["PressArea", "Button", "Toggle", "Button", "Menu"],
+                         "A conflicting skill offers Fix with Agent before its switch.")
+        fix = self.plugin_node(tree, "skill-fix-review-login")
+        self.assertEqual((fix["props"]["controlSize"], fix["children"][0]["props"]["text"]), ("small", "Fix with Agent"))
+        self.assertEqual(self.plugin_node(tree, "skill-conflict-review-login")["props"]["fill"], "orange")
+        self.assertEqual(self.plugin_node(tree, "skill-invalid-broken-skill")["props"]["fill"], "red")
+        self.assertEqual(self.plugin_node(tree, "skill-use-broken-skill")["props"]["disabled"], True, "No provider can use an invalid skill.")
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(tree)}
+        self.assertNotIn("skill-provider-broken-skill-claude", test_ids)
+        self.assertNotIn("skill-select-release-notes", test_ids, "Rows show no checkbox until selecting.")
+
+        switched = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skills-tab-picker:onChange:global",
+            "--event", "skill-toggle-shared-notes:onToggle", "--event", "skill-use-shared-notes:onPress")[0])
+        self.assertEqual(switched["errors"], [])
+        tree = switched["tree"]
+        commits = {commit["step"]: commit for commit in switched["commits"]}
+        last_action = self.plugin_node(tree, "js-last-action")
+        self.assertEqual(self.plugin_node(tree, "skills-tab-picker")["props"]["selected"], "global")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "js-last-action")), "Last: use shared-notes")
+        tab_only = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skills-tab-picker:onChange:global")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(tab_only["tree"], "js-last-action")), "Last: tab global", "The source picker ran onChange with its value.")
+        self.plugin_node(tree, "skill-linked-shared-notes")
+        self.assertEqual(self.plugin_node(tree, "skill-toggle-quiet-skill")["props"]["isOn"], False, "A switched-off skill shows its switch off.")
+        self.assertEqual(self.plugin_node(tree, "skill-use-quiet-skill")["props"]["disabled"], True, "A switched-off skill can't be used.")
+        self.assertEqual(self.plugin_node(tree, "skill-toggle-shared-notes")["props"]["isOn"], False, "onToggle turned the switch off.")
+        self.assertEqual(self.plugin_node(tree, "skill-use-shared-notes")["props"]["disabled"], True, "Turning a skill off disables Use.")
+        self.assertEqual([[item["id"] for item in group] for group in self.plugin_node(tree, "skill-actions-shared-notes")["props"]["items"]][2], ["unlink"],
+                         "A linked skill offers Remove Outside Link.")
+        toggled = commits["skill-toggle-shared-notes:onToggle"]
+        self.assertEqual(sorted(toggled["ops"]), ["text", "update", "update"], "The switch and Use update, and the readout's text; no row re-renders.")
+        used = commits["skill-use-shared-notes:onPress"]
+        self.assertEqual((used["ops"], used["touchedNodes"]), (["text"], [last_action["children"][1]["id"]]), "Use runs its handler without re-rendering any row.")
+        self.assertEqual(self.plugin_text(last_action), "Last: use shared-notes")
+
+        toggled_off = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skill-toggle-release-notes:onToggle")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(toggled_off["tree"], "js-last-action")), "Last: toggle release-notes off")
+        self.assertEqual(self.plugin_node(toggled_off["tree"], "skill-use-release-notes")["props"]["disabled"], True)
+
+        opened = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skill-text-release-notes:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(opened["tree"], "js-last-action")), "Last: open release-notes")
+
+        selecting = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skill-text-release-notes:onLongPress")[0])
+        tree = selecting["tree"]
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(tree)}
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "js-last-action")), "Last: select release-notes")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "skills-selection-count")), "1 selected")
+        checked = self.plugin_node(tree, "skill-select-release-notes")
+        self.assertEqual((checked["props"]["name"], checked["props"]["label"], checked["props"]["color"]), ("checkmark.circle.fill", "Selected", "accent"))
+        self.assertEqual(self.plugin_node(tree, "skill-select-review-login")["props"]["label"], "Not selected")
+        selected_row = self.plugin_node(tree, "skill-row-release-notes")["props"]
+        self.assertEqual((selected_row["fill"], selected_row["fillOpacity"], selected_row["stroke"], selected_row["strokeOpacity"]), ("accent", 0.12, "accent", 0.6),
+                         "A selected row is highlighted with the accent.")
+        for hidden in ["skill-toggle-release-notes", "skill-use-release-notes", "skill-actions-release-notes", "skill-fix-review-login", "skills-search", "new-skill-button"]:
+            self.assertNotIn(hidden, test_ids, f"Selecting hides {hidden}.")
+        self.assertEqual(self.plugin_node(tree, "skills-kind-picker")["props"]["disabled"], True, "The kind picker is locked while selecting.")
+        self.assertNotIn("shortcut", self.plugin_node(tree, "skills-back-button")["props"], "Escape ends selecting instead of going back.")
+        self.assertEqual(self.plugin_node(tree, "skills-selection-done")["props"]["shortcut"], "cancel")
+        self.assertEqual(self.plugin_node(tree, "skills-fix-selected")["props"]["disabled"], True, "Nothing selected is broken, so nothing can be fixed.")
+        delete = self.plugin_node(tree, "skills-delete-selected")["props"]
+        self.assertEqual((delete["disabled"], delete["destructive"]), (False, True))
+        self.assertTrue(self.plugin_text(self.plugin_node(tree, "skills-provider-timing")).startswith("Click skills to select them."))
+
+        built_in = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skill-text-release-notes:onLongPress",
+            "--event", "skills-tab-picker:onChange:builtin")[0])
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(built_in["tree"])}
+        self.assertIn("skill-row-simplify", test_ids)
+        self.assertNotIn("skill-select-simplify", test_ids, "A built-in skill shows no checkbox.")
+
+        added = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skill-text-release-notes:onLongPress",
+            "--event", "skill-text-review-login:onPress", "--event", "skills-fix-selected:onPress", "--event", "skills-selection-done:onPress")[0])
+        commits = {commit["step"]: commit for commit in added["commits"]}
+        fixed = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skill-text-release-notes:onLongPress",
+            "--event", "skill-text-review-login:onPress", "--event", "skills-fix-selected:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(fixed["tree"], "js-last-action")), "Last: fix 2 selected", "Fix with Agent ran with the selection.")
+        self.assertEqual(self.plugin_text(self.plugin_node(added["tree"], "js-last-action")), "Last: done selecting")
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(added["tree"])}
+        self.assertNotIn("skills-selection-count", test_ids, "Done ends selecting.")
+        self.assertIn("skill-toggle-release-notes", test_ids, "Rows show their controls again.")
+        two = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skill-text-release-notes:onLongPress", "--event", "skill-text-review-login:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(two["tree"], "skills-selection-count")), "2 selected", "A click on another row adds it.")
+        self.assertEqual(self.plugin_node(two["tree"], "skills-fix-selected")["props"]["disabled"], False, "A selected conflict can be fixed.")
+        self.assertIn("skills-fix-selected:onPress", commits)
+
+        menu = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skill-actions-release-notes:onMenu:edit",
+            "--event", "skills-search:onChange:release")[0])
+        tree = menu["tree"]
+        self.assertEqual(self.plugin_node(tree, "skills-search")["props"]["text"], "release", "onChange received the search text.")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "js-last-action")), "Last: search release")
+        menu_only = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skill-actions-release-notes:onMenu:edit")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(menu_only["tree"], "js-last-action")), "Last: menu release-notes edit")
+
+        rules = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skills-kind-picker:onChange:rules")[0])
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(rules["tree"])}
+        self.assertEqual(self.plugin_node(rules["tree"], "skills-kind-picker")["props"]["selected"], "rules")
+        self.assertEqual(self.plugin_text(self.plugin_node(rules["tree"], "js-last-action")), "Last: kind rules")
+        for hidden in ["skills-tab-picker", "skills-search", "new-skill-button", "skills-list"]:
+            self.assertNotIn(hidden, test_ids, f"Rules hides {hidden}.")
+
+        closed = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skills-back-button:onPress")[0])
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(closed["tree"])}
+        self.assertNotIn("skills-page", test_ids, "Back closed the page.")
+        self.assertEqual(self.plugin_text(self.plugin_node(closed["tree"], "js-last-action")), "Last: back")
+        reopened = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skills-back-button:onPress", "--event", "open-skills-button:onPress")[0])
+        self.plugin_node(reopened["tree"], "skill-row-release-notes")
+        self.assertEqual(self.plugin_text(self.plugin_node(reopened["tree"], "js-last-action")), "Last: open", "The Skills button opened it again.")
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skills-search:onPress", expected_status=2)[0], "invalid_argument")
 
     # Scheduled tasks. Firing goes through ConversationManager.send, the same path the
     # composer's Send and `conversation send` use for both providers, so the schedule

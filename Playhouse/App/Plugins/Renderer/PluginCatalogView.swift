@@ -64,13 +64,14 @@ private struct PluginCommitReadout: View {
 
 /// The Plugins menu's catalog: every atom rendered by its JavaScript page, and
 /// the native composites (the task item, the Agents info section, the Token
-/// Stats modal) composed in JavaScript beside the native ones.
+/// Stats modal, the Skills page) composed in JavaScript beside the native ones.
 struct PluginCatalogView: View {
     private enum Page: Hashable {
         case atom(AtomType)
         case taskItem
         case agentsInfo
         case tokenStats
+        case skillsPage
     }
 
     @State private var selection: Page? = .atom(.stack)
@@ -95,6 +96,9 @@ struct PluginCatalogView: View {
                     Text("Token Stats")
                         .tag(Page.tokenStats)
                         .accessibilityIdentifier("plugin-catalog-token-stats")
+                    Text("Skills Page")
+                        .tag(Page.skillsPage)
+                        .accessibilityIdentifier("plugin-catalog-skills-page")
                 }
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190)
@@ -109,6 +113,8 @@ struct PluginCatalogView: View {
                     AgentsInfoComparison()
                 case .tokenStats?:
                     TokenStatsComparison()
+                case .skillsPage?:
+                    SkillsPageComparison()
                 case nil:
                     EmptyView()
                 }
@@ -397,6 +403,149 @@ private struct NativeTokenStatsDemo: View {
                         },
                         done: { open = false; lastAction = "done" }
                     ))
+                }
+            }
+        }
+    }
+}
+
+/// The JavaScript Skills page above the native one (each as wide as a window,
+/// 1040 points, and 520 tall, so the page scrolls across), from the same
+/// sample model, each opened by the composer's Skills button. Each side keeps its own page state; the native page uses a
+/// "native-" prefix so the two never share accessibility identifiers.
+private struct SkillsPageComparison: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Skills Page")
+                .font(.title2.weight(.semibold))
+                .accessibilityIdentifier("plugin-catalog-title")
+            if let page = catalogPage("SkillsPage"),
+               let sample = try? Self.sample(page.props) {
+                ScrollView(.horizontal) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        comparisonColumn("JavaScript (React → atoms)", width: 1060) {
+                            PluginSurface(source: page.source, name: "SkillsPage.js", props: page.props)
+                        }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("plugin-catalog-js-skills-page")
+                        comparisonColumn("Native SwiftUI (atoms)", width: 1060) {
+                            NativeSkillsPageDemo(sample: sample)
+                        }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("plugin-catalog-native-skills-page")
+                    }
+                }
+                .accessibilityIdentifier("plugin-catalog-skills-page-scroll")
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    struct Sample: Decodable {
+        var skillsPage: SkillsPageModel
+    }
+
+    static func sample(_ props: [String: PluginValue]) throws -> Sample {
+        try PluginValueDecoder.decode(Sample.self, from: .object(props))
+    }
+}
+
+/// The native Skills page with the same demo state as SkillsPage.js, built from the same atoms.
+private struct NativeSkillsPageDemo: View {
+    let sample: SkillsPageComparison.Sample
+    @State private var open = true
+    @State private var kind: String?
+    @State private var tab: String?
+    @State private var search: String?
+    @State private var selection: [String]?
+    @State private var switched: [String: Bool] = [:]
+    @State private var lastAction = "none"
+
+    /// The demo's state applied to the sample, as SkillsPageView applies it to the catalog.
+    private var model: SkillsPageModel {
+        var model = sample.skillsPage
+        model.prefix = "native-"
+        model.kind = kind ?? model.kind
+        model.tab = tab ?? model.tab
+        model.search = search ?? model.search
+        model.selection = selection
+        let chosen = model.tabs.flatMap(\.sections).flatMap(\.rows).filter { selection?.contains($0.id) == true }
+        model.selectionCount = SkillsPageModel.selectionCount(chosen.count)
+        model.canFixSelection = chosen.contains(where: \.fixable)
+        for tab in model.tabs.indices {
+            for section in model.tabs[tab].sections.indices {
+                for row in model.tabs[tab].sections[section].rows.indices {
+                    let id = model.tabs[tab].sections[section].rows[row].id
+                    if let enabled = switched[id] { model.tabs[tab].sections[section].rows[row].enabled = enabled }
+                }
+            }
+        }
+        return model
+    }
+
+    private func shownRow(_ id: String) -> SkillsPageModel.Row? {
+        model.tabs.flatMap(\.sections).flatMap(\.rows).first { $0.id == id }
+    }
+
+    private var actions: SkillsPageActions {
+        SkillsPageActions(
+            back: { open = false; lastAction = "back" },
+            selectKind: { kind = $0; lastAction = "kind \($0)" },
+            selectTab: { tab = $0; lastAction = "tab \($0)" },
+            search: { search = $0; lastAction = "search \($0)" },
+            newSkill: { lastAction = "new skill" },
+            fixSelected: { lastAction = "fix \(selection?.count ?? 0) selected" },
+            deleteSelected: { lastAction = "delete \(selection?.count ?? 0) selected" },
+            endSelection: { selection = nil; lastAction = "done selecting" },
+            press: { id in
+                guard let row = shownRow(id) else { return }
+                if let chosen = selection {
+                    guard row.editable else { return }
+                    let isChosen = chosen.contains(id)
+                    selection = isChosen ? chosen.filter { $0 != id } : chosen + [id]
+                    lastAction = (isChosen ? "deselect " : "select ") + row.name
+                } else {
+                    lastAction = (row.opensOnClick ? "open " : "press ") + row.name
+                }
+            },
+            longPress: { id in
+                guard let row = shownRow(id), row.editable else { return }
+                let chosen = selection ?? []
+                selection = chosen.contains(id) ? chosen : chosen + [id]
+                lastAction = "select \(row.name)"
+            },
+            fix: { id in lastAction = "fix \(shownRow(id)?.name ?? id)" },
+            toggle: { id in
+                guard let row = shownRow(id) else { return }
+                switched[id] = !row.enabled
+                lastAction = "toggle \(row.name) \(row.enabled ? "off" : "on")"
+            },
+            use: { id in lastAction = "use \(shownRow(id)?.name ?? id)" },
+            menu: { id, item in lastAction = "menu \(shownRow(id)?.name ?? id) \(item)" }
+        )
+    }
+
+    var body: some View {
+        let model = model
+        AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
+            AtomStack(props: StackProps(axis: "h", spacing: 8)) {
+                AtomText(props: TextProps(text: "Composer button", size: 11, color: "secondary"))
+                SkillsButton(testID: "native-open-skills-button") {
+                    open = true
+                    lastAction = "open"
+                }
+                AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
+            }
+            if open {
+                AtomPanel(props: PanelProps(spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 10), common: AtomCommon(testID: "native-skills-page", width: 1040, height: 520)) {
+                    SkillsPageHeader(model: model, actions: actions)
+                    AtomDivider()
+                    if model.kind == "skills" {
+                        SkillGalleryView(model: model, actions: actions)
+                    } else {
+                        AtomText(props: TextProps(text: "The Rules and MCP lists stay native.", size: 12, color: "secondary"), common: AtomCommon(testID: "native-skills-native-list", padding: 20))
+                    }
                 }
             }
         }

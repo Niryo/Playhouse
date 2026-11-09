@@ -22,6 +22,7 @@
 		A100000000000000000000E1 /* TaskTerminalPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000000000000000000E1 /* TaskTerminalPanel.swift */; };
 		A1000000000000000000F301 /* AgentsInfoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F301 /* AgentsInfoView.swift */; };
 		A1000000000000000000F302 /* TokenStatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F302 /* TokenStatsView.swift */; };
+		A1000000000000000000F303 /* SkillGalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F303 /* SkillGalleryView.swift */; };
 		A1000000000000000000F401 /* TaskSchedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F401 /* TaskSchedule.swift */; };
 		A1000000000000000000F402 /* ScheduledTasksPageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F402 /* ScheduledTasksPageView.swift */; };
 		A1000000000000000000F201 /* AgentUsageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F201 /* AgentUsageStore.swift */; };
@@ -83,6 +84,7 @@
 		A200000000000000000000E1 /* TaskTerminalPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskTerminalPanel.swift; sourceTree = "<group>"; };
 		A2000000000000000000F301 /* AgentsInfoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentsInfoView.swift; sourceTree = "<group>"; };
 		A2000000000000000000F302 /* TokenStatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenStatsView.swift; sourceTree = "<group>"; };
+		A2000000000000000000F303 /* SkillGalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillGalleryView.swift; sourceTree = "<group>"; };
 		A2000000000000000000F401 /* TaskSchedule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskSchedule.swift; sourceTree = "<group>"; };
 		A2000000000000000000F402 /* ScheduledTasksPageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduledTasksPageView.swift; sourceTree = "<group>"; };
 		A2000000000000000000F201 /* AgentUsageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentUsageStore.swift; sourceTree = "<group>"; };
@@ -204,6 +206,7 @@
 				A200000000000000000000E1 /* TaskTerminalPanel.swift */,
 				A2000000000000000000F301 /* AgentsInfoView.swift */,
 				A2000000000000000000F302 /* TokenStatsView.swift */,
+				A2000000000000000000F303 /* SkillGalleryView.swift */,
 				A2000000000000000000F401 /* TaskSchedule.swift */,
 				A2000000000000000000F402 /* ScheduledTasksPageView.swift */,
 				A2000000000000000000F201 /* AgentUsageStore.swift */,
@@ -498,6 +501,7 @@
 				A100000000000000000000E1 /* TaskTerminalPanel.swift in Sources */,
 				A1000000000000000000F301 /* AgentsInfoView.swift in Sources */,
 				A1000000000000000000F302 /* TokenStatsView.swift in Sources */,
+				A1000000000000000000F303 /* SkillGalleryView.swift in Sources */,
 				A1000000000000000000F401 /* TaskSchedule.swift in Sources */,
 				A1000000000000000000F402 /* ScheduledTasksPageView.swift in Sources */,
 				A1000000000000000000F201 /* AgentUsageStore.swift in Sources */,
