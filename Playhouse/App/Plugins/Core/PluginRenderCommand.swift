@@ -36,7 +36,9 @@ struct PluginRenderCommand: Sendable {
         return files.filter { $0.hasSuffix(".js") }.map { String($0.dropLast(3)) }.sorted()
     }
 
-    /// A catalog page's script and props: the sample task data every page receives.
+    /// A catalog page's script and props: the sample data every page receives,
+    /// the top-level fields of every `catalog/sample-*.json` in one object
+    /// (the task item's `task`, the Agents info section's `agentsInfo`).
     static func catalogPage(_ page: String, resources: URL?) throws -> (source: String, props: [String: PluginValue]) {
         guard let folder = resources?.appendingPathComponent("catalog", isDirectory: true) else {
             throw PluginTreeError(message: "This build has no bundled plugin runtime.")
@@ -45,8 +47,20 @@ struct PluginRenderCommand: Sendable {
             throw PluginTreeError(message: "Unknown catalog page \"\(page)\". Pages: \(catalogPages(resources: resources).joined(separator: ", ")).")
         }
         let source = try String(contentsOf: folder.appendingPathComponent("\(page).js"), encoding: .utf8)
-        let sample = try JSONDecoder().decode(PluginValue.self, from: Data(contentsOf: folder.appendingPathComponent("sample-task.json")))
-        return (source, sample.object ?? [:])
+        let samples = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+            .filter { $0.hasPrefix("sample-") && $0.hasSuffix(".json") }
+            .sorted()
+        var props: [String: PluginValue] = [:]
+        for sample in samples {
+            let value = try JSONDecoder().decode(PluginValue.self, from: Data(contentsOf: folder.appendingPathComponent(sample)))
+            for (key, field) in value.object ?? [:] {
+                guard props[key] == nil else {
+                    throw PluginTreeError(message: "Catalog sample \(sample) repeats the field \"\(key)\" of another sample.")
+                }
+                props[key] = field
+            }
+        }
+        return (source, props)
     }
 
     func run() throws -> PluginValue {

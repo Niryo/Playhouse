@@ -40,9 +40,10 @@ enum AtomColor {
 }
 
 enum AtomFont {
-    static func font(size: Double?, weight: String?, design: String? = nil) -> Font? {
-        guard size != nil || weight != nil || design != nil else { return nil }
-        return .system(size: size ?? NSFont.systemFontSize, weight: self.weight(weight), design: design == "monospaced" ? .monospaced : .default)
+    static func font(size: Double?, weight: String?, design: String? = nil, monospacedDigits: Bool = false) -> Font? {
+        guard size != nil || weight != nil || design != nil || monospacedDigits else { return nil }
+        let font = Font.system(size: size ?? NSFont.systemFontSize, weight: self.weight(weight), design: design == "monospaced" ? .monospaced : .default)
+        return monospacedDigits ? font.monospacedDigit() : font
     }
 
     private static func weight(_ name: String?) -> Font.Weight {
@@ -59,6 +60,8 @@ private struct AtomCommonModifier: ViewModifier {
     let common: AtomCommon
     /// Makes the atom one accessibility container for its children.
     var group = false
+    /// Makes the atom one accessibility element whose label joins its children's.
+    var combine = false
 
     /// False when the atom already applied its frame (a Button, inside its label).
     var frame = true
@@ -68,7 +71,7 @@ private struct AtomCommonModifier: ViewModifier {
             .modifier(Applied(when: frame) { $0.atomFrame(common) })
             .modifier(OptionalHelp(text: common.help))
             .allowsHitTesting(common.passThrough != true)
-            .modifier(AtomAccessibility(common: common, group: group))
+            .modifier(AtomAccessibility(common: common, group: group, combine: combine))
     }
 }
 
@@ -85,10 +88,12 @@ private struct OptionalHelp: ViewModifier {
 private struct AtomAccessibility: ViewModifier {
     let common: AtomCommon
     let group: Bool
+    let combine: Bool
 
     func body(content: Content) -> some View {
         content
-            .modifier(Applied(when: group) { $0.accessibilityElement(children: .contain) })
+            .modifier(Applied(when: group && !combine) { $0.accessibilityElement(children: .contain) })
+            .modifier(Applied(when: combine) { $0.accessibilityElement(children: .combine) })
             .modifier(Applied(when: common.label != nil) { $0.accessibilityLabel(common.label ?? "") })
             .modifier(Applied(when: common.value != nil) { $0.accessibilityValue(common.value ?? "") })
             .modifier(Applied(when: common.hint != nil) { $0.accessibilityHint(common.hint ?? "") })
@@ -111,8 +116,8 @@ private struct Applied<Modified: View>: ViewModifier {
 }
 
 extension View {
-    func atomCommon(_ common: AtomCommon, group: Bool = false, frame: Bool = true) -> some View {
-        modifier(AtomCommonModifier(common: common, group: group, frame: frame))
+    func atomCommon(_ common: AtomCommon, group: Bool = false, combine: Bool = false, frame: Bool = true) -> some View {
+        modifier(AtomCommonModifier(common: common, group: group, combine: combine, frame: frame))
     }
 
     /// The common size, fill and padding props, each applied only when set.
@@ -186,7 +191,7 @@ struct AtomStack<Content: View>: View {
                 VStack(alignment: horizontalAlignment, spacing: props.spacing.map { CGFloat($0) }, content: content)
             }
         }
-        .atomCommon(common, group: props.group == true)
+        .atomCommon(common, group: props.group == true, combine: props.combine == true)
     }
 
     private var verticalAlignment: VerticalAlignment {
@@ -216,14 +221,23 @@ struct AtomText: View {
         let string = props.text ?? children
         Text(verbatim: string)
             .lineSpacing(CGFloat(props.lineSpacing ?? 0))
-            .atomFont(AtomFont.font(size: props.size, weight: props.weight, design: props.design))
+            .atomFont(AtomFont.font(size: props.size, weight: props.weight, design: props.design, monospacedDigits: props.monospacedDigits == true))
             .tracking(CGFloat(props.tracking ?? 0))
             .atomForeground(props.color)
             .lineLimit(props.lineLimit)
+            .truncationMode(truncationMode)
             .contentTransition(props.numeric == true ? .numericText() : .identity)
             .animation(props.numeric == true ? .default : nil, value: string)
             .fixedSize(horizontal: false, vertical: props.wrap == true)
             .atomCommon(common)
+    }
+
+    private var truncationMode: Text.TruncationMode {
+        switch props.truncation {
+        case "head": .head
+        case "middle": .middle
+        default: .tail
+        }
     }
 }
 
@@ -512,5 +526,90 @@ struct AtomCard<Content: View>: View {
                     .accessibilityIdentifier(item.testID ?? "")
                 }
             }
+    }
+}
+
+/// A section whose title collapses and expands its children. The title is a
+/// button with a chevron; a click calls `onToggle` inside an animation, so
+/// whatever owns `collapsed` flips it and the children animate in and out.
+/// The section is one accessibility container.
+struct AtomDisclosure<Content: View>: View {
+    var props: DisclosureProps
+    var common = AtomCommon()
+    let onToggle: () -> Void
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: CGFloat(props.spacing ?? 6)) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.22)) { onToggle() }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: props.collapsed ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                        .accessibilityHidden(true)
+                    Text(verbatim: props.title)
+                        .font(.system(size: 10, weight: .semibold))
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .buttonHoverPointer()
+            .nativeHelp(props.collapsed ? "Expand \(props.title)" : "Collapse \(props.title)")
+            .accessibilityLabel(props.title)
+            .accessibilityValue(props.collapsed ? "Collapsed" : "Expanded")
+            .accessibilityAddTraits(.isHeader)
+            .modifier(Applied(when: props.toggleTestID != nil) { $0.accessibilityIdentifier(props.toggleTestID ?? "") })
+            if !props.collapsed {
+                // A Group hands the transition to each child.
+                Group(content: content)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+        .atomCommon(common, group: true)
+    }
+}
+
+/// A rounded, filled background behind a leading column of its children.
+/// The frame and padding props size the panel, so the fill covers them.
+struct AtomPanel<Content: View>: View {
+    var props = PanelProps()
+    var common = AtomCommon()
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
+            .atomFrame(common)
+            .background(
+                (AtomColor.style(props.fill) ?? AnyShapeStyle(.primary)).opacity(props.fillOpacity ?? 0.05),
+                in: RoundedRectangle(cornerRadius: CGFloat(props.cornerRadius ?? 8), style: .continuous)
+            )
+            .atomCommon(common, group: true, frame: false)
+    }
+}
+
+/// A capsule usage bar filled to `fraction`. Drawn rather than a ProgressView:
+/// an AppKit progress indicator per bar makes every accessibility query of
+/// the window slow.
+struct AtomMeter: View {
+    var props: MeterProps
+    var common = AtomCommon()
+
+    var body: some View {
+        let fraction = min(1, max(0, props.fraction))
+        Capsule()
+            .fill(Color.primary.opacity(0.12))
+            .frame(height: CGFloat(props.thickness ?? 3))
+            .overlay(alignment: .leading) {
+                GeometryReader { proxy in
+                    Capsule()
+                        .fill(AtomColor.style(props.color) ?? AnyShapeStyle(Color.accentColor))
+                        .frame(width: proxy.size.width * fraction)
+                }
+            }
+            .accessibilityHidden(common.label == nil)
+            .atomCommon(common)
     }
 }

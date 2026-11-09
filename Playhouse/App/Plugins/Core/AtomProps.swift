@@ -1,9 +1,10 @@
 import Foundation
 
-/// The atoms plugins compose UI from: exactly the pieces the task item is
-/// built of. Each atom's props are a plain Decodable struct, decoded from a
-/// create/update op's payload here and built directly by native SwiftUI code,
-/// so both reach the same view (see `AtomRegistry` in Plugins/Atoms).
+/// The atoms plugins compose UI from: exactly the pieces the native
+/// composites (the task item and the Agents info section) are built of. Each
+/// atom's props are a plain Decodable struct, decoded from a create/update
+/// op's payload here and built directly by native SwiftUI code, so both reach
+/// the same view (see `AtomRegistry` in Plugins/Atoms).
 enum AtomType: String, CaseIterable, Sendable {
     case stack = "Stack"
     case text = "Text"
@@ -15,6 +16,9 @@ enum AtomType: String, CaseIterable, Sendable {
     case spacer = "Spacer"
     case pillPicker = "PillPicker"
     case card = "Card"
+    case disclosure = "Disclosure"
+    case panel = "Panel"
+    case meter = "Meter"
 
     /// The events each atom raises; a plugin's handler for any other name is never called.
     var events: Set<String> {
@@ -22,15 +26,16 @@ enum AtomType: String, CaseIterable, Sendable {
         case .button: ["onPress"]
         case .pillPicker: ["onChange"]
         case .card: ["onPress", "onMenu"]
-        case .stack, .text, .icon, .label, .link, .spinner, .spacer: []
+        case .disclosure: ["onToggle"]
+        case .stack, .text, .icon, .label, .link, .spinner, .spacer, .panel, .meter: []
         }
     }
 
     /// Whether the atom shows atom children. A Text holds only raw strings.
     var takesAtomChildren: Bool {
         switch self {
-        case .stack, .button, .link, .card: true
-        case .text, .icon, .label, .spinner, .spacer, .pillPicker: false
+        case .stack, .button, .link, .card, .disclosure, .panel: true
+        case .text, .icon, .label, .spinner, .spacer, .pillPicker, .meter: false
         }
     }
 
@@ -58,6 +63,9 @@ enum AtomType: String, CaseIterable, Sendable {
         case .spacer: Self.keys(SpacerProps.CodingKeys.self)
         case .pillPicker: Self.keys(PillPickerProps.CodingKeys.self)
         case .card: Self.keys(CardProps.CodingKeys.self)
+        case .disclosure: Self.keys(DisclosureProps.CodingKeys.self)
+        case .panel: Self.keys(PanelProps.CodingKeys.self)
+        case .meter: Self.keys(MeterProps.CodingKeys.self)
         }
     }
 
@@ -91,6 +99,9 @@ enum AtomType: String, CaseIterable, Sendable {
             case .spacer: _ = try SpacerProps.decode(props)
             case .pillPicker: _ = try PillPickerProps.decode(props)
             case .card: _ = try CardProps.decode(props)
+            case .disclosure: _ = try DisclosureProps.decode(props)
+            case .panel: _ = try PanelProps.decode(props)
+            case .meter: _ = try MeterProps.decode(props)
             }
         } catch let error as DecodingError {
             throw PluginTreeError(message: "<\(type)> has an invalid prop: \(Self.describe(error))")
@@ -149,14 +160,16 @@ struct AtomCommon: AtomPropsDecodable, Equatable {
 
 /// A row or column. `axis` is "h" or "v" (default); `align` is leading,
 /// center or trailing for a column and top, center or bottom for a row.
-/// `group` makes it one accessibility container for its children.
+/// `group` makes it one accessibility container for its children; `combine`
+/// makes it one accessibility element whose label joins theirs.
 struct StackProps: AtomPropsDecodable, Equatable {
     var axis: String?
     var spacing: Double?
     var align: String?
     var group: Bool?
+    var combine: Bool?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case axis, spacing, align, group }
+    enum CodingKeys: String, CodingKey, CaseIterable { case axis, spacing, align, group, combine }
 }
 
 /// A string, from `text` or the atom's raw string children. Weights: regular,
@@ -174,9 +187,13 @@ struct TextProps: AtomPropsDecodable, Equatable {
     var wrap: Bool?
     /// Animate digit changes.
     var numeric: Bool?
+    /// Where a cut-off string shows "…": head, middle or tail (default).
+    var truncation: String?
+    /// Give every digit the same width, so changing numbers don't shift.
+    var monospacedDigits: Bool?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case text, size, weight, design, color, lineLimit, tracking, lineSpacing, wrap, numeric
+        case text, size, weight, design, color, lineLimit, tracking, lineSpacing, wrap, numeric, truncation, monospacedDigits
     }
 }
 
@@ -269,4 +286,43 @@ struct CardProps: AtomPropsDecodable, Equatable {
     var meterTestID: String?
 
     enum CodingKeys: String, CodingKey, CaseIterable { case menu, meter, meterLabel, meterTestID }
+}
+
+/// A section whose title is a button that collapses and expands its
+/// children (the Agents info section). It is controlled: `collapsed` is what
+/// it shows, and a click calls `onToggle` (no value; the owner flips the
+/// state it holds) inside an animation, so the owner's change animates. `toggleTestID` identifies the
+/// title button; `common.testID` the whole section.
+struct DisclosureProps: AtomPropsDecodable, Equatable {
+    var title: String
+    var collapsed: Bool
+    /// Between the title and each child.
+    var spacing: Double?
+    var toggleTestID: String?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case title, collapsed, spacing, toggleTestID }
+}
+
+/// A rounded, filled background behind its children, which it lays out as a
+/// leading column (an agent's block in Agents info). `fill` is a color name
+/// (primary by default) drawn at `fillOpacity` (0.05 by default). It is one
+/// accessibility container.
+struct PanelProps: AtomPropsDecodable, Equatable {
+    var spacing: Double?
+    var fill: String?
+    var fillOpacity: Double?
+    var cornerRadius: Double?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case spacing, fill, fillOpacity, cornerRadius }
+}
+
+/// A horizontal usage bar: a capsule track filled to `fraction` (0...1) in
+/// `color` (accent by default), `thickness` points tall (3 by default).
+/// Decorative unless it has an accessibility `label`.
+struct MeterProps: AtomPropsDecodable, Equatable {
+    var fraction: Double
+    var color: String?
+    var thickness: Double?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case fraction, color, thickness }
 }

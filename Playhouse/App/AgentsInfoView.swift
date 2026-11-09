@@ -83,6 +83,258 @@ final class AgentUsageModel: ObservableObject {
     }
 }
 
+/// What the Agents info section shows, already derived from the usage
+/// report at one moment: plain values the native section and the catalog's
+/// JavaScript copy (catalog/AgentsInfo.js, as `Playhouse.props.agentsInfo`)
+/// compose the same way. `id` prefixes every
+/// accessibility identifier ("agents-info" on the board).
+struct AgentsInfoModel: Codable, Equatable {
+    /// One usage window row: its label and percent, the bar, and when it resets.
+    struct Window: Codable, Equatable {
+        var id: String
+        var label: String
+        /// "22%", or "–" when the provider reported no percent.
+        var percent: String
+        var percentColor: String
+        /// 0...1.
+        var fraction: Double
+        var barColor: String
+        var reset: String
+        var help: String
+    }
+
+    struct Status: Codable, Equatable {
+        var text: String
+        var color: String
+    }
+
+    /// One agent's block, top to bottom: the header, then either the Log in
+    /// button, the usage rows, or "No data yet".
+    struct Agent: Codable, Equatable {
+        var provider: String
+        var name: String
+        var icon: String
+        /// The account and plan on the row beneath the name.
+        var identity: String?
+        var identityHelp: String?
+        var canSwitch: Bool
+        var signedOut: Bool
+        var loginPending: Bool
+        var hasUsage: Bool
+        var windows: [Window]
+        var credits: String?
+        var status: Status?
+        var updated: String?
+    }
+
+    var id: String
+    var title: String
+    var agents: [Agent]
+    var errorMessage: String?
+}
+
+extension AgentsInfoModel {
+    /// Providers whose CLI is installed, in display order; none until the first read.
+    static func visibleProviders(_ report: AgentUsageReport?) -> [AgentProviderUsage] {
+        guard let report else { return [] }
+        return [ConversationProvider.claude, .codex].compactMap { provider in
+            report.providers.first { $0.provider == provider.rawValue && $0.installed }
+        }
+    }
+
+    init(report: AgentUsageReport?, runningProviders: [ConversationProvider: Int], errorMessage: String?, now: Date) {
+        id = "agents-info"
+        title = "Agents info"
+        self.errorMessage = errorMessage
+        agents = Self.visibleProviders(report).compactMap { usage in
+            guard let provider = ConversationProvider(rawValue: usage.provider) else { return nil }
+            return Self.agent(provider: provider, usage: usage, hasRunningTask: (runningProviders[provider] ?? 0) > 0, now: now)
+        }
+    }
+
+    private static func agent(provider: ConversationProvider, usage: AgentProviderUsage, hasRunningTask: Bool, now: Date) -> Agent {
+        let identity = [usage.account, usage.plan].compactMap { $0 }
+        var agent = Agent(
+            provider: provider.rawValue,
+            name: provider.displayName,
+            icon: provider == .claude ? "sparkle" : "chevron.left.forwardslash.chevron.right",
+            identity: identity.isEmpty ? nil : identity.joined(separator: " "),
+            identityHelp: identity.isEmpty ? nil : identity.joined(separator: " · "),
+            canSwitch: usage.loggedIn != nil,
+            signedOut: usage.loggedIn == false,
+            loginPending: usage.loginInProgress,
+            hasUsage: false,
+            windows: []
+        )
+        guard !agent.signedOut,
+              let snapshot = usage.snapshot?.effective(now: now.timeIntervalSince1970),
+              !snapshot.windows.isEmpty || snapshot.credits != nil else { return agent }
+        agent.hasUsage = true
+        agent.windows = snapshot.windows.map { window(provider: provider, $0, now: now) }
+        agent.credits = snapshot.credits.flatMap(creditsText)
+        if let status = snapshot.status, status != .allowed {
+            agent.status = status == .rejected ? Status(text: "Limit reached", color: "red") : Status(text: "Near limit", color: "orange")
+        }
+        // Shown when the numbers are not being kept live by a running task.
+        let age = now.timeIntervalSince1970 - snapshot.updatedAt
+        if age > 120, !hasRunningTask {
+            agent.updated = "Updated \(AgentUsageFormat.duration(age)) ago"
+        }
+        return agent
+    }
+
+    private static func window(provider: ConversationProvider, _ window: AgentUsageWindow, now: Date) -> Window {
+        let percent = min(100, max(0, window.usedPercent ?? 0))
+        let level = percent >= 100 ? "red" : percent >= AgentUsageSnapshot.warningPercent ? "orange" : nil
+        let reset: String
+        if window.isReset {
+            reset = "Reset"
+        } else if let resetsAt = window.resetsAt {
+            reset = "Resets in \(AgentUsageFormat.duration(resetsAt - now.timeIntervalSince1970))"
+        } else {
+            reset = "Reset time unknown"
+        }
+        let help: String
+        if let resetsAt = window.resetsAt {
+            help = "\(window.label) resets \(Date(timeIntervalSince1970: resetsAt).formatted(date: .abbreviated, time: .shortened))"
+        } else {
+            help = window.isReset ? "\(window.label) window has reset" : window.label
+        }
+        return Window(
+            id: window.id,
+            label: window.label,
+            percent: window.usedPercent == nil ? "–" : "\(Int(percent.rounded()))%",
+            percentColor: level ?? "primary",
+            fraction: percent / 100,
+            barColor: level ?? "accent",
+            reset: reset,
+            help: help
+        )
+    }
+
+    static func creditsText(_ credits: AgentUsageCredits) -> String? {
+        if credits.unlimited { return "Credits: unlimited" }
+        if let balance = credits.balance, !balance.isEmpty { return "Credits: \(balance)" }
+        return credits.hasCredits ? "Credits available" : nil
+    }
+}
+
+/// What the section's controls do, by provider id ("claude", "codex").
+struct AgentsInfoActions {
+    var toggle: () -> Void = {}
+    var login: (String) -> Void = { _ in }
+    var switchAccount: (String) -> Void = { _ in }
+}
+
+/// The Agents info section, composed only of plugin atoms (Plugins/Atoms), so
+/// a plugin building it from the same atoms looks identical. A Disclosure
+/// holds one Panel per agent, then any error.
+struct AgentsInfoSection: View {
+    let model: AgentsInfoModel
+    let collapsed: Bool
+    var actions = AgentsInfoActions()
+
+    private var id: String { model.id }
+
+    var body: some View {
+        AtomDisclosure(
+            props: DisclosureProps(title: model.title, collapsed: collapsed, spacing: 6, toggleTestID: "\(id)-toggle"),
+            common: AtomCommon(testID: id),
+            onToggle: actions.toggle
+        ) {
+            ForEach(model.agents, id: \.provider) { agent in
+                block(agent)
+            }
+            if let message = model.errorMessage {
+                AtomText(props: TextProps(text: message, size: 9, color: "red", lineLimit: 3), common: AtomCommon(testID: "\(id)-error"))
+            }
+        }
+    }
+
+    private func block(_ agent: AgentsInfoModel.Agent) -> some View {
+        let prefix = "\(id)-\(agent.provider)"
+        return AtomPanel(props: PanelProps(spacing: 4), common: AtomCommon(testID: prefix, fillWidth: true, padding: 8)) {
+            header(agent)
+            if agent.signedOut {
+                AtomStack(props: StackProps(axis: "v", spacing: 4, align: "leading")) {
+                    if agent.loginPending {
+                        AtomText(props: TextProps(text: "Waiting for sign-in…", size: 9, color: "secondary"), common: AtomCommon(testID: "\(prefix)-login-pending"))
+                    }
+                    AtomButton(
+                        common: AtomCommon(testID: "\(id)-login-\(agent.provider)", label: "Log in to \(agent.name)", help: "Log in to \(agent.name)", fillWidth: true),
+                        action: { actions.login(agent.provider) }
+                    ) {
+                        AtomPanel(props: PanelProps(fill: "accent", fillOpacity: 0.18, cornerRadius: 5), common: AtomCommon(fillWidth: true, padding: 3)) {
+                            AtomStack(props: StackProps(axis: "h")) {
+                                AtomSpacer(props: SpacerProps(minLength: 0))
+                                AtomText(props: TextProps(text: "Log in", size: 10, weight: "medium"))
+                                AtomSpacer(props: SpacerProps(minLength: 0))
+                            }
+                        }
+                    }
+                }
+            } else if agent.hasUsage {
+                ForEach(agent.windows, id: \.id) { window in
+                    windowRow(window, prefix: prefix)
+                }
+                if let credits = agent.credits {
+                    AtomText(props: TextProps(text: credits, size: 9, color: "secondary"), common: AtomCommon(testID: "\(prefix)-credits"))
+                }
+                if let status = agent.status {
+                    AtomText(props: TextProps(text: status.text, size: 9, weight: "semibold", color: status.color), common: AtomCommon(testID: "\(prefix)-status"))
+                }
+                if let updated = agent.updated {
+                    AtomText(props: TextProps(text: updated, size: 9, color: "tertiary"), common: AtomCommon(testID: "\(prefix)-updated"))
+                }
+            } else {
+                AtomText(props: TextProps(text: "No data yet", size: 9, color: "secondary"), common: AtomCommon(testID: "\(prefix)-empty"))
+            }
+        }
+    }
+
+    private func header(_ agent: AgentsInfoModel.Agent) -> some View {
+        AtomStack(props: StackProps(axis: "h", spacing: 5, align: "top")) {
+            AtomIcon(props: IconProps(name: agent.icon, size: 9, weight: "semibold", color: "secondary"))
+            AtomStack(props: StackProps(axis: "v", spacing: 1, align: "leading")) {
+                AtomText(props: TextProps(text: agent.name, size: 11, weight: "semibold"))
+                if let identity = agent.identity {
+                    AtomText(
+                        props: TextProps(text: identity, size: 9, color: "secondary", lineLimit: 1, truncation: "middle"),
+                        common: AtomCommon(testID: "\(id)-\(agent.provider)-account", help: agent.identityHelp)
+                    )
+                }
+            }
+            AtomSpacer(props: SpacerProps(minLength: 0))
+            if agent.canSwitch {
+                AtomButton(
+                    common: AtomCommon(testID: "\(id)-switch-\(agent.provider)", label: "Switch \(agent.name) account", help: "Switch \(agent.name) account", width: 16, height: 16),
+                    action: { actions.switchAccount(agent.provider) }
+                ) {
+                    AtomIcon(props: IconProps(name: "person.2", size: 9, color: "secondary"))
+                }
+            }
+        }
+    }
+
+    private func windowRow(_ window: AgentsInfoModel.Window, prefix: String) -> some View {
+        AtomStack(
+            props: StackProps(axis: "v", spacing: 2, align: "leading", combine: true),
+            common: AtomCommon(testID: "\(prefix)-window-\(window.id)", help: window.help)
+        ) {
+            AtomStack(props: StackProps(axis: "h", spacing: 4)) {
+                AtomText(props: TextProps(text: window.label, size: 10, lineLimit: 1))
+                AtomSpacer(props: SpacerProps(minLength: 0))
+                AtomText(props: TextProps(text: window.percent, size: 10, weight: "medium", color: window.percentColor, monospacedDigits: true))
+            }
+            AtomMeter(props: MeterProps(fraction: window.fraction, color: window.barColor))
+            AtomText(props: TextProps(text: window.reset, size: 9, color: "secondary"))
+        }
+    }
+}
+
+/// The board's Agents info section: the daemon's usage, re-derived on a slow
+/// tick, the remembered collapsed state, and the switch-account confirmation
+/// around the atom-built `AgentsInfoSection`.
 struct AgentsInfoView: View {
     /// App-wide, so returning to the board shows what is known instead of reading again.
     @EnvironmentObject private var model: AgentUsageModel
@@ -96,71 +348,29 @@ struct AgentsInfoView: View {
         self.runningProviders = runningProviders
     }
 
-    /// Providers whose CLI is installed, in display order; none until the first read.
-    private var visibleProviders: [AgentProviderUsage] {
-        guard let report = model.report else { return [] }
-        return [ConversationProvider.claude, .codex].compactMap { provider in
-            report.providers.first { $0.provider == provider.rawValue && $0.installed }
-        }
-    }
-
     var body: some View {
         // A stack, not a Group: the load below has to run while there is nothing to show yet.
         VStack(spacing: 0) {
-            if !visibleProviders.isEmpty {
+            if !AgentsInfoModel.visibleProviders(model.report).isEmpty {
                 // Re-evaluated on a slow tick so reset times and "updated" hints stay current.
                 TimelineView(.periodic(from: .now, by: 30)) { timeline in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.22)) { isCollapsed.toggle() }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: isCollapsed ? "chevron.up" : "chevron.down")
-                                    .font(.system(size: 8, weight: .bold))
-                                    .accessibilityHidden(true)
-                                Text("Agents info")
-                                    .font(.system(size: 10, weight: .semibold))
-                                Spacer(minLength: 0)
+                    AgentsInfoSection(
+                        model: AgentsInfoModel(report: model.report, runningProviders: runningProviders, errorMessage: model.errorMessage, now: timeline.date),
+                        collapsed: isCollapsed,
+                        actions: AgentsInfoActions(
+                            toggle: { isCollapsed.toggle() },
+                            login: { id in
+                                guard let provider = ConversationProvider(rawValue: id) else { return }
+                                Task { await model.login(provider) }
+                            },
+                            switchAccount: { id in
+                                guard let provider = ConversationProvider(rawValue: id) else { return }
+                                if (runningProviders[provider] ?? 0) > 0 { providerAwaitingSwitch = provider }
+                                else { Task { await model.switchAccount(provider) } }
                             }
-                            .foregroundStyle(.secondary)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .buttonHoverPointer()
-                        .nativeHelp(isCollapsed ? "Expand Agents info" : "Collapse Agents info")
-                        .accessibilityLabel("Agents info")
-                        .accessibilityValue(isCollapsed ? "Collapsed" : "Expanded")
-                        .accessibilityAddTraits(.isHeader)
-                        .accessibilityIdentifier("agents-info-toggle")
-                        if !isCollapsed {
-                            ForEach(visibleProviders, id: \.provider) { usage in
-                                if let provider = ConversationProvider(rawValue: usage.provider) {
-                                    AgentUsageBlock(
-                                        provider: provider,
-                                        usage: usage,
-                                        now: timeline.date,
-                                        hasRunningTask: (runningProviders[provider] ?? 0) > 0,
-                                        onLogin: { Task { await model.login(provider) } },
-                                        onSwitch: {
-                                            if (runningProviders[provider] ?? 0) > 0 { providerAwaitingSwitch = provider }
-                                            else { Task { await model.switchAccount(provider) } }
-                                        }
-                                    )
-                                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-                                }
-                            }
-                            if let message = model.errorMessage {
-                                Text(message)
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.red)
-                                    .lineLimit(3)
-                                    .accessibilityIdentifier("agents-info-error")
-                            }
-                        }
-                    }
+                        )
+                    )
                 }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("agents-info")
             }
         }
         .task { model.start() }
@@ -183,191 +393,6 @@ struct AgentsInfoView: View {
             let count = providerAwaitingSwitch.flatMap { runningProviders[$0] } ?? 0
             Text("\(count) \(providerAwaitingSwitch?.displayName ?? "") task\(count == 1 ? " is" : "s are") running. Signing out affects running tasks.")
         }
-    }
-}
-
-private struct AgentUsageBlock: View {
-    let provider: ConversationProvider
-    let usage: AgentProviderUsage
-    let now: Date
-    let hasRunningTask: Bool
-    let onLogin: () -> Void
-    let onSwitch: () -> Void
-
-    private var snapshot: AgentUsageSnapshot? { usage.snapshot?.effective(now: now.timeIntervalSince1970) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            header
-            if usage.loggedIn == false {
-                signedOut
-            } else if let snapshot, !snapshot.windows.isEmpty || snapshot.credits != nil {
-                ForEach(snapshot.windows, id: \.id) { window in
-                    WindowRow(provider: provider, window: window, status: snapshot.status, now: now)
-                }
-                if let credits = snapshot.credits, let text = Self.creditsText(credits) {
-                    Text(text)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("agents-info-\(provider.rawValue)-credits")
-                }
-                if let status = snapshot.status, status != .allowed {
-                    Text(status == .rejected ? "Limit reached" : "Near limit")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(status == .rejected ? Color.red : Color.orange)
-                        .accessibilityIdentifier("agents-info-\(provider.rawValue)-status")
-                }
-                if let hint = staleHint(snapshot) {
-                    Text(hint)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                        .accessibilityIdentifier("agents-info-\(provider.rawValue)-updated")
-                }
-            } else {
-                Text("No data yet")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("agents-info-\(provider.rawValue)-empty")
-            }
-        }
-        .padding(8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("agents-info-\(provider.rawValue)")
-    }
-
-    private var header: some View {
-        HStack(alignment: .top, spacing: 5) {
-            Image(systemName: provider == .claude ? "sparkle" : "chevron.left.forwardslash.chevron.right")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(provider.displayName)
-                    .font(.system(size: 11, weight: .semibold))
-                let identity = [usage.account, usage.plan].compactMap { $0 }
-                if !identity.isEmpty {
-                    Text(identity.joined(separator: " "))
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .nativeHelp(identity.joined(separator: " · "))
-                        .accessibilityIdentifier("agents-info-\(provider.rawValue)-account")
-                }
-            }
-            Spacer(minLength: 0)
-            if usage.loggedIn != nil {
-                Button(action: onSwitch) {
-                    Image(systemName: "person.2")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 16, height: 16)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .buttonHoverPointer()
-                .nativeHelp("Switch \(provider.displayName) account")
-                .accessibilityLabel("Switch \(provider.displayName) account")
-                .accessibilityIdentifier("agents-info-switch-\(provider.rawValue)")
-            }
-        }
-    }
-
-    private var signedOut: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if usage.loginInProgress {
-                Text("Waiting for sign-in…")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("agents-info-\(provider.rawValue)-login-pending")
-            }
-            Button(action: onLogin) {
-                Text("Log in")
-                    .font(.system(size: 10, weight: .medium))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 3)
-                    .background(Color.accentColor.opacity(0.18), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .buttonHoverPointer()
-            .nativeHelp("Log in to \(provider.displayName)")
-            .accessibilityLabel("Log in to \(provider.displayName)")
-            .accessibilityIdentifier("agents-info-login-\(provider.rawValue)")
-        }
-    }
-
-    /// Shown when the numbers are not being kept live by a running task.
-    private func staleHint(_ snapshot: AgentUsageSnapshot) -> String? {
-        let age = now.timeIntervalSince1970 - snapshot.updatedAt
-        guard age > 120, !hasRunningTask else { return nil }
-        return "Updated \(AgentUsageFormat.duration(age)) ago"
-    }
-
-    static func creditsText(_ credits: AgentUsageCredits) -> String? {
-        if credits.unlimited { return "Credits: unlimited" }
-        if let balance = credits.balance, !balance.isEmpty { return "Credits: \(balance)" }
-        return credits.hasCredits ? "Credits available" : nil
-    }
-}
-
-private struct WindowRow: View {
-    let provider: ConversationProvider
-    let window: AgentUsageWindow
-    let status: AgentUsageStatus?
-    let now: Date
-
-    private var percent: Double { min(100, max(0, window.usedPercent ?? 0)) }
-
-    private var tint: Color {
-        if percent >= 100 { return .red }
-        if percent >= AgentUsageSnapshot.warningPercent { return .orange }
-        return .accentColor
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 4) {
-                Text(window.label)
-                    .font(.system(size: 10))
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                Text(window.usedPercent == nil ? "–" : "\(Int(percent.rounded()))%")
-                    .font(.system(size: 10, weight: .medium).monospacedDigit())
-                    .foregroundStyle(percent >= 100 ? Color.red : percent >= AgentUsageSnapshot.warningPercent ? Color.orange : Color.primary)
-            }
-            // Drawn rather than a ProgressView: an AppKit progress indicator per row
-            // makes every accessibility query of the window slow.
-            Capsule()
-                .fill(Color.primary.opacity(0.12))
-                .frame(height: 3)
-                .overlay(alignment: .leading) {
-                    GeometryReader { proxy in
-                        Capsule().fill(tint).frame(width: proxy.size.width * percent / 100)
-                    }
-                }
-                .accessibilityHidden(true)
-            Text(resetText)
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary)
-        }
-        .nativeHelp(tooltip)
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("agents-info-\(provider.rawValue)-window-\(window.id)")
-    }
-
-    private var resetText: String {
-        if window.isReset { return "Reset" }
-        guard let resetsAt = window.resetsAt else { return "Reset time unknown" }
-        return "Resets in \(AgentUsageFormat.duration(resetsAt - now.timeIntervalSince1970))"
-    }
-
-    private var tooltip: String {
-        guard let resetsAt = window.resetsAt else { return window.isReset ? "\(window.label) window has reset" : window.label }
-        let formatted = Date(timeIntervalSince1970: resetsAt).formatted(date: .abbreviated, time: .shortened)
-        return "\(window.label) resets \(formatted)"
     }
 }
 

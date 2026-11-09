@@ -63,11 +63,13 @@ private struct PluginCommitReadout: View {
 }
 
 /// The Plugins menu's catalog: every atom rendered by its JavaScript page, and
-/// the task item composed in JavaScript beside the native one.
+/// the native composites (the task item, the Agents info section) composed in
+/// JavaScript beside the native ones.
 struct PluginCatalogView: View {
     private enum Page: Hashable {
         case atom(AtomType)
         case taskItem
+        case agentsInfo
     }
 
     @State private var selection: Page? = .atom(.stack)
@@ -86,6 +88,9 @@ struct PluginCatalogView: View {
                     Text("Task Item")
                         .tag(Page.taskItem)
                         .accessibilityIdentifier("plugin-catalog-task-item")
+                    Text("Agents Info")
+                        .tag(Page.agentsInfo)
+                        .accessibilityIdentifier("plugin-catalog-agents-info")
                 }
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190)
@@ -96,6 +101,8 @@ struct PluginCatalogView: View {
                     AtomPage(atom: atom).id(atom)
                 case .taskItem?:
                     TaskItemComparison()
+                case .agentsInfo?:
+                    AgentsInfoComparison()
                 case nil:
                     EmptyView()
                 }
@@ -106,6 +113,15 @@ struct PluginCatalogView: View {
 
 private func catalogPage(_ page: String) -> (source: String, props: [String: PluginValue])? {
     try? PluginRenderCommand.catalogPage(page, resources: PluginRuntime.bundledResources)
+}
+
+/// One side of a composite's comparison page.
+private func comparisonColumn(_ title: String, width: CGFloat, @ViewBuilder content: () -> some View) -> some View {
+    VStack(alignment: .leading, spacing: 10) {
+        Text(title).font(.headline)
+        content()
+    }
+    .frame(width: width, alignment: .leading)
 }
 
 private struct AtomPage: View {
@@ -155,12 +171,12 @@ private struct TaskItemComparison: View {
             if let page = catalogPage("TaskItem"),
                let sample = try? Self.sample(page.props) {
                 HStack(alignment: .top, spacing: 28) {
-                    column("JavaScript (React → atoms)") {
+                    comparisonColumn("JavaScript (React → atoms)", width: 300) {
                         PluginSurface(source: page.source, name: "TaskItem.js", props: page.props)
                     }
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("plugin-catalog-js-task-item")
-                    column("Native SwiftUI (atoms)") {
+                    comparisonColumn("Native SwiftUI (atoms)", width: 300) {
                         NativeTaskItemDemo(sample: sample)
                     }
                     .accessibilityElement(children: .contain)
@@ -170,14 +186,6 @@ private struct TaskItemComparison: View {
         }
         .padding(24)
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func column(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title).font(.headline)
-            content()
-        }
-        .frame(width: 300, alignment: .leading)
     }
 
     struct Sample: Decodable {
@@ -229,6 +237,83 @@ private struct NativeTaskItemDemo: View {
                     AtomText(props: TextProps(text: blocked ? "Unblock" : "Block", size: 11, weight: "medium", color: "accent"))
                 }
                 AtomText(props: TextProps(text: "Opened \(opened) times", size: 11, color: "secondary"), common: AtomCommon(testID: "native-opened-count"))
+                AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
+            }
+        }
+    }
+}
+
+/// The JavaScript Agents info section beside the native one, from the same
+/// sample model. Each side keeps its own collapsed and signed-out state; the
+/// native section uses a "native-agents-info" id so the two never share
+/// accessibility identifiers.
+private struct AgentsInfoComparison: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Agents Info")
+                .font(.title2.weight(.semibold))
+                .accessibilityIdentifier("plugin-catalog-title")
+            if let page = catalogPage("AgentsInfo"),
+               let sample = try? Self.sample(page.props) {
+                HStack(alignment: .top, spacing: 28) {
+                    comparisonColumn("JavaScript (React → atoms)", width: 240) {
+                        PluginSurface(source: page.source, name: "AgentsInfo.js", props: page.props)
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("plugin-catalog-js-agents-info")
+                    comparisonColumn("Native SwiftUI (atoms)", width: 240) {
+                        NativeAgentsInfoDemo(sample: sample)
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("plugin-catalog-native-agents-info")
+                }
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    struct Sample: Decodable {
+        var agentsInfo: AgentsInfoModel
+    }
+
+    static func sample(_ props: [String: PluginValue]) throws -> Sample {
+        try PluginValueDecoder.decode(Sample.self, from: .object(props))
+    }
+}
+
+/// The native Agents info section with the same demo controls as AgentsInfo.js, built from the same atoms.
+private struct NativeAgentsInfoDemo: View {
+    let sample: AgentsInfoComparison.Sample
+    @State private var collapsed = false
+    @State private var signedOut = false
+    @State private var lastAction = "none"
+
+    private var model: AgentsInfoModel {
+        var model = sample.agentsInfo
+        model.id = "native-\(model.id)"
+        model.agents = model.agents.map { agent in
+            var agent = agent
+            if agent.provider == "claude" && signedOut { agent.signedOut = true }
+            return agent
+        }
+        return model
+    }
+
+    var body: some View {
+        // As wide as the board sidebar's content.
+        AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
+            AtomStack(props: StackProps(axis: "v"), common: AtomCommon(width: 160)) {
+                AgentsInfoSection(model: model, collapsed: collapsed, actions: AgentsInfoActions(
+                    toggle: { lastAction = collapsed ? "expand" : "collapse"; collapsed.toggle() },
+                    login: { signedOut = false; lastAction = "login \($0)" },
+                    switchAccount: { lastAction = "switch \($0)" }
+                ))
+            }
+            AtomStack(props: StackProps(axis: "h", spacing: 8)) {
+                AtomButton(props: ButtonProps(style: "borderless"), common: AtomCommon(testID: "native-toggle-signed-out"), action: { signedOut.toggle() }) {
+                    AtomText(props: TextProps(text: signedOut ? "Sign in Claude" : "Sign out Claude", size: 11, weight: "medium", color: "accent"))
+                }
                 AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
             }
         }

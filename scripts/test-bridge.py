@@ -13850,7 +13850,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         path.write_text(source, encoding="utf-8")
         return self.call_cli("plugin", "render", "--file", path, *options, expected_status=expected_status)[0]
 
-    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card) and the Task Item example; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
+    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter) and the Task Item and Agents Info examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
     def test_plugin_renderer_commits_minimal_ops_and_runs_handlers(self):
         plugin = """
 function App() {
@@ -13869,8 +13869,8 @@ function App() {
 Playhouse.render(h(App));
 """
         rendered = self.assert_success(self.render_plugin(plugin))
-        self.assertEqual(rendered["atoms"], ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card"],
-                         "Plugins compose exactly the task item's atoms.")
+        self.assertEqual(rendered["atoms"], ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter"],
+                         "Plugins compose exactly the native composites' atoms.")
         self.assertEqual(rendered["errors"], [])
         self.assertEqual(len(rendered["commits"]), 1, "The first render is one commit.")
         first = rendered["commits"][0]
@@ -13944,12 +13944,20 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertTrue(any("Invalid commit" in error and "integer" in error for error in out_of_range["result"]["errors"]),
                         f"An op whose node id is out of range is reported, not a crash: {out_of_range['result']['errors']}")
 
-        for page in ["Button", "Card", "Icon", "Label", "Link", "PillPicker", "Spacer", "Spinner", "Stack", "TaskItem", "Text"]:
+        for page in ["AgentsInfo", "Button", "Card", "Disclosure", "Icon", "Label", "Link", "Meter", "Panel", "PillPicker", "Spacer", "Spinner", "Stack", "TaskItem", "Text"]:
             page_render = self.assert_success(self.call_cli("plugin", "render", "--page", page)[0])
             self.assertEqual(page_render["errors"], [], f"The {page} catalog page renders without errors.")
             used = {node["type"] for node in self.plugin_nodes(page_render["tree"])}
-            if page != "TaskItem":
+            if page not in ("TaskItem", "AgentsInfo"):
                 self.assertIn(page, used, f"The {page} page shows its atom.")
+        disclosure = self.assert_success(self.call_cli("plugin", "render", "--page", "Disclosure", "--event", "disclosure-demo:onToggle")[0])
+        section = self.plugin_node(disclosure["tree"], "disclosure-demo")
+        state = self.plugin_node(disclosure["tree"], "disclosure-state")
+        self.assertTrue(section["props"]["collapsed"], "The Disclosure page's onToggle collapsed it.")
+        self.assertEqual(self.plugin_text(state), "Collapsed")
+        self.plugin_node(disclosure["tree"], "disclosure-first")
+        self.assertEqual(sorted(disclosure["commits"][-1]["ops"]), ["text", "update"], "Collapsing keeps the children in the tree: the Disclosure's props and the readout change.")
+        self.assertEqual(set(disclosure["commits"][-1]["touchedNodes"]), {section["id"], state["children"][0]["id"]})
         pressed = self.assert_success(self.call_cli("plugin", "render", "--page", "Button", "--event", "button-plain:onPress")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(pressed["tree"], "button-press-count")), "Pressed 1 times")
         self.assertEqual(pressed["commits"][-1]["ops"], ["text"], "The Button page's press is one text op.")
@@ -13964,6 +13972,8 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
             ('Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a" }] }));', "<PillPicker> has an invalid prop: options.0.label: missing"),
             ('Playhouse.render(h(Stack, null, "loose"));', "must be inside a <Text> atom"),
             ('Playhouse.render(h(Label, { icon: "clock" }));', "<Label> has an invalid prop: text: missing"),
+            ('Playhouse.render(h(Meter, { color: "red" }));', "<Meter> has an invalid prop: fraction: missing"),
+            ('Playhouse.render(h(Disclosure, { title: "x", collapsed: "no" }));', "<Disclosure> has an invalid prop: collapsed: expected a boolean, found a string"),
             ('Playhouse.render(h(Stack, { onTap: function () {} }));', '<Stack> has no event "onTap"'),
             ('Playhouse.render(h(Icon, { name: "clock" }, h(Text, null, "x")));', "<Icon> can't hold <Text>"),
         ]:
@@ -14037,6 +14047,79 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(self.plugin_text(self.plugin_node(menu["tree"], "js-last-action")), "Last: menu done", "A menu item runs onMenu with its id.")
         self.assertEqual(menu["commits"][-1]["ops"], ["text"])
         self.assert_failure(self.call_cli("plugin", "render", "--page", "TaskItem", "--event", f"task-pr-mode-{task}:onPress", expected_status=2)[0], "invalid_argument")
+
+    # case-contract: test_plugin_agents_info_renders_from_atoms_like_native | The Plugin Catalog's Agents Info page shows the Agents info section composed in JavaScript from atoms beside the native SwiftUI section the board uses, built from the same atoms and sample data: both show the Agents info title button (Expanded), a Claude block above a Codex block with the same account and plan rows, window rows (label, percent, usage bar and reset time), Codex's credits, its Near limit status and the updated hints, each at the same size in both, and the JavaScript tree uses only atoms (Disclosure, Panel, Meter, Stack, Text, Icon, Button, Spacer) with the board section's identifiers. Collapsing is the Disclosure atom's own: clicking the JavaScript title runs onToggle, whose state change is one commit that updates only the Disclosure's props and the readout (Last: collapse) while the blocks stay in the tree, the JavaScript blocks go away and its title reads Collapsed while the native section stays open, the native title collapses its own section to the same size, and expanding brings the blocks back (Last: expand). Signing Claude out in the JavaScript example replaces its window rows with a Log in button the same size as the native one, whose onPress runs in JavaScript (Last: login claude) and brings the rows back, and Codex's switch-account button runs its JavaScript handler with its provider (Last: switch codex) without re-rendering any block.
+    def test_plugin_agents_info_renders_from_atoms_like_native(self):
+        rendered = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "AgentsInfo",
+            "--event", "agents-info:onToggle",
+            "--event", "agents-info-switch-codex:onPress")[0])
+        self.assertEqual(rendered["errors"], [])
+        tree = rendered["tree"]
+        # The same identifiers the board's native AgentsInfoSection gives its section.
+        for test_id in ["agents-info", "agents-info-claude", "agents-info-claude-account", "agents-info-switch-claude",
+                        "agents-info-claude-window-five_hour", "agents-info-claude-window-seven_day", "agents-info-claude-updated",
+                        "agents-info-codex", "agents-info-codex-account", "agents-info-switch-codex", "agents-info-codex-window-overage",
+                        "agents-info-codex-credits", "agents-info-codex-status", "agents-info-codex-updated"]:
+            self.plugin_node(tree, test_id)
+        types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
+        self.assertEqual(types, {"Disclosure", "Panel", "Meter", "Stack", "Text", "Icon", "Button", "Spacer"}, "The Agents info section is atoms only.")
+        section = self.plugin_node(tree, "agents-info")
+        self.assertEqual(section["type"], "Disclosure")
+        self.assertEqual(section["events"], ["onToggle"])
+        self.assertEqual((section["props"]["title"], section["props"]["toggleTestID"]), ("Agents info", "agents-info-toggle"))
+        self.assertTrue(section["props"]["collapsed"], "onToggle collapsed the section.")
+        blocks = [child for child in section["children"] if child["type"] == "Panel"]
+        self.assertEqual([block["props"]["testID"] for block in blocks], ["agents-info-claude", "agents-info-codex"],
+                         "Collapsed, the blocks stay in the tree; the Disclosure atom hides them.")
+        claude = self.plugin_node(tree, "agents-info-claude")
+        self.assertEqual((claude["props"]["spacing"], claude["props"]["padding"], claude["props"]["fillWidth"]), (4, 8, True))
+        account = self.plugin_node(tree, "agents-info-claude-account")
+        self.assertEqual(self.plugin_text(account), "claude@example.com Team")
+        self.assertEqual((account["props"]["truncation"], account["props"]["help"]), ("middle", "claude@example.com · Team"))
+        window = self.plugin_node(tree, "agents-info-claude-window-five_hour")
+        self.assertEqual(window["type"], "Stack")
+        self.assertTrue(window["props"]["combine"], "A window row is one accessibility element, as on the board.")
+        self.assertEqual([child["type"] for child in window["children"]], ["Stack", "Meter", "Text"], "Label and percent, the bar, then the reset time.")
+        label_row, meter, reset = window["children"]
+        self.assertEqual([self.plugin_text(child) for child in label_row["children"] if child["type"] == "Text"], ["5h", "5%"])
+        self.assertEqual((meter["props"]["fraction"], meter["props"]["color"]), (0.05, "accent"))
+        self.assertEqual(self.plugin_text(reset), "Resets in 3h 24m")
+        spend = self.plugin_node(tree, "agents-info-codex-window-overage")
+        self.assertEqual(spend["children"][1]["props"]["color"], "orange", "A window near its limit has an orange bar.")
+        status = self.plugin_node(tree, "agents-info-codex-status")
+        self.assertEqual((self.plugin_text(status), status["props"]["color"]), ("Near limit", "orange"))
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "agents-info-codex-credits")), "Credits available")
+
+        commits = {commit["step"]: commit for commit in rendered["commits"]}
+        last_action = self.plugin_node(tree, "js-last-action")
+        toggled = commits["agents-info:onToggle"]
+        self.assertEqual(sorted(toggled["ops"]), ["text", "update"], "Collapsing updates only the Disclosure's props and the readout.")
+        self.assertEqual(set(toggled["touchedNodes"]), {section["id"], last_action["children"][1]["id"]})
+        switched = commits["agents-info-switch-codex:onPress"]
+        self.assertEqual(self.plugin_text(last_action), "Last: switch codex", "The switch-account button ran its JavaScript handler with its provider.")
+        self.assertEqual(switched["ops"], ["text"])
+        self.assertEqual(switched["touchedNodes"], [last_action["children"][1]["id"]])
+        for block in blocks:
+            self.assertEqual(block["updates"], 0, "No block re-rendered.")
+
+        expanded = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "AgentsInfo", "--event", "agents-info:onToggle", "--event", "agents-info:onToggle")[0])
+        self.assertFalse(self.plugin_node(expanded["tree"], "agents-info")["props"]["collapsed"], "A second toggle expands it again.")
+        self.assertEqual(self.plugin_text(self.plugin_node(expanded["tree"], "js-last-action")), "Last: expand")
+
+        signed_out = self.assert_success(self.call_cli("plugin", "render", "--page", "AgentsInfo", "--event", "js-toggle-signed-out:onPress")[0])
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(signed_out["tree"])}
+        self.assertIn("agents-info-login-claude", test_ids, "A signed-out Claude shows Log in.")
+        self.assertNotIn("agents-info-claude-window-five_hour", test_ids, "A signed-out agent shows no usage.")
+        login = self.plugin_node(signed_out["tree"], "agents-info-login-claude")
+        self.assertEqual((login["type"], login["props"]["label"]), ("Button", "Log in to Claude"))
+        self.assertEqual(login["children"][0]["type"], "Panel")
+        logged_in = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "AgentsInfo", "--event", "js-toggle-signed-out:onPress", "--event", "agents-info-login-claude:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(logged_in["tree"], "js-last-action")), "Last: login claude", "Log in ran its JavaScript handler.")
+        self.plugin_node(logged_in["tree"], "agents-info-claude-window-five_hour")
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "AgentsInfo", "--event", "agents-info:onPress", expected_status=2)[0], "invalid_argument")
 
     # Scheduled tasks. Firing goes through ConversationManager.send, the same path the
     # composer's Send and `conversation send` use for both providers, so the schedule

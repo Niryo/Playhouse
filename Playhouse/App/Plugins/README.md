@@ -4,20 +4,27 @@ A plugin is plain JavaScript that builds UI with React. A custom React
 renderer running in JavaScriptCore turns each commit into mutation ops. Swift
 applies them to an observable node tree, and SwiftUI draws that tree from
 native **atoms**. Plugins compose only atoms. Composites such as the task
-item exist only as native SwiftUI built from the same atoms
-(`Playhouse/App/TaskItemView.swift`).
+item and the board's Agents info section exist only as native SwiftUI built
+from the same atoms (`Playhouse/App/TaskItemView.swift`,
+`AgentsInfoSection` in `Playhouse/App/AgentsInfoView.swift`).
 
 | Path | What it is |
 | --- | --- |
 | `Core/` | Foundation + JavaScriptCore only: `PluginRuntime` (the JS context), `PluginNodeTree` (ops → nodes), `AtomProps` (atom names and props), `PluginRenderCommand` (`playhouse plugin render`). Also compiled into the bridge daemon. |
 | `Atoms/` | The atoms' SwiftUI views and `AtomRegistry`, which maps each atom name to a builder that decodes the node's props. |
 | `Renderer/` | `PluginSurface` (runs one script and renders its tree) and the Plugin Catalog window. |
-| `Playhouse/Resources/PluginRuntime/` | `prelude.js` (the React host config), `vendor/` (prebuilt react 18.3.1, react-reconciler 0.29.2, scheduler 0.23.2), `catalog/` (one page per atom, `TaskItem.js`, the sample task). |
+| `Playhouse/Resources/PluginRuntime/` | `prelude.js` (the React host config), `vendor/` (prebuilt react 18.3.1, react-reconciler 0.29.2, scheduler 0.23.2), `catalog/` (one page per atom, `TaskItem.js`, `AgentsInfo.js`, and their `sample-*.json` data). |
 
 `catalog/TaskItem.js` is a demo that copies `TaskItemView` atom for atom, so the
 catalog can show the two side by side. It is not a composite exposed to
 plugins. Change it whenever `TaskItemView` changes;
 `test_plugin_task_item_renders_from_atoms_like_native` compares the two.
+`catalog/AgentsInfo.js` does the same for `AgentsInfoSection`, including its
+collapsing title (the `Disclosure` atom); change it whenever that section
+changes. `test_plugin_agents_info_renders_from_atoms_like_native` compares
+those two. Each composite reads a display model that is already derived
+(`TaskItemModel`, `AgentsInfoModel`), so the JavaScript copy formats nothing
+the native one doesn't.
 
 The app build does not run npm. `scripts/vendor-react.sh` is the one-time
 script that copies the prebuilt files into `vendor/`. Rerun it only to change
@@ -30,7 +37,10 @@ A plugin is one script. The runtime defines these globals:
 - `React`: React 18. Hooks work (`useState`, `useEffect`, …).
 - `h`: `React.createElement`.
 - One string constant per atom (`Stack`, `Text`, …), so a plugin writes `h(Text, …)`.
-- `Playhouse.props`: the plugin's input. Catalog pages get the sample task data.
+- `Playhouse.props`: the plugin's input. Catalog pages get the sample data:
+  the top-level fields of every `catalog/sample-*.json` (`task` and
+  `blockedStatusMessage` for the task item, `agentsInfo` for Agents info).
+  Two samples may not share a field.
 - `Playhouse.render(element)`: mounts the root.
 - `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`, `queueMicrotask`, `console`.
 
@@ -48,7 +58,7 @@ Playhouse.render(h(Counter));
 ```
 
 Raw strings may only appear inside a `Text`, and only `Stack`, `Button`,
-`Link` and `Card` take atom children. An unknown atom, an unknown prop, a prop
+`Link`, `Card`, `Disclosure` and `Panel` take atom children. An unknown atom, an unknown prop, a prop
 with the wrong type, or an event the atom doesn't raise is an error. The commit stops at that op, and
 the ops before it stay applied. The catalog shows the error under whatever
 rendered.
@@ -68,8 +78,8 @@ exits 1 when the plugin reported errors.
 
 ## Atoms
 
-These are exactly the atoms the task item is built from. Every atom also takes
-these common props:
+These are exactly the atoms the task item and the Agents info section are
+built from. Every atom also takes these common props:
 
 | Common prop | |
 | --- | --- |
@@ -88,8 +98,8 @@ Colors are `primary`, `secondary`, `tertiary`, `accent`, `text`, `red`,
 
 | Atom | Props | Events | Children |
 | --- | --- | --- | --- |
-| `Stack` | `axis` (`"v"` default, `"h"`), `spacing`, `align` (column: leading/center/trailing; row: top/center/bottom), `group` (one accessibility container) | | atoms |
-| `Text` | `text` (or string children), `size`, `weight`, `design` (`monospaced`), `color`, `lineLimit`, `tracking`, `lineSpacing`, `wrap` (grow vertically), `numeric` (animate digits) | | strings |
+| `Stack` | `axis` (`"v"` default, `"h"`), `spacing`, `align` (column: leading/center/trailing; row: top/center/bottom), `group` (one accessibility container), `combine` (one accessibility element joining its children's labels) | | atoms |
+| `Text` | `text` (or string children), `size`, `weight`, `design` (`monospaced`), `color`, `lineLimit`, `tracking`, `lineSpacing`, `wrap` (grow vertically), `numeric` (animate digits), `truncation` (`head`, `middle`, `tail` default), `monospacedDigits` | | strings |
 | `Icon` | `name` (SF Symbol) or `asset` (template image), `size`, `weight`, `color` | | |
 | `Label` | `text`, `icon` (SF Symbol), `size`, `weight`, `color` | | |
 | `Button` | `style` (`plain` default, `borderless`), `emphasis` (hover capsule padding), `overhang` (capsule spills past the layout of a Button without a fixed size), `disabled` | `onPress()` | atoms (its label) |
@@ -98,6 +108,9 @@ Colors are `primary`, `secondary`, `tertiary`, `accent`, `text`, `red`,
 | `Spacer` | `minLength` | | |
 | `PillPicker` | `options` (`[{value, label, help?, testID?}]`), `selected`; the `help` tooltip may contain `{help}`, which is replaced by the shown option's help | `onChange(value)` | |
 | `Card` | `menu` (`[{id, title, icon?, destructive?, testID?}]`), `meter` (0…1 usage bar), `meterLabel`, `meterTestID`; `testID`, `label` and `hint` describe its open button | `onPress()`, `onMenu(id)` | atoms |
+| `Disclosure` | `title`, `collapsed` (required; the atom shows what it is given), `spacing`, `toggleTestID` (the title button); a collapsed section keeps its children in the tree and hides them | `onToggle()`, called inside an animation; the owner flips `collapsed` | atoms |
+| `Panel` | `spacing`, `fill` (a color, `primary` default), `fillOpacity` (0.05 default), `cornerRadius` (8 default); a rounded filled background behind a leading column, one accessibility container | | atoms |
+| `Meter` | `fraction` (0…1, required), `color` (`accent` default), `thickness` (3 default); decorative unless it has a `label` | | |
 
 To add an atom, add its case and props struct to `Core/AtomProps.swift`, its
 view to `Atoms/AtomViews.swift`, its registry entry to

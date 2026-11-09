@@ -19414,16 +19414,17 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(switched["conversationProvider"] as? String, liveProvider)
     }
 
-    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card) and the Task Item example; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
+    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter) and the Task Item and Agents Info examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
     func test_plugin_renderer_commits_minimal_ops_and_runs_handlers() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
         XCTAssertTrue(element("plugin-catalog-atom-Stack").waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog opens the catalog.")
         XCTAssertTrue(element("plugin-catalog-task-item").exists, "The sidebar lists the Task Item example.")
+        XCTAssertTrue(element("plugin-catalog-agents-info").exists, "The sidebar lists the Agents Info example.")
 
         let rendered = try XCTUnwrap(try runCLI(["plugin", "render", "--page", "Stack"])["result"] as? [String: Any])
         let atoms = try XCTUnwrap(rendered["atoms"] as? [String])
-        XCTAssertEqual(atoms, ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card"])
+        XCTAssertEqual(atoms, ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter"])
         try assertPluginValuesCrossWithJSONRules()
         for atom in atoms {
             let row = element("plugin-catalog-atom-\(atom)")
@@ -19459,6 +19460,22 @@ final class PlayhouseUITests: XCTestCase {
         element("button-disabled").click()
         XCTAssertFalse(waitUntil({ self.pluginText(pressCount) != "Pressed 1 times" }, timeout: 2), "A disabled Button doesn't call its handler.")
         XCTAssertTrue(pluginText(commit).hasPrefix("Commit 2: "), "No commit followed the disabled tap: \(pluginText(commit))")
+
+        element("plugin-catalog-atom-Disclosure").click()
+        let disclosureToggle = element("disclosure-toggle")
+        XCTAssertTrue(disclosureToggle.waitToExist(timeout: 10))
+        XCTAssertEqual(disclosureToggle.value as? String, "Expanded")
+        XCTAssertTrue(element("disclosure-first").exists, "An expanded Disclosure shows its children.")
+        disclosureToggle.click()
+        XCTAssertTrue(waitUntil({ !self.element("disclosure-first").exists }, timeout: 5), "Clicking the title ran onToggle, which collapsed it.")
+        XCTAssertEqual(disclosureToggle.value as? String, "Collapsed")
+        XCTAssertEqual(pluginText(element("disclosure-state")), "Collapsed")
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 2: update, text → nodes ") }, timeout: 5),
+                      "Collapsing changed only the Disclosure's props and the readout: \(pluginText(commit))")
+        attachScreenshot(named: "Disclosure atom collapsed")
+        disclosureToggle.click()
+        XCTAssertTrue(element("disclosure-first").waitToExist(timeout: 5), "Expanding brings the children back.")
+        XCTAssertEqual(disclosureToggle.value as? String, "Expanded")
     }
 
     /// Commits, props and event values cross as JavaScript values, not JSON
@@ -19617,6 +19634,113 @@ final class PlayhouseUITests: XCTestCase {
         moveToDone.click()
         XCTAssertTrue(waitUntil({ self.pluginText(self.element("js-last-action")) == "Last: menu done" }, timeout: 5), "The menu item ran onMenu with its id.")
         XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 5: text → node ") }, timeout: 5), pluginText(commit))
+    }
+
+    // case-contract: test_plugin_agents_info_renders_from_atoms_like_native | The Plugin Catalog's Agents Info page shows the Agents info section composed in JavaScript from atoms beside the native SwiftUI section the board uses, built from the same atoms and sample data: both show the Agents info title button (Expanded), a Claude block above a Codex block with the same account and plan rows, window rows (label, percent, usage bar and reset time), Codex's credits, its Near limit status and the updated hints, each at the same size in both, and the JavaScript tree uses only atoms (Disclosure, Panel, Meter, Stack, Text, Icon, Button, Spacer) with the board section's identifiers. Collapsing is the Disclosure atom's own: clicking the JavaScript title runs onToggle, whose state change is one commit that updates only the Disclosure's props and the readout (Last: collapse) while the blocks stay in the tree, the JavaScript blocks go away and its title reads Collapsed while the native section stays open, the native title collapses its own section to the same size, and expanding brings the blocks back (Last: expand). Signing Claude out in the JavaScript example replaces its window rows with a Log in button the same size as the native one, whose onPress runs in JavaScript (Last: login claude) and brings the rows back, and Codex's switch-account button runs its JavaScript handler with its provider (Last: switch codex) without re-rendering any block.
+    func test_plugin_agents_info_renders_from_atoms_like_native() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Plugin Catalog")
+        let example = element("plugin-catalog-agents-info")
+        XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Agents Info example.")
+        example.click()
+        let jsSide = element("plugin-catalog-js-agents-info")
+        let nativeSide = element("plugin-catalog-native-agents-info")
+        XCTAssertTrue(jsSide.waitToExist(timeout: 10), "The page shows the JavaScript Agents info section.")
+        XCTAssertTrue(nativeSide.waitToExist(timeout: 10), "The page shows the native Agents info section.")
+        XCTAssertFalse(element("plugin-error").exists, "The JavaScript section renders without errors.")
+
+        // The board window behind the catalog shows the real Agents info section
+        // (the Codex fixture is installed) with the same identifiers as the
+        // JavaScript copy, so every lookup is scoped to its catalog column.
+        func js(_ identifier: String) -> XCUIElement {
+            jsSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func native(_ identifier: String) -> XCUIElement {
+            nativeSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func pair(_ suffix: String) -> (js: XCUIElement, native: XCUIElement) {
+            (js("agents-info\(suffix)"), native("native-agents-info\(suffix)"))
+        }
+        func assertSameSize(_ suffix: String) {
+            let (js, native) = pair(suffix)
+            XCTAssertTrue(js.waitToExist(timeout: 10), "The JavaScript section has agents-info\(suffix).")
+            XCTAssertTrue(native.waitToExist(timeout: 10), "The native section has agents-info\(suffix).")
+            XCTAssertEqual(js.frame.width, native.frame.width, accuracy: 1, "agents-info\(suffix) has the same width in both.")
+            XCTAssertEqual(js.frame.height, native.frame.height, accuracy: 1, "agents-info\(suffix) has the same height in both.")
+        }
+        for suffix in ["", "-toggle", "-claude", "-codex", "-claude-account", "-codex-account", "-switch-claude", "-switch-codex",
+                       "-claude-window-five_hour", "-claude-window-seven_day", "-codex-window-overage",
+                       "-codex-credits", "-codex-status", "-claude-updated", "-codex-updated"] {
+            assertSameSize(suffix)
+        }
+        let jsToggle = pair("-toggle").js, nativeToggle = pair("-toggle").native
+        XCTAssertEqual(jsToggle.value as? String, "Expanded", "The section is open by default.")
+        XCTAssertEqual(nativeToggle.value as? String, "Expanded")
+        XCTAssertLessThanOrEqual(pair("-claude").js.frame.maxY, pair("-codex").js.frame.minY, "Claude's block sits above Codex's.")
+        for side in [pair("").js, pair("").native] {
+            XCTAssertTrue(side.descendants(matching: .any).matching(NSPredicate(format: "label =[c] %@", "Agents info")).firstMatch.exists, "The title reads Agents info.")
+        }
+        for (js, native) in [pair("-claude-account"), pair("-codex-status"), pair("-codex-credits"), pair("-claude-updated")] {
+            XCTAssertEqual(pluginText(js), pluginText(native), "Both show the same text.")
+        }
+        XCTAssertEqual(pluginText(pair("-claude-account").js), "claude@example.com Team", "The account and plan share the row below the name.")
+        XCTAssertEqual(pluginText(pair("-codex-status").js), "Near limit")
+        XCTAssertEqual(pluginText(pair("-codex-credits").js), "Credits available")
+        let fiveHour = accessibleLabelOrValue(of: pair("-claude-window-five_hour").js)
+        XCTAssertTrue(fiveHour.contains("5h") && fiveHour.contains("5%") && fiveHour.contains("Resets in 3h 24m"), "A window row reads as one element: \(fiveHour)")
+        XCTAssertEqual(fiveHour, accessibleLabelOrValue(of: pair("-claude-window-five_hour").native), "Both window rows read the same.")
+        attachScreenshot(named: "Agents info: JavaScript beside native")
+
+        // Collapsing is the Disclosure atom's own; each side keeps its own state.
+        let commit = jsSide.descendants(matching: .any).matching(identifier: "plugin-last-commit").firstMatch
+        let expandedHeight = pair("").js.frame.height
+        jsToggle.click()
+        XCTAssertTrue(waitUntil({ !js("agents-info-claude").exists && !js("agents-info-codex").exists }, timeout: 5),
+                      "Collapsing hides the JavaScript blocks.")
+        XCTAssertEqual(jsToggle.value as? String, "Collapsed")
+        XCTAssertLessThan(pair("").js.frame.height, expandedHeight, "The collapsed section is only its title.")
+        XCTAssertTrue(pair("-claude").native.exists, "The native section stays open.")
+        XCTAssertEqual(nativeToggle.value as? String, "Expanded")
+        XCTAssertTrue(waitUntil({ self.pluginText(js("js-last-action")) == "Last: collapse" }, timeout: 5), "The title ran onToggle.")
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 2: update, text → nodes ") }, timeout: 5),
+                      "Collapsing changed only the Disclosure's props and the readout: \(pluginText(commit))")
+        attachScreenshot(named: "Agents info: JavaScript section collapsed, native open")
+        nativeToggle.click()
+        XCTAssertTrue(waitUntil({ !native("native-agents-info-claude").exists }, timeout: 5), "The native title collapses its own section.")
+        XCTAssertEqual(nativeToggle.value as? String, "Collapsed")
+        assertSameSize("")
+        attachScreenshot(named: "Agents info: both sections collapsed")
+        jsToggle.click()
+        nativeToggle.click()
+        XCTAssertTrue(js("agents-info-claude").waitToExist(timeout: 5), "Expanding brings the JavaScript blocks back.")
+        XCTAssertTrue(native("native-agents-info-claude").waitToExist(timeout: 5), "Expanding brings the native blocks back.")
+        XCTAssertEqual(jsToggle.value as? String, "Expanded")
+        XCTAssertTrue(waitUntil({ self.pluginText(js("js-last-action")) == "Last: expand" }, timeout: 5))
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 3: update, text → nodes ") }, timeout: 5), pluginText(commit))
+        XCTAssertEqual(pair("").js.frame.height, expandedHeight, accuracy: 1, "Expanded again, the section is its full height.")
+
+        // A signed-out agent shows Log in instead of its usage.
+        js("js-toggle-signed-out").click()
+        native("native-toggle-signed-out").click()
+        XCTAssertTrue(js("agents-info-login-claude").waitToExist(timeout: 5), "A signed-out Claude shows Log in.")
+        XCTAssertTrue(native("native-agents-info-login-claude").waitToExist(timeout: 5))
+        XCTAssertFalse(js("agents-info-claude-window-five_hour").exists, "A signed-out agent shows no usage.")
+        assertSameSize("-login-claude")
+        assertSameSize("-claude")
+        attachScreenshot(named: "Agents info: Claude signed out in both")
+        js("agents-info-login-claude").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(js("js-last-action")) == "Last: login claude" }, timeout: 5), "Log in ran its JavaScript handler.")
+        XCTAssertTrue(js("agents-info-claude-window-five_hour").waitToExist(timeout: 5), "Logged in again, Claude's usage is back.")
+        XCTAssertFalse(js("agents-info-login-claude").exists)
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 5: ") }, timeout: 5), "Log in is one commit: \(pluginText(commit))")
+        attachScreenshot(named: "Agents info: Claude logged in again in JavaScript")
+
+        pair("-switch-codex").js.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(js("js-last-action")) == "Last: switch codex" }, timeout: 5),
+                      "The switch-account button ran its JavaScript handler with its provider.")
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 6: text → node ") }, timeout: 5),
+                      "Switching changed only the readout: \(pluginText(commit))")
+        XCTAssertEqual(pluginText(native("native-last-action")), "Last: expand", "The native section keeps its own state.")
     }
 
     private func clickPluginsMenuItem(_ title: String) {
