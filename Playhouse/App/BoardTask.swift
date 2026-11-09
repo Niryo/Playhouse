@@ -440,10 +440,19 @@ struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
     var isPending: Bool = false
     var pullRequestNumber: Int? = nil
     var pullRequestURL: String? = nil
+    /// The branch head when pull request creation last found nothing here to
+    /// propose. The review gate clears it once the task changes the repository.
+    var pullRequestSkippedHead: String? = nil
 
     private enum CodingKeys: String, CodingKey {
         case repositoryPath, branch, worktreePath, branchFrom, createdByPlayhouse
-        case mergeTarget, isPending, pullRequestNumber, pullRequestURL
+        case mergeTarget, isPending, pullRequestNumber, pullRequestURL, pullRequestSkippedHead
+    }
+
+    /// A started repository with no linked pull request that is not known to
+    /// be unchanged, so its PR controls still offer to open one.
+    var awaitsPullRequest: Bool {
+        !isPending && (pullRequestNumber == nil || pullRequestURL == nil) && pullRequestSkippedHead == nil
     }
 
     init(
@@ -455,7 +464,8 @@ struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
         mergeTarget: String? = nil,
         isPending: Bool = false,
         pullRequestNumber: Int? = nil,
-        pullRequestURL: String? = nil
+        pullRequestURL: String? = nil,
+        pullRequestSkippedHead: String? = nil
     ) {
         self.repositoryPath = repositoryPath
         self.branch = branch
@@ -466,6 +476,7 @@ struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
         self.isPending = isPending
         self.pullRequestNumber = pullRequestNumber
         self.pullRequestURL = pullRequestURL
+        self.pullRequestSkippedHead = pullRequestSkippedHead
     }
 
     init(from decoder: Decoder) throws {
@@ -479,5 +490,6 @@ struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
         isPending = try values.decodeIfPresent(Bool.self, forKey: .isPending) ?? false
         pullRequestNumber = try values.decodeIfPresent(Int.self, forKey: .pullRequestNumber)
         pullRequestURL = try values.decodeIfPresent(String.self, forKey: .pullRequestURL)
+        pullRequestSkippedHead = try values.decodeIfPresent(String.self, forKey: .pullRequestSkippedHead)
     }
 }

@@ -1029,6 +1029,10 @@ enum PlayhouseWorktreeManager {
         return (Int(count.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 1) > 0
     }
 
+    static func headOid(_ record: RepositoryWorktreeRecord) throws -> String {
+        try git(record.worktreePath, ["rev-parse", "HEAD"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func hasMergeConflicts(_ record: RepositoryWorktreeRecord) throws -> Bool {
         guard record.mergeTarget?.isEmpty == false else { return false }
         let targetRef = try mergeTargetRef(record)
@@ -1536,6 +1540,14 @@ struct PlayhouseWorktreeService {
         try await perform("git.has_commits_ahead", record: record) {
             try await PlayhouseBackgroundOperation.run {
                 try PlayhouseWorktreeManager.hasCommitsAheadOfMergeTarget(record)
+            }
+        }
+    }
+
+    func headOid(_ record: RepositoryWorktreeRecord) async throws -> String {
+        try await perform("git.head_oid", record: record) {
+            try await PlayhouseBackgroundOperation.run {
+                try PlayhouseWorktreeManager.headOid(record)
             }
         }
     }
