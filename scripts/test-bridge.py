@@ -5187,6 +5187,16 @@ class PlayhouseBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(response)["title"], "Renamed through XPC")
 
+    # The pasteboard, checkmark, and 'Title copied' label clauses are verified only by the paired UI case; this case covers the persisted-title round trip.
+    # case-contract: test_task_title_copy_button_copies_persisted_title | The conversation title's copy button places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename; the button confirms the copy with a checkmark and its 'Title copied' label, and fresh CLI/XPC reads report the same title the copy produced.
+    def test_task_title_copy_button_copies_persisted_title(self):
+        task_id = self.create_task()["id"]
+        title = "Café & tea: ready ✓"
+        response, _ = self.call_cli("task", "rename", task_id, "--title", title)
+        self.assertEqual(self.assert_success(response)["title"], title)
+        response, _ = self.call_cli("task", "get", task_id)
+        self.assertEqual(self.assert_success(response)["title"], title)
+
     # case-contract: test_task_roots_set_get_order_deduplication_and_validation | Root editing preserves order, removes duplicates, rejects an empty list, and waits for an active conversation turn; a stale Git-folder validation is rejected after a newer folder edit, and the newer roots remain saved.
     def test_task_roots_set_get_order_deduplication_and_validation(self):
         task_id = self.create_task()["id"]

@@ -132,6 +132,10 @@
     "expectation": "A rename waits for the real per-task operation lock, then persists across fresh CLI/XPC reads; rejecting a blank rename preserves the last valid title."
   },
   {
+    "id": "test_task_title_copy_button_copies_persisted_title",
+    "expectation": "The conversation title's copy button places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename; the button confirms the copy with a checkmark and its 'Title copied' label, and fresh CLI/XPC reads report the same title the copy produced."
+  },
+  {
     "id": "test_task_roots_set_get_order_deduplication_and_validation",
     "expectation": "Root editing preserves order, removes duplicates, rejects an empty list, and waits for an active conversation turn; a stale Git-folder validation is rejected after a newer folder edit, and the newer roots remain saved."
   },
