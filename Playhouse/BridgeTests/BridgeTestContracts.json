@@ -132,8 +132,8 @@
     "expectation": "A rename waits for the real per-task operation lock, then persists across fresh CLI/XPC reads; rejecting a blank rename preserves the last valid title."
   },
   {
-    "id": "test_task_title_copy_button_copies_persisted_title",
-    "expectation": "The conversation title's copy button places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename; the button confirms the copy with a checkmark and its 'Title copied' label, and fresh CLI/XPC reads report the same title the copy produced."
+    "id": "test_task_title_is_selectable_and_copies_exact_title",
+    "expectation": "The conversation title is plain selectable text with no copy button: selecting it and copying places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename, and fresh CLI/XPC reads report the same title the copy produced."
   },
   {
     "id": "test_task_roots_set_get_order_deduplication_and_validation",
