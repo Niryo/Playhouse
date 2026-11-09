@@ -59,14 +59,23 @@ struct ScheduledTasksPageView: View {
             }
             if scheduledTasks.isEmpty {
                 VStack(spacing: 6) {
-                    Text("No scheduled tasks")
-                        .font(.headline)
-                    Text("Write a task, then use the clock beside Send to schedule it.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                    VStack(spacing: 6) {
+                        Text("No scheduled tasks")
+                            .font(.headline)
+                        Text("Write a task, then use the clock beside Send to schedule it.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                    Button(action: onNewTask) { Label("New Task", systemImage: "plus") }
+                        .controlSize(.large)
+                        .padding(.top, 8)
+                        .buttonHoverPointer()
+                        .nativeHelp("Write a task and choose when it runs")
+                        .accessibilityIdentifier("scheduled-tasks-empty-new-task-button")
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityElement(children: .combine)
+                .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("scheduled-tasks-empty")
             } else {
                 ScrollView {

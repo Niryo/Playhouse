@@ -1179,7 +1179,7 @@ struct KanbanBoardView: View {
                     repositories: [],
                     contextFolders: [],
                     provider: settings.defaultConversationProvider,
-                    pullRequestMode: settings.pullRequestModeDefault
+                    pullRequestMode: .pullRequest
                 )
                 let newTask = try manager.taskModel(created.id)
                 presentScheduleOnOpen = presentingSchedule

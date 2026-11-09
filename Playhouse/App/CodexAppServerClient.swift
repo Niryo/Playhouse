@@ -2760,18 +2760,13 @@ enum TaskThreadDeveloperInstructions {
         repositories: [RepositoryWorktreeRecord] = [],
         contextFolders: [String] = [],
         repositoryRootPath: String? = nil,
-        isStandaloneChat: Bool = false,
-        missedPreviousPageSignal: Bool = false
+        isStandaloneChat: Bool = false
     ) -> String {
         let executable = cliExecutableURL().path
         let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let id = taskID.uuidString
         if isStandaloneChat {
-            let escalation = missedPreviousPageSignal ? """
-            CRITICAL, READ FIRST: your previous reply did not run the required chat page close-turn command below. Before writing anything else this turn, run it now for your previous reply (use --continues true unless that reply clearly started a new topic), then continue normally and run it again at the end of THIS turn too.
-
-            """ : ""
-            return escalation + """
+            return """
             You are the assistant inside Playhouse's standalone chat.
 
             Playhouse is a native macOS task board for coordinating AI coding agents. Its unit of work is a "task": a card on a Kanban board (Backlog, In Progress, Blocked, Waiting Response, Review, Done) that can own one or more Git repositories, each checked out into its own worktree, and that holds its own agent conversation. The user manages that board through this app.
@@ -2793,11 +2788,14 @@ enum TaskThreadDeveloperInstructions {
 
             This chat itself is not a task: it has no board status, no repository and no worktree, so task progress, task outcome and repository commands do not apply to this conversation. The conversation is split behind the scenes into titled "pages" so your live context stays small while the full history stays searchable.
             - If the user asks about something from earlier that isn't in your current context, call \(quotedExecutable) chat page search "<query>" to find the right page, then \(quotedExecutable) chat page read <page-id> to load it before answering.
-            - At the end of every single turn, with no exceptions, decide whether the user's message continued the current topic or started a new, unrelated one, and run exactly one of these as a real command (never just write it as text in your reply):
+            - In every single turn, with no exceptions, once your work is done and before you write your final reply, decide whether the user's message continued the current topic or started a new, unrelated one, and run exactly one of these as a real command (never just write it as text in your reply). Run exactly one close-turn per turn:
               \(quotedExecutable) chat page close-turn \(id) --continues true
               \(quotedExecutable) chat page close-turn \(id) --continues false --new-title "<short title for the new topic>"
               This single command both records your classification and files this turn under the right page — do not call "chat page new" separately for this; close-turn creates the new page itself when needed.
+              Write your final reply to the user after close-turn returns. That reply is the last thing in the turn: never end a turn on a tool call.
               Playhouse shows the page title to the user as a separator in the transcript, so never write the page name, "Page: ...", or any other page bookkeeping into your visible answer.
+            - If you skip close-turn, Playhouse sends you one automatic reminder, which the user can see. Answer it by running close-turn for your previous reply, without repeating that reply.
+            - \(noVisibleOutputNoticeRule)
             """
         }
         return """
@@ -2829,12 +2827,18 @@ enum TaskThreadDeveloperInstructions {
         \(quotedExecutable) settings get
         \(quotedExecutable) workspace repos list
 
-        At the very end of every turn, make exactly one definitive outcome call using this task ID:
+        At the end of every turn, once your work is done and before you write your final reply, make exactly one definitive outcome call using this task ID:
         \(quotedExecutable) task outcome \(id) <\(TurnOutcome.commandChoices)>
         Use completed only when all work for this turn is finished and no user decision or response is needed; Playhouse moves the task to Review. Use waiting-response when you need the user to answer, choose between options, provide missing information, or take another action before you can continue. Use in-progress when this turn is ending but the work is not done and you need nothing from the user: Playhouse keeps the task In Progress and immediately sends you a private continuation turn so you can carry on. Never end a turn mid-work without an outcome — report in-progress instead. The outcome call must be your final CLI action for the turn.
+        Write your user-visible final reply after the outcome call returns. That reply is the last thing in the turn: never end a turn on a tool call.
         Reporting an outcome is required for every successful turn. If you end a turn without one, Playhouse privately nudges you to report your current status, up to \(TurnOutcome.maxContinuations) times per request. Answer a nudge with an outcome call rather than by repeating finished work. If the nudges run out without the work settling, Playhouse marks the task Blocked.
+        \(noVisibleOutputNoticeRule)
         """
     }
+
+    /// Claude Code adds a notice to a turn that ended on a tool call. An agent that already
+    /// answered earlier in that turn must not answer a second time.
+    static let noVisibleOutputNoticeRule = "If you receive a notice that your previous response had no visible output but you already answered in this turn, do not repeat the answer; reply briefly or say nothing more."
 
     private static func cliExecutableURL() -> URL {
         let fileManager = FileManager.default
@@ -2853,8 +2857,8 @@ enum TaskProgressReportInstructions {
     static let progressSubcommand = "task progress"
     static let outcomeSubcommand = "task outcome"
     /// Standalone chat's end-of-turn page signal. A chat has no board status, so
-    /// it reports this instead of an outcome, and it runs in the same place: after
-    /// the answer, often with a closing line still to come.
+    /// it reports this instead of an outcome, and it runs in the same place: just
+    /// before the final reply, though agents still often run it after their answer.
     static let chatPageCloseTurnSubcommand = "chat page close-turn"
 
     enum ReportCommand { case progress, outcome }
