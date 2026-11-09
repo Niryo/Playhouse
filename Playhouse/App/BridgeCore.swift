@@ -965,6 +965,34 @@ enum GitHubPullRequestManager {
         let status: String?
         let conclusion: String?
         let state: String?
+        let workflowName: String?
+        let startedAt: String?
+        let completedAt: String?
+        let createdAt: String?
+        let typename: String?
+
+        enum CodingKeys: String, CodingKey {
+            case name, context, status, conclusion, state, workflowName, startedAt, completedAt, createdAt
+            case typename = "__typename"
+        }
+
+        /// The key GitHub's badge groups reruns by: a check run's name within its
+        /// workflow, or a status context's name.
+        var identity: String {
+            if typename == "StatusContext" || (name == nil && context != nil) {
+                return "context\u{0}\(context ?? "")"
+            }
+            return "run\u{0}\(workflowName ?? "")\u{0}\(name ?? "")"
+        }
+
+        /// When this run started or was reported; nil when the rollup gave no usable time.
+        var timestamp: Date? {
+            for value in [startedAt, createdAt, completedAt] {
+                if let value, !value.isEmpty, let date = ISO8601DateFormatter().date(from: value),
+                   date.timeIntervalSince1970 > 946_684_800 { return date }  // queued runs report 0001-01-01
+            }
+            return nil
+        }
     }
 
     private struct ReviewThreadsResponse: Decodable {
@@ -1015,10 +1043,24 @@ enum GitHubPullRequestManager {
         )
     }
 
+    /// A rerun adds a rollup entry beside the old one; GitHub's badge counts only the
+    /// latest per check. Without timestamps the later rollup entry wins.
+    private static func latestChecks(_ items: [CheckRollupItem]) -> [CheckRollupItem] {
+        var latest: [String: (index: Int, item: CheckRollupItem)] = [:]
+        for (index, item) in items.enumerated() {
+            if let current = latest[item.identity] {
+                if let new = item.timestamp, let old = current.item.timestamp, new < old { continue }
+            }
+            latest[item.identity] = (index, item)
+        }
+        return latest.values.sorted { $0.index < $1.index }.map(\.item)
+    }
+
     /// Failure outranks pending, which outranks success, as on GitHub's own badge.
     /// A head with no checks yet is pending while GitHub may still register them.
     private static func summarizeChecks(_ items: [CheckRollupItem], headRecentlyCommitted: Bool) -> (state: PullRequestChecksState, failing: [String]) {
         guard !items.isEmpty else { return (headRecentlyCommitted ? .pending : .none, []) }
+        let items = latestChecks(items)
         let failingConclusions: Set<String> = ["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]
         var failing: [String] = []
         var pending = false
@@ -1033,7 +1075,7 @@ enum GitHubPullRequestManager {
                 failing.append(label)
             }
         }
-        if !failing.isEmpty { return (.failure, failing.sorted()) }
+        if !failing.isEmpty { return (.failure, Array(Set(failing)).sorted()) }
         return (pending ? .pending : .success, [])
     }
 

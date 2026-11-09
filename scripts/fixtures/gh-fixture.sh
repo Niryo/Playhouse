@@ -4,7 +4,7 @@
 # mergedAt[,mergeable,headRefOid]` from a state file (lines of
 # `<number>=<merged|unmerged|conflicting|head-mismatch>`) and logs each probe.
 # The full review probe also reports `statusCheckRollup` from an optional
-# `<number>.checks=<success|failure|pending|none>` line (default success), and
+# `<number>.checks=<success|failure|pending|none|rerun-success|rerun-failure|workflows|workflows-failing|statuses|untimed>` line (default success), and
 # `gh api graphql` review-thread reads answer from `<number>.threads=<count>`
 # unresolved threads (default 0), logging `threads <number>` to the call log.
 # `gh repo view --json ...MergeAllowed` allows every merge method, or only those
@@ -137,6 +137,12 @@ elif [ "$5" = mergedAt,mergeable,headRefOid,statusCheckRollup ]; then
     failure) rollup='[{"__typename":"CheckRun","name":"fixture-ci","status":"COMPLETED","conclusion":"FAILURE"}]' ;;
     pending) rollup='[{"__typename":"CheckRun","name":"fixture-ci","status":"IN_PROGRESS","conclusion":""}]' ;;
     none) rollup='[]' ;;
+    rerun-success) rollup='[{"__typename":"CheckRun","name":"fixture-ci","workflowName":"CI","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-11-09T10:00:00Z","completedAt":"2026-11-09T10:05:00Z"},{"__typename":"CheckRun","name":"fixture-ci","workflowName":"CI","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-09T11:00:00Z","completedAt":"2026-11-09T11:05:00Z"}]' ;;
+    rerun-failure) rollup='[{"__typename":"CheckRun","name":"fixture-ci","workflowName":"CI","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-11-09T11:00:00Z","completedAt":"2026-11-09T11:05:00Z"},{"__typename":"CheckRun","name":"fixture-ci","workflowName":"CI","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-09T10:00:00Z","completedAt":"2026-11-09T10:05:00Z"}]' ;;
+    workflows) rollup='[{"__typename":"CheckRun","name":"build","workflowName":"Lint","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-11-09T10:00:00Z"},{"__typename":"CheckRun","name":"build","workflowName":"Test","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-09T11:00:00Z"}]' ;;
+    workflows-failing) rollup='[{"__typename":"CheckRun","name":"build","workflowName":"Lint","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-11-09T10:00:00Z"},{"__typename":"CheckRun","name":"build","workflowName":"Test","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-11-09T11:00:00Z"}]' ;;
+    statuses) rollup='[{"__typename":"StatusContext","context":"ci/legacy","state":"ERROR","createdAt":"2026-11-09T10:00:00Z"},{"__typename":"StatusContext","context":"ci/legacy","state":"SUCCESS","createdAt":"2026-11-09T11:00:00Z"}]' ;;
+    untimed) rollup='[{"__typename":"CheckRun","name":"fixture-ci","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"CheckRun","name":"fixture-ci","status":"COMPLETED","conclusion":"SUCCESS"}]' ;;
     *) echo 'Unexpected gh fixture checks state' >&2; exit 2 ;;
   esac
   if [ "$state" = head-mismatch ]; then
