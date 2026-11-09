@@ -1,0 +1,44 @@
+{
+  "agentsInfo": {
+    "id": "agents-info",
+    "title": "Agents info",
+    "agents": [
+      {
+        "provider": "claude",
+        "name": "Claude",
+        "icon": "sparkle",
+        "identity": "claude@example.com Team",
+        "identityHelp": "claude@example.com · Team",
+        "canSwitch": true,
+        "signedOut": false,
+        "loginPending": false,
+        "hasUsage": true,
+        "windows": [
+          { "id": "five_hour", "label": "5h", "percent": "5%", "percentColor": "primary", "fraction": 0.05, "barColor": "accent", "reset": "Resets in 3h 24m", "help": "5h resets Nov 9, 2026 at 3:00 PM" },
+          { "id": "seven_day", "label": "Weekly", "percent": "22%", "percentColor": "primary", "fraction": 0.22, "barColor": "accent", "reset": "Resets in 5d 11h", "help": "Weekly resets Nov 15, 2026 at 12:00 AM" }
+        ],
+        "credits": null,
+        "status": null,
+        "updated": "Updated 29m ago"
+      },
+      {
+        "provider": "codex",
+        "name": "Codex",
+        "icon": "chevron.left.forwardslash.chevron.right",
+        "identity": "codex@example.com Usage Based",
+        "identityHelp": "codex@example.com · Usage Based",
+        "canSwitch": true,
+        "signedOut": false,
+        "loginPending": false,
+        "hasUsage": true,
+        "windows": [
+          { "id": "overage", "label": "Spend limit", "percent": "86%", "percentColor": "orange", "fraction": 0.86, "barColor": "orange", "reset": "Resets in 21d 14h", "help": "Spend limit resets Dec 1, 2026 at 12:00 AM" }
+        ],
+        "credits": "Credits available",
+        "status": { "text": "Near limit", "color": "orange" },
+        "updated": "Updated 1h 7m ago"
+      }
+    ],
+    "errorMessage": null
+  }
+}
