@@ -4379,8 +4379,8 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Renamed task remains unchanged after rejected blank rename")
     }
 
-    // case-contract: test_task_title_copy_button_copies_persisted_title | The conversation title's copy button places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename; the button confirms the copy with a checkmark and its 'Title copied' label, and fresh CLI/XPC reads report the same title the copy produced.
-    func test_task_title_copy_button_copies_persisted_title() throws {
+    // case-contract: test_task_title_is_selectable_and_copies_exact_title | The conversation title is plain selectable text with no copy button: selecting it and copying places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename, and fresh CLI/XPC reads report the same title the copy produced.
+    func test_task_title_is_selectable_and_copies_exact_title() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Before copy", roots: [fixture.primary.path])
         let taskID = try taskID(named: "Before copy")
@@ -4391,15 +4391,16 @@ final class PlayhouseUITests: XCTestCase {
         clickTaskCardTitle(card)
         XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10), "Opening the renamed task should show its conversation.")
 
-        let copyTitleButton = app.buttons["task-view-title-copy-button"]
-        XCTAssertTrue(copyTitleButton.waitToExist(timeout: 10), "The conversation title should have a copy button.")
-        XCTAssertTrue(waitUntil({ accessibleLabelOrValue(of: element("task-view-title")) == title }, timeout: 10), "The header should show the persisted title.")
+        let titleText = element("task-view-title")
+        XCTAssertTrue(waitUntil({ accessibleLabelOrValue(of: titleText) == title }, timeout: 10), "The header should show the persisted title.")
+        XCTAssertFalse(app.buttons["task-view-title-copy-button"].exists, "The title should not have a copy button.")
+        // Clicking into the title and choosing Select All selects it like any other text, then Copy takes the selection.
         NSPasteboard.general.clearContents()
-        copyTitleButton.click()
-        XCTAssertTrue(waitUntil({ copyTitleButton.label == "Title copied" }, timeout: 3), "The copy button should confirm the copy while the checkmark is shown.")
-        XCTAssertEqual(NSPasteboard.general.string(forType: .string), title, "Copying the title should place its exact persisted text on the pasteboard.")
-        attachScreenshot(named: "Conversation title copied to the pasteboard")
-        XCTAssertTrue(waitUntil({ copyTitleButton.label == "Copy title" }, timeout: 4), "The copy button should return to its idle label after the confirmation window.")
+        titleText.click()
+        app.typeKey("a", modifierFlags: .command)
+        attachScreenshot(named: "Conversation title selected as plain text")
+        app.typeKey("c", modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ NSPasteboard.general.string(forType: .string) == title }, timeout: 5), "Copying the selected title should place its exact persisted text on the pasteboard.")
         XCTAssertEqual(try taskRecord(id: taskID)?["title"] as? String, title, "The copied title should match the persisted title.")
     }
 

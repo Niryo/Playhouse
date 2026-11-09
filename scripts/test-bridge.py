@@ -5187,9 +5187,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(response)["title"], "Renamed through XPC")
 
-    # The pasteboard, checkmark, and 'Title copied' label clauses are verified only by the paired UI case; this case covers the persisted-title round trip.
-    # case-contract: test_task_title_copy_button_copies_persisted_title | The conversation title's copy button places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename; the button confirms the copy with a checkmark and its 'Title copied' label, and fresh CLI/XPC reads report the same title the copy produced.
-    def test_task_title_copy_button_copies_persisted_title(self):
+    # The selection, copy, and no-copy-button clauses are verified only by the paired UI case; this case covers the persisted-title round trip.
+    # case-contract: test_task_title_is_selectable_and_copies_exact_title | The conversation title is plain selectable text with no copy button: selecting it and copying places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename, and fresh CLI/XPC reads report the same title the copy produced.
+    def test_task_title_is_selectable_and_copies_exact_title(self):
         task_id = self.create_task()["id"]
         title = "Café & tea: ready ✓"
         response, _ = self.call_cli("task", "rename", task_id, "--title", title)
@@ -5509,6 +5509,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
             stale_tracking = self.run_git(self.primary, "rev-parse", "refs/remotes/origin/main").strip()
             task = self.create_repo_task("Default branch-from from origin", [self.primary])
             task_id = task["id"]
+            # Finishing the turn must not publish the branch through whatever `gh` the host has: a push
+            # would set the upstream this case asserts is absent.
+            self.assert_success(self.call_cli("task", "pr", "mode", task_id, "manual")[0])
             pending = task["repositoryWorktrees"][0]
             self.assertTrue(pending["isPending"])
             self.assertEqual(pending["branchFrom"], "origin/main")
@@ -5549,6 +5552,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
             offline = self.create_repo_task("Default branch-from while offline", [self.primary])
             offline_id = offline["id"]
+            self.assert_success(self.call_cli("task", "pr", "mode", offline_id, "manual")[0])
             self.assertEqual(offline["repositoryWorktrees"][0]["branchFrom"], "origin/main")
             self.run_git(self.primary, "remote", "set-url", "origin", str(self.data_directory / "unreachable-origin.git"))
             self.complete_fixture_turn(offline_id)
