@@ -3636,7 +3636,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A status nudge Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while showing the nudge replies.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. They place the outcome call, still the final CLI action, before the user-visible final reply, which ends the turn so it never ends on a tool call, and they tell the agent not to repeat an answer after a no-visible-output notice. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A status nudge Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while showing the nudge replies.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -3866,6 +3866,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(instructions.contains("Never end a turn mid-work without an outcome"))
         XCTAssertTrue(instructions.contains("waiting-response"))
         XCTAssertTrue(instructions.contains("final CLI action"))
+        XCTAssertTrue(instructions.contains("before you write your final reply, make exactly one definitive outcome call"))
+        XCTAssertTrue(instructions.contains("Write your user-visible final reply after the outcome call returns"))
+        XCTAssertTrue(instructions.contains("never end a turn on a tool call"))
+        XCTAssertTrue(instructions.contains("previous response had no visible output but you already answered in this turn, do not repeat the answer"))
         XCTAssertEqual(turn["threadStartCount"] as? Int, 1, "The follow-up should reuse the thread created with progress instructions.")
         XCTAssertGreaterThanOrEqual(turn["threadResumeCount"] as? Int ?? 0, 1)
         let turns = try XCTUnwrap(turn["turns"] as? [[String: Any]])
@@ -5673,7 +5677,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(reopened?["id"] as? String, legacyID, "Migration must run once, not create a second chat.")
     }
 
-    // case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, the Changes sidebar, and the no-repository-selected banner. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn never triggers the private task-outcome reminders, because the chat is told not to report an outcome; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer. Opening a board task while the chat sidebar is showing replaces it with that task's conversation view instead of showing both at once, and returning to the board reveals the chat sidebar again, with the chat's own model left untouched by the unrelated task. The visible chat panel opens at full board-content height, overlaps the logo header and narrow board sidebar, and hides the covered branding and sidebar controls from accessibility navigation while open; it raises the board's minimum width by the chat panel width, so the window grows to keep the shifted columns visible; it pushes the columns to the panel’s right edge; closing chat reveals the sidebar and moves the columns back beside it while the window keeps its grown width. Dragging the chat sidebar's right border resizes it, between a 320-point minimum and the larger of its default width and the screen width the board's minimum width leaves free, and reopening the sidebar, even after an app relaunch, keeps the dragged width. The border's grab strip extends only out over the board, never over the transcript's scroller along its inner side, so pressing and dragging just inside the border leaves the width unchanged. While the edge moves, the chat keeps the width it was last laid out at, clipped to the panel, and its transcript reflows to the panel's width when the drag ends.
+    // case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, the Changes sidebar, and the no-repository-selected banner. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn that ran close-turn gets no nudge, and a Codex chat turn that skipped it gets exactly one nudge through the shared recovery loop, asking for close-turn on its reply and never for a task outcome, because the chat has no board status; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer. Opening a board task while the chat sidebar is showing replaces it with that task's conversation view instead of showing both at once, and returning to the board reveals the chat sidebar again, with the chat's own model left untouched by the unrelated task. The visible chat panel opens at full board-content height, overlaps the logo header and narrow board sidebar, and hides the covered branding and sidebar controls from accessibility navigation while open; it raises the board's minimum width by the chat panel width, so the window grows to keep the shifted columns visible; it pushes the columns to the panel’s right edge; closing chat reveals the sidebar and moves the columns back beside it while the window keeps its grown width. Dragging the chat sidebar's right border resizes it, between a 320-point minimum and the larger of its default width and the screen width the board's minimum width leaves free, and reopening the sidebar, even after an app relaunch, keeps the dragged width. The border's grab strip extends only out over the board, never over the transcript's scroller along its inner side, so pressing and dragging just inside the border leaves the width unchanged. While the edge moves, the chat keeps the width it was last laid out at, clipped to the panel, and its transcript reflows to the panel's width when the drag ends.
     func test_standalone_chat_separate_model_and_pages_round_trip() throws {
         let fixtureSource = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureSource.path), "The prepared Codex fixture is missing or not executable.")
@@ -5940,9 +5944,7 @@ final class PlayhouseUITests: XCTestCase {
             "The standalone chat must never render as a card on the visible Kanban board."
         )
 
-        // The chat is told never to report a task outcome, so chasing one with private
-        // reminders can only spend extra provider turns and bury the user's next message in
-        // a reminder turn that answers nobody.
+        // A chat turn that ran close-turn is settled, so no nudge follows it.
         let chatFixtureHistory = try XCTUnwrap(
             try JSONSerialization.jsonObject(
                 with: Data(contentsOf: URL(fileURLWithPath: chatFixtureExecutable.path + ".history"))
@@ -5951,8 +5953,8 @@ final class PlayhouseUITests: XCTestCase {
         let chatFixtureTurns = try XCTUnwrap(chatFixtureHistory["turns"] as? [[String: Any]])
         XCTAssertFalse(chatFixtureTurns.isEmpty, "The chat fixture should have recorded its turns.")
         XCTAssertFalse(
-            chatFixtureTurns.contains { (($0["userMessage"] as? String) ?? "").lowercased().contains("outcome reminder") },
-            "A standalone chat turn must not trigger the private task-outcome reminders."
+            chatFixtureTurns.contains { (($0["userMessage"] as? String) ?? "").lowercased().contains("playhouse internal outcome nudge:") },
+            "A standalone chat turn that ran close-turn must not get a nudge."
         )
         // The chat must know it is Playhouse's own chat and own the board through the CLI,
         // instead of reaching for an unrelated task tool that the user can never see.
@@ -6022,6 +6024,16 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("send-message-button").isEnabled, "Standalone chat should send without a configured repository root.")
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: classifierActive.path) }, timeout: 15), "The fallback classifier should run after the primary answer and be held independently.")
+        // The same shared recovery loop nudges a Codex chat turn that skipped close-turn: once,
+        // for the page signal, never for a task outcome.
+        let codexNudges = try XCTUnwrap(
+            (try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: chatFixtureExecutable.path + ".history"))) as? [String: Any])?["turns"] as? [[String: Any]]
+        ).compactMap { $0["userMessage"] as? String }.filter { $0.lowercased().contains("playhouse internal outcome nudge:") }
+        XCTAssertEqual(codexNudges.count, 1, "A Codex chat turn that skipped close-turn gets exactly one nudge.")
+        XCTAssertTrue(codexNudges.first?.contains("chat page close-turn \(chatTaskID)") == true)
+        XCTAssertFalse(codexNudges.first?.contains("task outcome") ?? true)
+        try assertAutomaticMessageBubble(taskID: chatTaskID, containing: "This is the only reminder for that reply.")
+        XCTAssertFalse(element("codex-chat-error").exists, "The Codex chat nudge turn completes without an error.")
         XCTAssertFalse(element("chat-active-page-title").exists, "Page titles should appear in transcript separators, not the header.")
         XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "Page evaluation should stay visually quiet while pending.")
         XCTAssertEqual(element("chat-sidebar").descendants(matching: .progressIndicator).count, 0, "Page evaluation should not show a loader in the chat sidebar.")
@@ -6365,7 +6377,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Standalone chat pages keep separate sessions")
     }
 
-    // case-contract: test_standalone_chat_answer_stays_final_around_close_turn | A standalone chat reports no task outcome, so it ends every turn with Playhouse's own chat page close-turn signal, which Claude runs after its answer and before its closing line. That answer and closing line form one final answer, not commentary, in the streamed final answer, fresh CLI/XPC history, and the visible transcript, so the response is never left buried inside the collapsed Worked for disclosure; text written before an ordinary tool earlier in the same turn still stays commentary there, and the close-turn command really runs and succeeds. This classification is Claude-specific because Playhouse derives each message's phase from Claude's tool stream, while Codex reports the phase in its own protocol and so cannot mis-file an answer on the same turn shape.
+    // case-contract: test_standalone_chat_answer_stays_final_around_close_turn | A standalone chat reports no task outcome, so it ends every turn with Playhouse's own chat page close-turn signal. When Claude runs that signal after its answer and before its closing line, the answer and closing line form one final answer, not commentary, in the streamed final answer, fresh CLI/XPC history, and the visible transcript, so the response is never left buried inside the collapsed Worked for disclosure; text written before an ordinary tool earlier in the same turn still stays commentary there, and the close-turn command really runs and succeeds. The chat instructions ask for close-turn before the final reply, which must end the turn, keep exactly one real close-turn per turn and no page bookkeeping in the answer, and carry no hidden escalation. A turn that runs close-turn first and answers after it shows exactly one final answer, filed onto the active page, with no nudge. When the turn ends on close-turn and Claude Code adds its own no-visible-output notice to the same turn, the notice streams once as a user-side message and stays in fresh history between the answer and what Claude writes after it, rendering as an automatic message from Claude Code rather than the user's bubble; that later text is a separate final message, so no bubble holds the answer twice, and the notice is never filed into a chat page. This classification is Claude-specific because Playhouse derives each message's phase from Claude's tool stream and only Claude Code adds such a notice inside a turn, while Codex reports the phase in its own protocol and never injects a hidden message into a turn.
     func test_standalone_chat_answer_stays_final_around_close_turn() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-close-turn")
         try FileManager.default.copyItem(
@@ -6438,6 +6450,201 @@ final class PlayhouseUITests: XCTestCase {
         let status = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
         XCTAssertEqual(status["missedPreviousPageSignal"] as? Bool, false,
                        "A close-turn signal that really ran must satisfy the page signal instead of falling back to the classifier.")
+
+        let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
+        func fixtureTurns() -> [[String: Any]] {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".history")),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+            return (history["turns"] as? [[String: Any]] ?? []).filter {
+                !((($0["userText"] as? String) ?? "").hasPrefix("Classify the latest user message"))
+            }
+        }
+        func nudgeCount() -> Int {
+            fixtureTurns().filter { (($0["userText"] as? String) ?? "").contains("Playhouse internal outcome nudge:") }.count
+        }
+        func turnMessages(prompt: String) throws -> [(String, String?, String)] {
+            let history = try XCTUnwrap(try runCLI(["conversation", "history", chatID])["result"] as? [String: Any])
+            let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
+            let turnID = try XCTUnwrap(messages.first { ($0["role"] as? String) == "user" && ($0["text"] as? String) == prompt }?["turnID"] as? String)
+            return messages.filter { ($0["turnID"] as? String) == turnID }.map {
+                (($0["role"] as? String) ?? "", $0["phase"] as? String, ($0["text"] as? String) ?? "")
+            }
+        }
+        func send(_ prompt: String) {
+            composer.click()
+            composer.typeText(prompt)
+            element("send-message-button").click()
+            XCTAssertTrue(waitUntil({
+                self.fixtureTurnCount(executable, containing: prompt) > 0 && self.noTurnIsRunning()
+            }, timeout: 30), "The chat turn \(prompt) should finish.")
+        }
+        let arguments = try XCTUnwrap(fixtureTurns().last?["arguments"] as? [String])
+        let instructions = arguments[try XCTUnwrap(arguments.firstIndex(of: "--append-system-prompt")) + 1]
+        XCTAssertTrue(instructions.contains("before you write your final reply"), "The instructions must put close-turn before the final reply.")
+        XCTAssertTrue(instructions.contains("never end a turn on a tool call"))
+        XCTAssertTrue(instructions.contains("Run exactly one close-turn per turn"))
+        XCTAssertTrue(instructions.contains("never just write it as text in your reply"))
+        XCTAssertTrue(instructions.contains("never write the page name"))
+        XCTAssertTrue(instructions.contains("previous response had no visible output but you already answered in this turn, do not repeat the answer"))
+        XCTAssertFalse(instructions.contains("At the end of every single turn"))
+        XCTAssertFalse(instructions.contains("CRITICAL, READ FIRST"), "No hidden escalation is prepended to the chat instructions.")
+
+        // close-turn first, then the reply: one visible final answer, filed, and no nudge.
+        let closeFirstPrompt = "Name the largest moon of Jupiter."
+        let closeFirstAnswer = "Ganymede is the largest moon of Jupiter."
+        send(closeFirstPrompt)
+        XCTAssertTrue(visibleTexts(containing: closeFirstAnswer).firstMatch.waitToExist(timeout: 10),
+                      "The reply written after close-turn is the visible response.")
+        XCTAssertEqual(try turnMessages(prompt: closeFirstPrompt).map { "\($0.0)|\($0.1 ?? "")|\($0.2)" },
+                       ["user||\(closeFirstPrompt)", "assistant|final_answer|\(closeFirstAnswer)"],
+                       "The close-turn-first turn holds exactly one final answer.")
+        XCTAssertEqual(nudgeCount(), 0, "A turn whose close-turn ran is settled, so Playhouse sends it no nudge.")
+        let activePageID = try XCTUnwrap(((try runCLI(["chat", "status"])["result"] as? [String: Any])?["activePage"] as? [String: Any])?["id"] as? String)
+        func pageTexts() throws -> [String] {
+            try XCTUnwrap((try runCLI(["chat", "page", "read", activePageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+                .compactMap { $0["text"] as? String }
+        }
+        XCTAssertTrue(try pageTexts().contains(closeFirstAnswer), "The close-turn-first turn is filed onto the active page.")
+        attachScreenshot(named: "standalone-chat-close-turn-first-single-answer")
+
+        // Claude Code's own no-visible-output notice: an automatic message from Claude Code,
+        // between the answer and a separate reply, never merged into one bubble.
+        let noticePrompt = "Name the largest moon of Saturn."
+        let noticeAnswer = "Titan is the largest moon of Saturn."
+        let noticeReply = "I already answered above."
+        let noticeText = "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
+        send(noticePrompt)
+        XCTAssertTrue(visibleTexts(containing: noticeAnswer).firstMatch.waitToExist(timeout: 10), "The answer stays visible.")
+        XCTAssertTrue(visibleTexts(containing: noticeReply).firstMatch.waitToExist(timeout: 5), "The reply after the notice is visible as its own message.")
+        let noticeBubble = try assertAutomaticMessageBubble(taskID: chatID, containing: noticeText, sender: "Claude Code")
+        XCTAssertLessThan(visibleTexts(containing: noticeAnswer).firstMatch.frame.minY, noticeBubble.frame.minY, "The notice follows the answer.")
+        XCTAssertLessThan(noticeBubble.frame.minY, visibleTexts(containing: noticeReply).firstMatch.frame.minY, "The reply follows the notice.")
+        XCTAssertFalse(transcriptContains("Claude Code automatic notice:"), "The notice's internal marker line is never shown.")
+        XCTAssertEqual(
+            app.groups.matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", noticeAnswer, noticeReply)).count, 0,
+            "No bubble may hold the answer together with what Claude wrote after the notice."
+        )
+        XCTAssertEqual(try turnMessages(prompt: noticePrompt).map { "\($0.0)|\($0.1 ?? "")|\($0.2)" }, [
+            "user||\(noticePrompt)",
+            "assistant|final_answer|\(noticeAnswer)",
+            "user||Claude Code automatic notice:\n\(noticeText)",
+            "assistant|final_answer|\(noticeReply)",
+        ], "Fresh history keeps the answer, the notice and the reply apart, in turn order.")
+        XCTAssertFalse(try pageTexts().contains { $0.contains(noticeText) }, "Claude Code's notice is never filed into a chat page.")
+        XCTAssertTrue(try pageTexts().contains(noticeReply))
+        XCTAssertEqual(nudgeCount(), 0, "The notice turn ran close-turn, so it gets no Playhouse nudge.")
+        attachScreenshot(named: "standalone-chat-claude-code-notice-is-automatic")
+    }
+
+    // case-contract: test_standalone_chat_missed_close_turn_gets_visible_nudge | When a standalone chat turn ends without its chat page close-turn signal, Playhouse sends exactly one follow-up turn through the same unsettled-turn recovery loop task conversations use. Its prompt starts with the Playhouse nudge marker, asks for close-turn on the previous reply and never for a task outcome, and stays in the chat transcript as an automatic message from Playhouse, followed by the agent's reply. A close-turn run in that nudge settles the turn and classifies the user's turn, which moves to the new titled page without the fallback classifier; the nudge turn and its reply are never filed into a chat page or replayed into a page's seeded context. A nudge that goes unanswered is not retried, the background classifier then decides the page, the chat never gets a board status such as Blocked, and task outcome is rejected for the chat. The nudge loop, the close-turn CLI and the turn outcome store are shared by Claude and Codex, so one representative provider (Claude) covers this case, and the round-trip case shows a Codex chat turn reaching the same nudge.
+    func test_standalone_chat_missed_close_turn_gets_visible_nudge() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-close-turn-nudge")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
+        )
+        claudeFixtureExecutable = executable.path
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
+        let prompt = "Plan a weekend hiking trip."
+        let answer = "Pick a loop trail under 15 km and start early."
+        func visibleTexts(containing text: String) -> XCUIElementQuery {
+            app.groups.matching(NSPredicate(format: "label CONTAINS %@", text))
+        }
+        func fixtureTurns() -> [[String: Any]] {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".history")),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+            return (history["turns"] as? [[String: Any]] ?? []).filter {
+                !((($0["userText"] as? String) ?? "").hasPrefix("Classify the latest user message"))
+            }
+        }
+        func nudgeTurns() -> [[String: Any]] {
+            fixtureTurns().filter { (($0["userText"] as? String) ?? "").contains("Playhouse internal outcome nudge:") }
+        }
+        func chatStatus() throws -> [String: Any] {
+            try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        }
+        func send(_ text: String) {
+            let composer = element("message-composer")
+            XCTAssertTrue(composer.waitToExist(timeout: 10))
+            composer.click()
+            composer.typeText(text)
+            element("send-message-button").click()
+        }
+
+        // The turn answers but never runs close-turn: one visible nudge follows, which the
+        // agent answers by running close-turn for that reply.
+        send(prompt)
+        XCTAssertTrue(waitUntil({ nudgeTurns().count == 1 && self.noTurnIsRunning() }, timeout: 30),
+                      "A chat turn that skipped close-turn gets exactly one nudge, and the chat settles.")
+        let nudge = try XCTUnwrap(nudgeTurns().first)
+        let nudgeText = (nudge["userText"] as? String) ?? ""
+        XCTAssertTrue(nudgeText.contains("chat page close-turn \(chatID)"), "The chat nudge asks for close-turn on the previous reply.")
+        XCTAssertFalse(nudgeText.contains("task outcome"), "A chat is never asked for a task outcome.")
+        XCTAssertTrue(((nudge["reportCommands"] as? [[String: Any]])?.first?["output"] as? String ?? "").contains("\"ok\":true"))
+        XCTAssertTrue(visibleTexts(containing: answer).firstMatch.waitToExist(timeout: 10), "The answer stays visible above the nudge.")
+        let nudgeBubble = try assertAutomaticMessageBubble(taskID: chatID, containing: "This is the only reminder for that reply.")
+        let replyBubble = visibleTexts(containing: "Filed.").firstMatch
+        XCTAssertTrue(replyBubble.waitToExist(timeout: 5), "The agent's reply to the nudge is visible.")
+        let answerBubble = visibleTexts(containing: answer).firstMatch
+        XCTAssertLessThan(answerBubble.frame.minY, nudgeBubble.frame.minY, "The nudge follows the answer it is about.")
+        XCTAssertLessThan(nudgeBubble.frame.minY, replyBubble.frame.minY, "The agent's reply follows the nudge.")
+        XCTAssertFalse(transcriptContains("Playhouse internal outcome nudge:"), "The nudge's internal marker line is never shown.")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Hiking trip") }, timeout: 10),
+                      "The nudge's close-turn moves the user's turn to its new titled page.")
+        // The turn is filed after the nudge loop, so its page contents can land just after the turn settles.
+        var hikingPage: [String: Any] = [:]
+        var pageTexts: [String] = []
+        XCTAssertTrue(waitUntil({
+            guard let status = try? chatStatus(),
+                  status["missedPreviousPageSignal"] as? Bool == false,
+                  let page = status["activePage"] as? [String: Any],
+                  page["title"] as? String == "Hiking trip",
+                  let pageID = page["id"] as? String,
+                  let messages = (try? self.runCLI(["chat", "page", "read", pageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]] else { return false }
+            hikingPage = page
+            pageTexts = messages.compactMap { $0["text"] as? String }
+            return pageTexts == [prompt, answer]
+        }, timeout: 15), "Only the user's turn is filed on its page, never the nudge or its reply: \(pageTexts)")
+        XCTAssertEqual(hikingPage["title"] as? String, "Hiking trip")
+        let history = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
+        XCTAssertFalse(String(decoding: history, as: UTF8.self).contains("Classify the latest user message"),
+                       "A nudge that got close-turn run leaves nothing for the fallback classifier.")
+        let chatState = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["status"] as? String)
+        XCTAssertTrue(["In Progress", "Waiting Response"].contains(chatState), "A chat nudge never sets a board status such as Blocked.")
+        assertCLIError(try runCLI(["task", "outcome", chatID, "completed"], expectedStatus: 2), code: "invalid_argument")
+        attachScreenshot(named: "standalone-chat-close-turn-nudge-is-visible")
+
+        // A second missed turn whose nudge goes unanswered: one nudge, no Blocked, and the
+        // background classifier decides the page. The new page's session is seeded with its own
+        // turn, never with the nudge or its reply.
+        send("Tell me about volcanoes")
+        XCTAssertTrue(waitUntil({
+            guard nudgeTurns().count == 2, self.noTurnIsRunning(),
+                  let status = try? chatStatus(),
+                  status["missedPreviousPageSignal"] as? Bool == false,
+                  (status["activePage"] as? [String: Any])?["title"] as? String == "Volcanoes" else { return false }
+            return true
+        }, timeout: 45), "An unanswered nudge leaves the page to the fallback classifier.")
+        XCTAssertEqual((nudgeTurns().last?["reportCommands"] as? [Any])?.count, 0, "This nudge goes unanswered.")
+        let seeded = try XCTUnwrap(fixtureTurns().first { (($0["userText"] as? String) ?? "").hasSuffix("Tell me about volcanoes") }?["userText"] as? String)
+        XCTAssertTrue(seeded.contains(prompt) && seeded.contains(answer), "The new page's session is seeded with its own turn.")
+        XCTAssertFalse(seeded.contains("Playhouse internal outcome nudge:"), "A nudge is never replayed into page context.")
+        XCTAssertFalse(seeded.contains("Filed."), "A nudge's reply is never replayed into page context.")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Volcanoes") }, timeout: 10))
+        try assertAutomaticMessageBubble(taskID: chatID, containing: "This is the only reminder for that reply.")
+        XCTAssertEqual(nudgeTurns().count, 2, "An unanswered chat nudge is not retried.")
+        let laterState = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["status"] as? String)
+        XCTAssertTrue(["In Progress", "Waiting Response"].contains(laterState), "An unanswered chat nudge never marks the chat Blocked.")
+        attachScreenshot(named: "standalone-chat-unanswered-nudge-falls-back")
     }
 
     // case-contract: test_standalone_chat_recalls_loaded_pages | When a standalone chat's agent loads an earlier page into its context with `chat page read`, the conversation renders one deterministic "Recalling <page title>" line per loaded page, titled from the page archive rather than from anything the agent wrote, in the order the pages were read. The lines are visible in the turn that read them without opening the Worked for disclosure, stay once the turn settles and after a later turn and a reopen, and the read commands really run and succeed so the history carries each call and the page's own title. The line is derived from Playhouse's own provider-neutral command activity (a shell call titled "Running <command>" for both Claude and Codex) and the page store, so provider selection cannot change it; one representative provider (Claude) covers the shared path.
@@ -20803,7 +21010,8 @@ final class PlayhouseUITests: XCTestCase {
 
     /// Playhouse's own prompts render as muted automatic messages: the history entry that holds `text`
     /// is shown under the `playhouse-message-` identifier with its label, never as the user's bubble.
-    private func assertAutomaticMessageBubble(taskID: String, containing text: String, file: StaticString = #filePath, line: UInt = #line) throws {
+    @discardableResult
+    private func assertAutomaticMessageBubble(taskID: String, containing text: String, sender: String = "Playhouse", file: StaticString = #filePath, line: UInt = #line) throws -> XCUIElement {
         let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any], file: file, line: line)
         let messages = try XCTUnwrap(history["messages"] as? [[String: Any]], file: file, line: line)
         let sent = try XCTUnwrap(
@@ -20814,8 +21022,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("playhouse-message-\(id)").waitToExist(timeout: 10), "The message renders as an automatic Playhouse message.", file: file, line: line)
         let label = element("playhouse-message-label-\(id)")
         XCTAssertTrue(label.waitToExist(timeout: 5), "The automatic message carries its label.", file: file, line: line)
-        XCTAssertTrue(label.label.contains("Automatic message from Playhouse") || ((label.value as? String) ?? "").contains("Automatic message from Playhouse"), "The label says the message is automatic: \(label.label)", file: file, line: line)
+        XCTAssertTrue(label.label.contains("Automatic message from \(sender)") || ((label.value as? String) ?? "").contains("Automatic message from \(sender)"), "The label says the message is automatic from \(sender): \(label.label)", file: file, line: line)
         XCTAssertFalse(element("user-message-\(id)").exists, "An automatic message is not rendered as the user's own bubble.", file: file, line: line)
+        return element("playhouse-message-\(id)")
     }
 
     /// The transcript's last row: the newest message, which can be the reply to a status nudge

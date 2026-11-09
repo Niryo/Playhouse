@@ -80,6 +80,19 @@ UNANSWERED_LAST = "Checks are running; results will follow."
 CHAT_INTENT = "Let me check the newer release first."
 CHAT_ANSWER = "Confirmed: 2.1.309 registers the new model and 2.1.308 does not."
 CHAT_CLOSING = "Tell me if you want the upgrade command."
+# A chat turn that runs close-turn first and answers after it, as the instructions ask.
+CHAT_CLOSE_FIRST_PROMPT = "Name the largest moon of Jupiter."
+CHAT_CLOSE_FIRST_ANSWER = "Ganymede is the largest moon of Jupiter."
+# A chat turn that answers, runs close-turn last, and then gets Claude Code's own notice.
+CHAT_NOTICE_PROMPT = "Name the largest moon of Saturn."
+CHAT_NOTICE_ANSWER = "Titan is the largest moon of Saturn."
+CHAT_NOTICE_REPLY = "I already answered above."
+NO_VISIBLE_OUTPUT_NOTICE = "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
+# A chat turn that forgets close-turn; Playhouse's one visible nudge then gets it run.
+CHAT_SKIPPED_CLOSE_TURN_PROMPT = "Plan a weekend hiking trip."
+CHAT_SKIPPED_CLOSE_TURN_ANSWER = "Pick a loop trail under 15 km and start early."
+CHAT_NUDGE_PAGE_TITLE = "Hiking trip"
+CHAT_NUDGE_REPLY = "Filed."
 SIMPLE_ANSWER = "OK."
 PENDING_QUESTION_SUCCESS_MARKER = "finish while a structured question remains pending"
 NUDGE_RACE_STALE_ANSWER = "The task review is approved. Only the UI review is still pending."
@@ -507,6 +520,33 @@ def respond(user_text, instructions, preserve_no_outcome=False, previous_prompt=
             text("msg_page_classification", '{"continues":false,"title":"Saturn Rings"}')
         else:
             text("msg_page_classification", '{"continues":false,"title":"Volcanoes"}')
+    elif "playhouse internal outcome nudge:" in user_text.lower() and previous_prompt.rstrip().endswith(CHAT_SKIPPED_CLOSE_TURN_PROMPT.lower()):
+        # Answers Playhouse's chat nudge the way it asks: close-turn for the previous reply,
+        # then one short line, without repeating that reply.
+        close_turn = report_command(instructions, " chat page close-turn ")
+        if close_turn:
+            command = close_turn.replace("--continues true", f"--continues false --new-title {shlex.quote(CHAT_NUDGE_PAGE_TITLE)}")
+            commands.append({"command": command, "output": run_tool("toolu_nudged_close_turn", "Bash", {"command": command}, command)})
+        text("msg_chat_nudge_reply", CHAT_NUDGE_REPLY)
+    elif user_text.rstrip().endswith(CHAT_SKIPPED_CLOSE_TURN_PROMPT):
+        text("msg_chat_skipped_close_turn", CHAT_SKIPPED_CLOSE_TURN_ANSWER)
+    elif user_text.rstrip().endswith(CHAT_CLOSE_FIRST_PROMPT):
+        close_turn = report_command(instructions, " chat page close-turn ")
+        if close_turn:
+            commands.append({"command": close_turn,
+                             "output": run_tool("toolu_close_first", "Bash", {"command": close_turn}, close_turn)})
+        text("msg_chat_close_first_answer", CHAT_CLOSE_FIRST_ANSWER)
+    elif user_text.rstrip().endswith(CHAT_NOTICE_PROMPT):
+        # Mirrors the observed incident: the turn ends on close-turn, so Claude Code adds its
+        # synthetic "no visible output" message to the same turn and Claude answers again.
+        text("msg_chat_notice_answer", CHAT_NOTICE_ANSWER)
+        close_turn = report_command(instructions, " chat page close-turn ")
+        if close_turn:
+            commands.append({"command": close_turn,
+                             "output": run_tool("toolu_close_last", "Bash", {"command": close_turn}, close_turn)})
+        write({"type": "user", "parent_tool_use_id": None, "isSynthetic": True, "uuid": "fixture-no-visible-output-notice",
+               "message": {"role": "user", "content": [{"type": "text", "text": NO_VISIBLE_OUTPUT_NOTICE}]}})
+        text("msg_chat_notice_reply", CHAT_NOTICE_REPLY)
     elif PENDING_QUESTION_SUCCESS_MARKER in user_text.lower():
         question_input = {
             "questions": [{
