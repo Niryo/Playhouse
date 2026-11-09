@@ -9701,7 +9701,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(saved)["status"], "Blocked")
         self.assertEqual(self.assert_success(saved)["savedPrompt"], "A follow-up draft.")
 
-    # case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the UI renders the question inline, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
+    # case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the question's Markdown, header, and option descriptions reach the client, and the UI renders the question inline with its Markdown formatted at the reply text size, its header, and each option's description, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
     def test_claude_questions_can_be_answered_after_switching_conversations(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-question"
@@ -9721,7 +9721,17 @@ class PlayhouseBridgeTests(unittest.TestCase):
         result = self.assert_success(response)
         user_input = next(event for event in events if event.get("type") == "user_input")
         request = user_input["payload"]["userInputRequest"]
-        self.assertEqual(request["questions"][0]["question"], "Which color should I use?")
+        question = request["questions"][0]
+        self.assertEqual(
+            question["question"], "Which color should I use for **the primary button**?\n\nIt also tints `LinkText`.",
+            "The question's Markdown must reach the client unchanged so the form can render it.",
+        )
+        self.assertEqual(question["header"], "Color")
+        self.assertEqual(
+            [(option["label"], option.get("description")) for option in question["options"]],
+            [("Blue", "Use blue."), ("Green", "Use green.")],
+            "Each option's description must reach the client so the form can show it.",
+        )
         self.assertEqual(user_input["payload"].get("taskStatus"), "Waiting Response")
         self.assertTrue(any(
             event.get("type") == "task_status" and event.get("payload", {}).get("taskStatus") == "In Progress"

@@ -5470,13 +5470,25 @@ struct TaskConversationView: View {
     }
 
     private func userInputForm(_ request: ConversationUserInputRequest) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 16) {
             Text("A few questions")
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 17, weight: .semibold))
                 .accessibilityIdentifier("ai-question-form-title")
             ForEach(request.questions) { question in
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(question.question).font(.system(size: 12, weight: .medium))
+                VStack(alignment: .leading, spacing: 9) {
+                    if !question.header.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(question.header.uppercased())
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .accessibilityIdentifier("ai-question-header-\(question.id)")
+                    }
+                    // Providers write questions in Markdown, as they do replies, so they share the reply
+                    // renderer and size. The renderer sizes only bold, italic and code runs; plain text takes this font.
+                    assistantMarkdownContent(question.question)
+                        .font(.system(size: 16, weight: .regular))
+                        .foregroundStyle(WorkspaceTheme.conversationText)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("ai-question-text-\(question.id)")
                     if question.options.isEmpty {
                         Group {
                             if question.isSecret {
@@ -5492,21 +5504,35 @@ struct TaskConversationView: View {
                             }
                         }
                         .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 15))
+                        .controlSize(.large)
                         .accessibilityIdentifier("ai-question-answer-\(question.id)")
                     } else {
                         ForEach(question.options) { option in
                             let isSelected = (userInputAnswers[question.id] ?? []).first == option.label
-                            Button {
-                                userInputAnswers[question.id] = [option.label]
-                                userInputOtherSelected.remove(question.id)
-                            } label: {
-                                Label(option.label, systemImage: isSelected ? "largecircle.fill.circle" : "circle")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Button {
+                                    userInputAnswers[question.id] = [option.label]
+                                    userInputOtherSelected.remove(question.id)
+                                } label: {
+                                    Label(option.label, systemImage: isSelected ? "largecircle.fill.circle" : "circle")
+                                        .font(.system(size: 15))
+                                }
+                                .buttonHoverPointer()
+                                .nativeHelp("Select answer: \(option.label)")
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("ai-question-option-\(question.id)-\(option.label)")
+                                .accessibilityValue(isSelected ? "selected" : "not selected")
+                                if let description = option.description?.trimmingCharacters(in: .whitespacesAndNewlines), !description.isEmpty {
+                                    Text(description)
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        // Aligns with the option label, past the radio symbol.
+                                        .padding(.leading, 24)
+                                        .accessibilityIdentifier("ai-question-option-description-\(question.id)-\(option.label)")
+                                }
                             }
-                            .buttonHoverPointer()
-                            .nativeHelp("Select answer: \(option.label)")
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("ai-question-option-\(question.id)-\(option.label)")
-                            .accessibilityValue(isSelected ? "selected" : "not selected")
                         }
                         if question.allowsOther {
                             Button {
@@ -5514,6 +5540,7 @@ struct TaskConversationView: View {
                                 userInputOtherSelected.insert(question.id)
                             } label: {
                                 Label("Other", systemImage: userInputOtherSelected.contains(question.id) ? "largecircle.fill.circle" : "circle")
+                                    .font(.system(size: 15))
                             }
                             .buttonHoverPointer()
                             .nativeHelp("Select a free-text answer")
@@ -5528,6 +5555,8 @@ struct TaskConversationView: View {
                                 }
                             ))
                             .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 15))
+                            .controlSize(.large)
                         }
                     }
                 }
@@ -5538,6 +5567,7 @@ struct TaskConversationView: View {
             .buttonHoverPointer()
             .nativeHelp("Submit answers")
                 .buttonStyle(.borderedProminent)
+                .controlSize(.large)
                 .disabled(request.questions.contains { question in
                     let selections = userInputAnswers[question.id] ?? []
                     return selections.isEmpty && (!userInputOtherSelected.contains(question.id) || (userInputOther[question.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

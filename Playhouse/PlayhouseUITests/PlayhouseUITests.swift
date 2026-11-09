@@ -14684,7 +14684,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("conversation-user-input-request").exists, "A history failure must leave the unanswered recovery request visible.")
     }
 
-    // case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the UI renders the question inline, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
+    // case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the question's Markdown, header, and option descriptions reach the client, and the UI renders the question inline with its Markdown formatted at the reply text size, its header, and each option's description, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
     func test_claude_questions_can_be_answered_after_switching_conversations() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-question")
         try FileManager.default.copyItem(
@@ -14720,7 +14720,29 @@ final class PlayhouseUITests: XCTestCase {
         assertTaskVisible("Claude question", inColumn: "Waiting Response")
         openTask(named: "Claude question")
         XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
+        // The question renders its Markdown at the reply size, under its header, with each option's description.
+        let questionContainer = element("ai-question-text-question-1")
+        XCTAssertTrue(questionContainer.exists, "The question text should render in its own container.")
+        let questionText = questionContainer.staticTexts["Which color should I use for the primary button?"]
+        XCTAssertTrue(questionText.exists, "The question's bold Markdown should render without its markers.")
+        XCTAssertTrue(questionContainer.staticTexts["It also tints LinkText."].exists, "The question's second paragraph and inline code should render.")
+        XCTAssertFalse(
+            questionContainer.staticTexts.matching(NSPredicate(format: "label CONTAINS '**' OR label CONTAINS '`'")).firstMatch.exists,
+            "Raw Markdown markers must not show in the question."
+        )
+        // Width scales with the font and, unlike height, excludes the paragraph's bottom padding. With its
+        // bold run always 16 points, this line measures about 359 points when its plain text is at the
+        // 16-point reply size and about 324 when that text falls back to the 13-point default.
+        XCTAssertGreaterThanOrEqual(questionText.frame.width, 345, "The question's plain text should use the 16-point reply size.")
+        // A macOS static text reports its string as its value, not its label.
+        func shownText(_ identifier: String) -> String {
+            let text = element(identifier)
+            return text.label + (text.value as? String ?? "")
+        }
+        XCTAssertEqual(shownText("ai-question-header-question-1").uppercased(), "COLOR")
+        XCTAssertEqual(shownText("ai-question-option-description-question-1-Blue"), "Use blue.")
+        XCTAssertEqual(shownText("ai-question-option-description-question-1-Green"), "Use green.")
+        attachScreenshot(named: "Claude question with Markdown, header, and option descriptions")
         selectQuestionOption(identifier: "ai-question-option-question-1-Blue")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(transcriptMessage("Answer received: Blue.").waitToExist(timeout: 10))
