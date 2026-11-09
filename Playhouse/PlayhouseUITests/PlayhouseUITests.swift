@@ -19425,21 +19425,24 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(switched["conversationProvider"] as? String, liveProvider)
     }
 
-    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar) and the Task Item, Agents Info and Token Stats examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
+    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea) and the Task Item, Agents Info, Token Stats and Skills Page examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
     func test_plugin_renderer_commits_minimal_ops_and_runs_handlers() throws {
+        executionTimeAllowance = 360 // It opens and checks every atom's catalog page, then exercises each control.
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
         XCTAssertTrue(element("plugin-catalog-atom-Stack").waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog opens the catalog.")
         XCTAssertTrue(element("plugin-catalog-task-item").exists, "The sidebar lists the Task Item example.")
         XCTAssertTrue(element("plugin-catalog-agents-info").exists, "The sidebar lists the Agents Info example.")
         XCTAssertTrue(element("plugin-catalog-token-stats").exists, "The sidebar lists the Token Stats example.")
+        XCTAssertTrue(element("plugin-catalog-skills-page").exists, "The sidebar lists the Skills Page example.")
 
         let rendered = try XCTUnwrap(try runCLI(["plugin", "render", "--page", "Stack"])["result"] as? [String: Any])
         let atoms = try XCTUnwrap(rendered["atoms"] as? [String])
-        XCTAssertEqual(atoms, ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter", "Scroll", "Divider", "ChoiceBar"])
+        XCTAssertEqual(atoms, ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter",
+                               "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea"])
         try assertPluginValuesCrossWithJSONRules()
         for atom in atoms {
-            let row = element("plugin-catalog-atom-\(atom)")
+            let row = catalogSidebarRow("plugin-catalog-atom-\(atom)")
             XCTAssertTrue(row.waitToExist(timeout: 10), "The sidebar lists the \(atom) atom.")
             row.click()
             let title = element("plugin-catalog-title")
@@ -19455,11 +19458,11 @@ final class PlayhouseUITests: XCTestCase {
             attachScreenshot(named: "Plugin Catalog — \(atom)")
         }
 
-        element("plugin-catalog-atom-Text").click()
+        catalogSidebarRow("plugin-catalog-atom-Text").click()
         XCTAssertTrue(element("text-title").waitToExist(timeout: 10), "Text atoms render natively from the JavaScript page.")
         XCTAssertEqual(pluginText(element("text-title")), "Title: 13 semibold, tracking 0.35")
 
-        element("plugin-catalog-atom-Button").click()
+        catalogSidebarRow("plugin-catalog-atom-Button").click()
         let pressCount = element("button-press-count")
         XCTAssertTrue(pressCount.waitToExist(timeout: 10))
         XCTAssertEqual(pluginText(pressCount), "Pressed 0 times")
@@ -19473,7 +19476,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(waitUntil({ self.pluginText(pressCount) != "Pressed 1 times" }, timeout: 2), "A disabled Button doesn't call its handler.")
         XCTAssertTrue(pluginText(commit).hasPrefix("Commit 2: "), "No commit followed the disabled tap: \(pluginText(commit))")
 
-        element("plugin-catalog-atom-Disclosure").click()
+        catalogSidebarRow("plugin-catalog-atom-Disclosure").click()
         let disclosureToggle = element("disclosure-toggle")
         XCTAssertTrue(disclosureToggle.waitToExist(timeout: 10))
         XCTAssertEqual(disclosureToggle.value as? String, "Expanded")
@@ -19489,7 +19492,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("disclosure-first").waitToExist(timeout: 5), "Expanding brings the children back.")
         XCTAssertEqual(disclosureToggle.value as? String, "Expanded")
 
-        element("plugin-catalog-atom-ChoiceBar").click()
+        catalogSidebarRow("plugin-catalog-atom-ChoiceBar").click()
         let overviewChoice = element("choice-overview"), wastersChoice = element("choice-wasters")
         XCTAssertTrue(wastersChoice.waitToExist(timeout: 10))
         XCTAssertTrue(overviewChoice.isSelected, "The selected option carries the selected trait.")
@@ -19503,7 +19506,7 @@ final class PlayhouseUITests: XCTestCase {
         wastersChoice.click()
         XCTAssertFalse(waitUntil({ !self.pluginText(commit).hasPrefix("Commit 2: ") }, timeout: 2), "Clicking the selected option commits nothing: \(pluginText(commit))")
 
-        element("plugin-catalog-atom-Scroll").click()
+        catalogSidebarRow("plugin-catalog-atom-Scroll").click()
         let scroll = element("scroll-demo")
         XCTAssertTrue(scroll.waitToExist(timeout: 10))
         XCTAssertTrue(element("scroll-row-4").waitToExist(timeout: 5))
@@ -19520,6 +19523,56 @@ final class PlayhouseUITests: XCTestCase {
         }
         XCTAssertLessThanOrEqual(lastRow.frame.maxY, scroll.frame.maxY + 1, "Scrolling inside the Scroll brings its last row into view.")
         attachScreenshot(named: "Scroll atom capped at 120 points and scrolled to its last row")
+
+        // The Skills page's controls.
+        catalogSidebarRow("plugin-catalog-atom-Toggle").click()
+        let toggle = element("toggle-demo")
+        XCTAssertTrue(toggle.waitToExist(timeout: 10))
+        XCTAssertTrue(isOn(toggle), "The Toggle page's switch starts on.")
+        toggle.click()
+        XCTAssertTrue(waitUntil({ !self.isOn(toggle) && self.pluginText(self.element("toggle-state")) == "Off" }, timeout: 5), "onToggle flipped the switch off.")
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 2: update, text → nodes ") }, timeout: 5),
+                      "Toggling updated only the Toggle's props and the readout: \(pluginText(commit))")
+        attachScreenshot(named: "Toggle atom switched off")
+
+        catalogSidebarRow("plugin-catalog-atom-TextField").click()
+        let field = element("text-field-demo")
+        XCTAssertTrue(field.waitToExist(timeout: 10))
+        field.click()
+        field.typeText("release")
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("text-field-value")) == "Text: release" }, timeout: 5), "onChange received the typed text.")
+        attachScreenshot(named: "TextField atom after typing")
+        element("text-field-clear").click()
+        XCTAssertTrue(waitUntil({ (field.value as? String ?? "") == "" && self.pluginText(self.element("text-field-value")) == "Text: " }, timeout: 5),
+                      "The field shows the text its owner sets.")
+
+        catalogSidebarRow("plugin-catalog-atom-Segmented").click()
+        let segmented = element("segmented-demo")
+        XCTAssertTrue(segmented.waitToExist(timeout: 10))
+        segmented.radioButtons["Global"].click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("segmented-selected")) == "Selected: global" }, timeout: 5), "onChange received the segment's value.")
+        XCTAssertTrue(waitUntil({ self.isOn(segmented.radioButtons["Global"]) }, timeout: 5))
+        attachScreenshot(named: "Segmented atom on Global")
+
+        catalogSidebarRow("plugin-catalog-atom-Menu").click()
+        let menu = element("menu-demo")
+        XCTAssertTrue(menu.waitToExist(timeout: 10))
+        menu.click()
+        let delete = app.menuItems.matching(identifier: "menu-delete").firstMatch
+        XCTAssertTrue(delete.waitToExist(timeout: 5), "The Menu opens its items.")
+        XCTAssertTrue(app.menuItems["Reveal in Finder"].exists)
+        attachScreenshot(named: "Menu atom open with its groups")
+        delete.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("menu-chosen")) == "Chosen: delete" }, timeout: 5), "onMenu received the item's id.")
+
+        catalogSidebarRow("plugin-catalog-atom-PressArea").click()
+        let area = element("press-area-demo")
+        XCTAssertTrue(area.waitToExist(timeout: 10))
+        area.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("press-area-count")) == "Clicked 1 · held 0" }, timeout: 5), "A click runs onPress.")
+        area.press(forDuration: 1.0)
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("press-area-count")) == "Clicked 1 · held 1" }, timeout: 5), "A press and hold runs onLongPress, not onPress.")
+        attachScreenshot(named: "PressArea atom after a click and a press and hold")
     }
 
     /// Commits, props and event values cross as JavaScript values, not JSON
@@ -19599,7 +19652,7 @@ final class PlayhouseUITests: XCTestCase {
     func test_plugin_task_item_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
-        let example = element("plugin-catalog-task-item")
+        let example = catalogSidebarRow("plugin-catalog-task-item")
         XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Task Item example.")
         example.click()
         let jsSide = element("plugin-catalog-js-task-item")
@@ -19684,7 +19737,7 @@ final class PlayhouseUITests: XCTestCase {
     func test_plugin_agents_info_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
-        let example = element("plugin-catalog-agents-info")
+        let example = catalogSidebarRow("plugin-catalog-agents-info")
         XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Agents Info example.")
         example.click()
         let jsSide = element("plugin-catalog-js-agents-info")
@@ -19791,7 +19844,7 @@ final class PlayhouseUITests: XCTestCase {
     func test_plugin_token_stats_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
-        let example = element("plugin-catalog-token-stats")
+        let example = catalogSidebarRow("plugin-catalog-token-stats")
         XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Token Stats example.")
         example.click()
         let jsSide = element("plugin-catalog-js-token-stats")
@@ -19934,6 +19987,220 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: open" }, timeout: 5))
         XCTAssertEqual(pluginText(native("native-last-action")), "Last: section overhead", "The native modal keeps its own state.")
         attachScreenshot(named: "Token Stats: the counter reopened the JavaScript modal")
+    }
+
+    // case-contract: test_plugin_skills_page_renders_from_atoms_like_native | The Plugin Catalog's Skills Page shows the Skills page's header and skill gallery composed in JavaScript from atoms above the native SwiftUI header and gallery the Skills page uses, built from the same atoms and sample data, each opened by the composer's Skills button (the same plain Button atom with the sparkles icon, labelled Skills). Both show the back button, the Skills, Rules & MCP title, the Skills | Rules | MCP and Repo | Global | Built-in segmented pickers, the search field and New Skill, the hint, a repository section whose skill rows show their name, provider, Conflict and Invalid badges, description, issue and location, a small Fix with Agent button on a broken skill, the mini switch, a small Use button that is disabled for a skill no provider can use, and the actions menu, and an empty repository's empty state, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer, Divider, Scroll, Segmented, TextField, Toggle, Menu, PressArea) with the Skills page's identifiers. Choosing Global in the JavaScript source picker runs onChange (Last: tab global) and shows the Linked and switched-off global skills while the native page stays on Repo. Clicking a JavaScript switch runs onToggle (Last: toggle release-notes off), which turns it off and disables its Use button, and Use runs its handler (Last: use release-notes) without re-rendering any row. Clicking a skill's text runs onPress (Last: open release-notes); pressing and holding it runs onLongPress, which starts selecting (Last: select release-notes): its row shows a checked checkbox and the accent highlight, the rows' own controls hide, built-in skills show no checkbox, and the header shows 1 selected with Fix with Agent, Delete and Done; a click on another row adds it (2 selected), and Done ends selecting (Last: done selecting). The actions menu runs onMenu with the chosen item's id (Last: menu release-notes edit), typing in the search runs onChange with the text, choosing Rules hides the source picker and the search, and the back button closes the JavaScript page (Last: back) while the native one stays open, until the Skills button opens it again (Last: open). The search field raises no onPress, so pressing it is refused as invalid_argument.
+    func test_plugin_skills_page_renders_from_atoms_like_native() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Plugin Catalog")
+        let example = catalogSidebarRow("plugin-catalog-skills-page")
+        XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Skills Page example.")
+        example.click()
+        let jsSide = element("plugin-catalog-js-skills-page")
+        let nativeSide = element("plugin-catalog-native-skills-page")
+        XCTAssertTrue(jsSide.waitToExist(timeout: 10), "The page shows the JavaScript Skills page.")
+        XCTAssertTrue(nativeSide.waitToExist(timeout: 10), "The page shows the native Skills page.")
+        XCTAssertFalse(element("plugin-error").exists, "The JavaScript page renders without errors.")
+        XCTAssertFalse(element("plugin-node-error").exists, "Every node on the JavaScript page has a registered atom.")
+
+        func js(_ identifier: String) -> XCUIElement {
+            jsSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func native(_ identifier: String) -> XCUIElement {
+            nativeSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func pair(_ identifier: String) -> (js: XCUIElement, native: XCUIElement) {
+            (js(identifier), native("native-\(identifier)"))
+        }
+        // The pages are as wide as a window (1040 points) and 520 tall, so the
+        // native one sits below the JavaScript one, and the catalog page scrolls
+        // down and across to reach either.
+        let page = app.scrollViews.matching(NSPredicate(format: "identifier != %@", "plugin-catalog-skills-page-scroll"))
+            .containing(.any, identifier: "plugin-catalog-js-skills-page").firstMatch
+        let across = element("plugin-catalog-skills-page-scroll")
+        @discardableResult func reveal(_ element: XCUIElement) -> XCUIElement {
+            XCTAssertTrue(element.waitToExist(timeout: 10), "\(element) should exist before scrolling to it.")
+            // The horizontal scroll view reports its whole content's frame, so both
+            // directions are judged against the visible catalog page.
+            var scrolls = 0
+            while !element.isHittable, scrolls < 20 {
+                let visible = page.frame, target = element.frame
+                if target.midY < visible.minY + 20 || target.midY > visible.maxY - 20 {
+                    page.scroll(byDeltaX: 0, deltaY: target.midY > visible.midY ? -250 : 250)
+                } else if target.midX < visible.minX + 20 || target.midX > visible.maxX - 20 {
+                    across.scroll(byDeltaX: target.midX > visible.midX ? -250 : 250, deltaY: 0)
+                } else {
+                    page.scroll(byDeltaX: 0, deltaY: target.midY > visible.midY ? -100 : 100)
+                }
+                scrolls += 1
+            }
+            XCTAssertTrue(element.isHittable, "\(element) should be on screen after scrolling the catalog page.")
+            return element
+        }
+        func assertSameSize(_ identifier: String) {
+            let (js, native) = pair(identifier)
+            XCTAssertTrue(js.waitToExist(timeout: 10), "The JavaScript page has \(identifier).")
+            XCTAssertTrue(native.waitToExist(timeout: 10), "The native page has \(identifier).")
+            XCTAssertEqual(js.frame.width, native.frame.width, accuracy: 1, "\(identifier) has the same width in both.")
+            XCTAssertEqual(js.frame.height, native.frame.height, accuracy: 1, "\(identifier) has the same height in both.")
+        }
+        let commit = jsSide.descendants(matching: .any).matching(identifier: "plugin-last-commit").firstMatch
+        let lastAction = js("js-last-action")
+
+        // The composer's Skills button opens the page: the same plain Button atom.
+        assertSameSize("open-skills-button")
+        XCTAssertEqual(js("open-skills-button").label, "Skills")
+        XCTAssertEqual(native("native-open-skills-button").label, "Skills")
+
+        for identifier in ["skills-page", "skills-back-button", "skills-title", "skills-kind-picker", "skills-tab-picker", "skills-search", "new-skill-button",
+                           "skills-provider-timing", "skills-repo-section-login-app", "skill-row-release-notes", "skill-row-review-login", "skill-row-broken-skill",
+                           "skill-name-release-notes", "skill-provider-release-notes-claude", "skill-provider-release-notes-codex", "skill-description-release-notes",
+                           "skill-location-release-notes", "skill-toggle-release-notes", "skill-use-release-notes", "skill-actions-release-notes",
+                           "skill-conflict-review-login", "skill-issue-review-login", "skill-fix-review-login", "skill-invalid-broken-skill",
+                           "skill-fix-broken-skill", "skill-use-broken-skill", "skills-repo-section-docs-site", "skills-empty-docs-site"] {
+            assertSameSize(identifier)
+        }
+        XCTAssertEqual(pluginText(pair("skills-title").js), "Skills, Rules & MCP")
+        XCTAssertEqual(pair("skills-page").js.frame.width, 1040, accuracy: 1, "Each page is as wide as a window, 1040 points.")
+        XCTAssertGreaterThan(pair("skills-title").js.frame.width, 100, "The title shows in full on one line.")
+        XCTAssertLessThan(pair("skills-title").js.frame.height, 30)
+        XCTAssertLessThanOrEqual(pair("skills-page").js.frame.maxY, pair("skills-page").native.frame.minY, "The JavaScript page sits above the native one.")
+        for side in [pair("skills-tab-picker").js, pair("skills-tab-picker").native] {
+            XCTAssertTrue(isOn(side.radioButtons["Repo"]), "The page opens on its Repo skills.")
+        }
+        XCTAssertTrue(isOn(pair("skills-kind-picker").js.radioButtons["Skills"]), "The page opens on Skills.")
+        XCTAssertEqual(pluginText(js("skill-description-release-notes")), "Draft release notes from the merged pull requests.")
+        XCTAssertEqual(pluginText(js("skill-location-release-notes")), ".agents/skills")
+        XCTAssertTrue(isOn(pair("skill-toggle-release-notes").js) && isOn(pair("skill-toggle-release-notes").native), "Both switches start on.")
+        XCTAssertTrue(pair("skill-use-release-notes").js.isEnabled)
+        XCTAssertFalse(js("skill-use-broken-skill").isEnabled, "No provider can use an invalid skill.")
+        XCTAssertFalse(native("native-skill-use-broken-skill").isEnabled)
+        XCTAssertFalse(js("skill-provider-broken-skill-claude").exists)
+        XCTAssertEqual(js("skill-actions-release-notes").label, "Actions for release-notes")
+        reveal(js("skills-empty-docs-site"))
+        XCTAssertEqual(pluginText(js("skills-empty-docs-site")), "No skills in docs-site.")
+        reveal(pair("skills-page").js)
+        attachScreenshot(named: "Skills page: JavaScript above native, both on Repo")
+
+        // Each side keeps its own source; the Segmented atom is controlled.
+        reveal(pair("skills-tab-picker").js).radioButtons["Global"].click()
+        XCTAssertTrue(js("skill-row-shared-notes").waitToExist(timeout: 5), "Choosing Global shows the global skills.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: tab global" }, timeout: 5), "The source picker ran onChange with its value.")
+        XCTAssertTrue(js("skill-linked-shared-notes").exists, "A linked skill shows Linked.")
+        XCTAssertFalse(isOn(js("skill-toggle-quiet-skill")), "A switched-off skill shows its switch off.")
+        XCTAssertFalse(js("skill-use-quiet-skill").isEnabled, "A switched-off skill can't be used.")
+        XCTAssertFalse(js("skill-row-release-notes").exists, "Global replaces the repository's skills.")
+        XCTAssertTrue(native("native-skill-row-release-notes").exists, "The native page stays on Repo.")
+        attachScreenshot(named: "Skills page: JavaScript on Global, native still on Repo")
+        reveal(pair("skills-tab-picker").native).radioButtons["Global"].click()
+        XCTAssertTrue(native("native-skill-row-shared-notes").waitToExist(timeout: 5), "The native picker moves its own page.")
+        for identifier in ["skill-row-shared-notes", "skill-linked-shared-notes", "skill-row-quiet-skill", "skill-toggle-quiet-skill"] {
+            assertSameSize(identifier)
+        }
+        reveal(pair("skills-tab-picker").js).radioButtons["Repo"].click()
+        XCTAssertTrue(js("skill-row-release-notes").waitToExist(timeout: 5))
+        reveal(pair("skills-tab-picker").native).radioButtons["Repo"].click()
+        XCTAssertTrue(native("native-skill-row-release-notes").waitToExist(timeout: 5))
+
+        // The switch runs onToggle and turns Use off; Use runs its handler.
+        let jsToggle = reveal(js("skill-toggle-release-notes"))
+        reveal(js("skill-use-release-notes")).click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: use release-notes" }, timeout: 5), "Use ran its JavaScript handler.")
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).contains(": text → node ") }, timeout: 5), "Use changed only the readout: \(pluginText(commit))")
+        jsToggle.click()
+        XCTAssertTrue(waitUntil({ !self.isOn(jsToggle) && self.pluginText(lastAction) == "Last: toggle release-notes off" }, timeout: 5), "onToggle turned the switch off.")
+        XCTAssertTrue(waitUntil({ !js("skill-use-release-notes").isEnabled }, timeout: 5), "Turning a skill off disables Use.")
+        XCTAssertTrue(isOn(native("native-skill-toggle-release-notes")), "The native switch keeps its own state.")
+        attachScreenshot(named: "Skills page: the JavaScript switch turned release-notes off")
+        jsToggle.click()
+        XCTAssertTrue(waitUntil({ self.isOn(jsToggle) }, timeout: 5))
+
+        // A click on a skill's text opens it; a press and hold starts selecting.
+        reveal(js("skill-text-release-notes")).click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: open release-notes" }, timeout: 5), "A click on the skill ran onPress.")
+        js("skill-row-release-notes").press(forDuration: 1.0)
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: select release-notes" }, timeout: 5), "A press and hold ran onLongPress.")
+        XCTAssertTrue(js("skills-selection-count").waitToExist(timeout: 5), "Selecting shows the selection's actions.")
+        XCTAssertEqual(pluginText(js("skills-selection-count")), "1 selected")
+        XCTAssertEqual(js("skill-select-release-notes").label, "Selected", "The pressed skill's checkbox is checked.")
+        XCTAssertEqual(js("skill-select-review-login").label, "Not selected")
+        XCTAssertFalse(js("skill-toggle-release-notes").exists, "Selecting hides a row's own controls.")
+        XCTAssertFalse(js("skills-search").exists, "Selecting replaces the search with the selection's actions.")
+        XCTAssertTrue(js("skills-fix-selected").exists && js("skills-delete-selected").exists && js("skills-selection-done").exists)
+        XCTAssertFalse(js("skills-fix-selected").isEnabled, "Nothing selected is broken, so nothing can be fixed.")
+        XCTAssertFalse(pair("skills-kind-picker").js.isEnabled, "The kind picker is locked while selecting.")
+        XCTAssertTrue(native("native-skill-toggle-release-notes").exists, "The native page isn't selecting.")
+        attachScreenshot(named: "Skills page: selecting in JavaScript")
+        // While selecting, the row's text area is part of the row, so a click on the row's middle lands on it.
+        reveal(js("skill-row-review-login")).click()
+        XCTAssertTrue(waitUntil({ self.pluginText(js("skills-selection-count")) == "2 selected" }, timeout: 5), "A click on another row adds it.")
+        XCTAssertTrue(waitUntil({ js("skills-fix-selected").isEnabled }, timeout: 5), "A selected conflict can be fixed.")
+        reveal(pair("skills-tab-picker").js).radioButtons["Built-in"].click()
+        XCTAssertTrue(js("skill-row-simplify").waitToExist(timeout: 5))
+        XCTAssertFalse(js("skill-select-simplify").exists, "A built-in skill shows no checkbox.")
+        reveal(native("native-skill-row-release-notes")).press(forDuration: 1.0)
+        XCTAssertTrue(native("native-skills-selection-count").waitToExist(timeout: 5), "The native row starts selecting too.")
+        for identifier in ["skills-selection-count", "skills-fix-selected", "skills-delete-selected", "skills-selection-done"] {
+            assertSameSize(identifier)
+        }
+        reveal(pair("skills-tab-picker").js).radioButtons["Repo"].click()
+        XCTAssertTrue(js("skill-select-release-notes").waitToExist(timeout: 5))
+        assertSameSize("skill-row-release-notes")
+        assertSameSize("skill-select-release-notes")
+        reveal(js("skills-selection-done")).click()
+        XCTAssertTrue(waitUntil({ !js("skills-selection-count").exists && self.pluginText(lastAction) == "Last: done selecting" }, timeout: 5), "Done ends selecting.")
+        XCTAssertTrue(js("skill-toggle-release-notes").waitToExist(timeout: 5), "Rows show their controls again.")
+        reveal(native("native-skills-selection-done")).click()
+
+        // The actions menu runs onMenu with the chosen item's id.
+        reveal(js("skill-actions-release-notes")).click()
+        let edit = app.menuItems.matching(identifier: "skill-edit-release-notes").firstMatch
+        XCTAssertTrue(edit.waitToExist(timeout: 5), "The actions menu opens.")
+        XCTAssertTrue(app.menuItems["Move to docs-site"].exists && app.menuItems["Delete…"].exists, "It lists the skill's moves and Delete.")
+        attachScreenshot(named: "Skills page: the JavaScript actions menu open")
+        edit.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: menu release-notes edit" }, timeout: 5), "onMenu received the item's id.")
+
+        // Search runs onChange with the text; Rules hides the source picker and search.
+        let search = reveal(js("skills-search"))
+        search.click()
+        search.typeText("rel")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: search rel" }, timeout: 5), "Typing in the search ran onChange with the text.")
+        reveal(pair("skills-kind-picker").js).radioButtons["Rules"].click()
+        XCTAssertTrue(waitUntil({ !js("skills-tab-picker").exists && !js("skills-search").exists }, timeout: 5), "Rules hides the source picker and the search.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: kind rules" }, timeout: 5))
+        XCTAssertTrue(native("native-skills-tab-picker").exists, "The native page stays on Skills.")
+        attachScreenshot(named: "Skills page: JavaScript on Rules, native on Skills")
+        reveal(pair("skills-kind-picker").js).radioButtons["Skills"].click()
+        XCTAssertTrue(js("skills-tab-picker").waitToExist(timeout: 5))
+
+        // Back closes the JavaScript page; the Skills button opens it again.
+        reveal(js("skills-back-button")).click()
+        XCTAssertTrue(waitUntil({ !pair("skills-page").js.exists }, timeout: 5), "Back closed the JavaScript page.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: back" }, timeout: 5))
+        XCTAssertTrue(pair("skills-page").native.exists, "The native page stays open.")
+        reveal(js("open-skills-button")).click()
+        XCTAssertTrue(pair("skills-page").js.waitToExist(timeout: 5), "The Skills button opened the page again.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: open" }, timeout: 5))
+        XCTAssertEqual(pluginText(native("native-last-action")), "Last: done selecting", "The native page keeps its own state.")
+        attachScreenshot(named: "Skills page: the Skills button reopened the JavaScript page")
+    }
+
+    /// A Plugin Catalog sidebar row, scrolled into view: the sidebar lists more
+    /// atoms and examples than fit, and a row scrolled away has no frame to click.
+    /// The sidebar is the scroll view holding the atom rows.
+    private func catalogSidebarRow(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        let row = element(identifier)
+        let sidebar = app.scrollViews.containing(NSPredicate(format: "identifier BEGINSWITH %@", "plugin-catalog-atom-")).firstMatch
+        XCTAssertTrue(sidebar.waitToExist(timeout: 10), "The Plugin Catalog shows its sidebar.", file: file, line: line)
+        // One check per scroll: up first, then down past where it started.
+        var scrolls = 0
+        while !(row.exists && row.isHittable), scrolls < 20 {
+            sidebar.scroll(byDeltaX: 0, deltaY: scrolls < 10 ? 200 : -200)
+            scrolls += 1
+        }
+        XCTAssertTrue(row.exists && row.isHittable, "\(identifier) should be on screen after scrolling the catalog sidebar.", file: file, line: line)
+        return row
     }
 
     private func clickPluginsMenuItem(_ title: String) {

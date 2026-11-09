@@ -1,0 +1,488 @@
+{
+  "skillsPage": {
+    "prefix": "",
+    "title": "Skills, Rules & MCP",
+    "kinds": [
+      {
+        "value": "skills",
+        "label": "Skills"
+      },
+      {
+        "value": "rules",
+        "label": "Rules"
+      },
+      {
+        "value": "mcp",
+        "label": "MCP"
+      }
+    ],
+    "kind": "skills",
+    "tabs": [
+      {
+        "value": "repo",
+        "label": "Repo",
+        "intro": "Skills in the task's repositories. They live in .agents/skills or .claude/skills, and Playhouse shares each one with both Claude and Codex.",
+        "loading": false,
+        "sections": [
+          {
+            "title": "login-app",
+            "rows": [
+              {
+                "id": "repo:/tmp/repos/login-app#release-notes",
+                "name": "release-notes",
+                "badges": [
+                  {
+                    "text": "Claude",
+                    "icon": "checkmark",
+                    "color": "green",
+                    "testID": "skill-provider-release-notes-claude"
+                  },
+                  {
+                    "text": "Codex",
+                    "icon": "checkmark",
+                    "color": "green",
+                    "testID": "skill-provider-release-notes-codex"
+                  }
+                ],
+                "location": ".agents/skills",
+                "editable": true,
+                "opensOnClick": true,
+                "fixable": false,
+                "enabled": true,
+                "usable": true,
+                "menu": [
+                  [
+                    {
+                      "id": "edit",
+                      "title": "Edit…",
+                      "help": "Edit the skill's SKILL.md",
+                      "testID": "skill-edit-release-notes"
+                    },
+                    {
+                      "id": "reveal",
+                      "title": "Reveal in Finder",
+                      "help": "Show the skill folder in Finder",
+                      "testID": "skill-reveal-release-notes"
+                    }
+                  ],
+                  [
+                    {
+                      "id": "move-global",
+                      "title": "Move to Global",
+                      "help": "Make the skill available in every repository",
+                      "testID": "skill-move-global-release-notes"
+                    },
+                    {
+                      "id": "move-repo:/tmp/worktrees/docs-site",
+                      "title": "Move to docs-site",
+                      "help": "Keep the skill only in docs-site",
+                      "testID": "skill-move-repo-release-notes-docs-site"
+                    }
+                  ],
+                  [
+                    {
+                      "id": "link",
+                      "title": "Make Available Outside Playhouse…",
+                      "help": "Write a symlink so the claude and codex CLIs find the skill on their own",
+                      "testID": "skill-link-release-notes"
+                    }
+                  ],
+                  [
+                    {
+                      "id": "delete",
+                      "title": "Delete…",
+                      "help": "Delete the skill from disk",
+                      "testID": "skill-delete-release-notes",
+                      "destructive": true
+                    }
+                  ]
+                ],
+                "description": "Draft release notes from the merged pull requests."
+              },
+              {
+                "id": "repo:/tmp/repos/login-app#review-login",
+                "name": "review-login",
+                "badges": [
+                  {
+                    "text": "Claude",
+                    "icon": "checkmark",
+                    "color": "green",
+                    "testID": "skill-provider-review-login-claude"
+                  },
+                  {
+                    "text": "Codex",
+                    "icon": "checkmark",
+                    "color": "green",
+                    "testID": "skill-provider-review-login-codex"
+                  },
+                  {
+                    "text": "Conflict",
+                    "icon": "exclamationmark.triangle",
+                    "color": "orange",
+                    "testID": "skill-conflict-review-login"
+                  }
+                ],
+                "location": ".agents/skills · .claude/skills",
+                "editable": true,
+                "opensOnClick": true,
+                "fixable": true,
+                "enabled": true,
+                "usable": true,
+                "menu": [
+                  [
+                    {
+                      "id": "edit",
+                      "title": "Edit…",
+                      "help": "Edit the skill's SKILL.md",
+                      "testID": "skill-edit-review-login"
+                    },
+                    {
+                      "id": "reveal",
+                      "title": "Reveal in Finder",
+                      "help": "Show the skill folder in Finder",
+                      "testID": "skill-reveal-review-login"
+                    }
+                  ],
+                  [
+                    {
+                      "id": "move-global",
+                      "title": "Move to Global",
+                      "help": "Make the skill available in every repository",
+                      "testID": "skill-move-global-review-login"
+                    },
+                    {
+                      "id": "move-repo:/tmp/worktrees/docs-site",
+                      "title": "Move to docs-site",
+                      "help": "Keep the skill only in docs-site",
+                      "testID": "skill-move-repo-review-login-docs-site"
+                    }
+                  ],
+                  [],
+                  [
+                    {
+                      "id": "delete",
+                      "title": "Delete…",
+                      "help": "Delete the skill from disk",
+                      "testID": "skill-delete-review-login",
+                      "destructive": true
+                    }
+                  ]
+                ],
+                "description": "Review a change to the login flow.",
+                "issue": "Different skills named \"review-login\" are in .agents/skills and .claude/skills. Each provider keeps its own copy until you remove or rename one."
+              },
+              {
+                "id": "repo:/tmp/repos/login-app#broken-skill",
+                "name": "broken-skill",
+                "badges": [
+                  {
+                    "text": "Invalid",
+                    "icon": "exclamationmark.triangle",
+                    "color": "red",
+                    "testID": "skill-invalid-broken-skill"
+                  }
+                ],
+                "location": ".agents/skills",
+                "editable": true,
+                "opensOnClick": true,
+                "fixable": true,
+                "enabled": true,
+                "usable": false,
+                "menu": [
+                  [
+                    {
+                      "id": "edit",
+                      "title": "Edit…",
+                      "help": "Edit the skill's SKILL.md",
+                      "testID": "skill-edit-broken-skill"
+                    },
+                    {
+                      "id": "reveal",
+                      "title": "Reveal in Finder",
+                      "help": "Show the skill folder in Finder",
+                      "testID": "skill-reveal-broken-skill"
+                    }
+                  ],
+                  [
+                    {
+                      "id": "move-global",
+                      "title": "Move to Global",
+                      "help": "Make the skill available in every repository",
+                      "testID": "skill-move-global-broken-skill"
+                    },
+                    {
+                      "id": "move-repo:/tmp/worktrees/docs-site",
+                      "title": "Move to docs-site",
+                      "help": "Keep the skill only in docs-site",
+                      "testID": "skill-move-repo-broken-skill-docs-site"
+                    }
+                  ],
+                  [
+                    {
+                      "id": "link",
+                      "title": "Make Available Outside Playhouse…",
+                      "help": "Write a symlink so the claude and codex CLIs find the skill on their own",
+                      "testID": "skill-link-broken-skill"
+                    }
+                  ],
+                  [
+                    {
+                      "id": "delete",
+                      "title": "Delete…",
+                      "help": "Delete the skill from disk",
+                      "testID": "skill-delete-broken-skill",
+                      "destructive": true
+                    }
+                  ]
+                ],
+                "issue": "SKILL.md has no frontmatter with a name and description."
+              }
+            ]
+          },
+          {
+            "title": "docs-site",
+            "empty": {
+              "key": "docs-site",
+              "text": "No skills in docs-site."
+            },
+            "rows": []
+          }
+        ]
+      },
+      {
+        "value": "global",
+        "label": "Global",
+        "intro": "Your skills for every repository, from ~/.agents/skills and Claude's and Codex's own skill folders.",
+        "loading": false,
+        "sections": [
+          {
+            "rows": [
+              {
+                "id": "global:shared-notes",
+                "name": "shared-notes",
+                "badges": [
+                  {
+                    "text": "Claude",
+                    "icon": "checkmark",
+                    "color": "green",
+                    "testID": "skill-provider-shared-notes-claude"
+                  },
+                  {
+                    "text": "Codex",
+                    "icon": "checkmark",
+                    "color": "green",
+                    "testID": "skill-provider-shared-notes-codex"
+                  },
+                  {
+                    "text": "Linked",
+                    "icon": "link",
+                    "color": "blue",
+                    "testID": "skill-linked-shared-notes"
+                  }
+                ],
+                "location": ".agents/skills · .claude/skills",
+                "editable": true,
+                "opensOnClick": true,
+                "fixable": false,
+                "enabled": true,
+                "usable": true,
+                "menu": [
+                  [
+                    {
+                      "id": "edit",
+                      "title": "Edit…",
+                      "help": "Edit the skill's SKILL.md",
+                      "testID": "skill-edit-shared-notes"
+                    },
+                    {
+                      "id": "reveal",
+                      "title": "Reveal in Finder",
+                      "help": "Show the skill folder in Finder",
+                      "testID": "skill-reveal-shared-notes"
+                    }
+                  ],
+                  [
+                    {
+                      "id": "move-repo:/tmp/worktrees/login-app",
+                      "title": "Move to login-app",
+                      "help": "Keep the skill only in login-app",
+                      "testID": "skill-move-repo-shared-notes-login-app"
+                    },
+                    {
+                      "id": "move-repo:/tmp/worktrees/docs-site",
+                      "title": "Move to docs-site",
+                      "help": "Keep the skill only in docs-site",
+                      "testID": "skill-move-repo-shared-notes-docs-site"
+                    }
+                  ],
+                  [
+                    {
+                      "id": "unlink",
+                      "title": "Remove Outside Link",
+                      "help": "Remove the symlink Playhouse wrote; Playhouse sessions still share the skill",
+                      "testID": "skill-unlink-shared-notes"
+                    }
+                  ],
+                  [
+                    {
+                      "id": "delete",
+                      "title": "Delete…",
+                      "help": "Delete the skill from disk",
+                      "testID": "skill-delete-shared-notes",
+                      "destructive": true
+                    }
+                  ]
+                ],
+                "description": "Keep running notes for the task."
+              },
+              {
+                "id": "global:quiet-skill",
+                "name": "quiet-skill",
+                "badges": [
+                  {
+                    "text": "Claude",
+                    "icon": "checkmark",
+                    "color": "green",
+                    "testID": "skill-provider-quiet-skill-claude"
+                  },
+                  {
+                    "text": "Codex",
+                    "icon": "checkmark",
+                    "color": "green",
+                    "testID": "skill-provider-quiet-skill-codex"
+                  }
+                ],
+                "location": ".agents/skills",
+                "editable": true,
+                "opensOnClick": true,
+                "fixable": false,
+                "enabled": false,
+                "usable": true,
+                "menu": [
+                  [
+                    {
+                      "id": "edit",
+                      "title": "Edit…",
+                      "help": "Edit the skill's SKILL.md",
+                      "testID": "skill-edit-quiet-skill"
+                    },
+                    {
+                      "id": "reveal",
+                      "title": "Reveal in Finder",
+                      "help": "Show the skill folder in Finder",
+                      "testID": "skill-reveal-quiet-skill"
+                    }
+                  ],
+                  [
+                    {
+                      "id": "move-repo:/tmp/worktrees/login-app",
+                      "title": "Move to login-app",
+                      "help": "Keep the skill only in login-app",
+                      "testID": "skill-move-repo-quiet-skill-login-app"
+                    },
+                    {
+                      "id": "move-repo:/tmp/worktrees/docs-site",
+                      "title": "Move to docs-site",
+                      "help": "Keep the skill only in docs-site",
+                      "testID": "skill-move-repo-quiet-skill-docs-site"
+                    }
+                  ],
+                  [
+                    {
+                      "id": "link",
+                      "title": "Make Available Outside Playhouse…",
+                      "help": "Write a symlink so the claude and codex CLIs find the skill on their own",
+                      "testID": "skill-link-quiet-skill"
+                    }
+                  ],
+                  [
+                    {
+                      "id": "delete",
+                      "title": "Delete…",
+                      "help": "Delete the skill from disk",
+                      "testID": "skill-delete-quiet-skill",
+                      "destructive": true
+                    }
+                  ]
+                ],
+                "description": "A skill turned off in Playhouse sessions."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "value": "builtin",
+        "label": "Built-in",
+        "intro": "Skills and commands that come with each provider. Each one works only with the provider it ships with.",
+        "loading": false,
+        "sections": [
+          {
+            "rows": [
+              {
+                "id": "builtin:claude#simplify",
+                "name": "simplify",
+                "badges": [
+                  {
+                    "text": "Claude",
+                    "icon": "checkmark",
+                    "color": "green",
+                    "testID": "skill-provider-simplify-claude"
+                  }
+                ],
+                "location": "Claude Code built-in",
+                "editable": false,
+                "opensOnClick": false,
+                "fixable": false,
+                "enabled": true,
+                "usable": true,
+                "menu": [
+                  []
+                ],
+                "description": "Review changed code for reuse and simplification."
+              },
+              {
+                "id": "builtin:codex#skill-creator",
+                "name": "skill-creator",
+                "badges": [
+                  {
+                    "text": "Codex",
+                    "icon": "checkmark",
+                    "color": "green",
+                    "testID": "skill-provider-skill-creator-codex"
+                  }
+                ],
+                "location": "Codex built-in",
+                "editable": false,
+                "opensOnClick": true,
+                "fixable": false,
+                "enabled": true,
+                "usable": true,
+                "menu": [
+                  [
+                    {
+                      "id": "reveal",
+                      "title": "Reveal in Finder",
+                      "help": "Show the skill folder in Finder",
+                      "testID": "skill-reveal-skill-creator"
+                    }
+                  ]
+                ],
+                "description": "Create a new skill."
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "tab": "repo",
+    "search": "",
+    "selectionCount": "0 selected",
+    "canFixSelection": false,
+    "isFixing": false,
+    "hint": "Click a skill to open it, or press and hold one to select several. Turning a skill on or off reaches Claude on its next turn, and a Codex conversation the next time its thread starts.",
+    "selectingHint": "Click skills to select them. Built-in skills can't be selected.",
+    "loaded": true,
+    "panelOpen": false
+  }
+}

@@ -5,19 +5,21 @@ import SwiftUI
 /// skills, instruction files and servers, the user's global ones, and the ones
 /// that came with each provider. Every skill, rule or server a user adds works with both Claude and Codex,
 /// so the page shows where it lives and who can use it rather than which
-/// provider owns it.
+/// provider owns it. The header and the skill gallery are composed of plugin
+/// atoms (`SkillsPageHeader` and `SkillGalleryView`); this view owns their
+/// state, the confirmations and the editor panels, and the Rules and MCP lists.
 struct SkillsPageView: View {
     enum Kind: String, CaseIterable, Identifiable {
-        case skills = "Skills"
-        case rules = "Rules"
-        case mcp = "MCP"
+        case skills
+        case rules
+        case mcp
         var id: String { rawValue }
     }
 
     enum Tab: String, CaseIterable, Identifiable {
-        case repo = "Repo"
-        case global = "Global"
-        case builtin = "Built-in"
+        case repo
+        case global
+        case builtin
         var id: String { rawValue }
     }
 
@@ -64,7 +66,7 @@ struct SkillsPageView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            header
+            SkillsPageHeader(model: model, actions: actions)
             Divider()
             switch kind {
             case .skills: skillsBody
@@ -80,73 +82,82 @@ struct SkillsPageView: View {
         .accessibilityIdentifier("skills-page")
     }
 
-    @ViewBuilder
+    private var model: SkillsPageModel {
+        SkillsPageModel(
+            catalog: catalog, kind: kind.rawValue, tab: tab.rawValue, search: search,
+            selection: isSelecting ? selection : nil, enabledOverrides: enabledOverrides,
+            isLoadingBuiltins: isLoading, isFixing: isFixing, error: errorMessage,
+            panelOpen: isPresentingPanel || isPresentingRulePanel || isPresentingMcpPanel
+        )
+    }
+
+    private var actions: SkillsPageActions {
+        SkillsPageActions(
+            back: onClose,
+            selectKind: { if let kind = Kind(rawValue: $0) { self.kind = kind } },
+            selectTab: { if let tab = Tab(rawValue: $0) { self.tab = tab } },
+            search: { search = $0 },
+            newSkill: { withAnimation(Self.panelAnimation) { panel = .creating } },
+            fixSelected: { fix(selectedSkills.filter(SkillsPageModel.isFixable)) },
+            deleteSelected: { pendingDelete = selectedSkills },
+            endSelection: endSelection,
+            press: { withSkill($0, click) },
+            longPress: { withSkill($0, beginSelection) },
+            fix: { withSkill($0) { fix([$0]) } },
+            toggle: { withSkill($0) { setEnabled($0, !isEnabled($0)) } },
+            use: { withSkill($0, onUse) },
+            menu: { id, item in withSkill(id) { menu($0, item) } }
+        )
+    }
+
+    /// Runs a row action on the skill it names, if the catalog still has it.
+    private func withSkill(_ id: String, _ action: (SkillRecord) -> Void) {
+        if let skill = catalog?.skill(id: id) { action(skill) }
+    }
+
     private var skillsBody: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let errorMessage {
-                Text(errorMessage)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("skills-error")
-            }
-            Text(isSelecting
-                 ? "Click skills to select them. Built-in skills can't be selected."
-                 : "Click a skill to open it, or press and hold one to select several. Turning a skill on or off reaches Claude on its next turn, and a Codex conversation the next time its thread starts.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 20)
-                .padding(.top, 8)
-                .accessibilityIdentifier("skills-provider-timing")
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) { content }
-                    .padding(20)
-            }
-            .accessibilityIdentifier("skills-list")
-        }
-        .task { await reload() }
-        .alert(
-            pendingDelete.count == 1 ? "Delete \(pendingDelete[0].name)?" : "Delete \(pendingDelete.count) skills?",
-            isPresented: Binding(get: { !pendingDelete.isEmpty }, set: { if !$0 { pendingDelete = [] } }),
-            presenting: pendingDelete
-        ) { skills in
-            Button("Delete", role: .destructive) {
-                perform {
-                    try await manager.deleteSkills(taskID: task.id, skillIDs: skills.map(\.id))
-                    selection.subtract(skills.map(\.id))
-                    if selection.isEmpty { isSelecting = false }
+        SkillGalleryView(model: model, actions: actions)
+            .task { await reload() }
+            .alert(
+                pendingDelete.count == 1 ? "Delete \(pendingDelete[0].name)?" : "Delete \(pendingDelete.count) skills?",
+                isPresented: Binding(get: { !pendingDelete.isEmpty }, set: { if !$0 { pendingDelete = [] } }),
+                presenting: pendingDelete
+            ) { skills in
+                Button("Delete", role: .destructive) {
+                    perform {
+                        try await manager.deleteSkills(taskID: task.id, skillIDs: skills.map(\.id))
+                        selection.subtract(skills.map(\.id))
+                        if selection.isEmpty { isSelecting = false }
+                    }
                 }
+                .buttonHoverPointer()
+                .nativeHelp("Delete the skill folders from disk")
+                .accessibilityIdentifier("confirm-delete-skill")
+                Button("Cancel", role: .cancel) {}
+                    .buttonHoverPointer()
+                    .nativeHelp("Keep the skills")
+            } message: { skills in
+                Text(skills.count == 1
+                     ? "This removes \(skills[0].folderPath ?? skills[0].name) from disk for both Claude and Codex."
+                     : "This removes \(skills.map(\.name).joined(separator: ", ")) from disk for both Claude and Codex.")
             }
-            .buttonHoverPointer()
-            .nativeHelp("Delete the skill folders from disk")
-            .accessibilityIdentifier("confirm-delete-skill")
-            Button("Cancel", role: .cancel) {}
-                .buttonHoverPointer()
-                .nativeHelp("Keep the skills")
-        } message: { skills in
-            Text(skills.count == 1
-                 ? "This removes \(skills[0].folderPath ?? skills[0].name) from disk for both Claude and Codex."
-                 : "This removes \(skills.map(\.name).joined(separator: ", ")) from disk for both Claude and Codex.")
-        }
-        .confirmationDialog(
-            "Make \(pendingLink?.name ?? "skill") available outside Playhouse?",
-            isPresented: Binding(get: { pendingLink != nil }, set: { if !$0 { pendingLink = nil } }),
-            presenting: pendingLink
-        ) { skill in
-            Button("Create Link") { perform { _ = try await manager.linkSkill(taskID: task.id, skillID: skill.id, linked: true) } }
-                .buttonHoverPointer()
-                .nativeHelp("Write a symlink so both CLIs find the skill on their own")
-                .accessibilityIdentifier("confirm-link-skill")
-            Button("Cancel", role: .cancel) {}
-                .buttonHoverPointer()
-                .nativeHelp("Keep sharing the skill only in Playhouse sessions")
-        } message: { skill in
-            Text(skill.scope == .repo
-                 ? "Playhouse writes a symlink inside the repository, so the claude and codex CLIs find the skill outside Playhouse too. Commit it to share it with teammates."
-                 : "Playhouse writes a symlink in your home folder, so the claude and codex CLIs find the skill outside Playhouse too.")
-        }
+            .confirmationDialog(
+                "Make \(pendingLink?.name ?? "skill") available outside Playhouse?",
+                isPresented: Binding(get: { pendingLink != nil }, set: { if !$0 { pendingLink = nil } }),
+                presenting: pendingLink
+            ) { skill in
+                Button("Create Link") { perform { _ = try await manager.linkSkill(taskID: task.id, skillID: skill.id, linked: true) } }
+                    .buttonHoverPointer()
+                    .nativeHelp("Write a symlink so both CLIs find the skill on their own")
+                    .accessibilityIdentifier("confirm-link-skill")
+                Button("Cancel", role: .cancel) {}
+                    .buttonHoverPointer()
+                    .nativeHelp("Keep sharing the skill only in Playhouse sessions")
+            } message: { skill in
+                Text(skill.scope == .repo
+                     ? "Playhouse writes a symlink inside the repository, so the claude and codex CLIs find the skill outside Playhouse too. Commit it to share it with teammates."
+                     : "Playhouse writes a symlink in your home folder, so the claude and codex CLIs find the skill outside Playhouse too.")
+            }
     }
 
     private var isPresentingPanel: Bool { panel != nil }
@@ -196,95 +207,8 @@ struct SkillsPageView: View {
         withAnimation(Self.panelAnimation) { panel = nil }
     }
 
-    private var header: some View {
-        HStack(spacing: 12) {
-            Button(action: onClose) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 26, height: 26)
-                    .background(Color.primary.opacity(0.07), in: Circle())
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut(isPresentingPanel || isPresentingRulePanel || isPresentingMcpPanel || isSelecting ? nil : .cancelAction)
-            .buttonHoverPointer()
-            .nativeHelp("Back to the conversation")
-            .accessibilityLabel("Back to the conversation")
-            .accessibilityIdentifier("skills-back-button")
-
-            Text("Skills, Rules & MCP")
-                .font(.title2.weight(.semibold))
-                .accessibilityIdentifier("skills-title")
-
-            Picker("Show", selection: $kind) {
-                ForEach(Kind.allCases) { kind in Text(kind.rawValue).tag(kind) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-            .disabled(isSelecting || isPresentingPanel || isPresentingRulePanel || isPresentingMcpPanel)
-            .nativeHelp("Show skills, the rule files agents follow on every turn, or the MCP servers that give them tools")
-            .accessibilityIdentifier("skills-kind-picker")
-
-            if kind == .skills {
-                Picker("Skill source", selection: $tab) {
-                    ForEach(Tab.allCases) { tab in Text(tab.rawValue).tag(tab) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 260)
-                .accessibilityIdentifier("skills-tab-picker")
-            }
-
-            Spacer()
-
-            if kind != .skills {
-                EmptyView()
-            } else if isSelecting {
-                selectionActions
-            } else {
-                TextField("Search skills", text: $search)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 200)
-                    .accessibilityIdentifier("skills-search")
-
-                Button { withAnimation(Self.panelAnimation) { panel = .creating } } label: { Label("New Skill", systemImage: "plus") }
-                    .buttonHoverPointer()
-                    .nativeHelp("Create a skill that both Claude and Codex can use")
-                    .accessibilityIdentifier("new-skill-button")
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-    }
-
     private var selectedSkills: [SkillRecord] {
         (catalog?.allSkills ?? []).filter { selection.contains($0.id) }
-    }
-
-    private var selectionActions: some View {
-        let selected = selectedSkills
-        let fixable = selected.filter(Self.isFixable)
-        return HStack(spacing: 8) {
-            Text(selected.count == 1 ? "1 selected" : "\(selected.count) selected")
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .accessibilityIdentifier("skills-selection-count")
-            Button { fix(fixable) } label: { Label("Fix with Agent", systemImage: "wand.and.stars") }
-                .disabled(fixable.isEmpty || isFixing)
-                .buttonHoverPointer()
-                .nativeHelp("Open a task whose agent fixes the selected conflicting or invalid skills")
-                .accessibilityIdentifier("skills-fix-selected")
-            Button(role: .destructive) { pendingDelete = selected } label: { Label("Delete", systemImage: "trash") }
-                .disabled(selected.isEmpty)
-                .buttonHoverPointer()
-                .nativeHelp("Delete the selected skills from disk")
-                .accessibilityIdentifier("skills-delete-selected")
-            Button("Done") { endSelection() }
-                .keyboardShortcut(isPresentingPanel ? nil : .cancelAction)
-                .buttonHoverPointer()
-                .nativeHelp("Stop selecting skills")
-                .accessibilityIdentifier("skills-selection-done")
-        }
     }
 
     private func endSelection() {
@@ -294,174 +218,7 @@ struct SkillsPageView: View {
         }
     }
 
-    @ViewBuilder
-    private var content: some View {
-        if catalog == nil {
-            ProgressView().frame(maxWidth: .infinity).accessibilityIdentifier("skills-loading")
-        } else {
-            switch tab {
-            case .repo:
-                Text("Skills in the task's repositories. They live in .agents/skills or .claude/skills, and Playhouse shares each one with both Claude and Codex.")
-                    .font(.callout).foregroundStyle(.secondary)
-                if catalog?.repositories.isEmpty != false {
-                    emptyState("This task has no repositories.", identifier: "skills-empty-repo")
-                }
-                ForEach(catalog?.repositories ?? [], id: \.rootPath) { section in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(section.name)
-                            .font(.headline)
-                            .padding(.top, 6)
-                            .accessibilityIdentifier("skills-repo-section-\(section.name)")
-                        let skills = filtered(section.skills)
-                        if skills.isEmpty {
-                            emptyState(section.skills.isEmpty ? "No skills in \(section.name)." : "No matching skills.",
-                                       identifier: "skills-empty-\(section.name)")
-                        }
-                        ForEach(skills) { row($0) }
-                    }
-                }
-            case .global:
-                Text("Your skills for every repository, from ~/.agents/skills and Claude's and Codex's own skill folders.")
-                    .font(.callout).foregroundStyle(.secondary)
-                let skills = filtered(catalog?.global ?? [])
-                if skills.isEmpty { emptyState("No global skills.", identifier: "skills-empty-global") }
-                ForEach(skills) { row($0) }
-            case .builtin:
-                Text("Skills and commands that come with each provider. Each one works only with the provider it ships with.")
-                    .font(.callout).foregroundStyle(.secondary)
-                if isLoading { ProgressView().controlSize(.small).accessibilityIdentifier("skills-builtin-loading") }
-                let skills = filtered(catalog?.builtin ?? [])
-                if skills.isEmpty, !isLoading { emptyState("No built-in skills found.", identifier: "skills-empty-builtin") }
-                ForEach(skills) { row($0) }
-            }
-        }
-    }
-
-    private func emptyState(_ text: String, identifier: String) -> some View {
-        Text(text)
-            .foregroundStyle(.secondary)
-            .padding(.vertical, 6)
-            .accessibilityIdentifier(identifier)
-    }
-
-    private func filtered(_ skills: [SkillRecord]) -> [SkillRecord] {
-        let query = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !query.isEmpty else { return skills }
-        return skills.filter { $0.name.lowercased().contains(query) || $0.description.lowercased().contains(query) }
-    }
-
-    private static func isFixable(_ skill: SkillRecord) -> Bool {
-        skill.editable && (skill.conflict || skill.issue != nil)
-    }
-
     private func isEnabled(_ skill: SkillRecord) -> Bool { enabledOverrides[skill.id] ?? skill.enabled }
-
-    private func row(_ skill: SkillRecord) -> some View {
-        let isSelected = selection.contains(skill.id)
-        let opensOnClick = isSelecting ? skill.editable : skill.folderPath != nil
-        return HStack(alignment: .center, spacing: 12) {
-            HStack(alignment: .center, spacing: 12) {
-                if isSelecting, skill.editable {
-                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 16))
-                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-                        .accessibilityLabel(isSelected ? "Selected" : "Not selected")
-                        .accessibilityIdentifier("skill-select-\(skill.name)")
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(skill.name)
-                            .font(.body.weight(.semibold))
-                            .accessibilityIdentifier("skill-name-\(skill.name)")
-                        ForEach(ConversationProvider.allCases) { provider in
-                            if skill.providers.contains(provider) {
-                                badge(provider.displayName, systemImage: "checkmark", color: .green)
-                                    .accessibilityIdentifier("skill-provider-\(skill.name)-\(provider.rawValue)")
-                            }
-                        }
-                        if skill.availableOutsidePlayhouse {
-                            badge("Linked", systemImage: "link", color: .blue)
-                                .accessibilityIdentifier("skill-linked-\(skill.name)")
-                        }
-                        if skill.conflict {
-                            badge("Conflict", systemImage: "exclamationmark.triangle", color: .orange)
-                                .accessibilityIdentifier("skill-conflict-\(skill.name)")
-                        } else if skill.issue != nil {
-                            badge("Invalid", systemImage: "exclamationmark.triangle", color: .red)
-                                .accessibilityIdentifier("skill-invalid-\(skill.name)")
-                        }
-                    }
-                    if !skill.description.isEmpty {
-                        Text(skill.description)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(3)
-                            .accessibilityIdentifier("skill-description-\(skill.name)")
-                    }
-                    if let issue = skill.issue {
-                        Text(issue).font(.caption).foregroundStyle(.orange).accessibilityIdentifier("skill-issue-\(skill.name)")
-                    }
-                    Text(skill.locations.map(\.layout.displayPath).joined(separator: " · "))
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .accessibilityIdentifier("skill-location-\(skill.name)")
-                }
-                Spacer(minLength: 8)
-            }
-            // A press and hold starts selecting; a click opens the skill, or selects while
-            // selecting. Only the skill's own text takes them: a held click on a control, such
-            // as the actions menu while it tracks, must not start selecting.
-            .overlay {
-                SkillRowPressArea(
-                    showsPointingHand: opensOnClick,
-                    onClick: { click(skill) },
-                    onLongPress: { beginSelection(with: skill) }
-                )
-            }
-            if !isSelecting {
-                if Self.isFixable(skill) {
-                    Button { fix([skill]) } label: { Label("Fix with Agent", systemImage: "wand.and.stars") }
-                        .controlSize(.small)
-                        .disabled(isFixing)
-                        .buttonHoverPointer()
-                        .nativeHelp("Open a task whose agent fixes \(skill.name)")
-                        .accessibilityIdentifier("skill-fix-\(skill.name)")
-                }
-                Toggle("Enabled", isOn: Binding(get: { isEnabled(skill) }, set: { setEnabled(skill, $0) }))
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .labelsHidden()
-                    .buttonHoverPointer()
-                    .nativeHelp(isEnabled(skill) ? "Turn the skill off in Playhouse sessions" : "Turn the skill on in Playhouse sessions")
-                    .accessibilityLabel("\(skill.name) enabled")
-                    .accessibilityIdentifier("skill-toggle-\(skill.name)")
-
-                Button("Use") { onUse(skill) }
-                    .controlSize(.small)
-                    .disabled(!isEnabled(skill) || skill.providers.isEmpty)
-                    .buttonHoverPointer()
-                    .nativeHelp("Insert /\(skill.name) into the message")
-                    .accessibilityIdentifier("skill-use-\(skill.name)")
-
-                actions(skill)
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(isSelected ? Color.accentColor.opacity(0.12) : WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(isSelected ? Color.accentColor.opacity(0.6) : Color.clear))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("skill-row-\(skill.name)")
-    }
-
-    private func badge(_ text: String, systemImage: String, color: Color) -> some View {
-        Label(text, systemImage: systemImage)
-            .font(.caption2.weight(.medium))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .foregroundStyle(color)
-            .background(color.opacity(0.12), in: Capsule())
-    }
 
     private func beginSelection(with skill: SkillRecord) {
         guard skill.editable else { return }
@@ -517,74 +274,23 @@ struct SkillsPageView: View {
         }
     }
 
-    private func actions(_ skill: SkillRecord) -> some View {
-        Menu {
-            if skill.editable {
-                Button("Edit…") { openEditor(skill) }
-                    .buttonHoverPointer()
-                    .help("Edit the skill's SKILL.md")
-                    .accessibilityIdentifier("skill-edit-\(skill.name)")
-            }
-            if let folder = skill.folderPath {
-                Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder)]) }
-                    .buttonHoverPointer()
-                    .help("Show the skill folder in Finder")
-                    .accessibilityIdentifier("skill-reveal-\(skill.name)")
-            }
-            if skill.editable {
-                Divider()
-                if skill.scope == .repo {
-                    Button("Move to Global") {
-                        perform { _ = try await manager.moveSkill(taskID: task.id, skillID: skill.id, scope: .global, root: nil) }
-                    }
-                    .buttonHoverPointer()
-                    .help("Make the skill available in every repository")
-                    .accessibilityIdentifier("skill-move-global-\(skill.name)")
-                }
-                ForEach(catalog?.repositories ?? [], id: \.rootPath) { section in
-                    if skill.scope == .global || skill.rootPath != section.rootPath {
-                        Button("Move to \(section.name)") {
-                            perform { _ = try await manager.moveSkill(taskID: task.id, skillID: skill.id, scope: .repo, root: section.rootPath) }
-                        }
-                        .buttonHoverPointer()
-                        .help("Keep the skill only in \(section.name)")
-                        .accessibilityIdentifier("skill-move-repo-\(skill.name)-\(section.name)")
-                    }
-                }
-                Divider()
-                if skill.locations.contains(where: \.isSymlink) {
-                    Button("Remove Outside Link") {
-                        perform { _ = try await manager.linkSkill(taskID: task.id, skillID: skill.id, linked: false) }
-                    }
-                    .buttonHoverPointer()
-                    .help("Remove the symlink Playhouse wrote; Playhouse sessions still share the skill")
-                    .accessibilityIdentifier("skill-unlink-\(skill.name)")
-                } else if !skill.availableOutsidePlayhouse, !skill.conflict {
-                    Button("Make Available Outside Playhouse…") { pendingLink = skill }
-                        .buttonHoverPointer()
-                        .help("Write a symlink so the claude and codex CLIs find the skill on their own")
-                        .accessibilityIdentifier("skill-link-\(skill.name)")
-                }
-                Divider()
-                Button("Delete…", role: .destructive) { pendingDelete = [skill] }
-                    .buttonHoverPointer()
-                    .help("Delete the skill from disk")
-                    .accessibilityIdentifier("skill-delete-\(skill.name)")
-            }
-        } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 24, height: 24)
-                .contentShape(Rectangle())
+    /// Runs the actions menu's item, by its id (see `SkillsPageModel.MenuItem`).
+    private func menu(_ skill: SkillRecord, _ item: String) {
+        switch item {
+        case "edit": openEditor(skill)
+        case "reveal":
+            if let folder = skill.folderPath { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder)]) }
+        case "move-global":
+            perform { _ = try await manager.moveSkill(taskID: task.id, skillID: skill.id, scope: .global, root: nil) }
+        case "unlink":
+            perform { _ = try await manager.linkSkill(taskID: task.id, skillID: skill.id, linked: false) }
+        case "link": pendingLink = skill
+        case "delete": pendingDelete = [skill]
+        default:
+            guard item.hasPrefix("move-repo:") else { return }
+            let root = String(item.dropFirst("move-repo:".count))
+            perform { _ = try await manager.moveSkill(taskID: task.id, skillID: skill.id, scope: .repo, root: root) }
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .buttonHoverPointer()
-        .nativeHelp("More actions for \(skill.name)")
-        .accessibilityLabel("Actions for \(skill.name)")
-        .accessibilityIdentifier("skill-actions-\(skill.name)")
     }
 
     private func perform(reloading: Bool = true, _ operation: @escaping () async throws -> Void) {
@@ -994,64 +700,6 @@ private struct SkillMarkdownPreview: View {
     }
 }
 
-/// A skill row's text area. AppKit's own mouse tracking tells a click from a
-/// press and hold: SwiftUI's long-press gesture raced against a tap could stay
-/// tracking after a click opened the editor, and the window then ignored every
-/// click until it was minimized.
-struct SkillRowPressArea: NSViewRepresentable {
-    let showsPointingHand: Bool
-    let onClick: () -> Void
-    let onLongPress: () -> Void
-
-    func makeNSView(context: Context) -> PressView { PressView() }
-
-    func updateNSView(_ view: PressView, context: Context) {
-        view.onClick = onClick
-        view.onLongPress = onLongPress
-        if view.showsPointingHand != showsPointingHand {
-            view.showsPointingHand = showsPointingHand
-            view.window?.invalidateCursorRects(for: view)
-        }
-    }
-
-    final class PressView: NSView {
-        static let holdDuration: TimeInterval = 0.45
-        var onClick: () -> Void = {}
-        var onLongPress: () -> Void = {}
-        var showsPointingHand = false
-
-        override func isAccessibilityElement() -> Bool { false }
-        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-        override func resetCursorRects() {
-            if showsPointingHand { addCursorRect(bounds, cursor: .pointingHand) }
-        }
-
-        /// Tracks the press to its mouse-up here, so no gesture state outlives it.
-        override func mouseDown(with event: NSEvent) {
-            guard let window else { return }
-            let deadline = Date(timeIntervalSinceNow: Self.holdDuration)
-            var held = false
-            while true {
-                let next = window.nextEvent(
-                    matching: [.leftMouseUp, .leftMouseDragged],
-                    until: held ? .distantFuture : deadline,
-                    inMode: .eventTracking,
-                    dequeue: true
-                )
-                guard let next else {
-                    held = true
-                    onLongPress()
-                    continue
-                }
-                guard next.type == .leftMouseUp else { continue }
-                if !held, bounds.contains(convert(next.locationInWindow, from: nil)) { onClick() }
-                return
-            }
-        }
-    }
-}
-
 /// A plain-text editor for a skill's instructions. SwiftUI's `TextEditor`
 /// applies the system's smart dashes and quotes, which would turn Markdown's
 /// `---` into an em dash.
@@ -1369,7 +1017,7 @@ private struct RulesSectionView: View {
                 Spacer(minLength: 8)
             }
             .overlay {
-                SkillRowPressArea(showsPointingHand: true, onClick: { openEditor(rule) }, onLongPress: {})
+                PressAreaView(showsPointingHand: true, onClick: { openEditor(rule) }, onLongPress: {})
             }
             if rule.issue != nil, rule.editable {
                 Button { fix(rule) } label: { Label("Fix with Agent", systemImage: "wand.and.stars") }

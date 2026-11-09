@@ -87,6 +87,35 @@ enum AtomRegistry {
                 runtime.dispatch(nodeID: node.id, event: "onChange", value: .string(value))
             })
         }
+        register(.toggle) { node, runtime in
+            AnyView(AtomToggle(props: try .decode(node.props), common: try .decode(node.props)) {
+                runtime.dispatch(nodeID: node.id, event: "onToggle")
+            })
+        }
+        register(.textField) { node, runtime in
+            AnyView(AtomTextField(props: try .decode(node.props), common: try .decode(node.props)) { text in
+                runtime.dispatch(nodeID: node.id, event: "onChange", value: .string(text))
+            })
+        }
+        register(.segmented) { node, runtime in
+            AnyView(AtomSegmented(props: try .decode(node.props), common: try .decode(node.props)) { value in
+                runtime.dispatch(nodeID: node.id, event: "onChange", value: .string(value))
+            })
+        }
+        register(.menu) { node, runtime in
+            AnyView(AtomMenu(props: try .decode(node.props), common: try .decode(node.props)) { id in
+                runtime.dispatch(nodeID: node.id, event: "onMenu", value: .string(id))
+            })
+        }
+        register(.pressArea) { node, runtime in
+            AnyView(AtomPressArea(props: try .decode(node.props), common: try .decode(node.props), onPress: {
+                runtime.dispatch(nodeID: node.id, event: "onPress")
+            }, onLongPress: {
+                runtime.dispatch(nodeID: node.id, event: "onLongPress")
+            }) {
+                PluginChildren(node: node, runtime: runtime)
+            })
+        }
         assert(Set(builders.keys) == Set(AtomType.allCases.map(\.rawValue)), "Every atom needs exactly one registry entry.")
         return builders
     }()

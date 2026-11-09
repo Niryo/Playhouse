@@ -5159,11 +5159,7 @@ struct TaskConversationView: View {
                     .accessibilityIdentifier("message-composer-scroll-view")
 
                 HStack(spacing: 12) {
-                    Button { isShowingSkills = true } label: { Image(systemName: "sparkles") }
-                    .buttonHoverPointer()
-                    .nativeHelp("Skills")
-                        .buttonStyle(.plain).accessibilityLabel("Skills")
-                        .accessibilityIdentifier("open-skills-button")
+                    SkillsButton(testID: "open-skills-button") { isShowingSkills = true }
                     Menu {
                         if provider.supportsGoals {
                             Button {
