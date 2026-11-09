@@ -82,6 +82,10 @@ CHAT_ANSWER = "Confirmed: 2.1.309 registers the new model and 2.1.308 does not."
 CHAT_CLOSING = "Tell me if you want the upgrade command."
 SIMPLE_ANSWER = "OK."
 PENDING_QUESTION_SUCCESS_MARKER = "finish while a structured question remains pending"
+# Claude writes questions in Markdown, as it does replies.
+MARKDOWN_QUESTION = "Which color should I use for **the primary button**?\n\nIt also tints `LinkText`."
+# Playhouse keys each answer by the question it answers.
+QUESTION_TEXTS = ("Which color should I use?", MARKDOWN_QUESTION)
 NUDGE_RACE_STALE_ANSWER = "The task review is approved. Only the UI review is still pending."
 NUDGE_RACE_UI_REPORT = "UI review approved."
 NUDGED_COMMENTARY = "Every review is approved. Running the final check."
@@ -655,7 +659,7 @@ def respond(user_text, instructions, preserve_no_outcome=False, previous_prompt=
         question_input = {
             "questions": [{
                 "header": "Color",
-                "question": "Which color should I use?",
+                "question": MARKDOWN_QUESTION,
                 "options": [
                     {"label": "Blue", "description": "Use blue."},
                     {"label": "Green", "description": "Use green."},
@@ -1487,9 +1491,10 @@ def main():
                 ]}})
                 write({"type": "result", "subtype": "error", "is_error": True, "result": response.get("message", "Question was rejected.")})
                 continue
-            if set(answers) != {"Which color should I use?"} or not isinstance(answers["Which color should I use?"], str) or not answers["Which color should I use?"].strip():
+            question_text = next(iter(answers)) if len(answers) == 1 else None
+            if question_text not in QUESTION_TEXTS or not isinstance(answers[question_text], str) or not answers[question_text].strip():
                 raise ValueError(f"Malformed Claude question answer: {answers!r}")
-            answer = answers.get("Which color should I use?", "")
+            answer = answers[question_text]
             write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": "toolu_question", "content": json.dumps(answers), "is_error": False},
             ]}})

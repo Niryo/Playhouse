@@ -257,7 +257,9 @@ base_test_arguments+=(
   ONLY_ACTIVE_ARCH=YES
 )
 app_bundle_identifier="${source_bundle_identifier}.e2e.ui"
-ui_build_timeout_seconds="${PLAYHOUSE_UI_BUILD_TIMEOUT_SECONDS:-600}"
+# The VM's DerivedData is shared by every worktree that runs there, so a run after
+# another worktree's recompiles the large app and UI test sources from scratch.
+ui_build_timeout_seconds="${PLAYHOUSE_UI_BUILD_TIMEOUT_SECONDS:-1200}"
 watchdog_command=(
   perl -e '
     use POSIX ":sys_wait_h";

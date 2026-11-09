@@ -369,7 +369,7 @@
   },
   {
     "id": "test_claude_questions_can_be_answered_after_switching_conversations",
-    "expectation": "Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the UI renders the question inline, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response."
+    "expectation": "Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the question's Markdown, header, and option descriptions reach the client, and the UI renders the question inline with its Markdown formatted at the reply text size, its header, and each option's description, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response."
   },
   {
     "id": "test_claude_outcome_reminder_rejects_user_questions",
