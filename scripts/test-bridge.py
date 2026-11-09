@@ -580,13 +580,21 @@ class PlayhouseBridgeTests(unittest.TestCase):
             return True
         return True
 
+    @staticmethod
+    def daemon_log_pids(service):
+        """Every daemon process that wrote to this service's socket log (each logs on start)."""
+        digest = hashlib.sha256(service.encode("utf-8")).hexdigest()[:32]
+        log = Path("/tmp/playhouse-bridge") / str(os.getuid()) / f"{digest}.sock.log"
+        text = log.read_text(encoding="utf-8") if log.is_file() else ""
+        return {int(pid) for pid in re.findall(r"playhouse-daemon\[(\d+)\]", text)}
+
     def wait_until_process_exits(self, pid, timeout):
         deadline = time.monotonic() + timeout
         while self.process_is_running(pid) and time.monotonic() < deadline:
             time.sleep(0.1)
         return not self.process_is_running(pid)
 
-    # case-contract: test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle | The bridge daemon starts on the first request, serves later requests from the same process, and stays alive while any connection (such as a window's runtime or CPU usage watcher) is open. A watcher receives the daemon's runtime snapshots as a turn starts and stops, and the daemon exits by itself once the last connection closes and no request is running; the next request starts a fresh daemon on demand without any manual step.
+    # case-contract: test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle | The bridge daemon starts on the first request, exactly once even when callers race to start it, serves later requests from the same process, and stays alive while any connection (such as a window's runtime or CPU usage watcher) is open. A watcher receives the daemon's runtime snapshots as a turn starts and stops, and the daemon exits by itself once the last connection closes and no request is running; the next request starts a fresh daemon on demand without any manual step.
     def test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle(self):
         service = f"{arguments.service_name}.lifecycle-{uuid.uuid4().hex[:8]}"
         fixture_source = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -603,8 +611,16 @@ class PlayhouseBridgeTests(unittest.TestCase):
         }
         task = self.create_task("Daemon watcher", provider="codex")
 
-        first = self.assert_success(self.call_cli("status", extra_environment=environment)[0])
-        daemon_pid = first["processID"]
+        # Callers that race to start the daemon start exactly one.
+        racing = [self.start_cli("status", extra_environment=environment) for _ in range(4)]
+        racing_pids = set()
+        for process in racing:
+            stdout, _ = process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 0, stdout)
+            racing_pids.add(json.loads(stdout.strip().splitlines()[-1])["result"]["processID"])
+        self.assertEqual(len(racing_pids), 1, f"Racing first requests should share one daemon: {racing_pids}")
+        daemon_pid = racing_pids.pop()
+        self.assertEqual(self.daemon_log_pids(service), {daemon_pid}, "Only one daemon should have been started.")
         self.assertTrue(self.process_is_running(daemon_pid), "The first request should have started a daemon.")
         second = self.assert_success(self.call_cli("status", extra_environment=environment)[0])
         self.assertEqual(second["processID"], daemon_pid, "Later requests should reuse the running daemon.")
@@ -7990,7 +8006,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
 
-    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the submitted user message remains visible in the transcript. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the transcript never shows blank space: the submitted user message is in view, or, once the turn's activity has outgrown the viewport and the transcript follows it, the message sits above the latest live activity, which is in view. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     def test_conversation_shows_mcp_and_dynamic_tool_activity(self):
         task_id = self.create_task(title="Tool activity")['id']
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -8510,7 +8526,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
             and event.get("itemType") == "commandExecution"
         )
         self.assertEqual(command_event.get("command"), "git status --short")
-        self.assertEqual(command_event.get("workingDirectory"), str(self.primary.resolve()))
+        # The thread cwd Playhouse requested, as real Codex reports it.
+        self.assertEqual(command_event.get("workingDirectory"), str(self.primary))
         self.assertGreater(int(command_event["outputBytes"]), 0)
         file_event = next(
             event for event in diagnostics
@@ -9585,25 +9602,25 @@ class PlayhouseBridgeTests(unittest.TestCase):
                 "A paged history read must not bring back the answered question while its recovery turn runs.",
             )
             self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
-            # Kill the bridge daemon that owns the recovery turn before it can clean up.
-            send_started = [
-                event for event in self.diagnostic_events()
-                if event.get("event") == "conversation.send.started" and event.get("taskID") == task_id
+            # The recovery's Claude Code process dies mid-turn. Agents outlive a daemon restart,
+            # so killing the daemon would not end the recovery.
+            recovery_turn = [
+                event for event in self.diagnostic_events() if event.get("event") == "claude.turn.started"
             ][-1]
-            bridge_pid = int(send_started["clientPID"])
+            recovery_pid = int(recovery_turn["claudePID"])
             try:
-                os.kill(bridge_pid, signal.SIGKILL)
+                os.kill(recovery_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             exit_deadline = time.monotonic() + 5
             while time.monotonic() < exit_deadline:
                 try:
-                    os.kill(bridge_pid, 0)
+                    os.kill(recovery_pid, 0)
                 except ProcessLookupError:
                     break
                 time.sleep(0.02)
             else:
-                self.fail("The bridge daemon owning the recovery turn should exit.")
+                self.fail("The Claude Code process running the recovery turn should exit.")
             answer_process.communicate(timeout=30)
         finally:
             recovery_release.write_text("Release the orphaned recovery turn.\n", encoding="utf-8")
@@ -13336,7 +13353,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(without_task["repositories"], [])
         self.assertEqual([server["name"] for server in without_task["global"]], list(global_servers))
 
-    # case-contract: test_mcp_create_update_and_delete_in_both_configs | New Server writes a global server straight into both Claude Code's ~/.claude.json mcpServers and Codex's config.toml [mcp_servers] table, with ${NAME} environment references written as Codex env_vars and every other setting, comment and server in both files kept; a repository server goes into the chosen task worktree's .mcp.json and the source checkout is left alone. An invalid name, a missing command, an SSE server, a URL that is not http, an environment reference Codex can't pass through, the managed scope, and an existing name are rejected with nothing written. Clicking a server opens its editor, and saving rewrites it in every file that defines it while keeping each provider's own keys, such as Codex's startup_timeout_sec and Claude's oauth; an invalid edit and an edit to a server written inline in config.toml are rejected while keeping the files. Deleting a server removes it from every file that defines it, and every change is visible to a fresh CLI process and on the page.
+    # case-contract: test_mcp_create_update_and_delete_in_both_configs | New Server writes a global server straight into both Claude Code's ~/.claude.json mcpServers and Codex's config.toml [mcp_servers] table, with ${NAME} environment references written as Codex env_vars and every other setting, comment and server in both files kept; a repository server goes into the chosen task worktree's .mcp.json and the source checkout is left alone. An invalid name, a missing command, an SSE server, a URL that is not http, an environment reference Codex can't pass through, the managed scope, and an existing name are rejected with nothing written. Clicking a server opens its editor, and saving rewrites it in every file that defines it while keeping each provider's own keys, such as Codex's startup_timeout_sec and Claude's oauth; an invalid edit and an edit to a server written inline in config.toml are rejected while keeping the files. Deleting a server removes it from every file that defines it, and every change is visible to a fresh CLI process and on the page. Right after a create closes its panel, one click on New Server opens it again.
     def test_mcp_create_update_and_delete_in_both_configs(self):
         repository = self.make_skill_repository("mcp-manage-repo", {})
         task = self.create_skills_task("MCP manage", [repository])

@@ -391,16 +391,18 @@ final class PlayhouseUITests: XCTestCase {
 
     override func tearDownWithError() throws {
         // Read before cleanup, report after it: a failure here stops tearDown, which must
-        // not leave the app running or the data directory behind for the next case.
+        // not leave the app running for the next case. Cleanup still keeps the data
+        // directory of a case with violations, for triage.
         let providerViolations = runDirectory != nil && !isLiveIntegration ? providerFixtureViolations() : []
-        try cleanUpAfterCase()
+        try cleanUpAfterCase(failing: !providerViolations.isEmpty)
         for violation in providerViolations {
             XCTFail(violation)
         }
     }
 
-    private func cleanUpAfterCase() throws {
-        if (testRun?.failureCount ?? 0) > 0 {
+    private func cleanUpAfterCase(failing pendingFailure: Bool = false) throws {
+        let failed = pendingFailure || (testRun?.failureCount ?? 0) > 0
+        if failed {
             if let app {
                 let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
                 screenshot.name = "failure-screenshot"
@@ -421,7 +423,7 @@ final class PlayhouseUITests: XCTestCase {
         // Shared Codex servers and Claude runs outlive the app and its daemon on purpose.
         stopSurvivingAgents()
         clearSavedWindowFrames()
-        if (testRun?.failureCount ?? 0) > 0 {
+        if failed {
             // Keep the failed case's app data (Diagnostics.jsonl, transcripts,
             // store) for diagnosis; the runner prunes these on its next start.
             let note = XCTAttachment(string: runDirectory.path)
@@ -462,12 +464,12 @@ final class PlayhouseUITests: XCTestCase {
     func test_service_reports_bridge_version() throws {
         launchApp(defaultParent: fixture.parent.path)
         XCTAssertEqual(app.windows.count, 1, "Playhouse should open one board window on launch.")
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 15), "The Playhouse window did not open.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 15), "The Playhouse window did not open.")
         let logo = app.images["Playhouse logo"]
-        XCTAssertTrue(logo.waitForExistence(timeout: 5), "The board header should display the transparent theater logo.")
+        XCTAssertTrue(logo.waitToExist(timeout: 5), "The board header should display the transparent theater logo.")
         let sidebar = element(withAccessibilityLabel: "Kanban sidebar")
         let scheduledTasksButton = element("scheduled-tasks-button")
-        XCTAssertTrue(sidebar.waitForExistence(timeout: 5), "The Kanban sidebar should be visible.")
+        XCTAssertTrue(sidebar.waitToExist(timeout: 5), "The Kanban sidebar should be visible.")
         XCTAssertLessThan(sidebar.frame.width, 200, "The Kanban sidebar should stay compact beside the board columns.")
         XCTAssertTrue(scheduledTasksButton.isHittable, "The Scheduled Tasks button should be hittable.")
         XCTAssertTrue(sidebar.frame.contains(scheduledTasksButton.frame), "The Scheduled Tasks button should be inside the sidebar.")
@@ -507,7 +509,7 @@ final class PlayhouseUITests: XCTestCase {
         assertIconPixel(0.02, 0.02, (44, 47, 54), accuracy: 5)
         XCTAssertEqual(app.windows.firstMatch.title, "Playhouse — Playhouse UI Test Worktree")
         relaunchApp()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 15), "The board should reopen after relaunch.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 15), "The board should reopen after relaunch.")
         XCTAssertTrue(element(withAccessibilityLabel: "Kanban sidebar").exists, "The sidebar should remain visible after relaunch.")
         XCTAssertEqual(app.windows.firstMatch.title, "Playhouse — Playhouse UI Test Worktree")
         let response = try runCLI(["status"])
@@ -545,7 +547,7 @@ final class PlayhouseUITests: XCTestCase {
         // The section sits at the bottom of the sidebar, below the Scheduled Tasks button, with one block per agent.
         let sidebar = element(withAccessibilityLabel: "Kanban sidebar")
         let section = element("agents-info")
-        XCTAssertTrue(section.waitForExistence(timeout: 30), "Agents info should appear once an agent CLI is installed.")
+        XCTAssertTrue(section.waitToExist(timeout: 30), "Agents info should appear once an agent CLI is installed.")
         XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label =[c] %@ OR value =[c] %@", "Agents info", "Agents info")).firstMatch.exists, "The section should be titled Agents info.")
         XCTAssertTrue(sidebar.frame.contains(section.frame), "Agents info should be inside the left sidebar.")
         XCTAssertLessThanOrEqual(element("scheduled-tasks-button").frame.maxY, section.frame.minY, "Agents info should sit below the Scheduled Tasks button.")
@@ -560,7 +562,7 @@ final class PlayhouseUITests: XCTestCase {
         let expandedTitleMinY = toggle.frame.minY
 
         // Codex shows its account, both windows, and credits from the app-server; Claude has no usage until a task runs.
-        XCTAssertTrue(element("agents-info-codex-window-secondary").waitForExistence(timeout: 30), "Codex usage should show soon after launch.")
+        XCTAssertTrue(element("agents-info-codex-window-secondary").waitToExist(timeout: 30), "Codex usage should show soon after launch.")
         XCTAssertEqual(text("agents-info-codex-account"), "codex-fixture@example.com Plus", "The account and plan should share the row below the provider name.")
         let codexName = element("agents-info-codex").staticTexts["Codex"]
         XCTAssertGreaterThanOrEqual(element("agents-info-codex-account").frame.minY, codexName.frame.maxY, "Codex account and plan should be below the provider name.")
@@ -647,10 +649,10 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: runningTaskID)?["status"] as? String) == "In Progress" }, timeout: 10))
         // The confirmation counts the board's own tasks, so wait until the board shows it running.
-        XCTAssertTrue(element("column-in-progress").buttons["task-card-\(runningTaskID.uppercased())"].waitForExistence(timeout: 10), "The board should show the Codex task running.")
+        XCTAssertTrue(element("column-in-progress").buttons["task-card-\(runningTaskID.uppercased())"].waitToExist(timeout: 10), "The board should show the Codex task running.")
         element("agents-info-switch-codex").click()
         let sheet = app.sheets.firstMatch
-        XCTAssertTrue(sheet.waitForExistence(timeout: 10), "Switching with a running Codex task should ask for confirmation.")
+        XCTAssertTrue(sheet.waitToExist(timeout: 10), "Switching with a running Codex task should ask for confirmation.")
         XCTAssertTrue(sheet.buttons["Switch Account"].exists)
         XCTAssertTrue(sheet.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", "1 Codex task is running", "1 Codex task is running")).firstMatch.exists, "The confirmation should name the running task.")
         attachScreenshot(named: "Switching the Codex account asks first while a Codex task runs")
@@ -672,7 +674,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Agents info after switching the Codex account")
         element("agents-info-switch-claude").click()
         XCTAssertTrue(waitUntil({ text("agents-info-claude-account").hasPrefix("claude-second@example.com") }, timeout: 40), "The switched Claude account should show.")
-        XCTAssertTrue(element("agents-info-claude-empty").waitForExistence(timeout: 10), "The old Claude account's usage must not carry over.")
+        XCTAssertTrue(element("agents-info-claude-empty").waitToExist(timeout: 10), "The old Claude account's usage must not carry over.")
 
         // A signed-out agent shows Log in instead of usage; logging in brings its usage back.
         try JSONSerialization.data(withJSONObject: ["loggedIn": false, "email": NSNull(), "used": [0, 0]]).write(to: codexAccount)
@@ -680,7 +682,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before the signed-out relaunch.")
         launchAppWithOpen()
         waitForBoardOrAbortSuite()
-        XCTAssertTrue(element("agents-info-login-codex").waitForExistence(timeout: 40), "A signed-out Codex should offer Log in.")
+        XCTAssertTrue(element("agents-info-login-codex").waitToExist(timeout: 40), "A signed-out Codex should offer Log in.")
         XCTAssertTrue(element("agents-info-login-claude").exists, "A signed-out Claude should offer Log in.")
         XCTAssertFalse(element("agents-info-codex-window-primary").exists, "A signed-out agent shows no usage.")
         attachScreenshot(named: "Agents info with both agents signed out")
@@ -702,12 +704,12 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before the minimized relaunch.")
         launchAppWithOpen()
         waitForBoardOrAbortSuite()
-        XCTAssertTrue(toggle.waitForExistence(timeout: 40), "The minimized title should still show after a relaunch.")
+        XCTAssertTrue(toggle.waitToExist(timeout: 40), "The minimized title should still show after a relaunch.")
         XCTAssertEqual(toggle.value as? String, "Collapsed", "A minimized section should stay minimized after a relaunch.")
         XCTAssertFalse(element("agents-info-claude").exists || element("agents-info-codex").exists)
         attachScreenshot(named: "Agents info still minimized after relaunch")
         toggle.click()
-        XCTAssertTrue(element("agents-info-claude").waitForExistence(timeout: 10), "Expanding should bring the agent blocks back.")
+        XCTAssertTrue(element("agents-info-claude").waitToExist(timeout: 10), "Expanding should bring the agent blocks back.")
         XCTAssertEqual(toggle.value as? String, "Expanded")
 
         // An agent whose CLI is not installed has no block; with neither installed the section is gone.
@@ -716,7 +718,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before the Codex-only relaunch.")
         launchAppWithOpen()
         waitForBoardOrAbortSuite()
-        XCTAssertTrue(element("agents-info-codex").waitForExistence(timeout: 40), "Codex, still installed, keeps its block.")
+        XCTAssertTrue(element("agents-info-codex").waitToExist(timeout: 40), "Codex, still installed, keeps its block.")
         XCTAssertFalse(element("agents-info-claude").exists, "Claude, not installed, should have no block.")
         attachScreenshot(named: "Agents info with only Codex installed")
         codexFixtureExecutable = nil
@@ -961,12 +963,12 @@ final class PlayhouseUITests: XCTestCase {
         openNewTaskConversation()
         let standaloneTaskID = try taskID(named: "Untitled task")
         _ = try runCLI(["task", "rename", standaloneTaskID, "--title", "Standalone conversation"])
-        XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("empty-conversation").waitToExist(timeout: 10))
         XCTAssertEqual(repositoryTitle().value as? String, "No repository selected")
         let repositorySearch = element("conversation-repository-search")
         XCTAssertFalse(repositorySearch.exists, "New Task should keep the repository picker closed by default.")
         let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10), "The chat composer should be visible.")
+        XCTAssertTrue(composer.waitToExist(timeout: 10), "The chat composer should be visible.")
         XCTAssertTrue(element("repository-root-required-notice").exists, "An unset repository root should show the setup notice.")
         XCTAssertFalse(element("no-working-folders-error").exists, "A standalone conversation should not warn that a repository is missing.")
         composer.typeText("A standalone question that needs no repository context.")
@@ -979,7 +981,7 @@ final class PlayhouseUITests: XCTestCase {
         let standalonePrompt = "A standalone question that needs no repository context."
         element("send-message-button").click()
         let submittedPrompt = app.textViews.matching(NSPredicate(format: "value == %@", standalonePrompt)).firstMatch
-        XCTAssertTrue(submittedPrompt.waitForExistence(timeout: 10), "The UI should submit a standalone conversation after the root is configured.")
+        XCTAssertTrue(submittedPrompt.waitToExist(timeout: 10), "The UI should submit a standalone conversation after the root is configured.")
         let mainHistoryURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
         let mainHistory = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: mainHistoryURL)) as? [String: Any])
         let instructions = try XCTUnwrap(mainHistory["threadStartDeveloperInstructions"] as? String)
@@ -1019,14 +1021,14 @@ final class PlayhouseUITests: XCTestCase {
             code: "invalid_argument"
         )
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         let tasksAfterStandaloneSend = try tasksFromBoardList()
         XCTAssertEqual(tasksAfterStandaloneSend.count, 2, "The board should contain the standalone UI conversation and the separate CLI task.")
         XCTAssertTrue(tasksAfterStandaloneSend.contains { $0["id"] as? String == emptyRootTaskID })
         relaunchApp()
         openTask(named: "No roots")
         let reopenedComposer = element("chat-composer")
-        XCTAssertTrue(reopenedComposer.waitForExistence(timeout: 10), "The reopened task should show its chat composer.")
+        XCTAssertTrue(reopenedComposer.waitToExist(timeout: 10), "The reopened task should show its chat composer.")
         XCTAssertFalse(element("no-working-folders-error").exists, "An empty-root standalone task should not show a red missing-folder warning.")
         let deletedEmptyRootTask = try XCTUnwrap(
             try runCLI(["task", "delete", emptyRootTaskID])["result"] as? [String: Any]
@@ -1167,7 +1169,7 @@ final class PlayhouseUITests: XCTestCase {
         }
         assertTaskVisible(taskTitle, inColumn: "Backlog")
         openTask(named: taskTitle)
-        XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10))
         XCTAssertTrue(element("conversation-repository-badge-secondary").exists)
         XCTAssertTrue(element("conversation-repository-badge-primary").exists)
         attachScreenshot(named: "A task has a separate worktree for each selected repository")
@@ -1208,14 +1210,14 @@ final class PlayhouseUITests: XCTestCase {
         let newTask = try XCTUnwrap(tasksFromBoardList().first { $0["id"] as? String != ownerID })
         let newTaskID = try XCTUnwrap(newTask["id"] as? String)
         let badge = element("conversation-repository-badge-primary")
-        XCTAssertTrue(badge.waitForExistence(timeout: 5))
+        XCTAssertTrue(badge.waitToExist(timeout: 5))
         badge.click()
         element("conversation-repository-branch-edit").click()
         let branchField = element("conversation-repository-branch")
         replaceText(branchField, with: branch)
         element("conversation-repository-branch-save").click()
         let error = element("codex-chat-error")
-        XCTAssertTrue(error.waitForExistence(timeout: 10))
+        XCTAssertTrue(error.waitToExist(timeout: 10))
         let errorText = error.label + (error.value as? String ?? "")
         XCTAssertTrue(errorText.contains("is already used by task \"Active owner\""), errorText)
         XCTAssertTrue(errorText.contains("`\(branch)`"), errorText)
@@ -1269,7 +1271,7 @@ final class PlayhouseUITests: XCTestCase {
         let card = element("task-card-\(taskID.uppercased())")
         XCTAssertTrue(waitUntil({ card.exists }, timeout: 10), "Exactly one reservation should appear on the visible board.")
         clickTaskCardTitle(card)
-        XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10))
     }
 
     // case-contract: test_persistence_store_open_failure_records_detailed_error | A real ModelContainer open failure against an isolated invalid store path returns an error and durably logs the phase, exact underlying NSError domain/code/userInfo, resolved store path, file/sidecar snapshot, and read-only schema probe failure; the paired visible UI case keeps Playhouse open on its normal board while the same isolated CLI/XPC request fails and verifies the persisted diagnostic.
@@ -1306,13 +1308,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(failedOpen["schemaProbeResult"] as? String, "open-failed")
         XCTAssertNotNil(failedOpen["schemaProbeSQLiteMessage"] as? String)
         XCTAssertEqual(app.state, .runningForeground, "The normal Playhouse app should remain open after the isolated CLI failure.")
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5), "The normal board should remain visible after the isolated CLI failure.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5), "The normal board should remain visible after the isolated CLI failure.")
     }
 
     // case-contract: test_persistence_read_failure_records_detailed_error | A real SwiftData fetch failure against an isolated store with a missing task column returns an error and logs a correlated read ID, NSError domain/code/userInfo, store path, file/sidecar snapshot, and the exact missing-column message from a read-only schema probe before the CLI/XPC request completes; the paired visible UI case keeps the normal task board open and verifies the same isolated failure record.
     func test_persistence_read_failure_records_detailed_error() throws {
         launchApp(defaultParent: fixture.parent.path)
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         let failureDirectory = dataDirectory.appendingPathComponent("fetch-failure", isDirectory: true)
         try FileManager.default.createDirectory(at: failureDirectory, withIntermediateDirectories: true)
         _ = try runCLI(
@@ -1368,7 +1370,7 @@ final class PlayhouseUITests: XCTestCase {
                 && $0["storePath"] as? String == store.path
         }, "The error should correlate to its started store read.")
         XCTAssertEqual(app.state, .runningForeground, "The normal app should stay open while the isolated bridge store fails.")
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5), "The normal app board should stay available while the isolated bridge store fails.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5), "The normal app board should stay available while the isolated bridge store fails.")
     }
 
     // case-contract: test_legacy_store_import_failure_preserves_original | An invalid legacy database fails import without changing the source or publishing a destination or partial snapshot; the normal isolated board remains usable.
@@ -1385,7 +1387,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: failure.appendingPathComponent("Playhouse-v2.store").path))
         XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: failure.path).contains { $0.hasPrefix(".store-import-") })
         XCTAssertEqual(app.state, .runningForeground)
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         openNewTaskConversation()
         chooseRepositorySuggestion("primary")
         saveNewTaskPromptAndReturnToBoard("Healthy board", prompt: "Still usable")
@@ -1493,7 +1495,7 @@ final class PlayhouseUITests: XCTestCase {
         })
         XCTAssertEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, draft)
         openTask(named: title)
-        XCTAssertTrue(element("message-composer").waitForExistence(timeout: 10), "The migrated task should open its composer.")
+        XCTAssertTrue(element("message-composer").waitToExist(timeout: 10), "The migrated task should open its composer.")
         // The draft restores asynchronously after history loads, so hold the empty composer for a moment.
         XCTAssertFalse(waitUntil({
             !((element("message-composer").value as? String) ?? "").isEmpty
@@ -1502,7 +1504,7 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         assertTaskVisible(title, inColumn: "Backlog")
         openTask(named: title)
-        XCTAssertTrue(element("message-composer").waitForExistence(timeout: 10), "The migrated task should reopen its composer after a restart.")
+        XCTAssertTrue(element("message-composer").waitToExist(timeout: 10), "The migrated task should reopen its composer after a restart.")
         XCTAssertFalse(waitUntil({
             !((element("message-composer").value as? String) ?? "").isEmpty
         }, timeout: 2), "The saved prompt should stay out of the composer after a restart.")
@@ -1514,7 +1516,7 @@ final class PlayhouseUITests: XCTestCase {
         composer.typeKey("a", modifierFlags: .command)
         composer.typeText("Edited after import")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         XCTAssertEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, "Edited after import")
         XCTAssertTrue(terminateAppAndWait(app))
         launchApp(defaultParent: fixture.parent.path)
@@ -1688,9 +1690,9 @@ final class PlayhouseUITests: XCTestCase {
 
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: title)
-        XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10))
         let savedPrompt = app.textViews.matching(NSPredicate(format: "value == %@", prompt)).firstMatch
-        XCTAssertTrue(savedPrompt.waitForExistence(timeout: 10), "The saved user message should render after reopening the conversation.")
+        XCTAssertTrue(savedPrompt.waitToExist(timeout: 10), "The saved user message should render after reopening the conversation.")
         let savedAnswer = app.descendants(matching: .any).matching(
             NSPredicate(
                 format: "identifier BEGINSWITH %@ AND label == %@",
@@ -1698,7 +1700,7 @@ final class PlayhouseUITests: XCTestCase {
                 "Answers received: Blue / fixture-secret."
             )
         ).firstMatch
-        XCTAssertTrue(savedAnswer.waitForExistence(timeout: 10), "The saved assistant reply should render after reopening the conversation.")
+        XCTAssertTrue(savedAnswer.waitToExist(timeout: 10), "The saved assistant reply should render after reopening the conversation.")
         XCTAssertFalse(element("codex-chat-error").exists, "A recovered store write must not leave a conversation error banner.")
         attachScreenshot(named: "Conversation status and history persist after shared store contention")
     }
@@ -1757,7 +1759,7 @@ final class PlayhouseUITests: XCTestCase {
             )
             for taskID in taskIDs {
                 let card = element("task-card-\(taskID.uppercased())")
-                XCTAssertTrue(card.waitForExistence(timeout: 10), "Pending tasks should remain visible on the board before conversation start.")
+                XCTAssertTrue(card.waitToExist(timeout: 10), "Pending tasks should remain visible on the board before conversation start.")
             }
 
             // Materialize the first task's generated branch, then start the second:
@@ -1818,13 +1820,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", staleSlug), staleCommit)
 
         let secondCard = element("task-card-\(second.id.uppercased())")
-        XCTAssertTrue(secondCard.waitForExistence(timeout: 10), "The second task should be on the board.")
+        XCTAssertTrue(secondCard.waitToExist(timeout: 10), "The second task should be on the board.")
         clickTaskCardTitle(secondCard)
         let badge = element("conversation-repository-badge-primary")
-        XCTAssertTrue(badge.waitForExistence(timeout: 10))
+        XCTAssertTrue(badge.waitToExist(timeout: 10))
         badge.click()
         let branchValue = element("conversation-repository-branch-value")
-        XCTAssertTrue(branchValue.waitForExistence(timeout: 5))
+        XCTAssertTrue(branchValue.waitToExist(timeout: 5))
         XCTAssertEqual(accessibleLabelOrValue(of: branchValue), secondBranch, "The conversation should show the second task's suffixed branch.")
         attachScreenshot(named: "A task keeps its resolved branch when another task already used the slug")
     }
@@ -1836,7 +1838,7 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         openNewTaskConversation()
         chooseRepositorySuggestion("primary")
-        XCTAssertTrue(element("message-composer").waitForExistence(timeout: 10), "New Task should open the composer in its conversation.")
+        XCTAssertTrue(element("message-composer").waitToExist(timeout: 10), "New Task should open the composer in its conversation.")
         let task = try XCTUnwrap(tasksFromBoardList().first)
         let record = try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first)
         var path = try XCTUnwrap(record["worktreePath"] as? String)
@@ -1907,8 +1909,8 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         let prLink = element("task-pr-link-\(taskID)-123")
         let secondPRLink = element("task-pr-link-\(taskID)-456")
-        XCTAssertTrue(prLink.waitForExistence(timeout: 10), "The linked unmerged PR should remain available on the Review card.")
-        XCTAssertTrue(secondPRLink.waitForExistence(timeout: 10), "The task's second linked PR should also be visible.")
+        XCTAssertTrue(prLink.waitToExist(timeout: 10), "The linked unmerged PR should remain available on the Review card.")
+        XCTAssertTrue(secondPRLink.waitToExist(timeout: 10), "The task's second linked PR should also be visible.")
         XCTAssertGreaterThanOrEqual(prLink.frame.width, 30, "A PR link should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(prLink.frame.height, 30, "A PR link should have a comfortable vertical hit target.")
         XCTAssertGreaterThanOrEqual(secondPRLink.frame.width, 30, "The second PR link should have a comfortable horizontal hit target.")
@@ -1968,7 +1970,7 @@ final class PlayhouseUITests: XCTestCase {
             ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= fourthCheckCount + 2
         }, timeout: 10), "Regaining focus should refresh both PR merge states.")
         XCTAssertEqual(Set(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), Set(["123", "456"]))
-        XCTAssertTrue(completionButton.waitForExistence(timeout: 10), "A merged PR should replace its link with the completion button.")
+        XCTAssertTrue(completionButton.waitToExist(timeout: 10), "A merged PR should replace its link with the completion button.")
         revealOnBoard(completionButton)
         XCTAssertGreaterThanOrEqual(completionButton.frame.width, 30, "The completion action should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(completionButton.frame.height, 30, "The completion action should have a comfortable vertical hit target.")
@@ -1980,7 +1982,7 @@ final class PlayhouseUITests: XCTestCase {
         var moveLockReleased = false
         defer { if !moveLockReleased { try? moveLock.release() } }
         let taskCard = element("task-card-\(taskID)")
-        XCTAssertTrue(taskCard.waitForExistence(timeout: 5))
+        XCTAssertTrue(taskCard.waitToExist(timeout: 5))
         completionButton.click()
         Thread.sleep(forTimeInterval: 0.25)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review", "The UI move should wait while another process owns the task operation lock.")
@@ -2033,7 +2035,7 @@ final class PlayhouseUITests: XCTestCase {
         let archiveButton = element("done-archive-button")
         archiveButton.click()
         let archiveResult = element("done-archive-task-\(taskID)")
-        XCTAssertTrue(element("done-archive-task-\(titleMatchID)").waitForExistence(timeout: 10), "The newest completed task should appear in the first archive page.")
+        XCTAssertTrue(element("done-archive-task-\(titleMatchID)").waitToExist(timeout: 10), "The newest completed task should appear in the first archive page.")
         let archiveList = app.scrollViews["done-archive-list"]
         XCTAssertEqual(archiveList.value as? String, "40 tasks loaded", "The archive should fetch one 40-task page initially.")
         XCTAssertFalse(archiveResult.exists, "Older tasks should not be loaded into the first archive page.")
@@ -2042,11 +2044,11 @@ final class PlayhouseUITests: XCTestCase {
         let archiveSearch = element("done-archive-search")
         archiveSearch.click()
         archiveSearch.typeText("no-such-archive-task")
-        XCTAssertTrue(element("done-archive-empty-state").waitForExistence(timeout: 10), "A search with no matches should show an empty state.")
+        XCTAssertTrue(element("done-archive-empty-state").waitToExist(timeout: 10), "A search with no matches should show an empty state.")
         element("clear-archive-search-button").click()
         archiveSearch.typeText("FiXtUrE-SeCrEt")
         let titleMatchResult = element("done-archive-task-\(titleMatchID)")
-        XCTAssertTrue(titleMatchResult.waitForExistence(timeout: 10), "A title match should appear in the archive search results.")
+        XCTAssertTrue(titleMatchResult.waitToExist(timeout: 10), "A title match should appear in the archive search results.")
         element("clear-archive-search-button").click()
         archiveSearch.typeText("local-session-only-output-TOKEN")
         XCTAssertTrue(waitUntil({ archiveResult.exists && !titleMatchResult.exists }, timeout: 10), "Searching assistant output_text should show its conversation match and filter out unrelated title matches.")
@@ -2055,14 +2057,14 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ archiveResult.exists && !titleMatchResult.exists }, timeout: 10), "Searching user input_text should show its conversation match and filter out unrelated title matches.")
         element("clear-archive-search-button").click()
         archiveSearch.typeText(currentTitle)
-        XCTAssertTrue(archiveResult.waitForExistence(timeout: 10))
+        XCTAssertTrue(archiveResult.waitToExist(timeout: 10))
         XCTAssertFalse(titleMatchResult.exists)
         archiveResult.click()
-        XCTAssertTrue(element("archived-conversation-read-only").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("archived-conversation-read-only").waitToExist(timeout: 10))
         let archivedAnswer = app.descendants(matching: .any).matching(
             NSPredicate(format: "label == %@", "Answers received: Blue / fixture-secret.")
         ).firstMatch
-        XCTAssertTrue(archivedAnswer.waitForExistence(timeout: 10))
+        XCTAssertTrue(archivedAnswer.waitToExist(timeout: 10))
         XCTAssertFalse(element("message-composer").exists, "Archived conversations must not expose the composer.")
         element("back-to-board-button").click()
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done", "Leaving the read-only conversation must not alter the archived task.")
@@ -2119,9 +2121,9 @@ final class PlayhouseUITests: XCTestCase {
 
         let link = element("task-pr-link-\(taskID)-123")
         let resolveButton = element("task-resolve-pr-conflicts-\(taskID)")
-        XCTAssertTrue(link.waitForExistence(timeout: 10))
+        XCTAssertTrue(link.waitToExist(timeout: 10))
         let secondLink = element("task-pr-link-\(secondTaskID)-456")
-        XCTAssertTrue(secondLink.waitForExistence(timeout: 10))
+        XCTAssertTrue(secondLink.waitToExist(timeout: 10))
         XCTAssertGreaterThanOrEqual(secondLink.frame.width, 30, "The second task's PR link should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(secondLink.frame.height, 30, "The second task's PR link should have a comfortable vertical hit target.")
         let startedDirectory = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STARTED_DIRECTORY"]))
@@ -2143,7 +2145,7 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 25), "Cooldown focus events should coalesce into one trailing probe after 20 seconds.")
         Thread.sleep(forTimeInterval: 0.5)
         XCTAssertEqual((try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count, callsBeforeCooldownFocus + 2, "Four focus changes should produce exactly one probe per linked PR.")
-        XCTAssertTrue(resolveButton.waitForExistence(timeout: 10), "Focus should discover the conflicting PR.")
+        XCTAssertTrue(resolveButton.waitToExist(timeout: 10), "Focus should discover the conflicting PR.")
         XCTAssertGreaterThanOrEqual(resolveButton.frame.width, 30, "The conflict action should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(resolveButton.frame.height, 30, "The conflict action should have a comfortable vertical hit target.")
         XCTAssertGreaterThanOrEqual(link.frame.width, 30, "A PR link should have a comfortable horizontal hit target.")
@@ -2157,7 +2159,7 @@ final class PlayhouseUITests: XCTestCase {
         let initialPrompt = "The PR has conflicts. Fix them, commit, and push."
         let initialPromptElement = element("conversation-scroll-view").descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", initialPrompt)).firstMatch
-        XCTAssertTrue(initialPromptElement.waitForExistence(timeout: 10), "The conflict action should send the corrected instruction into the task conversation.")
+        XCTAssertTrue(initialPromptElement.waitToExist(timeout: 10), "The conflict action should send the corrected instruction into the task conversation.")
         XCTAssertTrue(initialPromptElement.identifier.hasPrefix("playhouse-message-"), "The conflict instruction renders as an automatic Playhouse message: \(initialPromptElement.identifier)")
         attachScreenshot(named: "Conflict instruction shown as an automatic Playhouse message")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: readyURL.path) }, timeout: 10), "Codex should start the conflict resolution turn.")
@@ -2166,7 +2168,7 @@ final class PlayhouseUITests: XCTestCase {
         let retryPrompt = "The PR still has conflicts or your latest commit has not reached GitHub. Resolve the remaining conflicts, commit, and push. Verify the PR's merge status before finishing."
         let retryPromptElement = element("conversation-scroll-view").descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", retryPrompt)).firstMatch
-        XCTAssertTrue(retryPromptElement.waitForExistence(timeout: 15), "A still-conflicting PR should receive one follow-up turn.")
+        XCTAssertTrue(retryPromptElement.waitToExist(timeout: 15), "A still-conflicting PR should receive one follow-up turn.")
         XCTAssertTrue(retryPromptElement.identifier.hasPrefix("playhouse-message-"), "The retry instruction renders as an automatic Playhouse message: \(retryPromptElement.identifier)")
         XCTAssertTrue(waitUntil({
             (try? String(contentsOf: startCountURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) == 2
@@ -2320,7 +2322,7 @@ final class PlayhouseUITests: XCTestCase {
         let localHead = try runGitOutput(worktree, "rev-parse", "HEAD")
         XCTAssertNotEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), localHead)
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
-        XCTAssertTrue(element("task-card-\(taskID)").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("task-card-\(taskID)").waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({
             (try? self.runGitOutput(remote, "rev-parse", "refs/heads/\(branch)")) == localHead
         }, timeout: 30), "The board should push the diverged local head automatically.")
@@ -2390,12 +2392,12 @@ final class PlayhouseUITests: XCTestCase {
         let targetBefore = try runGitOutput(fixture.primary, "rev-parse", "main")
         let branchHead = try runGitOutput(URL(fileURLWithPath: path), "rev-parse", "HEAD")
         let card = app.buttons["Dirty done UI"].firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        XCTAssertTrue(card.waitToExist(timeout: 5))
         assertDoneDrawerResting("before any drag")
         attachScreenshot(named: "Done drawer peeks at the board edge while resting", fullScreen: true)
         // Dropping a card back in its own column hits no drop target; the drawer must still close.
         let reviewColumn = element("column-review")
-        XCTAssertTrue(reviewColumn.waitForExistence(timeout: 5))
+        XCTAssertTrue(reviewColumn.waitToExist(timeout: 5))
         card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(
             forDuration: 0.5,
             thenDragTo: reviewColumn.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.92)),
@@ -2411,7 +2413,7 @@ final class PlayhouseUITests: XCTestCase {
         // Scoped to the dialog sheet: a bare "Cancel" button also matches a Touch Bar element.
         let discardButton = app.sheets.buttons["Discard Changes and Mark Done"].firstMatch
         let keepButton = app.sheets.buttons["Cancel"].firstMatch
-        XCTAssertTrue(discardButton.waitForExistence(timeout: 10), "A worktree with uncommitted changes must ask before Done discards them.")
+        XCTAssertTrue(discardButton.waitToExist(timeout: 10), "A worktree with uncommitted changes must ask before Done discards them.")
         attachScreenshot(named: "Done asks before discarding uncommitted changes")
         // Declining leaves the task and its files exactly as they were.
         keepButton.click()
@@ -2421,7 +2423,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: path), "Declining must keep the task worktree.")
         XCTAssertEqual(try String(contentsOf: URL(fileURLWithPath: path).appendingPathComponent("unsaved.txt"), encoding: .utf8), "New unsaved work\n")
         dragTaskToDone(card)
-        XCTAssertTrue(discardButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(discardButton.waitToExist(timeout: 10))
         discardButton.click()
         XCTAssertTrue(waitUntil({
             do { return try taskRecord(named: "Dirty done UI")?["status"] as? String == "Done" }
@@ -2447,7 +2449,7 @@ final class PlayhouseUITests: XCTestCase {
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         XCTAssertEqual(created["status"] as? String, "Backlog")
-        XCTAssertTrue(element("task-card-\(taskID)").waitForExistence(timeout: 5), "The backlog task card should render before checking its PR controls.")
+        XCTAssertTrue(element("task-card-\(taskID)").waitToExist(timeout: 5), "The backlog task card should render before checking its PR controls.")
         XCTAssertFalse(element("task-create-pr-\(taskID)").exists, "Backlog cards must not expose a PR action.")
         let createdRecord = try XCTUnwrap((created["repositoryWorktrees"] as? [[String: Any]])?.first)
         XCTAssertEqual(createdRecord["mergeTarget"] as? String, "main")
@@ -2455,12 +2457,12 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "PR failure UI")
         element("conversation-repository-badge-primary").click()
         let mergeTargetValue = element("conversation-repository-merge-target-value")
-        XCTAssertTrue(mergeTargetValue.waitForExistence(timeout: 5))
+        XCTAssertTrue(mergeTargetValue.waitToExist(timeout: 5))
         XCTAssertEqual(accessibleLabelOrValue(of: mergeTargetValue), "main")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "PR failure UI")
         element("back-to-board-button").click()
         let activeCreateButton = element("task-create-pr-\(taskID)")
-        XCTAssertTrue(activeCreateButton.waitForExistence(timeout: 5), "An active repository task should expose its PR action on the card.")
+        XCTAssertTrue(activeCreateButton.waitToExist(timeout: 5), "An active repository task should expose its PR action on the card.")
         revealOnBoard(activeCreateButton)
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.width, 30, "The PR action should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.height, 30, "The PR action should have a comfortable vertical hit target.")
@@ -2490,9 +2492,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
         element("done-archive-button").click()
         let archiveTask = element("done-archive-task-\(taskID)")
-        XCTAssertTrue(archiveTask.waitForExistence(timeout: 10), "The completed task should be listed in the archive.")
+        XCTAssertTrue(archiveTask.waitToExist(timeout: 10), "The completed task should be listed in the archive.")
         let createButton = element("done-archive-create-pr-\(taskID)")
-        XCTAssertTrue(createButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(createButton.waitToExist(timeout: 5))
         assertHoverEmphasis(for: createButton)
         XCTAssertEqual(createButton.label, "PR. Create a pull request for each repository linked to this completed task")
         assertNativeHelpText(for: createButton, equals: "Create a pull request for each repository linked to this completed task")
@@ -2512,7 +2514,7 @@ final class PlayhouseUITests: XCTestCase {
         try operationLock.release()
         operationLockReleased = true
         let alertSheet = app.sheets.firstMatch
-        XCTAssertTrue(alertSheet.waitForExistence(timeout: 20), "The archived task should report gh's inability to create a PR.")
+        XCTAssertTrue(alertSheet.waitToExist(timeout: 20), "The archived task should report gh's inability to create a PR.")
         XCTAssertTrue(waitUntil({
             self.element(containingAccessibilityText: "gh auth login").exists
                 || self.element(containingAccessibilityText: "publish the task branch").exists
@@ -2536,7 +2538,7 @@ final class PlayhouseUITests: XCTestCase {
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
-        XCTAssertTrue(element("task-card-\(taskID)").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("task-card-\(taskID)").waitToExist(timeout: 5))
         XCTAssertFalse(element("task-pr-mode-\(taskID)").exists, "A Backlog task has no working-state PR controls yet.")
         // A worktree shares its source repository's git config, so the origin remotes this
         // case adds through its worktrees must not leak into later cases. A teardown block,
@@ -2552,7 +2554,7 @@ final class PlayhouseUITests: XCTestCase {
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Auto PR toggle UI", whileTurnHeld: {
             self.element("back-to-board-button").click()
             let pill = self.element("task-pr-mode-\(taskID)")
-            XCTAssertTrue(pill.waitForExistence(timeout: 5), "An in-progress task with no linked PR should show the PR mode pill.")
+            XCTAssertTrue(pill.waitToExist(timeout: 5), "An in-progress task with no linked PR should show the PR mode pill.")
             XCTAssertFalse(self.element("task-create-pr-\(taskID)").exists, "The mode pill replaces the manual PR button while the task is in progress.")
             XCTAssertGreaterThanOrEqual(pill.frame.height, 30, "The closed pill should keep a comfortable hit target.")
             let duration = self.element("task-working-duration-\(taskID)")
@@ -2577,7 +2579,7 @@ final class PlayhouseUITests: XCTestCase {
             pill.click()
             for mode in ["manual", "pr", "autopilot", "merge"] {
                 let option = self.element("task-pr-mode-\(mode)-\(taskID)")
-                XCTAssertTrue(option.waitForExistence(timeout: 5), "The open pill should offer \(mode).")
+                XCTAssertTrue(option.waitToExist(timeout: 5), "The open pill should offer \(mode).")
                 XCTAssertGreaterThanOrEqual(option.frame.height, 30, "Each mode should keep a comfortable hit target.")
             }
             XCTAssertEqual(self.element("task-pr-mode-manual-\(taskID)").value as? String, "selected")
@@ -2623,7 +2625,7 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 15), "Auto PR should create the pull request itself once the task reaches Review.")
         element("back-to-board-button").click()
         let prLink = app.links["task-pr-link-\(taskID)-501"]
-        XCTAssertTrue(prLink.waitForExistence(timeout: 10), "The auto-created PR number should appear on the card without the user clicking the PR button.")
+        XCTAssertTrue(prLink.waitToExist(timeout: 10), "The auto-created PR number should appear on the card without the user clicking the PR button.")
         XCTAssertTrue(element("task-pr-mode-\(taskID)").exists, "The mode pill stays beside the linked PR so autopilot and merge remain switchable.")
         XCTAssertEqual(element("task-pr-mode-\(taskID)").value as? String, "pr")
         attachScreenshot(named: "Auto PR created the pull request automatically once the task reached Review", fullScreen: true)
@@ -2655,7 +2657,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: manualTaskID)?["status"] as? String, "Review")
         XCTAssertNil((try taskRecord(id: manualTaskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"], "With Auto PR off, reaching Review must not create a pull request by itself.")
         let manualButton = element("task-create-pr-\(manualTaskID)")
-        XCTAssertTrue(manualButton.waitForExistence(timeout: 5), "Auto PR off must leave the existing manual PR button in place.")
+        XCTAssertTrue(manualButton.waitToExist(timeout: 5), "Auto PR off must leave the existing manual PR button in place.")
         let manualRecord = try XCTUnwrap((try taskRecord(id: manualTaskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
         let manualWorktree = URL(fileURLWithPath: try XCTUnwrap(manualRecord["worktreePath"] as? String), isDirectory: true)
         let manualRemoteRoot = dataDirectory.appendingPathComponent("manual-pr-remotes", isDirectory: true)
@@ -2671,7 +2673,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Review card shows the manual PR button", fullScreen: true)
         manualButton.click()
         let manualPRLink = app.links["task-pr-link-\(manualTaskID)-502"]
-        XCTAssertTrue(manualPRLink.waitForExistence(timeout: 10), "The manual PR flow must still work unchanged when Auto PR stays off.")
+        XCTAssertTrue(manualPRLink.waitToExist(timeout: 10), "The manual PR flow must still work unchanged when Auto PR stays off.")
     }
 
     // case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only for an autopilot task; the board colours each linked PR number green, red, or blue by that health and keeps the mode pill beside linked PRs. Autopilot leaves a task inactive unless its mode is autopilot and it sits in Review. With checks still running it sends no turn, and the board re-probes only those autopilot PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop.
@@ -2728,11 +2730,11 @@ final class PlayhouseUITests: XCTestCase {
         // Pending checks: the PR number turns blue, and no fix turn is sent.
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         let prLink = app.links["task-pr-link-\(taskID)-801"]
-        XCTAssertTrue(prLink.waitForExistence(timeout: 10))
+        XCTAssertTrue(prLink.waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ (prLink.value as? String) == "pending" }, timeout: 15), "Running checks should colour the PR number blue.")
         XCTAssertFalse((try? String(contentsOf: callLogURL, encoding: .utf8))?.contains("threads 801") ?? false, "Only autopilot tasks read review threads.")
         let modePill = element("task-pr-mode-\(taskID)")
-        XCTAssertTrue(modePill.waitForExistence(timeout: 5), "A linked PR keeps the mode pill beside it.")
+        XCTAssertTrue(modePill.waitToExist(timeout: 5), "A linked PR keeps the mode pill beside it.")
         XCTAssertEqual(modePill.value as? String, "manual")
         XCTAssertGreaterThanOrEqual(modePill.frame.height, 30)
         attachScreenshot(named: "Pending checks colour the PR number blue", fullScreen: true)
@@ -2850,10 +2852,10 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
 
         let prLink = app.links["task-pr-link-\(taskID)-811"]
-        XCTAssertTrue(prLink.waitForExistence(timeout: 10))
+        XCTAssertTrue(prLink.waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ (prLink.value as? String) == "pending" }, timeout: 15))
         let pill = element("task-pr-mode-\(taskID)")
-        XCTAssertTrue(pill.waitForExistence(timeout: 5))
+        XCTAssertTrue(pill.waitToExist(timeout: 5))
         pill.click()
         let mergeOption = settledPillOption("merge", taskID: taskID)
         attachScreenshot(named: "The open mode pill offers Merge beside the linked PR", fullScreen: true)
@@ -2874,7 +2876,7 @@ final class PlayhouseUITests: XCTestCase {
         try (try String(contentsOf: stateURL, encoding: .utf8)).replacingOccurrences(of: "811.checks=pending", with: "811.checks=success")
             .write(to: stateURL, atomically: true, encoding: .utf8)
         let completeButton = element("task-complete-merged-pr-\(taskID)")
-        XCTAssertTrue(completeButton.waitForExistence(timeout: 20), "Once green, merge mode should merge the PR and the card should offer completion.")
+        XCTAssertTrue(completeButton.waitToExist(timeout: 20), "Once green, merge mode should merge the PR and the card should offer completion.")
         XCTAssertEqual(merges().filter { $0.contains("\t811\t") }, ["merged\t811\t--squash"], "The PR is merged once with the first allowed method.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review", "Merging leaves the task in Review for the user to complete.")
         attachScreenshot(named: "Merge mode merged the green PR and the card offers completion", fullScreen: true)
@@ -2950,11 +2952,11 @@ final class PlayhouseUITests: XCTestCase {
 
         element("back-to-board-button").click()
         let prButton = element("task-create-pr-\(taskID)")
-        XCTAssertTrue(prButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(prButton.waitToExist(timeout: 5))
         revealOnBoard(prButton)
         prButton.click()
         let failureAlert = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
-        XCTAssertTrue(failureAlert.waitForExistence(timeout: 10), "The local bare remote should reach the normal GitHub CLI failure after the task branch is published.")
+        XCTAssertTrue(failureAlert.waitToExist(timeout: 10), "The local bare remote should reach the normal GitHub CLI failure after the task branch is published.")
         let conflictGuidance = failureAlert.staticTexts.matching(
             NSPredicate(format: "value BEGINSWITH %@", "Resolve conflicts")
         ).firstMatch
@@ -2993,7 +2995,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
         element("done-archive-button").click()
         let archiveCreatePRButton = element("done-archive-create-pr-\(taskID)")
-        XCTAssertTrue(archiveCreatePRButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(archiveCreatePRButton.waitToExist(timeout: 10))
         XCTAssertEqual(archiveCreatePRButton.label, "PRs. Create pull requests for each repository linked to this completed task")
         attachScreenshot(named: "Done archive labels its multi-repository action PRs")
         element("done-archive-button").click()
@@ -3010,7 +3012,7 @@ final class PlayhouseUITests: XCTestCase {
         try clearTaskProviderSession(taskID: activeTaskID)
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         let createPRButton = element("task-create-pr-\(activeTaskID)")
-        XCTAssertTrue(createPRButton.waitForExistence(timeout: 5), "An active repository task should expose its Create PR button.")
+        XCTAssertTrue(createPRButton.waitToExist(timeout: 5), "An active repository task should expose its Create PR button.")
         XCTAssertEqual(createPRButton.label, "PRs. Create pull requests for each repository linked to this task")
         revealOnBoard(createPRButton)
         assertHoverEmphasis(for: createPRButton)
@@ -3041,19 +3043,19 @@ final class PlayhouseUITests: XCTestCase {
         try "2\n".write(to: failurePath, atomically: true, encoding: .utf8)
         createPRButton.click()
         let partialFailure = app.sheets.firstMatch
-        XCTAssertTrue(partialFailure.waitForExistence(timeout: 30), "The second repository's configured gh failure should surface in the task.")
+        XCTAssertTrue(partialFailure.waitToExist(timeout: 30), "The second repository's configured gh failure should surface in the task.")
         partialFailure.buttons["OK"].click()
         let firstCreatedLink = app.links["task-pr-link-\(activeTaskID)-501"]
-        XCTAssertTrue(firstCreatedLink.waitForExistence(timeout: 10), "The first repository's successful PR should persist after the second fails.")
+        XCTAssertTrue(firstCreatedLink.waitToExist(timeout: 10), "The first repository's successful PR should persist after the second fails.")
         XCTAssertEqual(firstCreatedLink.label, "#501")
         let retryPRButton = element("task-create-pr-\(activeTaskID)")
-        XCTAssertTrue(retryPRButton.waitForExistence(timeout: 10), "The task should keep a PRs action while another repository has no PR.")
+        XCTAssertTrue(retryPRButton.waitToExist(timeout: 10), "The task should keep a PRs action while another repository has no PR.")
         XCTAssertEqual(retryPRButton.label, "PRs. Create pull requests for repositories without a linked pull request")
         attachScreenshot(named: "Task shows its PR and retry action after partial creation")
         try "\n".write(to: failurePath, atomically: true, encoding: .utf8)
         retryPRButton.click()
         let secondCreatedLink = app.links["task-pr-link-\(activeTaskID)-502"]
-        XCTAssertTrue(secondCreatedLink.waitForExistence(timeout: 30), "Retry should create a PR for the repository still missing one.")
+        XCTAssertTrue(secondCreatedLink.waitToExist(timeout: 30), "Retry should create a PR for the repository still missing one.")
         XCTAssertEqual(secondCreatedLink.label, "#502")
         let createdTask = try XCTUnwrap(taskRecord(id: activeTaskID))
         let createdRecords = try XCTUnwrap(createdTask["repositoryWorktrees"] as? [[String: Any]])
@@ -3090,16 +3092,16 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         let firstActiveLink = app.links["task-pr-link-\(activeTaskID)-1234"]
         let secondActiveLink = app.links["task-pr-link-\(activeTaskID)-502"]
-        XCTAssertTrue(firstActiveLink.waitForExistence(timeout: 10))
-        XCTAssertTrue(secondActiveLink.waitForExistence(timeout: 10), "The active task card should show each repository's created PR number.")
+        XCTAssertTrue(firstActiveLink.waitToExist(timeout: 10))
+        XCTAssertTrue(secondActiveLink.waitToExist(timeout: 10), "The active task card should show each repository's created PR number.")
         XCTAssertEqual(firstActiveLink.label, "#1234")
         XCTAssertEqual(secondActiveLink.label, "#502")
         element("done-archive-button").click()
-        XCTAssertTrue(element("done-archive-task-\(taskID)").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("done-archive-task-\(taskID)").waitToExist(timeout: 10))
         let prLink = app.links["done-archive-pr-link-\(taskID)-1234"]
-        XCTAssertTrue(prLink.waitForExistence(timeout: 10), "The Done archive should show the saved PR number as a link.")
+        XCTAssertTrue(prLink.waitToExist(timeout: 10), "The Done archive should show the saved PR number as a link.")
         let secondPRLink = app.links["done-archive-pr-link-\(taskID)-1235"]
-        XCTAssertTrue(secondPRLink.waitForExistence(timeout: 10), "The Done archive should show every repository's saved PR number.")
+        XCTAssertTrue(secondPRLink.waitToExist(timeout: 10), "The Done archive should show every repository's saved PR number.")
         XCTAssertEqual(prLink.label, "#1234")
         XCTAssertEqual(secondPRLink.label, "#1235")
         for link in [prLink, secondPRLink] {
@@ -3154,11 +3156,11 @@ final class PlayhouseUITests: XCTestCase {
         try "Only the primary repository changed.\n".write(to: primaryWorktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
 
         let createPRButton = element("task-create-pr-\(taskID)")
-        XCTAssertTrue(createPRButton.waitForExistence(timeout: 5), "The two-repository task should expose its PRs action.")
+        XCTAssertTrue(createPRButton.waitToExist(timeout: 5), "The two-repository task should expose its PRs action.")
         revealOnBoard(createPRButton)
         createPRButton.click()
         let primaryLink = app.links["task-pr-link-\(taskID)-501"]
-        XCTAssertTrue(primaryLink.waitForExistence(timeout: 30), "The changed repository should get its pull request.")
+        XCTAssertTrue(primaryLink.waitToExist(timeout: 30), "The changed repository should get its pull request.")
         // The link can appear while the secondary repository is still being checked; wait for the operation to settle.
         let remainingPRButton = element("task-create-pr-\(taskID)")
         XCTAssertTrue(waitUntil({ remainingPRButton.exists && remainingPRButton.isEnabled }, timeout: 30), "The PR operation should finish for every repository.")
@@ -3186,11 +3188,11 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         XCTAssertEqual(try taskRecord(id: unchangedID)?["status"] as? String, "Review")
         let unchangedButton = element("task-create-pr-\(unchangedID)")
-        XCTAssertTrue(unchangedButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(unchangedButton.waitToExist(timeout: 5))
         revealOnBoard(unchangedButton)
         unchangedButton.click()
         let alertSheet = app.sheets.firstMatch
-        XCTAssertTrue(alertSheet.waitForExistence(timeout: 30), "A task with no changes should report why no pull request was opened.")
+        XCTAssertTrue(alertSheet.waitToExist(timeout: 30), "A task with no changes should report why no pull request was opened.")
         XCTAssertTrue(waitUntil({
             self.element(containingAccessibilityText: "No repository in this task has changes").exists
         }, timeout: 5), app.debugDescription)
@@ -3225,7 +3227,7 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         let resetNotice = element("task-lifecycle-reset-notice")
         let resetDetails = element("task-lifecycle-reset-details")
-        XCTAssertTrue(resetNotice.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(resetNotice.waitToExist(timeout: 10), app.debugDescription)
         XCTAssertTrue(element("task-lifecycle-reset-title").exists)
         XCTAssertTrue(accessibleLabelOrValue(of: resetDetails).contains(dirtyPath), app.debugDescription)
         element("dismiss-task-lifecycle-reset-notice").click()
@@ -3247,7 +3249,7 @@ final class PlayhouseUITests: XCTestCase {
         try createTaskFixture(title: "Status transitions", roots: [fixture.primary.path])
         try createTaskFixture(title: "Searchable board card", roots: [fixture.alternate.path])
         let titleElement = app.staticTexts["Searchable board card"]
-        XCTAssertTrue(titleElement.waitForExistence(timeout: 5), "The task card should expose its rendered title text.")
+        XCTAssertTrue(titleElement.waitToExist(timeout: 5), "The task card should expose its rendered title text.")
         let titleFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
         let untrackedWidth = ("Searchable board card" as NSString).size(withAttributes: [.font: titleFont]).width
         XCTAssertGreaterThan(
@@ -3258,7 +3260,7 @@ final class PlayhouseUITests: XCTestCase {
         let wrappedTitle = "Task card title spacing increases between wrapped lines"
         try createTaskFixture(title: wrappedTitle, roots: [fixture.alternate.path])
         let wrappedTitleElement = app.staticTexts[wrappedTitle]
-        XCTAssertTrue(wrappedTitleElement.waitForExistence(timeout: 5))
+        XCTAssertTrue(wrappedTitleElement.waitToExist(timeout: 5))
         let wrappedTitleBaseline = NSAttributedString(
             string: wrappedTitle,
             attributes: [.font: titleFont, .kern: 0.35]
@@ -3276,10 +3278,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("board-search-button").exists, "The top bar should not show a search button; search is keyboard-only.")
         app.typeKey("f", modifierFlags: .command)
         let boardSearch = element("board-search-field")
-        XCTAssertTrue(boardSearch.waitForExistence(timeout: 5), "Command+F should reveal the prominent board search.")
+        XCTAssertTrue(boardSearch.waitToExist(timeout: 5), "Command+F should reveal the prominent board search.")
         XCTAssertLessThan(element("board-search-bar").frame.maxY, element("board-columns-scroll-view").frame.minY, "Board search should sit above the task columns.")
         boardSearch.typeText("Searchable")
-        XCTAssertTrue(app.buttons["Searchable board card"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Searchable board card"].waitToExist(timeout: 5))
         XCTAssertFalse(app.buttons["Status transitions"].exists, "Nonmatching task cards should be filtered out.")
         element("close-board-search-button").click()
         XCTAssertFalse(element("board-search-field").exists)
@@ -3341,17 +3343,17 @@ final class PlayhouseUITests: XCTestCase {
         let waitingTaskID = try taskID(named: "Waiting layout")
         openTask(named: "Waiting layout")
         let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitForExistence(timeout: 5))
+        XCTAssertTrue(modeMenu.waitToExist(timeout: 5))
         modeMenu.click()
         app.menuItems["Plan mode"].click()
         XCTAssertTrue(modeMenu.label.contains("Plan mode"))
         element("message-composer").click()
         element("message-composer").typeText("Please share your plan.")
         element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 10))
         XCTAssertEqual(try taskRecord(id: waitingTaskID)?["status"] as? String, "Waiting Response")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
 
         assertTaskVisible("Blocked layout", inColumn: "Blocked")
         assertTaskVisible("Status transitions", inColumn: "Backlog")
@@ -3379,19 +3381,19 @@ final class PlayhouseUITests: XCTestCase {
 
         let blockedCard = element("task-card-\(blockedTaskID)")
         blockedCard.rightClick()
-        XCTAssertTrue(element("rename-task-menu-item").waitForExistence(timeout: 5), "Stacked columns should retain full task-card actions.")
+        XCTAssertTrue(element("rename-task-menu-item").waitToExist(timeout: 5), "Stacked columns should retain full task-card actions.")
         XCTAssertTrue(element("delete-task-menu-item").exists)
         app.typeKey(.escape, modifierFlags: [])
 
         openTask(named: "Waiting layout")
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 5))
         selectQuestionOption("Blue")
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitToExist(timeout: 10))
         XCTAssertEqual(try taskRecord(id: waitingTaskID)?["status"] as? String, "Waiting Response")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Waiting layout", inColumn: "Waiting Response")
 
         // This task exists for board layout, so it settles explicitly rather than
@@ -3452,9 +3454,9 @@ final class PlayhouseUITests: XCTestCase {
         mainWindow.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: drawnCardPoint.x - mainWindow.frame.minX, dy: drawnCardPoint.y - mainWindow.frame.minY))
             .click()
-        XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10), "Clicking the card where it draws should open the task.")
+        XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10), "Clicking the card where it draws should open the task.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
     }
 
     // case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response; once GitHub reports the pull request merged, a retry commits local work, skips syncing the merged branch even though its remote is unreachable, and moves the task to Review.
@@ -3490,33 +3492,33 @@ final class PlayhouseUITests: XCTestCase {
         assertCLIError(try runCLI(["task", "move", backlogTaskID, "Review"], expectedStatus: 2), code: "invalid_argument")
         XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
         element("task-card-\(backlogTaskID)").rightClick()
-        XCTAssertTrue(element("rename-task-menu-item").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("rename-task-menu-item").waitToExist(timeout: 5))
         XCTAssertFalse(element("move-task-to-review-menu-item").exists, "Only Waiting Response cards offer Move to Review.")
         app.typeKey(.escape, modifierFlags: [])
 
         // A pending blocking question shows Waiting Response while its turn still runs.
         openTask(named: "Manual review menu")
         let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitForExistence(timeout: 5))
+        XCTAssertTrue(modeMenu.waitToExist(timeout: 5))
         modeMenu.click()
         app.menuItems["Plan mode"].click()
         element("message-composer").click()
         element("message-composer").typeText("Please share your plan.")
         element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 10))
         XCTAssertEqual(try taskRecord(id: menuTaskID)?["status"] as? String, "Waiting Response")
         try "Waiting turn output.\n".write(to: worktree.appendingPathComponent("manual-review.txt"), atomically: true, encoding: .utf8)
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Manual review menu", inColumn: "Waiting Response")
 
         let menuCard = element("task-card-\(menuTaskID)")
         let moveToReview = element("move-task-to-review-menu-item")
         let rejection = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
         menuCard.rightClick()
-        XCTAssertTrue(moveToReview.waitForExistence(timeout: 5), "A Waiting Response card should offer Move to Review.")
+        XCTAssertTrue(moveToReview.waitToExist(timeout: 5), "A Waiting Response card should offer Move to Review.")
         moveToReview.click()
-        XCTAssertTrue(rejection.waitForExistence(timeout: 10), "Moving a task whose turn is still running should explain the rejection.")
+        XCTAssertTrue(rejection.waitToExist(timeout: 10), "Moving a task whose turn is still running should explain the rejection.")
         XCTAssertTrue(rejection.staticTexts.matching(NSPredicate(format: "value == %@", "Couldn't move task to Review")).firstMatch.exists)
         XCTAssertTrue(rejection.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "still running")).firstMatch.exists)
         attachScreenshot(named: "Move to Review is rejected while the question's turn still runs")
@@ -3527,11 +3529,11 @@ final class PlayhouseUITests: XCTestCase {
         assertTaskVisible("Manual review menu", inColumn: "Waiting Response")
 
         openTask(named: "Manual review menu")
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 5))
         selectQuestionOption("Blue")
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitToExist(timeout: 10))
         // The status reads Waiting Response before the turn releases the task, so wait for the daemon.
         let threadID = try XCTUnwrap(try taskRecord(id: menuTaskID)?["codexThreadID"] as? String)
         XCTAssertTrue(waitUntil({
@@ -3540,7 +3542,7 @@ final class PlayhouseUITests: XCTestCase {
                 && (try? self.taskRecord(id: menuTaskID)?["status"] as? String) == "Waiting Response"
         }, timeout: 30), "The answered turn should finish in Waiting Response.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
 
         // A pull request sync that fails reports the error and leaves the task waiting.
         let missingRemote = runDirectory.appendingPathComponent("manual-review-missing-origin.git", isDirectory: true)
@@ -3552,9 +3554,9 @@ final class PlayhouseUITests: XCTestCase {
             }
         }
         menuCard.rightClick()
-        XCTAssertTrue(moveToReview.waitForExistence(timeout: 5))
+        XCTAssertTrue(moveToReview.waitToExist(timeout: 5))
         moveToReview.click()
-        XCTAssertTrue(rejection.waitForExistence(timeout: 15), "A failed pull request sync should be shown to the user.")
+        XCTAssertTrue(rejection.waitToExist(timeout: 15), "A failed pull request sync should be shown to the user.")
         XCTAssertTrue(rejection.staticTexts.matching(NSPredicate(format: "value == %@", "Couldn't move task to Review")).firstMatch.exists)
         XCTAssertFalse(rejection.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "still running")).firstMatch.exists,
                        "This alert should report the sync failure, not the finished turn.")
@@ -3569,7 +3571,7 @@ final class PlayhouseUITests: XCTestCase {
         try "Work after the failed move.\n".write(to: worktree.appendingPathComponent("merged-retry.txt"), atomically: true, encoding: .utf8)
         try "321=merged\n".write(toFile: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STATE_PATH"]), atomically: true, encoding: .utf8)
         menuCard.rightClick()
-        XCTAssertTrue(moveToReview.waitForExistence(timeout: 5))
+        XCTAssertTrue(moveToReview.waitToExist(timeout: 5))
         attachScreenshot(named: "Waiting Response card context menu offers Move to Review")
         moveToReview.click()
         XCTAssertTrue(waitUntil({
@@ -3601,7 +3603,9 @@ final class PlayhouseUITests: XCTestCase {
         assertTaskVisible("Manual review drag", inColumn: "Waiting Response")
         attachScreenshot(named: "Waiting Response card before dragging it to Review")
         let reviewColumn = element("column-review")
-        XCTAssertTrue(reviewColumn.waitForExistence(timeout: 5))
+        XCTAssertTrue(reviewColumn.waitToExist(timeout: 5))
+        // The card has just moved columns; a drag that starts mid-animation grabs empty board.
+        XCTAssertTrue(waitForStableFrame(element("task-card-\(dragTaskID)")), "The card should settle in Waiting Response before the drag.")
         element("task-card-\(dragTaskID)").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
             .press(forDuration: 0.5, thenDragTo: reviewColumn.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)))
         XCTAssertTrue(waitUntil({
@@ -3797,7 +3801,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(recoveredProcess.terminationStatus, 0, "The reminder recovery fixture conversation should finish successfully: \(recoveredOutput) \(recoveredError)")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review", "A completed CLI outcome reported during a private reminder should be honored.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Progress reports", inColumn: "Review")
         openTask(named: "Progress reports")
         XCTAssertTrue(transcriptContains("ended without reporting a task outcome"), "The nudge Playhouse sent must appear in the visible transcript.")
@@ -3997,7 +4001,7 @@ final class PlayhouseUITests: XCTestCase {
             )
         }
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
 
         // Every turn reports in-progress, so Playhouse runs out of continuations.
         try createTaskFixture(title: "Never settles", roots: [fixture.primary.path])
@@ -4170,7 +4174,7 @@ final class PlayhouseUITests: XCTestCase {
         // This task's thread lives in the queue fixture; the app must read it there.
         relaunchApp()
         openTask(named: "Queued over continuation")
-        XCTAssertTrue(transcriptMessage("Follow-up from the user.").waitForExistence(timeout: 15),
+        XCTAssertTrue(transcriptMessage("Follow-up from the user.").waitToExist(timeout: 15),
                       "The queued follow-up should be visible in the conversation it ran in.")
         XCTAssertEqual(
             app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "You reported")).count, 0,
@@ -4211,7 +4215,7 @@ final class PlayhouseUITests: XCTestCase {
             _ = try runCLI(["task", "progress", "publish", taskID, "--type", "testing", "--detail", "Waiting for the result"])
             XCTAssertEqual(try taskRecord(id: taskID)?["progressLabel"] as? String, "Testing")
             relaunchApp()
-            XCTAssertTrue(element("task-card-\(taskID.uppercased())").waitForExistence(timeout: 5), "The active task should appear on the board.")
+            XCTAssertTrue(element("task-card-\(taskID.uppercased())").waitToExist(timeout: 5), "The active task should appear on the board.")
             XCTAssertEqual(try taskRecord(id: taskID)?["progressLabel"] as? String, "Testing", "Progress should remain persisted after the app relaunches.")
             XCTAssertTrue(waitUntil({ label.exists && (label.value as? String)?.contains("Testing") == true }, timeout: 20), "The active task card should show progress before a failed turn. \(app.debugDescription)")
             XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
@@ -4268,7 +4272,7 @@ final class PlayhouseUITests: XCTestCase {
         let waitingReport = try runCLI(["task", "progress", "publish", questionTaskID, "--type", "reviewing", "--detail", "Preparing a question"])
         XCTAssertEqual((waitingReport["result"] as? [String: Any])?["progressLabel"] as? String, "Reviewing")
         try "Release the active turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10), "Structured questions should appear inline in the conversation.")
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10), "Structured questions should appear inline in the conversation.")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: questionHistoryURL.path) }, timeout: 5))
         let questionHistory = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: questionHistoryURL)) as? [String: Any])
         let threadInstructions = try XCTUnwrap(questionHistory["threadStartDeveloperInstructions"] as? String)
@@ -4285,24 +4289,23 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: questionTaskID)?["status"] as? String, "Waiting Response")
         XCTAssertNil(try taskRecord(id: questionTaskID)?["progressLabel"] as? String, "Progress should clear as soon as Codex requests user input.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5), "The board should reopen after leaving the pending question.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5), "The board should reopen after leaving the pending question.")
         let waitingReportLabel = element("task-progress-label-\(questionTaskID.uppercased())")
         XCTAssertTrue(waitForDisappearance(waitingReportLabel), "The active task card should not retain the agent's progress row.")
         openTask(named: "Progress question")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 5), "Reopening should restore the pending question inline.")
-        XCTAssertTrue(app.buttons["Continue"].exists)
-        app.buttons["Continue"].click()
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 5), "Reopening should restore the pending question inline.")
+        selectQuestionOption("Continue")
         try "Hold final turn completion for answer status verification.\n".write(to: outcomeHold, atomically: true, encoding: .utf8)
         element("submit-ai-answers-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: outcomeActive.path) }, timeout: 10), "The fixture should acknowledge the answer and hold final completion.")
         XCTAssertEqual(try taskRecord(id: questionTaskID)?["status"] as? String, "In Progress", "Answering should leave the active turn In Progress until it finishes.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Progress question", inColumn: "In Progress")
         openTask(named: "Progress question")
         try "Release final turn completion.\n".write(to: outcomeRelease, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ !element("conversation-user-input-request").exists }, timeout: 5), "Submitting the answer should remove the inline question.")
-        XCTAssertTrue(transcriptMessage("Answer received: Continue.").waitForExistence(timeout: 10), "The resumed turn should receive the submitted answer.")
+        XCTAssertTrue(transcriptMessage("Answer received: Continue.").waitToExist(timeout: 10), "The resumed turn should receive the submitted answer.")
         let completionDeadline = Date().addingTimeInterval(10)
         var completedStatus: String?
         while Date() < completionDeadline {
@@ -4313,7 +4316,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(completedStatus, "Waiting Response", "An answered turn without an explicit completion outcome should return to Waiting Response.")
         XCTAssertNil(try taskRecord(id: questionTaskID)?["progressLabel"] as? String)
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Progress question", inColumn: "Waiting Response")
         try? FileManager.default.removeItem(at: activeMarker)
         try? FileManager.default.removeItem(at: releaseMarker)
@@ -4326,21 +4329,21 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try taskID(named: "Before rename")
         let operationLock = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         let card = app.buttons.matching(NSPredicate(format: "label == %@", "Before rename")).firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        XCTAssertTrue(card.waitToExist(timeout: 10))
         card.rightClick()
         let renameAction = element("rename-task-menu-item")
-        XCTAssertTrue(renameAction.waitForExistence(timeout: 5), "The task context menu has no rename action.")
+        XCTAssertTrue(renameAction.waitToExist(timeout: 5), "The task context menu has no rename action.")
         renameAction.click()
 
         let titleField = element("rename-task-title-field")
-        XCTAssertTrue(titleField.waitForExistence(timeout: 5))
+        XCTAssertTrue(titleField.waitToExist(timeout: 5))
         titleField.click()
         titleField.typeKey("a", modifierFlags: .command)
         titleField.typeText("After rename")
         element("save-task-rename-button").click()
-        XCTAssertTrue(card.waitForExistence(timeout: 3), "The persisted title should remain unchanged while the task-operation lock is held.")
+        XCTAssertTrue(card.waitToExist(timeout: 3), "The persisted title should remain unchanged while the task-operation lock is held.")
         try operationLock.release()
-        XCTAssertTrue(app.buttons["After rename"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["After rename"].waitToExist(timeout: 10))
 
         XCTAssertEqual(try taskRecord(named: "After rename")?["title"] as? String, "After rename")
         assertCLIError(
@@ -4447,10 +4450,10 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Header repository picker")
         element("add-conversation-repository-button").click()
         let search = element("conversation-repository-search")
-        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        XCTAssertTrue(search.waitToExist(timeout: 5))
         search.click()
         search.typeText("suggested-parent")
-        XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitToExist(timeout: 10))
         XCTAssertTrue(element("conversation-repository-suggestion-changes").exists)
         XCTAssertTrue(element("conversation-repository-suggestion-secondary").exists)
         let suggestionResult = try runCLI(["workspace", "suggest", "--parent", fixture.parent.path])["result"] as? [String: Any]
@@ -4463,7 +4466,7 @@ final class PlayhouseUITests: XCTestCase {
         search.typeKey(XCUIKeyboardKey.upArrow.rawValue, modifierFlags: [])
         search.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: [])
         let suggestion = element("conversation-repository-suggestion-primary")
-        XCTAssertTrue(suggestion.waitForExistence(timeout: 10))
+        XCTAssertTrue(suggestion.waitToExist(timeout: 10))
         let conversationReservation = try ConversationTurnLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         var conversationReservationReleased = false
         defer {
@@ -4484,12 +4487,12 @@ final class PlayhouseUITests: XCTestCase {
         try conversationReservation.release()
         conversationReservationReleased = true
         let badge = element("conversation-repository-badge-primary")
-        XCTAssertTrue(badge.waitForExistence(timeout: 10))
+        XCTAssertTrue(badge.waitToExist(timeout: 10))
         let emptyTitle = repositoryTitle()
         XCTAssertEqual(accessibleLabelOrValue(of: emptyTitle), "primary", "The prominent empty-conversation title should identify the selected repository.")
         XCTAssertTrue(waitUntil({ repositoryTitleHasColor(emptyTitle, appearance: "dark") }, timeout: 5), "Dark appearance should render an orange repository title.")
         let conversationIcon = app.images["Conversation"]
-        XCTAssertTrue(conversationIcon.waitForExistence(timeout: 5))
+        XCTAssertTrue(conversationIcon.waitToExist(timeout: 5))
         XCTAssertGreaterThan(conversationIcon.frame.minY - emptyTitle.frame.maxY, 40, "The conversation prompt should have breathing room below the repository title.")
         XCTAssertFalse(app.staticTexts["Start a conversation"].exists, "The redundant Start a conversation heading should be removed.")
         XCTAssertFalse(element("working-folders-summary").exists, "Selected repositories already appear in the title and compact header labels.")
@@ -4498,7 +4501,7 @@ final class PlayhouseUITests: XCTestCase {
         _ = try runCLI(["settings", "set-appearance", "dark"])
         XCTAssertTrue(waitUntil({ repositoryTitleHasColor(emptyTitle, appearance: "dark") }, timeout: 5), "Changing appearance should update the title color.")
         let title = element("task-view-title")
-        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertTrue(title.waitToExist(timeout: 5))
         XCTAssertGreaterThan(badge.frame.minX, title.frame.maxX, "Repository badges should appear to the right of the task title.")
         XCTAssertLessThan(abs(badge.frame.midY - title.frame.midY), 8, "Repository badges should share the title row.")
         let record = try XCTUnwrap(taskRecord(named: "Header repository picker"))
@@ -4518,9 +4521,9 @@ final class PlayhouseUITests: XCTestCase {
         let branchValue = element("conversation-repository-branch-value")
         let branchFromValue = element("conversation-repository-branch-from-value")
         let mergeTargetValue = element("conversation-repository-merge-target-value")
-        XCTAssertTrue(branchValue.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(branchFromValue.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(mergeTargetValue.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(branchValue.waitToExist(timeout: 5), app.debugDescription)
+        XCTAssertTrue(branchFromValue.waitToExist(timeout: 5), app.debugDescription)
+        XCTAssertTrue(mergeTargetValue.waitToExist(timeout: 5), app.debugDescription)
         XCTAssertEqual(accessibleLabelOrValue(of: branchValue), branch, app.debugDescription)
         XCTAssertEqual(accessibleLabelOrValue(of: branchFromValue), mergeFrom, app.debugDescription)
         XCTAssertEqual(accessibleLabelOrValue(of: mergeTargetValue), mergeTo, app.debugDescription)
@@ -4544,7 +4547,7 @@ final class PlayhouseUITests: XCTestCase {
         let managedWorktree = try XCTUnwrap(secondary["worktreePath"] as? String)
         XCTAssertNotEqual(managedWorktree, fixture.secondary.path)
         XCTAssertTrue(managedWorktree.hasPrefix(dataDirectory.appendingPathComponent("task-worktrees", isDirectory: true).path))
-        XCTAssertTrue(element("conversation-repository-badge-secondary").waitForExistence(timeout: 10), "Repository additions made through the AI API should appear in the open task header.")
+        XCTAssertTrue(element("conversation-repository-badge-secondary").waitToExist(timeout: 10), "Repository additions made through the AI API should appear in the open task header.")
         XCTAssertEqual(accessibleLabelOrValue(of: repositoryTitle()), "primary · secondary", "The prominent title should update when the API adds a repository.")
         XCTAssertFalse(element("working-folders-summary").exists, "Repository worktrees should not be repeated in a separate working-folders line.")
         let savedRepositories = try runCLI(["settings", "get"])["result"] as? [String: Any]
@@ -4559,14 +4562,14 @@ final class PlayhouseUITests: XCTestCase {
         apiReservationReleased = true
 
         let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertTrue(composer.waitToExist(timeout: 5))
         composer.click()
         composer.typeText("Start working in the selected repositories.")
         element("send-message-button").click()
         let sentPrompt = app.textViews.matching(
             NSPredicate(format: "value == %@", "Start working in the selected repositories.")
         ).firstMatch
-        XCTAssertTrue(sentPrompt.waitForExistence(timeout: 10))
+        XCTAssertTrue(sentPrompt.waitToExist(timeout: 10))
         XCTAssertFalse(repositoryTitle().exists, "The prominent repository title should leave the timeline once the conversation has messages.")
         XCTAssertFalse(app.staticTexts["Start a conversation"].exists)
         let badgeAfterSend = element("conversation-repository-badge-secondary")
@@ -4587,7 +4590,7 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try XCTUnwrap(created?["id"] as? String)
         openTask(named: title)
         let badge = element("conversation-repository-badge-primary")
-        XCTAssertTrue(badge.waitForExistence(timeout: 5))
+        XCTAssertTrue(badge.waitToExist(timeout: 5))
         let removeBadgeButton = element("remove-conversation-repository-primary")
         XCTAssertGreaterThanOrEqual(removeBadgeButton.frame.width, 20, "The repository chip's remove button should be an easy target.")
         XCTAssertGreaterThanOrEqual(removeBadgeButton.frame.height, 20, "The repository chip's remove button should be an easy target.")
@@ -4599,7 +4602,7 @@ final class PlayhouseUITests: XCTestCase {
         badge.click()
         let initialBranchValue = element("conversation-repository-branch-value")
         let branchEdit = element("conversation-repository-branch-edit")
-        XCTAssertTrue(initialBranchValue.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(initialBranchValue.waitToExist(timeout: 5), app.debugDescription)
         XCTAssertTrue(branchEdit.exists)
         let settingsTitle = element("conversation-repository-settings-title")
         XCTAssertGreaterThanOrEqual(app.popovers.firstMatch.frame.width, 340, "The repository settings popover should be roomier than before.")
@@ -4612,7 +4615,7 @@ final class PlayhouseUITests: XCTestCase {
         branchEdit.click()
         let branchField = element("conversation-repository-branch")
         let branchSave = element("conversation-repository-branch-save")
-        XCTAssertTrue(branchField.waitForExistence(timeout: 5))
+        XCTAssertTrue(branchField.waitToExist(timeout: 5))
         XCTAssertTrue(branchSave.exists, "Editing a value should show a confirmation checkmark.")
         XCTAssertGreaterThan(branchSave.frame.minX, branchField.frame.minX, "The checkmark should sit inside the field's trailing edge.")
         XCTAssertLessThan(abs(branchSave.frame.midY - branchField.frame.midY), 6, "The checkmark should be inside the field.")
@@ -4620,7 +4623,7 @@ final class PlayhouseUITests: XCTestCase {
         replaceText(branchField, with: "invalid branch")
         attachScreenshot(named: "Inline branch edit with its confirmation checkmark", fullScreen: true)
         branchSave.click()
-        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "Invalid branch settings should be shown in the conversation.")
+        XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 10), "Invalid branch settings should be shown in the conversation.")
         XCTAssertEqual(try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["branch"] as? String, initialBranch)
         XCTAssertTrue(branchField.exists, "A rejected value should stay open for correction.")
 
@@ -4645,7 +4648,7 @@ final class PlayhouseUITests: XCTestCase {
 
         element("conversation-repository-branch-from-edit").click()
         let branchFromField = element("conversation-repository-branch-from")
-        XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
+        XCTAssertTrue(branchFromField.waitToExist(timeout: 5))
         replaceText(branchFromField, with: "discarded-edit")
         settingsTitle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
         XCTAssertTrue(waitForDisappearance(branchFromField), "Clicking outside the field should dismiss the edit.")
@@ -4655,7 +4658,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Clicking outside the field dismisses the edit unsaved", fullScreen: true)
 
         element("conversation-repository-branch-from-edit").click()
-        XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
+        XCTAssertTrue(branchFromField.waitToExist(timeout: 5))
         replaceText(branchFromField, with: "escaped-edit")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(waitForDisappearance(branchFromField), "Escape should dismiss the edit.")
@@ -4665,7 +4668,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Escape dismisses the edit unsaved", fullScreen: true)
 
         element("conversation-repository-branch-from-edit").click()
-        XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
+        XCTAssertTrue(branchFromField.waitToExist(timeout: 5))
         replaceText(branchFromField, with: "branch-source")
         element("conversation-repository-branch-from-save").click()
         XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "branchFrom", expected: "branch-source"))
@@ -4675,16 +4678,16 @@ final class PlayhouseUITests: XCTestCase {
         element("conversation-repository-merge-target-edit").click()
         let mergeTargetField = element("conversation-repository-merge-target")
         let mergeTargetSave = element("conversation-repository-merge-target-save")
-        XCTAssertTrue(mergeTargetField.waitForExistence(timeout: 5))
+        XCTAssertTrue(mergeTargetField.waitToExist(timeout: 5))
         replaceText(mergeTargetField, with: "branch-source")
         mergeTargetSave.click()
         XCTAssertTrue(waitForRepositoryValue(taskID: taskID, repositoryPath: fixture.primary.path, key: "mergeTarget", expected: "branch-source"))
         XCTAssertTrue(waitForDisappearance(mergeTargetField))
         element("conversation-repository-merge-target-edit").click()
-        XCTAssertTrue(mergeTargetField.waitForExistence(timeout: 5))
+        XCTAssertTrue(mergeTargetField.waitToExist(timeout: 5))
         replaceText(mergeTargetField, with: "missing-local-branch")
         mergeTargetSave.click()
-        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "An invalid merge target should be shown in the conversation.")
+        XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 10), "An invalid merge target should be shown in the conversation.")
         XCTAssertEqual(
             try repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path)?["mergeTarget"] as? String,
             "branch-source",
@@ -4703,9 +4706,9 @@ final class PlayhouseUITests: XCTestCase {
         let branchValue = element("conversation-repository-branch-value")
         let branchFromValue = element("conversation-repository-branch-from-value")
         let mergeTargetValue = element("conversation-repository-merge-target-value")
-        XCTAssertTrue(branchValue.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(branchFromValue.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(mergeTargetValue.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(branchValue.waitToExist(timeout: 5), app.debugDescription)
+        XCTAssertTrue(branchFromValue.waitToExist(timeout: 5), app.debugDescription)
+        XCTAssertTrue(mergeTargetValue.waitToExist(timeout: 5), app.debugDescription)
         XCTAssertEqual(accessibleLabelOrValue(of: branchValue), "conversation-edited", app.debugDescription)
         XCTAssertEqual(accessibleLabelOrValue(of: branchFromValue), "branch-source", app.debugDescription)
         XCTAssertEqual(accessibleLabelOrValue(of: mergeTargetValue), "branch-source", app.debugDescription)
@@ -4713,7 +4716,7 @@ final class PlayhouseUITests: XCTestCase {
 
         try completeCurrentTaskWithFixtureAnswers(taskTitle: title)
         badge.click()
-        XCTAssertTrue(element("conversation-repository-settings-locked").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("conversation-repository-settings-locked").waitToExist(timeout: 5))
         XCTAssertFalse(element("conversation-repository-branch-edit").exists)
         XCTAssertFalse(element("conversation-repository-branch-save").exists)
         assertCLIError(
@@ -4763,13 +4766,13 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try XCTUnwrap(created?["id"] as? String)
         openTask(named: title)
         let badge = element("conversation-repository-badge-primary")
-        XCTAssertTrue(badge.waitForExistence(timeout: 5))
+        XCTAssertTrue(badge.waitToExist(timeout: 5))
 
         badge.click()
         element("conversation-repository-branch-from-edit").click()
         let branchFromField = element("conversation-repository-branch-from")
         let branchFromSave = element("conversation-repository-branch-from-save")
-        XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
+        XCTAssertTrue(branchFromField.waitToExist(timeout: 5))
         replaceText(branchFromField, with: remoteBranch)
         attachScreenshot(named: "Branch-from names a branch that exists only on the remote")
         branchFromSave.click()
@@ -4780,16 +4783,16 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitForDisappearance(branchFromField), "A successful save should leave edit mode.")
 
         let branchFromValue = element("conversation-repository-branch-from-value")
-        XCTAssertTrue(branchFromValue.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(branchFromValue.waitToExist(timeout: 5), app.debugDescription)
         XCTAssertEqual(accessibleLabelOrValue(of: branchFromValue), "origin/\(remoteBranch)", app.debugDescription)
         attachScreenshot(named: "Remote branch-from is fetched and saved as its remote-tracking branch")
 
         element("conversation-repository-branch-from-edit").click()
-        XCTAssertTrue(branchFromField.waitForExistence(timeout: 5))
+        XCTAssertTrue(branchFromField.waitToExist(timeout: 5))
         replaceText(branchFromField, with: "missing-everywhere/branch")
         branchFromSave.click()
         let error = element("codex-chat-error")
-        XCTAssertTrue(error.waitForExistence(timeout: 10), "A branch-from missing locally and on the remote should be shown in the conversation.")
+        XCTAssertTrue(error.waitToExist(timeout: 10), "A branch-from missing locally and on the remote should be shown in the conversation.")
         XCTAssertTrue(error.label.contains("missing-everywhere/branch"), error.label)
         attachScreenshot(named: "Branch-from missing locally and on the remote is rejected")
         XCTAssertEqual(
@@ -4845,7 +4848,7 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try XCTUnwrap(created?["id"] as? String)
         openTask(named: title)
         let badge = element("conversation-repository-badge-primary")
-        XCTAssertTrue(badge.waitForExistence(timeout: 5))
+        XCTAssertTrue(badge.waitToExist(timeout: 5))
         badge.click()
         element("conversation-repository-branch-edit").click()
         replaceText(element("conversation-repository-branch"), with: "stale-ui-edit")
@@ -4866,7 +4869,7 @@ final class PlayhouseUITests: XCTestCase {
         try barrier.release()
         barrierReleased = true
         let error = element("codex-chat-error")
-        XCTAssertTrue(error.waitForExistence(timeout: 10), "The stale repository edit should be reported in the conversation.")
+        XCTAssertTrue(error.waitToExist(timeout: 10), "The stale repository edit should be reported in the conversation.")
         XCTAssertTrue(error.label.localizedCaseInsensitiveContains("settings changed"), error.label)
         let fresh = try XCTUnwrap(taskRecord(id: taskID))
         XCTAssertEqual((fresh["repositoryWorktrees"] as? [Any])?.count, 0)
@@ -4897,8 +4900,10 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         element("new-task-button").click()
         let restoredTitle = element("empty-conversation-repository-title")
-        XCTAssertTrue(restoredTitle.waitForExistence(timeout: 5), "A new task should restore the remaining remembered repository.")
-        XCTAssertEqual(accessibleLabelOrValue(of: restoredTitle), "secondary")
+        XCTAssertTrue(restoredTitle.waitToExist(timeout: 5), "A new task should restore the remaining remembered repository.")
+        // The remembered selection loads after the empty conversation first renders.
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: restoredTitle) == "secondary" }, timeout: 5),
+                      "A new task should restore the remaining remembered repository, not \(accessibleLabelOrValue(of: restoredTitle)).")
         XCTAssertTrue(element("conversation-repository-badge-secondary").exists)
         XCTAssertFalse(element("conversation-repository-badge-primary").exists)
         attachScreenshot(named: "New task restores only the repository that remains selected")
@@ -4976,13 +4981,13 @@ final class PlayhouseUITests: XCTestCase {
 
         let removeButton = element("remove-conversation-repository-secondary")
         removeButton.click()
-        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "Dirty worktree removal should report an error in the conversation.")
+        XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 10), "Dirty worktree removal should report an error in the conversation.")
         XCTAssertTrue(element("codex-chat-error").label.contains("uncommitted changes"))
         XCTAssertEqual(try repositoryRecord(taskID: activeID, repositoryPath: fixture.secondary.path)?["worktreePath"] as? String, worktreePath)
         XCTAssertTrue(FileManager.default.fileExists(atPath: dirtyFile.path))
 
         try FileManager.default.removeItem(at: dirtyFile)
-        XCTAssertTrue(removeButton.waitForExistence(timeout: 5), "The repository can be removed after its worktree is clean.")
+        XCTAssertTrue(removeButton.waitToExist(timeout: 5), "The repository can be removed after its worktree is clean.")
         let conversationReservation = try ConversationTurnLockBarrier(dataDirectory: dataDirectory, taskID: activeID)
         var conversationReservationReleased = false
         defer {
@@ -5067,7 +5072,7 @@ final class PlayhouseUITests: XCTestCase {
         for title in [pendingTitle, keptTitle] {
             openTask(named: title)
             let modeMenu = element("conversation-mode-menu")
-            XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
+            XCTAssertTrue(modeMenu.waitToExist(timeout: 10))
             modeMenu.click()
             app.menuItems["Plan mode"].click()
             XCTAssertTrue(modeMenu.label.contains("Plan mode"))
@@ -5077,7 +5082,7 @@ final class PlayhouseUITests: XCTestCase {
             self.isolatedPreferenceKeys().isSuperset(of: [pendingPreference, keptPreference, orphanedPreference])
         }, timeout: 10), "Choosing a conversation mode should save it in the isolated preferences.")
         deleteTaskFromContextMenu(pendingTitle)
-        XCTAssertTrue(element("confirm-delete-task-button").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("confirm-delete-task-button").waitToExist(timeout: 5))
         let conversationReservation = try ConversationTurnLockBarrier(dataDirectory: dataDirectory, taskID: pendingID)
         var conversationReservationReleased = false
         defer {
@@ -5134,7 +5139,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(resumeEventsAfterDeleteCheck, resumeEventsBeforeDeleteCheck, "Delete-check must not resume a conversation thread already owned by the app.")
         deleteTaskFromContextMenu(cleanTitle)
         let cleanConfirmation = element("confirm-delete-task-button")
-        XCTAssertTrue(cleanConfirmation.waitForExistence(timeout: 5))
+        XCTAssertTrue(cleanConfirmation.waitToExist(timeout: 5))
         cleanConfirmation.click()
         XCTAssertTrue(waitUntil({
             (try? self.diagnosticEvents().contains {
@@ -5161,14 +5166,14 @@ final class PlayhouseUITests: XCTestCase {
 
         deleteTaskFromContextMenu(dirtyTitle)
         let cancel = element("cancel-delete-task-button")
-        XCTAssertTrue(cancel.waitForExistence(timeout: 5), "Dirty work dropped on trash must require confirmation.")
+        XCTAssertTrue(cancel.waitToExist(timeout: 5), "Dirty work dropped on trash must require confirmation.")
         cancel.click()
         XCTAssertTrue(app.buttons[dirtyTitle].exists, "Canceling deletion must preserve the task.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: dirtyPath), "Canceling deletion must preserve the worktree.")
 
         deleteTaskFromContextMenu(dirtyTitle)
         let confirmation = element("confirm-delete-task-button")
-        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        XCTAssertTrue(confirmation.waitToExist(timeout: 5))
         confirmation.click()
         XCTAssertTrue(waitUntil({
             (try? self.diagnosticEvents().contains {
@@ -5209,11 +5214,11 @@ final class PlayhouseUITests: XCTestCase {
         let movedRepository = dataDirectory.appendingPathComponent("delete-failure-repository-restored-after-error", isDirectory: true)
         try FileManager.default.moveItem(at: brokenRepository, to: movedRepository)
         deleteTaskFromContextMenu(failureTitle)
-        XCTAssertTrue(element("confirm-delete-task-button").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("confirm-delete-task-button").waitToExist(timeout: 5))
         element("confirm-delete-task-button").click()
         let saveErrorAlert = app.sheets.firstMatch
-        XCTAssertTrue(saveErrorAlert.waitForExistence(timeout: 10), "A worktree-removal failure should be visible to the user.")
-        XCTAssertTrue(element(containingAccessibilityText: "Diagnostics.jsonl").waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(saveErrorAlert.waitToExist(timeout: 10), "A worktree-removal failure should be visible to the user.")
+        XCTAssertTrue(element(containingAccessibilityText: "Diagnostics.jsonl").waitToExist(timeout: 5), app.debugDescription)
         let failureLog = try String(contentsOf: dataDirectory.appendingPathComponent("Diagnostics.jsonl"), encoding: .utf8)
         let failureEvents = try failureLog.split(whereSeparator: \.isNewline).compactMap {
             try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
@@ -5238,7 +5243,7 @@ final class PlayhouseUITests: XCTestCase {
         saveErrorAlert.buttons["OK"].click()
         try FileManager.default.moveItem(at: movedRepository, to: brokenRepository)
         deleteTaskFromContextMenu(failureTitle)
-        XCTAssertTrue(element("confirm-delete-task-button").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("confirm-delete-task-button").waitToExist(timeout: 5))
         element("confirm-delete-task-button").click()
         XCTAssertTrue(waitUntil({
             (try? self.diagnosticEvents().contains {
@@ -5262,7 +5267,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("send-message-button").isEnabled)
         element("set-conversation-repository-root-button").click()
         let firstRunPanel = openFolderPanel
-        XCTAssertTrue(firstRunPanel.waitForExistence(timeout: 10))
+        XCTAssertTrue(firstRunPanel.waitToExist(timeout: 10))
         firstRunPanel.buttons["Cancel"].click()
         XCTAssertFalse(element("conversation-repository-search").exists, "Canceling root setup should leave the direct-created task and picker closed.")
         XCTAssertEqual(try tasksFromBoardList().count, 1)
@@ -5272,7 +5277,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("repository-root-required-notice").exists)
         XCTAssertFalse(element("conversation-repository-search").exists, "Setting the root should leave the repo picker closed.")
         element("add-conversation-repository-button").click()
-        XCTAssertTrue(element("conversation-repository-suggestion-primary").waitForExistence(timeout: 10), "Choosing a suggestion folder should populate the conversation picker.")
+        XCTAssertTrue(element("conversation-repository-suggestion-primary").waitToExist(timeout: 10), "Choosing a suggestion folder should populate the conversation picker.")
         let parentVisibleToBridge = waitUntil({
             guard let response = try? self.runCLI(["settings", "get"]),
                   let settings = response["result"] as? [String: Any] else { return false }
@@ -5280,11 +5285,11 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 5)
         XCTAssertTrue(parentVisibleToBridge, "The selected parent folder should be visible through a fresh CLI/XPC read.")
         let changeSuggestionParent = element("choose-repository-suggestion-parent-button")
-        XCTAssertTrue(changeSuggestionParent.waitForExistence(timeout: 5), "The picker should keep a Change parent action available after a valid parent has been selected.")
+        XCTAssertTrue(changeSuggestionParent.waitToExist(timeout: 5), "The picker should keep a Change parent action available after a valid parent has been selected.")
         XCTAssertTrue(changeSuggestionParent.label.localizedCaseInsensitiveContains("Change"))
         changeSuggestionParent.click()
         try chooseFolder(in: openFolderPanel, folder: fixture.alternateParent, confirmationButton: "Use This Folder")
-        XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitForExistence(timeout: 10), "Changing the parent should refresh the repository suggestions.")
+        XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitToExist(timeout: 10), "Changing the parent should refresh the repository suggestions.")
         XCTAssertFalse(element("conversation-repository-suggestion-primary").exists, "Suggestions from the previous parent should be replaced.")
         XCTAssertTrue(waitUntil({
             guard let response = try? self.runCLI(["settings", "get"]),
@@ -5292,20 +5297,20 @@ final class PlayhouseUITests: XCTestCase {
             return (settings["defaultParentFolder"] as? String) == self.fixture.alternateParent.path
         }, timeout: 5), "The changed parent folder should be visible through a fresh CLI/XPC read.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         XCTAssertEqual(try tasksFromBoardList().count, 0, "Backing out should discard the empty pending conversation.")
 
         app.typeKey(",", modifierFlags: .command)
         let preferencesWindow = settingsWindow
-        XCTAssertTrue(preferencesWindow.waitForExistence(timeout: 10), "Workspace Settings did not open.")
+        XCTAssertTrue(preferencesWindow.waitToExist(timeout: 10), "Workspace Settings did not open.")
         let appearancePicker = preferencesWindow.descendants(matching: .any)
             .matching(identifier: "appearance-picker").firstMatch
-        XCTAssertTrue(appearancePicker.waitForExistence(timeout: 5), "Workspace Settings should expose the Dark and Light theme choices.")
+        XCTAssertTrue(appearancePicker.waitToExist(timeout: 5), "Workspace Settings should expose the Dark and Light theme choices.")
         XCTAssertFalse(preferencesWindow.descendants(matching: .any).matching(identifier: "pr-conflict-action-picker").firstMatch.exists, "Workspace Settings should no longer expose automatic PR conflict behavior.")
         XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["appearance"] as? String, "dark")
         appearancePicker.click()
         let lightChoice = preferencesWindow.menuItems["Light"]
-        if lightChoice.waitForExistence(timeout: 2) {
+        if lightChoice.waitToExist(timeout: 2) {
             lightChoice.click()
         } else {
             preferencesWindow.buttons["Light"].click()
@@ -5318,14 +5323,14 @@ final class PlayhouseUITests: XCTestCase {
         app.typeKey("w", modifierFlags: .command)
         XCTAssertTrue(waitUntil({ !preferencesWindow.exists }, timeout: 5), "Settings should close before checking the workspace canvas.")
         let workspaceCanvas = element("board-columns-scroll-view")
-        XCTAssertTrue(workspaceCanvas.waitForExistence(timeout: 5), "The board workspace should be visible.")
+        XCTAssertTrue(workspaceCanvas.waitToExist(timeout: 5), "The board workspace should be visible.")
         assertPixel(workspaceCanvas.screenshot().image, normalizedX: 0.02, normalizedY: 0.5, rgb: (30, 30, 30), accuracy: 20)
         app.typeKey(",", modifierFlags: .command)
         let reopenedPreferences = settingsWindow
-        XCTAssertTrue(reopenedPreferences.waitForExistence(timeout: 10), "Workspace Settings did not reopen.")
+        XCTAssertTrue(reopenedPreferences.waitToExist(timeout: 10), "Workspace Settings did not reopen.")
         let chooseParent = reopenedPreferences.descendants(matching: .any)
             .matching(identifier: "choose-default-parent-folder-button").firstMatch
-        XCTAssertTrue(chooseParent.waitForExistence(timeout: 10))
+        XCTAssertTrue(chooseParent.waitToExist(timeout: 10))
         chooseParent.click()
         try chooseFolder(in: openFolderPanel, folder: fixture.parent, confirmationButton: "Use This Folder")
         assertText("default-parent-folder-path", equals: fixture.parent.path)
@@ -5373,16 +5378,16 @@ final class PlayhouseUITests: XCTestCase {
         openNewTaskConversation()
         element("add-conversation-repository-button").click()
         let search = element("conversation-repository-search")
-        XCTAssertTrue(element("conversation-repository-suggestion-primary").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-repository-suggestion-primary").waitToExist(timeout: 10))
         XCTAssertFalse(element("conversation-repository-suggestion-nested").exists, "Nested Git folders should not be suggested.")
         XCTAssertFalse(element("conversation-repository-suggestion-linked-outside").exists, "Symlink targets should not be suggested.")
         replaceText(search, with: "primary")
-        XCTAssertTrue(element("conversation-repository-suggestion-primary").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-repository-suggestion-primary").waitToExist(timeout: 10))
         XCTAssertFalse(element("conversation-repository-suggestion-secondary").exists, "Search should filter suggestions by repository name.")
         replaceText(search, with: "linked-outside")
-        XCTAssertTrue(app.staticTexts["No matching repositories."].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["No matching repositories."].waitToExist(timeout: 5))
         replaceText(search, with: "group")
-        XCTAssertTrue(element("conversation-repository-suggestion-secondary").waitForExistence(timeout: 5), "A path-only query should find a repository inside a matching parent folder.")
+        XCTAssertTrue(element("conversation-repository-suggestion-secondary").waitToExist(timeout: 5), "A path-only query should find a repository inside a matching parent folder.")
         XCTAssertFalse(element("conversation-repository-suggestion-primary").exists)
         replaceText(search, with: "changes")
         XCTAssertTrue(element("conversation-repository-suggestion-changes").exists)
@@ -5397,8 +5402,8 @@ final class PlayhouseUITests: XCTestCase {
 
         openNewTaskConversation()
         XCTAssertFalse(element("conversation-repository-search").exists, "Saved repositories should apply without opening the picker.")
-        XCTAssertTrue(element("conversation-repository-badge-secondary").waitForExistence(timeout: 10))
-        XCTAssertTrue(element("conversation-repository-badge-primary").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-repository-badge-secondary").waitToExist(timeout: 10))
+        XCTAssertTrue(element("conversation-repository-badge-primary").waitToExist(timeout: 10))
         let firstTask = try XCTUnwrap(tasksFromBoardList().first)
         let firstTaskID = try XCTUnwrap(firstTask["id"] as? String)
         let firstRoots = try XCTUnwrap(firstTask["workspaceRoots"] as? [String])
@@ -5413,16 +5418,16 @@ final class PlayhouseUITests: XCTestCase {
         assertCLIError(try runCLI(["task", "get", firstTaskID], expectedStatus: 3), code: "not_found")
 
         openNewTaskConversation()
-        XCTAssertTrue(element("conversation-repository-badge-secondary").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-repository-badge-secondary").waitToExist(timeout: 10))
         XCTAssertTrue(element("conversation-repository-badge-primary").exists)
         element("add-conversation-repository-button").click()
         let overrideSearch = element("conversation-repository-search")
-        XCTAssertTrue(overrideSearch.waitForExistence(timeout: 5))
+        XCTAssertTrue(overrideSearch.waitToExist(timeout: 5))
         replaceText(overrideSearch, with: "alternate")
-        XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitToExist(timeout: 10))
         overrideSearch.typeKey(.downArrow, modifierFlags: [])
         overrideSearch.typeKey(.return, modifierFlags: [])
-        XCTAssertTrue(element("conversation-repository-badge-alternate").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-repository-badge-alternate").waitToExist(timeout: 10))
         let expandedSelection = [fixture.secondary.path, fixture.primary.path, fixture.alternate.path]
         XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], expandedSelection)
 
@@ -5452,11 +5457,11 @@ final class PlayhouseUITests: XCTestCase {
 
         element("add-conversation-repository-button").click()
         let recentSearch = element("conversation-repository-search")
-        XCTAssertTrue(recentSearch.waitForExistence(timeout: 5))
+        XCTAssertTrue(recentSearch.waitToExist(timeout: 5))
         let recentHeader = element("conversation-repository-recent-header")
         let recentPrimary = element("conversation-repository-recent-primary")
         let recentAlternate = element("conversation-repository-recent-alternate")
-        XCTAssertTrue(recentHeader.waitForExistence(timeout: 5), "Before typing, the picker should list recent repositories.")
+        XCTAssertTrue(recentHeader.waitToExist(timeout: 5), "Before typing, the picker should list recent repositories.")
         XCTAssertTrue(recentPrimary.exists)
         XCTAssertTrue(recentAlternate.exists)
         XCTAssertLessThan(recentPrimary.frame.minY, recentAlternate.frame.minY, "Recent repositories should be ordered newest first.")
@@ -5464,21 +5469,21 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("conversation-repository-suggestion-changes").exists, "The search suggestions wait until something is typed.")
         attachScreenshot(named: "Add repository picker lists recent repositories before typing", fullScreen: true)
         replaceText(recentSearch, with: "alt")
-        XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitForExistence(timeout: 5), "Typing should switch to the regular search suggestions.")
+        XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitToExist(timeout: 5), "Typing should switch to the regular search suggestions.")
         XCTAssertFalse(recentHeader.exists, "Typing should replace the recent list.")
         XCTAssertFalse(recentAlternate.exists)
         attachScreenshot(named: "Typing switches the picker to search suggestions", fullScreen: true)
         recentSearch.typeKey("a", modifierFlags: .command)
         recentSearch.typeKey(XCUIKeyboardKey.delete.rawValue, modifierFlags: [])
-        XCTAssertTrue(recentPrimary.waitForExistence(timeout: 5), "Clearing the search should bring the recent list back.")
+        XCTAssertTrue(recentPrimary.waitToExist(timeout: 5), "Clearing the search should bring the recent list back.")
         recentPrimary.click()
-        XCTAssertTrue(primaryBadge.waitForExistence(timeout: 10), "Clicking a recent repository should add it immediately.")
+        XCTAssertTrue(primaryBadge.waitToExist(timeout: 10), "Clicking a recent repository should add it immediately.")
         XCTAssertTrue(waitForDisappearance(recentSearch), "Adding a recent repository should close the picker.")
         element("add-conversation-repository-button").click()
-        XCTAssertTrue(recentAlternate.waitForExistence(timeout: 5))
+        XCTAssertTrue(recentAlternate.waitToExist(timeout: 5))
         XCTAssertFalse(recentPrimary.exists, "A re-added repository leaves the recent list.")
         recentAlternate.click()
-        XCTAssertTrue(alternateBadge.waitForExistence(timeout: 10), "Clicking a recent repository should add it immediately.")
+        XCTAssertTrue(alternateBadge.waitToExist(timeout: 10), "Clicking a recent repository should add it immediately.")
         attachScreenshot(named: "Recent repositories re-added as attached chips")
         // The badge appears before the saved selection is written, so wait for the write.
         XCTAssertTrue(waitUntil({
@@ -5489,9 +5494,9 @@ final class PlayhouseUITests: XCTestCase {
 
         openNewTaskConversation()
         XCTAssertFalse(element("conversation-repository-search").exists)
-        XCTAssertTrue(element("conversation-repository-badge-secondary").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-repository-badge-secondary").waitToExist(timeout: 10))
         XCTAssertTrue(element("conversation-repository-badge-primary").exists)
-        XCTAssertTrue(element("conversation-repository-badge-alternate").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-repository-badge-alternate").waitToExist(timeout: 10))
         XCTAssertEqual(try XCTUnwrap(tasksFromBoardList().first?["workspaceRoots"] as? [String]), expandedSelection)
         element("back-to-board-button").click()
         assertScreenshotIfVisible(named: "New conversation restores and remembers repository choices")
@@ -5510,7 +5515,7 @@ final class PlayhouseUITests: XCTestCase {
 
         openNewTaskConversation()
         let search = element("conversation-repository-search")
-        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "The failed saved-repository batch should display an error.")
+        XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 10), "The failed saved-repository batch should display an error.")
         XCTAssertFalse(search.exists, "A failed default restore should not open the repository picker.")
         XCTAssertFalse(element("conversation-repository-badge-primary").exists, "The first valid repository must not remain attached after the batch fails.")
         XCTAssertFalse(element("conversation-repository-badge-empty-git-repo").exists)
@@ -5535,12 +5540,12 @@ final class PlayhouseUITests: XCTestCase {
             (try? self.diagnosticEvents().contains { $0["event"] as? String == "ui.new_task.started" }) ?? false
         }, timeout: 2), "The New Task start event should reach the diagnostics file promptly after the click.")
         XCTAssertEqual(app.windows.count, 1, "New Task should open one conversation window.")
-        XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("empty-conversation").waitToExist(timeout: 10))
         XCTAssertEqual(accessibleLabelOrValue(of: repositoryTitle()), "No repository selected")
         let repositorySearch = element("conversation-repository-search")
         XCTAssertFalse(repositorySearch.exists, "The new conversation should keep the repository picker closed by default.")
         let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
         composer.typeText("Standalone draft")
         XCTAssertEqual(composer.value as? String, "Standalone draft", "The composer should receive typing immediately.")
         XCTAssertFalse(element("create-task-button").exists, "Direct task creation should not present a create sheet.")
@@ -5551,7 +5556,7 @@ final class PlayhouseUITests: XCTestCase {
         let shellID = try XCTUnwrap(shell["id"] as? String)
 
         _ = try runCLI(["task", "roots", "set", shellID, "--root", fixture.custom.path])
-        XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("empty-conversation").waitToExist(timeout: 10))
         XCTAssertTrue(app.staticTexts["Untitled task"].exists, "An empty conversation should keep its untitled title until the first prompt is added.")
         XCTAssertFalse(element("task-title-generating-loader").exists, "Title generation should not start before the first prompt.")
         XCTAssertFalse(element("pause-response-button").exists)
@@ -5580,7 +5585,7 @@ final class PlayhouseUITests: XCTestCase {
         composer.typeKey("a", modifierFlags: .command)
         composer.typeKey(.delete, modifierFlags: [])
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         XCTAssertFalse(element("confirm-discard-empty-task-button").exists, "An empty new conversation should return to the board without a discard confirmation.")
         let deleted = try runCLI(["task", "get", createdTaskID], expectedStatus: 3)
         XCTAssertEqual((deleted["error"] as? [String: Any])?["code"] as? String, "not_found")
@@ -5596,7 +5601,7 @@ final class PlayhouseUITests: XCTestCase {
 
         element("new-task-button").click()
         let saveAlert = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
-        XCTAssertTrue(saveAlert.waitForExistence(timeout: 10), "A real store-lock open failure should be shown to the user.")
+        XCTAssertTrue(saveAlert.waitToExist(timeout: 10), "A real store-lock open failure should be shown to the user.")
         let alertTitle = saveAlert.staticTexts.matching(
             NSPredicate(format: "value == %@", "Couldn't save changes")
         ).firstMatch
@@ -5632,7 +5637,7 @@ final class PlayhouseUITests: XCTestCase {
         // The board renders from its own SwiftData query, so this is where a leftover hidden
         // task would actually surface as a card.
         XCTAssertFalse(
-            element("task-card-\(legacyID)").waitForExistence(timeout: 3),
+            element("task-card-\(legacyID)").waitToExist(timeout: 3),
             "A chat migrated off the board must not render as a card."
         )
         XCTAssertTrue(try tasksFromBoardList().isEmpty, "The migrated chat must no longer be a board task.")
@@ -5652,7 +5657,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(opened?["progressDetail"] as? String, "Looking into volcanoes")
 
         element("chat-sidebar-button").click()
-        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10), "The migrated chat should still open in the sidebar.")
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10), "The migrated chat should still open in the sidebar.")
         attachScreenshot(named: "Migrated standalone chat")
 
         let reopened = try runCLI(["chat", "open"])["result"] as? [String: Any]
@@ -5687,12 +5692,12 @@ final class PlayhouseUITests: XCTestCase {
         let backlogColumnFrameBeforeOpeningChat = backlogColumn.frame
 
         element("chat-sidebar-button").click()
-        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10), "Clicking Chat should slide in the sidebar.")
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10), "Clicking Chat should slide in the sidebar.")
         XCTAssertTrue(
             waitUntil({ mainWindow.frame.width > windowFrameBeforeOpeningChat.width + 1 }, timeout: 5),
             "Opening chat should grow the window to fit the columns beside the chat."
         )
-        XCTAssertTrue(reviewColumn.waitForExistence(timeout: 5), "The rightmost review column should remain present after the window grows.")
+        XCTAssertTrue(reviewColumn.waitToExist(timeout: 5), "The rightmost review column should remain present after the window grows.")
         let columnsViewport = element("board-columns-scroll-view")
         // Read the geometry once the slide-in and window growth have settled.
         XCTAssertTrue(
@@ -5731,7 +5736,7 @@ final class PlayhouseUITests: XCTestCase {
             mainWindow.frame.maxX,
             "Growing the window should keep the rightmost board column inside the visible window."
         )
-        XCTAssertTrue(element("message-composer").waitForExistence(timeout: 10), "The sidebar should reuse the standard chat composer.")
+        XCTAssertTrue(element("message-composer").waitToExist(timeout: 10), "The sidebar should reuse the standard chat composer.")
         XCTAssertFalse(element("task-status-message").exists, "Standalone chat must not show task status.")
         XCTAssertFalse(app.staticTexts["Backlog"].exists, "Standalone chat must not show a board status label.")
         XCTAssertFalse(element("conversation-repository-search").exists, "Standalone chat must not show repository controls.")
@@ -5741,7 +5746,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("workspace-changes-empty").exists, "Standalone chat must not show task workspace changes.")
         // Anchor on the rendered placeholder first: while history loads neither it nor the
         // title exists, so an unanchored absence check would pass even without the fix.
-        XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10), "The standalone chat should show its empty-conversation placeholder.")
+        XCTAssertTrue(element("empty-conversation").waitToExist(timeout: 10), "The standalone chat should show its empty-conversation placeholder.")
         XCTAssertTrue(element("model-prompt").exists, "The placeholder should keep its send-a-message prompt.")
         XCTAssertFalse(element("empty-conversation-repository-title").exists, "Standalone chat must not show the no-repository-selected banner.")
         attachScreenshot(named: "Standalone chat sidebar opened")
@@ -5749,7 +5754,7 @@ final class PlayhouseUITests: XCTestCase {
         // Dragging the sidebar's right border resizes it, within limits, and the width is remembered.
         let chatSidebar = element("chat-sidebar")
         let chatHandle = element("chat-sidebar-resize-handle")
-        XCTAssertTrue(chatHandle.waitForExistence(timeout: 5))
+        XCTAssertTrue(chatHandle.waitToExist(timeout: 5))
         // The handle's grab strip starts at the sidebar's 1-point border and extends out over the board.
         let chatWidth = { chatHandle.frame.minX + 1 - chatSidebar.frame.minX }
         XCTAssertEqual(chatWidth(), 460, accuracy: 2, "The resize handle is the sidebar's right border.")
@@ -5804,12 +5809,12 @@ final class PlayhouseUITests: XCTestCase {
         let coveringCard = element("task-card-\(coveringTaskID.uppercased())")
         XCTAssertTrue(waitUntil({ coveringCard.exists }, timeout: 10), "The new task should appear on the board behind the open chat sidebar.")
         clickTaskCardTitle(coveringCard)
-        XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10), "Opening a task should show its conversation view.")
+        XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10), "Opening a task should show its conversation view.")
         XCTAssertFalse(element("chat-sidebar").exists, "Entering a task must cover the standalone chat, not show both at once.")
         attachScreenshot(named: "Task view covers standalone chat sidebar")
 
         element("back-to-board-button").click()
-        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10), "Leaving the task should reveal the standalone chat sidebar again.")
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10), "Leaving the task should reveal the standalone chat sidebar again.")
 
         let opened = try runCLI(["chat", "open"])["result"] as? [String: Any]
         let chatTaskID = try XCTUnwrap(opened?["id"] as? String)
@@ -6011,7 +6016,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("chat-active-page-title").exists, "Page titles should appear in transcript separators, not the header.")
         XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "Page evaluation should stay visually quiet while pending.")
         XCTAssertEqual(element("chat-sidebar").descendants(matching: .progressIndicator).count, 0, "Page evaluation should not show a loader in the chat sidebar.")
-        XCTAssertTrue(transcriptMessage("Answers received: Blue / fixture-secret.").waitForExistence(timeout: 10), "The primary answer should render before the background classifier is released.")
+        XCTAssertTrue(transcriptMessage("Answers received: Blue / fixture-secret.").waitToExist(timeout: 10), "The primary answer should render before the background classifier is released.")
         XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 10), "The background classifier must not keep the chat turn running.")
         XCTAssertTrue(chatPageSeparatorIsVisible("Dinner recipes"), "The current title should remain in its transcript separator until classification completes.")
         element("message-composer").click()
@@ -6126,7 +6131,7 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Do not overtake Mars")
         element("send-message-button").click()
-        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 15), "A later send should explain that the prior page decision is still pending.")
+        XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 15), "A later send should explain that the prior page decision is still pending.")
         let failedHistory = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: chatFixtureExecutable.path + ".history"))) as? [String: Any]
         let failedTurns = try XCTUnwrap(failedHistory?["turns"] as? [[String: Any]])
         XCTAssertFalse(failedTurns.contains { ($0["userMessage"] as? String) == "Do not overtake Mars" }, "The blocked follow-up must not reach the provider.")
@@ -6177,7 +6182,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertGreaterThan(mainWindow.frame.width, windowFrameBeforeOpeningChat.width + 1, "Closing chat should keep the window's grown width.")
         XCTAssertEqual(boardHeader.frame.origin, headerFrameBeforeOpeningChat.origin, "Closing chat should leave the logo header in place.")
         XCTAssertEqual(boardHeader.frame.height, headerFrameBeforeOpeningChat.height, "Closing chat should leave the logo header's height unchanged.")
-        XCTAssertTrue(element(withAccessibilityLabel: "Kanban sidebar").waitForExistence(timeout: 5), "Closing chat should restore the board sidebar to accessibility navigation.")
+        XCTAssertTrue(element(withAccessibilityLabel: "Kanban sidebar").waitToExist(timeout: 5), "Closing chat should restore the board sidebar to accessibility navigation.")
         XCTAssertTrue(app.images["Playhouse logo"].exists, "Closing chat should restore the logo to accessibility navigation.")
         XCTAssertEqual(boardSidebar.frame, sidebarFrameBeforeOpeningChat, "Closing chat should reveal the sidebar in its original position.")
         // The kept width can leave room to spare, so the columns return beside the sidebar
@@ -6210,7 +6215,7 @@ final class PlayhouseUITests: XCTestCase {
         _ = try runCLI(["settings", "clear-parent"])
         launchApp(defaultParent: nil)
         element("chat-sidebar-button").click()
-        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
         let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
 
         func waitForPage(_ title: String) throws -> [String: Any] {
@@ -6230,7 +6235,7 @@ final class PlayhouseUITests: XCTestCase {
 
         func sendFromSidebar(_ prompt: String) {
             let composer = element("message-composer")
-            XCTAssertTrue(composer.waitForExistence(timeout: 10))
+            XCTAssertTrue(composer.waitToExist(timeout: 10))
             let receivedBefore = fixtureTurnCount(executable, containing: prompt)
             composer.click()
             composer.typeText(prompt)
@@ -6310,14 +6315,14 @@ final class PlayhouseUITests: XCTestCase {
         )
         let volcanoMessageID = try XCTUnwrap(volcanoMessage["id"] as? String)
         let volcanoView = element("user-message-\(volcanoMessageID)")
-        XCTAssertTrue(volcanoView.waitForExistence(timeout: 10), "An earlier page's message stays visible after rotation.")
+        XCTAssertTrue(volcanoView.waitToExist(timeout: 10), "An earlier page's message stays visible after rotation.")
         volcanoView.click()
         volcanoView.typeKey("a", modifierFlags: .command)
         let addComment = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
-        XCTAssertTrue(addComment.waitForExistence(timeout: 5), "Selecting transcript text should expose Add comment.")
+        XCTAssertTrue(addComment.waitToExist(timeout: 5), "Selecting transcript text should expose Add comment.")
         addComment.click()
         let commentField = element("comment-input-field")
-        XCTAssertTrue(commentField.waitForExistence(timeout: 5))
+        XCTAssertTrue(commentField.waitToExist(timeout: 5))
         assertCommentFieldBesideHint(commentField)
         commentField.typeText("What did we say before?")
         // Clicking the arrow submits a comment on a user message (it once did nothing there).
@@ -6367,7 +6372,7 @@ final class PlayhouseUITests: XCTestCase {
         _ = try runCLI(["settings", "clear-parent"])
         launchApp(defaultParent: nil)
         element("chat-sidebar-button").click()
-        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
         _ = try runCLI(["chat", "open"])
 
         let intent = "Let me check the newer release first."
@@ -6380,7 +6385,7 @@ final class PlayhouseUITests: XCTestCase {
         }
 
         let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
         composer.click()
         composer.typeText(prompt)
         element("send-message-button").click()
@@ -6393,9 +6398,9 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 20), "The settled chat turn should show its Worked for summary.")
 
         // Settling re-renders the transcript (commentary folds into Worked for), so the answer can briefly be mid-layout.
-        XCTAssertTrue(visibleTexts(containing: answer).firstMatch.waitForExistence(timeout: 10),
+        XCTAssertTrue(visibleTexts(containing: answer).firstMatch.waitToExist(timeout: 10),
                       "The answer written before the close-turn signal must be the visible response, not collapsed commentary.")
-        XCTAssertTrue(visibleTexts(containing: closing).firstMatch.waitForExistence(timeout: 5),
+        XCTAssertTrue(visibleTexts(containing: closing).firstMatch.waitToExist(timeout: 5),
                       "The closing line Claude adds after the signal belongs to the same answer.")
         XCTAssertEqual(visibleTexts(containing: intent).count, 0,
                        "Text written before an ordinary tool stays collapsed commentary.")
@@ -6403,7 +6408,7 @@ final class PlayhouseUITests: XCTestCase {
 
         element("codex-activity-disclosure").click()
         let activityDetails = element("codex-activity-details")
-        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Worked for should expand.")
+        XCTAssertTrue(activityDetails.waitToExist(timeout: 5), "Worked for should expand.")
         // A progress bubble carries its text as the element's value, not its label, so it is
         // identified by the provider message it was built from.
         func progressBubbles(forMessageID messageID: String) -> XCUIElementQuery {
@@ -6442,7 +6447,7 @@ final class PlayhouseUITests: XCTestCase {
         _ = try runCLI(["settings", "clear-parent"])
         launchApp(defaultParent: nil)
         element("chat-sidebar-button").click()
-        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
         _ = try runCLI(["chat", "open"])
         let titles = ["Volcano research", "Saturn notes"]
         var pageIDs: [String] = []
@@ -6457,7 +6462,7 @@ final class PlayhouseUITests: XCTestCase {
         func recallRow(_ index: Int) -> XCUIElement { element("conversation-chat-page-recall-toolu_recall_\(index)") }
         func send(_ prompt: String) {
             let composer = element("message-composer")
-            XCTAssertTrue(composer.waitForExistence(timeout: 10))
+            XCTAssertTrue(composer.waitToExist(timeout: 10))
             composer.click()
             composer.typeText(prompt)
             element("send-message-button").click()
@@ -6493,7 +6498,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(waitForRecallLabel(index, title), "The line for \(title) stays once the turn settles.")
         }
         let disclosure = element("codex-activity-disclosure")
-        XCTAssertTrue(disclosure.waitForExistence(timeout: 20), "The settled turn shows its Worked for summary.")
+        XCTAssertTrue(disclosure.waitToExist(timeout: 20), "The settled turn shows its Worked for summary.")
         XCTAssertTrue((disclosure.value as? String ?? "").hasPrefix("Collapsed"), "Worked for stays collapsed while the lines are visible.")
         attachScreenshot(named: "standalone-chat-recalling-lines")
 
@@ -6530,7 +6535,7 @@ final class PlayhouseUITests: XCTestCase {
         _ = try runCLI(["settings", "clear-parent"])
         launchApp(defaultParent: nil)
         element("chat-sidebar-button").click()
-        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
         let opened = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any]))
         XCTAssertNotNil(opened["id"] as? String)
         XCTAssertEqual(opened["conversationProvider"] as? String, "claude")
@@ -6540,7 +6545,7 @@ final class PlayhouseUITests: XCTestCase {
 
         func sendFromSidebar(_ prompt: String, expectedTitle: String) throws {
             let composer = element("message-composer")
-            XCTAssertTrue(composer.waitForExistence(timeout: 10))
+            XCTAssertTrue(composer.waitToExist(timeout: 10))
             let hold = URL(fileURLWithPath: executable.path + ".hold-classifier")
             let active = URL(fileURLWithPath: executable.path + ".classifier-active")
             let release = URL(fileURLWithPath: executable.path + ".classifier-release")
@@ -6554,7 +6559,7 @@ final class PlayhouseUITests: XCTestCase {
                 XCTAssertFalse(element("chat-active-page-title").exists, "Page titles should appear in transcript separators, not the header.")
                 XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "Page evaluation should stay visually quiet while pending.")
                 XCTAssertEqual(element("chat-sidebar").descendants(matching: .progressIndicator).count, 0, "Page evaluation should not show a loader in the chat sidebar.")
-                XCTAssertTrue(transcriptMessage("OK.").waitForExistence(timeout: 10), "The primary Claude answer should be visible while fallback classification is pending.")
+                XCTAssertTrue(transcriptMessage("OK.").waitToExist(timeout: 10), "The primary Claude answer should be visible while fallback classification is pending.")
                 XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 10), "A background classifier must not keep the chat turn running.")
                 XCTAssertTrue(chatPageSeparatorIsVisible("General chat"))
                 return
@@ -6662,7 +6667,7 @@ final class PlayhouseUITests: XCTestCase {
         composer.click()
         composer.typeText("Do not overtake Mars")
         element("send-message-button").click()
-        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 15), "Claude chat should explain when a prior page decision is still unresolved.")
+        XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 15), "Claude chat should explain when a prior page decision is still unresolved.")
         let failedHistory = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
         let failedTurns = try XCTUnwrap(failedHistory?["turns"] as? [[String: Any]])
         XCTAssertFalse(failedTurns.contains { ($0["userText"] as? String) == "Do not overtake Mars" })
@@ -6696,7 +6701,7 @@ final class PlayhouseUITests: XCTestCase {
         openNewTaskConversation()
         chooseRepositorySuggestion("primary")
         let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10), "Task creation should open its conversation immediately.")
+        XCTAssertTrue(composer.waitToExist(timeout: 10), "Task creation should open its conversation immediately.")
         XCTAssertFalse(element("save-task-prompt-button").exists, "Drafts should save automatically without a separate Save button.")
         let initialTask = try XCTUnwrap(tasksFromBoardList().first)
         let selectedRepository = try XCTUnwrap((initialTask["repositoryWorktrees"] as? [[String: Any]])?.first?["repositoryPath"] as? String)
@@ -6722,7 +6727,7 @@ final class PlayhouseUITests: XCTestCase {
             ((try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) ?? nil) == prompt
         }, timeout: 10), "Typing again should autosave the replacement draft.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         let titleGenerationReady = URL(fileURLWithPath: codexFixtureExecutable! + ".resolve-ready")
         let titleGenerationContinue = URL(fileURLWithPath: codexFixtureExecutable! + ".resolve-continue")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: titleGenerationReady.path) }, timeout: 10), "The real app-server fixture should confirm that title generation is in flight.")
@@ -6806,7 +6811,7 @@ final class PlayhouseUITests: XCTestCase {
         try createTaskFixture(title: title, roots: [fixture.primary.path])
         let taskID = try taskID(named: title)
         openTask(named: title)
-        XCTAssertTrue(modelPrompt().waitForExistence(timeout: 15), "Conversation history should finish loading before the composer is used.")
+        XCTAssertTrue(modelPrompt().waitToExist(timeout: 15), "Conversation history should finish loading before the composer is used.")
         let composer = app.textViews.matching(identifier: "message-composer").firstMatch
         XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15))
         let firstPrompt = "Start the turn the draft is typed beside."
@@ -6828,7 +6833,7 @@ final class PlayhouseUITests: XCTestCase {
         composer.typeText(steeredText)
         XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) ?? nil) == steeredText }, timeout: 10), "Text typed during a turn should autosave.")
         composer.typeKey(.return, modifierFlags: .command)
-        XCTAssertTrue(transcriptMessage(steeredText).waitForExistence(timeout: 10), "Command-Return should steer the running turn.")
+        XCTAssertTrue(transcriptMessage(steeredText).waitToExist(timeout: 10), "Command-Return should steer the running turn.")
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "" }, timeout: 10))
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) == nil }, timeout: 10), "A steered draft should leave the saved draft.")
         composer.typeText(queuedText)
@@ -6841,7 +6846,7 @@ final class PlayhouseUITests: XCTestCase {
         NSPasteboard.general.setData(try XCTUnwrap(bitmap.representation(using: .png, properties: [:])), forType: .png)
         composer.typeText(typedDraft)
         composer.typeKey("v", modifierFlags: .command)
-        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5))
         XCTAssertTrue(waitUntil({
             guard let record = try? self.taskRecord(id: taskID) else { return false }
             return record["savedPrompt"] as? String == typedDraft
@@ -6862,24 +6867,24 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Draft and image typed while the agent responds")
 
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         openTask(named: title)
         XCTAssertTrue(waitUntil({ (composer.value as? String) == typedDraft }, timeout: 10), "Reopening during the turn should restore the draft typed beside it.")
-        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "Reopening during the turn should restore the draft image.")
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "Reopening during the turn should restore the draft image.")
         // Leaving right after typing, before the autosave delay, must still save the text.
         let fullDraft = typedDraft + " Added just before leaving."
         composer.click()
         composer.typeKey(.downArrow, modifierFlags: .command)
         composer.typeText(" Added just before leaving.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) ?? nil) == fullDraft }, timeout: 10), "Going back mid-turn should save text typed just before leaving.")
         openTask(named: title)
         XCTAssertTrue(waitUntil({ (composer.value as? String) == fullDraft }, timeout: 10), "Reopening should restore text typed just before leaving.")
 
         // The turn ends and the queued follow-up dispatches while the task is closed.
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         try Data("release\n".utf8).write(to: release)
         XCTAssertTrue(waitUntil({
             guard let record = try? self.taskRecord(id: taskID) else { return false }
@@ -6890,7 +6895,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(settled["savedPrompt"] as? String, fullDraft, "A dispatched follow-up must not replace the unsent draft.")
         XCTAssertEqual((settled["draftImageDataURLs"] as? [String])?.count, 1)
         openTask(named: title)
-        XCTAssertTrue(transcriptMessage(queuedText).waitForExistence(timeout: 15), "The queued follow-up should have run as its own turn.")
+        XCTAssertTrue(transcriptMessage(queuedText).waitToExist(timeout: 15), "The queued follow-up should have run as its own turn.")
         XCTAssertTrue(waitUntil({ (composer.value as? String) == fullDraft }, timeout: 10), "Reopening after the turn must restore the draft, not an empty or steered one.")
         XCTAssertTrue(element("pending-chat-images").exists, "Reopening after the turn should restore the draft image.")
         attachScreenshot(named: "Draft restored after the turn ends")
@@ -6899,21 +6904,21 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: title)
         XCTAssertTrue(waitUntil({ (composer.value as? String) == fullDraft }, timeout: 15), "The draft typed during the turn should survive an app restart.")
-        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "The draft image should survive an app restart.")
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "The draft image should survive an app restart.")
         attachScreenshot(named: "Draft restored after restarting the app")
 
         XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 10))
         element("send-message-button").click()
-        XCTAssertTrue(transcriptMessage(fullDraft).waitForExistence(timeout: 15), "Sending should deliver the restored draft.")
+        XCTAssertTrue(transcriptMessage(fullDraft).waitToExist(timeout: 15), "Sending should deliver the restored draft.")
         XCTAssertTrue(waitUntil({
             guard let record = try? self.taskRecord(id: taskID) else { return false }
             return record["hasUnsentDraft"] as? Bool == false && (record["draftImageDataURLs"] as? [String])?.isEmpty == true
         }, timeout: 15), "Sending the draft should clear the saved draft.")
         XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: taskID)?["status"] as? String) ?? nil) != "In Progress" }, timeout: 30))
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         openTask(named: title)
-        XCTAssertTrue(transcriptMessage(fullDraft).waitForExistence(timeout: 15))
+        XCTAssertTrue(transcriptMessage(fullDraft).waitToExist(timeout: 15))
         XCTAssertEqual(composer.value as? String, "", "A sent draft must not return to the composer.")
         XCTAssertFalse(element("pending-chat-images").exists, "A sent draft image must not return to the composer.")
         attachScreenshot(named: "Sent draft leaves the composer empty")
@@ -6923,7 +6928,7 @@ final class PlayhouseUITests: XCTestCase {
         NSPasteboard.general.setData(try XCTUnwrap(bitmap.representation(using: .png, properties: [:])), forType: .png)
         composer.click()
         composer.typeKey("v", modifierFlags: .command)
-        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5))
         XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: taskID)?["draftImageDataURLs"] as? [String]) ?? nil)?.count == 1 }, timeout: 10), "An attached image should autosave.")
         XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 10))
         element("send-message-button").click()
@@ -6933,11 +6938,11 @@ final class PlayhouseUITests: XCTestCase {
                 && record["status"] as? String != "In Progress"
         }, timeout: 30), "An image-only send should clear its image from the saved draft.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         openTask(named: title)
         // The reopened transcript pins the latest turn, the image-only send.
         let transcriptImages = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-image-"))
-        XCTAssertTrue(transcriptImages.firstMatch.waitForExistence(timeout: 15), "The image-only send should appear in the transcript.")
+        XCTAssertTrue(transcriptImages.firstMatch.waitToExist(timeout: 15), "The image-only send should appear in the transcript.")
         XCTAssertEqual(composer.value as? String, "")
         XCTAssertFalse(element("pending-chat-images").exists, "A sent image-only draft must not return to the composer.")
 
@@ -6949,7 +6954,7 @@ final class PlayhouseUITests: XCTestCase {
         _ = try runCLI(["task", "prompt", neverStartedID, "--text", submitted, "--status", "In Progress", "--submitted", "true"])
         _ = try runCLI(["task", "draft", neverStartedID, "--text", laterDraft])
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         openTask(named: neverStarted)
         XCTAssertTrue(waitUntil({ (composer.value as? String) == submitted + "\n\n" + laterDraft }, timeout: 15), "A prompt whose turn never started should return to the composer with the draft typed after it.")
         XCTAssertEqual(try taskRecord(id: neverStartedID)?["status"] as? String, "Waiting Response")
@@ -6960,10 +6965,10 @@ final class PlayhouseUITests: XCTestCase {
         let neverStartedImageID = try self.taskID(named: neverStartedImage)
         _ = try runCLI(["task", "prompt", neverStartedImageID, "--text", submitted, "--image", validImage.path, "--status", "In Progress", "--submitted", "true"])
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         openTask(named: neverStartedImage)
         XCTAssertTrue(waitUntil({ (composer.value as? String) == submitted }, timeout: 15), "A never-started prompt should return to the composer.")
-        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "A never-started prompt should return with its image.")
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "A never-started prompt should return with its image.")
         attachScreenshot(named: "Never-started prompt returns with its image")
     }
 
@@ -6981,15 +6986,16 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Blank message")
         let draftEditor = element("message-composer")
         let editorViewport = element("message-composer-scroll-view")
-        XCTAssertTrue(draftEditor.waitForExistence(timeout: 5))
+        XCTAssertTrue(draftEditor.waitToExist(timeout: 5))
         XCTAssertEqual(draftEditor.elementType, .textView, "The composer should use a native multiline text area.")
-        XCTAssertEqual(draftEditor.value as? String, longDraft)
+        XCTAssertTrue(waitUntil({ draftEditor.value as? String == longDraft }, timeout: 5),
+                      "The saved long draft should return after restarting: \(String(describing: draftEditor.value))")
         XCTAssertTrue(waitUntil({ editorViewport.frame.height >= 205 }, timeout: 5), "Opening a saved long draft must expand to the 12-line viewport immediately, before typing.")
         XCTAssertLessThanOrEqual(editorViewport.frame.height, 216, "A long draft must not expand the editor beyond its 12-line viewport cap.")
         attachScreenshot(named: "Long saved draft expands the native composer")
         let draftTopPosition = draftEditor.frame.minY
         editorViewport.swipeUp()
-        XCTAssertTrue(editorViewport.scrollBars.firstMatch.waitForExistence(timeout: 5), "Scrolling overflow must expose the composer's own native scrollbar.")
+        XCTAssertTrue(editorViewport.scrollBars.firstMatch.waitToExist(timeout: 5), "Scrolling overflow must expose the composer's own native scrollbar.")
         XCTAssertTrue(waitUntil({ draftEditor.frame.minY < draftTopPosition - 20 }, timeout: 5), "Scrolling down must reveal later draft content.")
         let draftLowerPosition = draftEditor.frame.minY
         editorViewport.swipeDown()
@@ -7021,11 +7027,12 @@ final class PlayhouseUITests: XCTestCase {
         let lineBreakDraft = editedDraft + "\n" + typedAfterLineBreak
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: longDraftTaskID)?["savedPrompt"] as? String) == lineBreakDraft }, timeout: 10))
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5), "Back must remain responsive after editing a long draft.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5), "Back must remain responsive after editing a long draft.")
         app.terminate()
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Blank message")
-        XCTAssertEqual(draftEditor.value as? String, lineBreakDraft)
+        XCTAssertTrue(waitUntil({ draftEditor.value as? String == lineBreakDraft }, timeout: 5),
+                      "The saved draft should return after restarting: \(String(describing: draftEditor.value))")
         XCTAssertTrue(waitUntil({ editorViewport.frame.height >= 205 }, timeout: 5), "The editor must also expand to its 12-line viewport after restarting with a saved draft.")
         draftEditor.click()
         draftEditor.typeKey("a", modifierFlags: .command)
@@ -7046,8 +7053,8 @@ final class PlayhouseUITests: XCTestCase {
         let composer = element("message-composer")
         let sendButton = element("send-message-button")
         let modelPicker = element("model-picker-menu")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10))
-        XCTAssertTrue(modelPicker.waitForExistence(timeout: 10), "The composer should show the selected model next to its send controls.")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        XCTAssertTrue(modelPicker.waitToExist(timeout: 10), "The composer should show the selected model next to its send controls.")
         let modelTaskID = try taskID(named: "Blank message")
         let modelResult = try runCLI(["conversation", "models", modelTaskID])["result"] as? [String: Any]
         let availableModels = try XCTUnwrap(modelResult?["models"] as? [[String: Any]])
@@ -7147,7 +7154,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertEqual(try repositoryRecord(taskID: titleTaskID, repositoryPath: fixture.primary.path)?["isPending"] as? Bool, true)
             openTask(named: "Untitled task")
             let titleComposer = element("message-composer")
-            XCTAssertTrue(titleComposer.waitForExistence(timeout: 10))
+            XCTAssertTrue(titleComposer.waitToExist(timeout: 10))
             let titlePrompt = "Transcript entry " + String(repeating: "Readable chat content for scrolling. ", count: 40)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             titleComposer.click()
@@ -7162,7 +7169,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(waitUntil({ backButton.isEnabled }, timeout: 5), "Back should become available after the submitted prompt and title placeholder are persisted.")
             backButton.click()
             let titleTaskCard = element("task-card-\(titleTaskID.uppercased())")
-            XCTAssertTrue(titleTaskCard.waitForExistence(timeout: 10))
+            XCTAssertTrue(titleTaskCard.waitToExist(timeout: 10))
             XCTAssertEqual(try taskRecord(id: titleTaskID)?["title"] as? String, "Generating title…", "The board should retain the title placeholder while title generation is pending.")
             clickTaskCardTitle(titleTaskCard)
             XCTAssertTrue(waitUntil({
@@ -7170,7 +7177,7 @@ final class PlayhouseUITests: XCTestCase {
             }, timeout: 10), "The active title-pending task should reopen from the board. UI: \(app.debugDescription)")
             XCTAssertEqual(element("message-composer").value as? String, "", "A submitted prompt must not reappear as a draft after returning during title generation.")
             let submittedPromptMessage = app.groups.matching(NSPredicate(format: "identifier BEGINSWITH %@", "user-message-")).firstMatch
-            XCTAssertTrue(submittedPromptMessage.waitForExistence(timeout: 5), "The submitted prompt should remain visible as a conversation message after reopening.")
+            XCTAssertTrue(submittedPromptMessage.waitToExist(timeout: 5), "The submitted prompt should remain visible as a conversation message after reopening.")
             let promptBubbles = app.groups.matching(NSPredicate(format: "identifier BEGINSWITH %@", "user-message-"))
             XCTAssertTrue(waitUntil({ promptBubbles.count == 1 }, timeout: 5), "The submitted prompt should render as exactly one user bubble after reopening; found \(promptBubbles.count).")
             XCTAssertTrue(element("pause-response-button").exists, "The reopened task should retain its active-send controls while the Codex thread is being prepared.")
@@ -7205,8 +7212,8 @@ final class PlayhouseUITests: XCTestCase {
             let longPromptMessage = app.textViews.matching(
                 NSPredicate(format: "value BEGINSWITH %@", "Transcript entry Readable chat content")
             ).firstMatch
-            XCTAssertTrue(longPromptMessage.waitForExistence(timeout: 5), "The full long prompt should remain present in conversation history.")
-            XCTAssertTrue(transcriptScrollView.scrollBars.firstMatch.waitForExistence(timeout: 5), "An overflowing transcript should expose a visible scrollbar.")
+            XCTAssertTrue(longPromptMessage.waitToExist(timeout: 5), "The full long prompt should remain present in conversation history.")
+            XCTAssertTrue(transcriptScrollView.scrollBars.firstMatch.waitToExist(timeout: 5), "An overflowing transcript should expose a visible scrollbar.")
             let latestPosition = longPromptMessage.frame.minY
             transcriptScrollView.swipeDown()
             XCTAssertTrue(waitUntil({ longPromptMessage.frame.minY > latestPosition + 20 }, timeout: 5), "Scrolling up should reveal earlier content in the long message.")
@@ -7234,7 +7241,7 @@ final class PlayhouseUITests: XCTestCase {
             let standaloneTitleTaskID = try XCTUnwrap(standaloneTitleTask["id"] as? String)
             openTask(named: "Untitled task")
             let standaloneComposer = element("message-composer")
-            XCTAssertTrue(standaloneComposer.waitForExistence(timeout: 10))
+            XCTAssertTrue(standaloneComposer.waitToExist(timeout: 10))
             standaloneComposer.click()
             standaloneComposer.typeText("Persist the provider thread before this background title finishes.")
             standaloneComposer.typeKey(.return, modifierFlags: [])
@@ -7267,7 +7274,7 @@ final class PlayhouseUITests: XCTestCase {
             try? FileManager.default.removeItem(at: concurrentTitleRelease)
             openTask(named: "Untitled task")
             let concurrentComposer = element("message-composer")
-            XCTAssertTrue(concurrentComposer.waitForExistence(timeout: 10))
+            XCTAssertTrue(concurrentComposer.waitToExist(timeout: 10))
             concurrentComposer.click()
             concurrentComposer.typeText(concurrentPrompt)
             concurrentComposer.typeKey(.return, modifierFlags: [])
@@ -7310,7 +7317,7 @@ final class PlayhouseUITests: XCTestCase {
             try Data("continue recovery\n".utf8).write(to: URL(fileURLWithPath: activeTitleFixtureExecutable + ".resolve-continue"))
             launchApp(defaultParent: fixture.parent.path)
             let recoveryTaskCard = element("task-card-\(recoveryTaskID.uppercased())")
-            XCTAssertTrue(recoveryTaskCard.waitForExistence(timeout: 10))
+            XCTAssertTrue(recoveryTaskCard.waitToExist(timeout: 10))
             clickTaskCardTitle(recoveryTaskCard)
             XCTAssertTrue(waitUntil({
                 element("task-view-title").exists || element("task-title-generating").exists
@@ -7335,7 +7342,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertEqual(try repositoryRecord(taskID: failureTaskID, repositoryPath: fixture.primary.path)?["branch"] as? String, "auto")
             openTask(named: "Untitled task")
             let failureComposer = element("message-composer")
-            XCTAssertTrue(failureComposer.waitForExistence(timeout: 10))
+            XCTAssertTrue(failureComposer.waitToExist(timeout: 10))
             let failurePrompt = "Explain how repository setup works for new contributors"
             let rpcFailureCountBeforeSend = try diagnosticEvents().filter {
                 $0["event"] as? String == "codex.rpc.response.failed" && $0["errorCode"] as? String == "-32042"
@@ -7381,7 +7388,7 @@ final class PlayhouseUITests: XCTestCase {
             launchApp(defaultParent: fixture.parent.path)
             openTask(named: failurePrompt)
             let queuedMessageRow = element("queued-message-text-\(queuedMessageID)")
-            XCTAssertTrue(queuedMessageRow.waitForExistence(timeout: 10), "The saved queued follow-up should appear after reopening the conversation.")
+            XCTAssertTrue(queuedMessageRow.waitToExist(timeout: 10), "The saved queued follow-up should appear after reopening the conversation.")
             XCTAssertEqual(queuedMessageRow.value as? String, queuedText)
             app.terminate()
             // A plain fixture, never the installed Codex CLI.
@@ -7401,7 +7408,7 @@ final class PlayhouseUITests: XCTestCase {
             sendButton.click()
 
             let pauseButton = element("pause-response-button")
-            XCTAssertTrue(pauseButton.waitForExistence(timeout: 60), "A live turn should replace Send with Pause.")
+            XCTAssertTrue(pauseButton.waitToExist(timeout: 60), "A live turn should replace Send with Pause.")
             XCTAssertTrue(pauseButton.isEnabled, "Pause should be enabled after Codex reports an active turn.")
             XCTAssertFalse(element("steer-current-turn-button").exists, "The old footer Steer button should be absent during a turn.")
             XCTAssertFalse(element("queue-message-after-turn-button").exists, "The old footer Queue button should be absent during a turn.")
@@ -7412,12 +7419,12 @@ final class PlayhouseUITests: XCTestCase {
             composer.typeKey(.return, modifierFlags: [])
             let queuedDuringLiveTurn = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
             XCTAssertEqual(queuedDuringLiveTurn?.first?["text"] as? String, queuedText, "Return should queue the active-turn follow-up.")
-            XCTAssertTrue(app.staticTexts["Queued for after this turn"].waitForExistence(timeout: 10), "Queueing should persist and visibly distinguish a follow-up from steering.")
+            XCTAssertTrue(app.staticTexts["Queued for after this turn"].waitToExist(timeout: 10), "Queueing should persist and visibly distinguish a follow-up from steering.")
 
             element("back-to-board-button").click()
             openTask(named: "Blank message")
-            XCTAssertTrue(element("pause-response-button").waitForExistence(timeout: 30), "Reopening the task should retain the active-turn controls.")
-            XCTAssertTrue(app.staticTexts["Queued for after this turn"].waitForExistence(timeout: 10), "The queued follow-up should survive closing and reopening the conversation.")
+            XCTAssertTrue(element("pause-response-button").waitToExist(timeout: 30), "Reopening the task should retain the active-turn controls.")
+            XCTAssertTrue(app.staticTexts["Queued for after this turn"].waitToExist(timeout: 10), "The queued follow-up should survive closing and reopening the conversation.")
             XCTAssertEqual(composer.value as? String, "", "A prompt already sent to Codex must not reappear as a composer draft.")
             let reopenedActivity = element("codex-activity-disclosure")
             let visibleThinking = NSPredicate(format: "label CONTAINS %@ OR label CONTAINS %@", "Thinking", "Running")
@@ -7427,7 +7434,7 @@ final class PlayhouseUITests: XCTestCase {
                           "Reopening a task mid-turn should land on the same open section instead of hiding the work behind Working for.")
 
             let activityDisclosure = element("codex-activity-disclosure")
-            guard activityDisclosure.waitForExistence(timeout: 60) else {
+            guard activityDisclosure.waitToExist(timeout: 60) else {
                 attachScreenshot(named: "Live turn did not surface Codex activity")
                 let liveHistory = try? runCLI(["conversation", "history", taskID])
                 let liveRows = ((liveHistory?["result"] as? [String: Any])?["activities"] as? [[String: Any]] ?? [])
@@ -7449,7 +7456,7 @@ final class PlayhouseUITests: XCTestCase {
             let activityRow = app.descendants(matching: .any)
                 .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "codex-activity-row-", "sleep 90; printf PAUSE_TEST_FINISHED"))
                 .firstMatch
-            XCTAssertTrue(activityRow.waitForExistence(timeout: 30), "A live turn should show its running command row without the reader opening anything.")
+            XCTAssertTrue(activityRow.waitToExist(timeout: 30), "A live turn should show its running command row without the reader opening anything.")
             attachScreenshot(named: "Running chat composer and open Codex activity")
             // The open section is a default, not a lock. The running row keeps the
             // live slot outside the section, so the chevron is what folds here.
@@ -7459,14 +7466,14 @@ final class PlayhouseUITests: XCTestCase {
             activityDisclosure.click()
             XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Expanded, down chevron" }, timeout: 10),
                           "Reopening the section mid-turn should restore the open chevron.")
-            XCTAssertTrue(activityRow.waitForExistence(timeout: 30), "The running command row should remain available.")
+            XCTAssertTrue(activityRow.waitToExist(timeout: 30), "The running command row should remain available.")
 
             pauseButton.click()
             let continueButton = element("continue-response-button")
-            XCTAssertTrue(continueButton.waitForExistence(timeout: 30), "An interrupted response should offer Continue.")
+            XCTAssertTrue(continueButton.waitToExist(timeout: 30), "An interrupted response should offer Continue.")
             attachScreenshot(named: "Paused response with Continue control")
             continueButton.click()
-            XCTAssertTrue(sendButton.waitForExistence(timeout: 120), "The continued response should return the composer to Send.")
+            XCTAssertTrue(sendButton.waitToExist(timeout: 120), "The continued response should return the composer to Send.")
             let pauseEnded = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: pauseButton)
             let continueEnded = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: continueButton)
             XCTAssertEqual(
@@ -7477,7 +7484,7 @@ final class PlayhouseUITests: XCTestCase {
             let completedAssistantMessage = app.descendants(matching: .any)
                 .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND value != ''", "assistant-message-"))
                 .firstMatch
-            XCTAssertTrue(completedAssistantMessage.waitForExistence(timeout: 30), "Continue should finish the response and show its assistant message in the conversation.")
+            XCTAssertTrue(completedAssistantMessage.waitToExist(timeout: 30), "Continue should finish the response and show its assistant message in the conversation.")
             attachScreenshot(named: "Continued response completed in the conversation")
         }
         attachScreenshot(named: "Blank composer leaves send disabled")
@@ -7502,7 +7509,7 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: title)
         let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
         composer.click()
         composer.typeText("Hold until stopped.")
         element("send-message-button").click()
@@ -7515,7 +7522,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue((thinking["interruptibleThreadIDs"] as? [String] ?? []).contains(threadID), "The daemon should report the window's thinking turn as interruptible.")
 
         let stopActivity = element("codex-activity-disclosure")
-        XCTAssertTrue(stopActivity.waitForExistence(timeout: 10), "A thinking turn should surface its activity section.")
+        XCTAssertTrue(stopActivity.waitToExist(timeout: 10), "A thinking turn should surface its activity section.")
         XCTAssertTrue(waitUntil({ stopActivity.value as? String == "Expanded, down chevron" }, timeout: 10),
                       "A thinking turn should show its work instead of hiding it behind Working for.")
         let stop = element("pause-response-button")
@@ -7523,15 +7530,15 @@ final class PlayhouseUITests: XCTestCase {
         stop.click()
         XCTAssertTrue(waitUntil({ (try? taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 5), "The task should move to Waiting Response immediately after Stop.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         let waitingColumn = element("column-waiting-response")
         let waitingCard = waitingColumn.buttons["task-card-\(taskID.uppercased())"]
-        XCTAssertTrue(waitingCard.waitForExistence(timeout: 5), "The visible board should place the stopped task in Waiting Response before interrupt acknowledgment.")
+        XCTAssertTrue(waitingCard.waitToExist(timeout: 5), "The visible board should place the stopped task in Waiting Response before interrupt acknowledgment.")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10), "\(provider) should receive its native interrupt.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response", "The task should move before the provider acknowledges the interrupt.")
         try Data("acknowledge interrupt\n".utf8).write(to: release)
         clickTaskCardTitle(waitingCard)
-        XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 15), "The stopped turn should reset the composer to its resumable state.")
+        XCTAssertTrue(element("continue-response-button").waitToExist(timeout: 15), "The stopped turn should reset the composer to its resumable state.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         XCTAssertNil(try taskRecord(id: taskID)?["statusMessage"] as? String, "A user-requested stop should not leave a failure reason.")
         // A user-initiated Stop settles with no final answer and no Blocked reason,
@@ -7558,7 +7565,7 @@ final class PlayhouseUITests: XCTestCase {
         try exerciseStopDuringThinking(provider: "claude", title: "Claude stop while thinking")
     }
 
-    // case-contract: test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle | The bridge daemon starts on the first request, serves later requests from the same process, and stays alive while any connection (such as a window's runtime or CPU usage watcher) is open. A watcher receives the daemon's runtime snapshots as a turn starts and stops, and the daemon exits by itself once the last connection closes and no request is running; the next request starts a fresh daemon on demand without any manual step.
+    // case-contract: test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle | The bridge daemon starts on the first request, exactly once even when callers race to start it, serves later requests from the same process, and stays alive while any connection (such as a window's runtime or CPU usage watcher) is open. A watcher receives the daemon's runtime snapshots as a turn starts and stops, and the daemon exits by itself once the last connection closes and no request is running; the next request starts a fresh daemon on demand without any manual step.
     func test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle() throws {
         // Its own daemon, separate from the one the UI runner keeps alive for every
         // case. The app starts it: the sandboxed test runner can only connect.
@@ -7586,6 +7593,9 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try XCTUnwrap(task["id"] as? String)
         let firstPID = try daemonPID()
         XCTAssertTrue(isRunning(firstPID), "The window's first request should have started a daemon.")
+        // The window sends several requests at once on launch; racing to start the daemon, they start exactly one.
+        XCTAssertEqual(daemonLogProcessIDs(service: graceEnvironment["PLAYHOUSE_BRIDGE_SERVICE_NAME"]!), [firstPID],
+                       "Only one daemon should have been started.")
         XCTAssertEqual(try daemonPID(), firstPID, "Later requests should reuse the running daemon.")
         RunLoop.current.run(until: Date().addingTimeInterval(4.5))
         XCTAssertTrue(isRunning(firstPID), "An open window keeps the daemon alive past its idle grace.")
@@ -7596,7 +7606,7 @@ final class PlayhouseUITests: XCTestCase {
         // The window sees the daemon's turn start and stop.
         openTask(named: "Daemon watcher")
         let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
         composer.click()
         composer.typeText("Hold until stopped.")
         element("send-message-button").click()
@@ -7610,7 +7620,7 @@ final class PlayhouseUITests: XCTestCase {
         _ = try runCLI(["conversation", "stop", taskID], extraEnvironment: graceEnvironment)
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10))
         try Data("acknowledge interrupt\n".utf8).write(to: release)
-        XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 15), "The window should show the turn as paused once the daemon settles it.")
+        XCTAssertTrue(element("continue-response-button").waitToExist(timeout: 15), "The window should show the turn as paused once the daemon settles it.")
         let stopped = try XCTUnwrap(try runCLI(["conversation", "runtime"], extraEnvironment: graceEnvironment)["result"] as? [String: Any])
         XCTAssertFalse((stopped["activeThreadIDs"] as? [String] ?? []).contains(threadID))
         XCTAssertTrue((stopped["interruptedThreadIDs"] as? [String] ?? []).contains(threadID))
@@ -7668,7 +7678,7 @@ final class PlayhouseUITests: XCTestCase {
         stop.click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10), "Stop reaches the reattached turn.")
         try Data("acknowledge interrupt\n".utf8).write(to: release)
-        XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 15))
+        XCTAssertTrue(element("continue-response-button").waitToExist(timeout: 15))
         XCTAssertTrue(waitForStatus(taskID, "Waiting Response"))
         for marker in [ready, received, release] { try? FileManager.default.removeItem(at: marker) }
         sendFromComposer("Hold again on the fresh daemon.")
@@ -7677,7 +7687,7 @@ final class PlayhouseUITests: XCTestCase {
         stop.click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10))
         try Data("acknowledge interrupt\n".utf8).write(to: release)
-        XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 15))
+        XCTAssertTrue(element("continue-response-button").waitToExist(timeout: 15))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
     }
 
@@ -7695,7 +7705,7 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Codex reattach")
         sendFromComposer("Keep working across a restart.")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-ready") }, timeout: 20), "The turn should be running.")
-        XCTAssertTrue(transcriptMessage("Before restart.").waitForExistence(timeout: 15))
+        XCTAssertTrue(transcriptMessage("Before restart.").waitToExist(timeout: 15))
         let server = try XCTUnwrap(agentManifest(kind: "codex", service: environment)?.manifest["process"] as? [String: Any])
         attachScreenshot(named: "codex-reattach-1-running-before-restart")
 
@@ -7704,7 +7714,7 @@ final class PlayhouseUITests: XCTestCase {
         touch(executable + ".reattach-raise")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-raised") }, timeout: 10))
         // The window reconnects; the fresh daemon reattaches the turn and re-receives the question.
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 30), "The question raised during the restart appears.")
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 30), "The question raised during the restart appears.")
         XCTAssertFalse(element("codex-chat-error").exists, "A reattached turn is not a failed turn.")
         XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment))
         XCTAssertFalse((try taskRecord(id: taskID)?["statusMessage"] as? String ?? "").contains("restarting"))
@@ -7712,9 +7722,9 @@ final class PlayhouseUITests: XCTestCase {
                        "The fresh daemon reconnects to the same app-server.")
         XCTAssertTrue(transcriptMessage("Before restart.").exists)
         attachScreenshot(named: "codex-reattach-2-question-after-restart")
-        app.buttons["blue"].click()
+        selectQuestionOption("blue")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(transcriptMessage("Answer received: blue.").waitForExistence(timeout: 15))
+        XCTAssertTrue(transcriptMessage("Answer received: blue.").waitToExist(timeout: 15))
         steerFromComposer("Also check the README.")
         XCTAssertTrue(waitUntil({ !self.jsonLines(executable + ".reattach-steers").isEmpty }, timeout: 15), "The follow-up steers the reattached turn.")
         // The steer also makes the server raise a question on a thread no conversation owns; the
@@ -7770,7 +7780,7 @@ final class PlayhouseUITests: XCTestCase {
         sendFromComposer("Keep working across a restart.")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-ready") }, timeout: 20))
         touch(executable + ".reattach-ask")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 15), "The question appears before the restart.")
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 15), "The question appears before the restart.")
         let run = try XCTUnwrap(agentManifest(kind: "claude", service: environment))
         let agent = try XCTUnwrap(run.manifest["process"] as? [String: Any])
         attachScreenshot(named: "claude-reattach-1-question-before-restart")
@@ -7783,15 +7793,15 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("codex-chat-error").exists, "A reattached turn is not a failed turn.")
         let reconnected = try runCLI(["task", "get", taskID], extraEnvironment: environment)["result"] as? [String: Any]
         XCTAssertFalse((reconnected?["statusMessage"] as? String ?? "").contains("restarting"), "No restart notice after reconnecting.")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 15))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 15))
         XCTAssertTrue(agentIsAlive(agent))
         attachScreenshot(named: "claude-reattach-2-question-after-restart")
-        app.buttons["blue"].click()
+        selectQuestionOption("blue")
         element("submit-ai-answers-button").click()
         steerFromComposer("Also check the README.")
         XCTAssertTrue(waitUntil({ !self.jsonLines(executable + ".reattach-steers").isEmpty }, timeout: 15), "The follow-up reaches the running process.")
         touch(executable + ".reattach-release")
-        XCTAssertTrue(transcriptMessage("After restart.").waitForExistence(timeout: 20), "The window streams the rest of the reattached turn.")
+        XCTAssertTrue(transcriptMessage("After restart.").waitToExist(timeout: 20), "The window streams the rest of the reattached turn.")
         XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment))
         attachScreenshot(named: "claude-reattach-3-finished")
         let finalStatus = try runCLI(["task", "get", taskID], extraEnvironment: environment)["result"] as? [String: Any]
@@ -7850,9 +7860,9 @@ final class PlayhouseUITests: XCTestCase {
             openTask(named: title)
             let settled = try runCLI(["task", "get", taskID], extraEnvironment: environment)["result"] as? [String: Any]
             XCTAssertEqual(settled?["statusMessage"] as? String, Self.restartMessage)
-            XCTAssertTrue(transcriptMessage("Die while Playhouse is down.").waitForExistence(timeout: 10), "The conversation up to the restart is kept.")
+            XCTAssertTrue(transcriptMessage("Die while Playhouse is down.").waitToExist(timeout: 10), "The conversation up to the restart is kept.")
             if provider == "codex" {
-                XCTAssertTrue(transcriptMessage("Before restart.").waitForExistence(timeout: 10), "Codex keeps the output its thread saved before the agent died.")
+                XCTAssertTrue(transcriptMessage("Before restart.").waitToExist(timeout: 10), "Codex keeps the output its thread saved before the agent died.")
             }
             attachScreenshot(named: "\(provider)-agent-died-interrupted")
             XCTAssertTrue(terminateAppAndWait(app))
@@ -7884,7 +7894,7 @@ final class PlayhouseUITests: XCTestCase {
             attachScreenshot(named: "\(provider)-reattached-turn-stop-offered")
             stop.click()
             XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-interrupted") }, timeout: 15), "Stop reaches the reattached agent.")
-            XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 20))
+            XCTAssertTrue(element("continue-response-button").waitToExist(timeout: 20))
             XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment))
             if provider == "codex" {
                 XCTAssertTrue(agentIsAlive(agent), "Codex stops the turn and keeps its shared server.")
@@ -7917,11 +7927,11 @@ final class PlayhouseUITests: XCTestCase {
         // Another caller starts the turn while the window shows the task.
         let sender = try startCLIProcess(["conversation", "send", taskID, "--message", "Stream to a watcher."])
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-ready") }, timeout: 20))
-        XCTAssertTrue(transcriptMessage("Stream to a watcher.").waitForExistence(timeout: 15), "The window shows the prompt of a turn it didn't send.")
+        XCTAssertTrue(transcriptMessage("Stream to a watcher.").waitToExist(timeout: 15), "The window shows the prompt of a turn it didn't send.")
         XCTAssertTrue(waitUntil({ self.element("pause-response-button").exists }, timeout: 15), "The window shows the turn as running.")
         attachScreenshot(named: "watched-turn-running")
         touch(executable + ".reattach-release")
-        XCTAssertTrue(transcriptMessage("After restart.").waitForExistence(timeout: 20), "The window streams the watched turn's text.")
+        XCTAssertTrue(transcriptMessage("After restart.").waitToExist(timeout: 20), "The window streams the watched turn's text.")
         let (sent, senderEvents) = try finishCLIProcessCapturingEvents(sender)
         XCTAssertEqual(sent["ok"] as? Bool, true)
         let senderText = senderEvents.filter { $0["type"] as? String == "text_delta" }
@@ -7975,7 +7985,7 @@ final class PlayhouseUITests: XCTestCase {
         try JSONSerialization.data(withJSONObject: codexManifest).write(to: codexRuns.appendingPathComponent("young.json"))
         // The window's first requests start the daemon, which sweeps the run folders.
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 15))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 15))
         XCTAssertTrue(waitUntil({ !stray.isRunning }, timeout: 20), "A Claude run process no manifest accounts for is stopped.")
         XCTAssertTrue(waitUntil({ !codexStray.isRunning }, timeout: 20), "A Codex server process no manifest accounts for is stopped.")
         XCTAssertTrue(young.isRunning, "A Claude spawn still being recorded is left alone.")
@@ -8004,7 +8014,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ ((try? String(contentsOfFile: log, encoding: .utf8)) ?? "").contains("\"type\": \"result\"") }, timeout: 15))
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
         openTask(named: "Claude finished while down")
-        XCTAssertTrue(transcriptMessage("After restart.").waitForExistence(timeout: 30), "The result written during the restart is shown.")
+        XCTAssertTrue(transcriptMessage("After restart.").waitToExist(timeout: 30), "The result written during the restart is shown.")
         XCTAssertTrue(waitForStatus(taskID, "Waiting Response", environment: environment, timeout: 40))
         XCTAssertFalse((try taskRecord(id: taskID)?["statusMessage"] as? String ?? "").contains("restarting"))
         XCTAssertEqual(try historyTexts(taskID: taskID, environment: environment).filter { $0 == "After restart." }.count, 1)
@@ -8032,7 +8042,7 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: title)
         let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
         composer.click()
         composer.typeText("Hold until stopped.")
         element("send-message-button").click()
@@ -8042,18 +8052,18 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response", "The optimistic pause should persist while rejection is pending.")
         try Data("reject interrupt\n".utf8).write(to: reject)
         let stopError = element("codex-chat-error")
-        XCTAssertTrue(stopError.waitForExistence(timeout: 10), "The UI should report the provider's rejected interrupt.")
+        XCTAssertTrue(stopError.waitToExist(timeout: 10), "The UI should report the provider's rejected interrupt.")
         XCTAssertTrue(stopError.label.localizedCaseInsensitiveContains("rejected"), "The visible error should explain that the provider rejected Stop.")
         XCTAssertTrue(waitUntil({ (try? taskRecord(id: taskID)?["status"] as? String) == "In Progress" }, timeout: 5), "A rejected stop should restore In Progress while the turn remains active.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         let activeColumn = element("column-in-progress")
         let activeCard = activeColumn.buttons["task-card-\(taskID.uppercased())"]
-        XCTAssertTrue(activeCard.waitForExistence(timeout: 5), "The visible board should keep the still-running task in In Progress.")
+        XCTAssertTrue(activeCard.waitToExist(timeout: 5), "The visible board should keep the still-running task in In Progress.")
         try Data("finish active turn\n".utf8).write(to: release)
         XCTAssertTrue(waitUntil({ (try? taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 15), "The original turn should complete normally and return the task for review.")
         let waitingColumn = element("column-waiting-response")
-        XCTAssertTrue(waitingColumn.buttons["task-card-\(taskID.uppercased())"].waitForExistence(timeout: 8), "The visible board should show the naturally completed task awaiting review.")
+        XCTAssertTrue(waitingColumn.buttons["task-card-\(taskID.uppercased())"].waitToExist(timeout: 8), "The visible board should show the naturally completed task awaiting review.")
     }
 
     // case-contract: test_codex_stop_rejection_restores_active_task | If Codex rejects turn/interrupt while its turn is still active, Stop reports the provider failure and the task returns to In Progress; releasing the fixture lets the original turn complete normally into Waiting Response.
@@ -8093,14 +8103,14 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["conversationProvider"] as? String, "codex")
         openTask(named: "Provider choice UI")
         let providerMenu = element("conversation-provider-menu")
-        XCTAssertTrue(providerMenu.waitForExistence(timeout: 10), "The composer should offer a provider picker.")
+        XCTAssertTrue(providerMenu.waitToExist(timeout: 10), "The composer should offer a provider picker.")
         XCTAssertTrue(waitUntil({ providerMenu.label.contains("Codex") && providerMenu.isEnabled }, timeout: 10))
-        XCTAssertTrue(app.staticTexts["Send a message to Codex · Luna."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Send a message to Codex · Luna."].waitToExist(timeout: 10))
         _ = try runCLI(["conversation", "model", taskID, "set", "codex-choice"])
 
         element("conversation-provider-menu").click()
         let claudeChoice = app.menuItems["conversation-provider-claude"]
-        XCTAssertTrue(claudeChoice.waitForExistence(timeout: 5))
+        XCTAssertTrue(claudeChoice.waitToExist(timeout: 5))
         claudeChoice.click()
         XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").label.contains("Claude") }, timeout: 10), "A task without a conversation switches immediately.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["conversationProvider"] as? String) == "claude" }, timeout: 10))
@@ -8121,7 +8131,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("provider-boundary-claude").exists, "Switching before any conversation records no boundary.")
         XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").isEnabled }, timeout: 10))
         element("conversation-provider-menu").click()
-        XCTAssertTrue(app.menuItems["conversation-provider-codex"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.menuItems["conversation-provider-codex"].waitToExist(timeout: 5))
         app.menuItems["conversation-provider-codex"].click()
         XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").label.contains("Codex") }, timeout: 10))
         let switchedCodexModelPicker = element("model-picker-menu")
@@ -8129,7 +8139,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "codex-choice")
         XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").isEnabled }, timeout: 10))
         element("conversation-provider-menu").click()
-        XCTAssertTrue(app.menuItems["conversation-provider-claude"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.menuItems["conversation-provider-claude"].waitToExist(timeout: 5))
         app.menuItems["conversation-provider-claude"].click()
         XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").label.contains("Claude") }, timeout: 10))
         let switchedClaudeModelPicker = element("model-picker-menu")
@@ -8140,7 +8150,7 @@ final class PlayhouseUITests: XCTestCase {
 
         let modeMenu = element("conversation-mode-menu")
         modeMenu.click()
-        XCTAssertTrue(app.menuItems["Plan mode"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.menuItems["Plan mode"].waitToExist(timeout: 5))
         XCTAssertFalse(app.menuItems["conversation-mode-goal"].exists, "Claude tasks hide Goal mode.")
         app.typeKey(.escape, modifierFlags: [])
         let goal = try runCLI(["conversation", "goal", taskID, "set", "--text", "Ship it"], expectedStatus: 1)
@@ -8151,7 +8161,7 @@ final class PlayhouseUITests: XCTestCase {
         relaunchApp()
         openTask(named: "Provider choice UI")
         XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").label.contains("Claude") }, timeout: 10), "The provider choice persists across an app relaunch.")
-        XCTAssertTrue(app.staticTexts["Send a message to Claude."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Send a message to Claude."].waitToExist(timeout: 10))
         element("back-to-board-button").click()
 
         _ = try runCLI(["settings", "set-default-provider", "claude"])
@@ -8168,7 +8178,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("empty-conversation").exists, "A description saved on create must not have been sent.")
         attachScreenshot(named: "Task created with a prompt shows its description unsent in the composer")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         XCTAssertEqual(try taskRecord(id: try XCTUnwrap(prompted["id"] as? String))?["status"] as? String, "Backlog", "Opening the task must not start it.")
         let blankPrompt = try runCLI(["task", "create", "--title", "Blank prompt UI", "--root", fixture.primary.path, "--prompt", "   "], expectedStatus: 2)
         XCTAssertEqual((blankPrompt["error"] as? [String: Any])?["code"] as? String, "invalid_argument", "A blank --prompt is rejected.")
@@ -8188,9 +8198,9 @@ final class PlayhouseUITests: XCTestCase {
         moveTaskToDone("Provider done UI")
         element("done-archive-button").click()
         let archived = element("done-archive-task-\(doneTaskID)")
-        XCTAssertTrue(archived.waitForExistence(timeout: 10))
+        XCTAssertTrue(archived.waitToExist(timeout: 10))
         archived.click()
-        XCTAssertTrue(element("archived-conversation-read-only").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("archived-conversation-read-only").waitToExist(timeout: 10))
         XCTAssertFalse(element("conversation-provider-menu").exists, "A Done task's read-only conversation offers no provider switch.")
         let doneSwitch = try runCLI(["conversation", "provider", doneTaskID, "set", "claude"], expectedStatus: 2)
         XCTAssertTrue(((doneSwitch["error"] as? [String: Any])?["message"] as? String ?? "").contains("Done tasks are closed"))
@@ -8218,7 +8228,7 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try taskID(named: "Provider switch UI")
         openTask(named: "Provider switch UI")
         let providerMenu = element("conversation-provider-menu")
-        XCTAssertTrue(providerMenu.waitForExistence(timeout: 10))
+        XCTAssertTrue(providerMenu.waitToExist(timeout: 10))
 
         let hold = URL(fileURLWithPath: executablePath + ".outcome-hold")
         let active = URL(fileURLWithPath: executablePath + ".outcome-active")
@@ -8236,7 +8246,7 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Start with Codex.")
         element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 10))
         selectQuestionOption("Blue")
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
@@ -8248,7 +8258,7 @@ final class PlayhouseUITests: XCTestCase {
         _ = try runCLI(["task", "outcome", taskID, "completed"])
         try "Release the held fixture turn.\n".write(to: release, atomically: true, encoding: .utf8)
         let codexReply = transcriptMessage("Answers received: Blue / fixture-secret.")
-        XCTAssertTrue(codexReply.waitForExistence(timeout: 10))
+        XCTAssertTrue(codexReply.waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 10))
         let codexThread = try XCTUnwrap(try taskRecord(id: taskID)?["codexThreadID"] as? String)
 
@@ -8260,10 +8270,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ providerMenu.isEnabled }, timeout: 10), "The provider menu is enabled once the turn settles.")
         providerMenu.click()
         let claudeChoice = app.menuItems["conversation-provider-claude"]
-        XCTAssertTrue(claudeChoice.waitForExistence(timeout: 5))
+        XCTAssertTrue(claudeChoice.waitToExist(timeout: 5))
         claudeChoice.click()
         let boundary = element("provider-boundary-claude")
-        XCTAssertTrue(boundary.waitForExistence(timeout: 10), "A settled switch shows a provider boundary.")
+        XCTAssertTrue(boundary.waitToExist(timeout: 10), "A settled switch shows a provider boundary.")
         XCTAssertEqual(boundary.label, "Conversation switched to Claude")
         XCTAssertGreaterThan(boundary.frame.minY, codexReply.frame.maxY, "The boundary follows the last Codex reply.")
         XCTAssertTrue(app.staticTexts["Codex · Luna"].exists, "Earlier replies stay labeled Codex.")
@@ -8274,14 +8284,14 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         relaunchApp()
         openTask(named: "Provider switch UI")
-        XCTAssertTrue(element("provider-boundary-claude").waitForExistence(timeout: 10), "The boundary persists across an app relaunch.")
+        XCTAssertTrue(element("provider-boundary-claude").waitToExist(timeout: 10), "The boundary persists across an app relaunch.")
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].exists)
 
         let reopenedMenu = element("conversation-provider-menu")
         XCTAssertTrue(waitUntil({ reopenedMenu.isEnabled }, timeout: 10))
         reopenedMenu.click()
         let codexChoice = app.menuItems["conversation-provider-codex"]
-        XCTAssertTrue(codexChoice.waitForExistence(timeout: 5))
+        XCTAssertTrue(codexChoice.waitToExist(timeout: 5))
         codexChoice.click()
         XCTAssertTrue(waitForDisappearance(element("provider-boundary-claude"), timeout: 10), "Returning before any Claude turn removes the empty boundary.")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Provider switch UI", prompt: "Continue with Codex.")
@@ -8333,22 +8343,22 @@ final class PlayhouseUITests: XCTestCase {
         let firstTurnModelArgumentIndex = try XCTUnwrap(firstTurnArguments.firstIndex(of: "--model"))
         XCTAssertEqual(firstTurnArguments[firstTurnModelArgumentIndex + 1], "sonnet", "Sending without an explicit pick should dispatch to Sonnet.")
         // Settling re-renders the transcript (commentary folds into Worked for), so the answer can briefly be mid-layout.
-        XCTAssertTrue(visibleTexts(containing: story).firstMatch.waitForExistence(timeout: 5), "The story should be the visible answer, not collapsed commentary.")
-        XCTAssertTrue(visibleTexts(containing: "The story is above.").firstMatch.waitForExistence(timeout: 5), "The closing line belongs to the same answer.")
+        XCTAssertTrue(visibleTexts(containing: story).firstMatch.waitToExist(timeout: 5), "The story should be the visible answer, not collapsed commentary.")
+        XCTAssertTrue(visibleTexts(containing: "The story is above.").firstMatch.waitToExist(timeout: 5), "The closing line belongs to the same answer.")
         element("codex-activity-disclosure").click()
         let activityDetails = element("codex-activity-details")
-        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Worked for should expand.")
+        XCTAssertTrue(activityDetails.waitToExist(timeout: 5), "Worked for should expand.")
         XCTAssertEqual(activityDetails.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", story)).count, 0, "The story must not be inside Worked for.")
         element("codex-activity-disclosure").click()
 
         send("Please inspect the workspace.")
-        XCTAssertTrue(visibleTexts(containing: "Inspection done: the workspace is ready.").firstMatch.waitForExistence(timeout: 20))
+        XCTAssertTrue(visibleTexts(containing: "Inspection done: the workspace is ready.").firstMatch.waitToExist(timeout: 20))
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Blocked" }, timeout: 60), "A turn that leaves every status nudge unanswered should settle in Blocked.")
         waitForSettledTurn()
         XCTAssertEqual(visibleTexts(containing: "I'll inspect the workspace first.").count, 0, "Text before an ordinary tool stays collapsed commentary.")
 
         send("Start the checks.")
-        XCTAssertTrue(visibleTexts(containing: "Start the checks.").firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(visibleTexts(containing: "Start the checks.").firstMatch.waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({
             !self.element("pause-response-button").exists
         }, timeout: 20), "The commentary-only turn should finish.")
@@ -8357,9 +8367,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ providerMenu.isEnabled }, timeout: 10), "The provider menu is enabled once the turn settles.")
         providerMenu.click()
         let codexChoice = app.menuItems["conversation-provider-codex"]
-        XCTAssertTrue(codexChoice.waitForExistence(timeout: 5))
+        XCTAssertTrue(codexChoice.waitToExist(timeout: 5))
         codexChoice.click()
-        XCTAssertTrue(element("provider-boundary-codex").waitForExistence(timeout: 10), "The switch shows a provider boundary.")
+        XCTAssertTrue(element("provider-boundary-codex").waitToExist(timeout: 10), "The switch shows a provider boundary.")
         send("Continue the story.")
         XCTAssertTrue(waitUntil({ self.transcriptContains("Answers received: Blue / fixture-secret.") }, timeout: 20), "The Codex turn should complete.")
         let claudeHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: claudeExecutable.path + ".history"))) as? [String: Any])
@@ -8388,7 +8398,7 @@ final class PlayhouseUITests: XCTestCase {
         relaunchApp()
         openTask(named: "Claude answer UI")
         XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
-        XCTAssertTrue(visibleTexts(containing: story).firstMatch.waitForExistence(timeout: 10), "The saved Claude answer should persist across a relaunch.")
+        XCTAssertTrue(visibleTexts(containing: story).firstMatch.waitToExist(timeout: 10), "The saved Claude answer should persist across a relaunch.")
         XCTAssertTrue(element("provider-boundary-codex").exists)
     }
 
@@ -8460,7 +8470,7 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Claude resume recovery UI")
         XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
         XCTAssertTrue(waitUntil({ self.transcriptContains(story) }, timeout: 10), "The first Claude answer should restore from Playhouse's persisted transcript.")
-        XCTAssertTrue(transcriptMessage("Please inspect the workspace.").waitForExistence(timeout: 10), "The previous user prompt should remain in the reopened transcript.")
+        XCTAssertTrue(transcriptMessage("Please inspect the workspace.").waitToExist(timeout: 10), "The previous user prompt should remain in the reopened transcript.")
         XCTAssertTrue(waitUntil({ self.transcriptContains("Inspection done: the workspace is ready.") }, timeout: 10), "The second Claude answer should also restore from Playhouse's persisted transcript.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: executable.path + ".missing-resume"))
         try Data("Playhouse test owns this missing-session trigger.\n".utf8).write(to: URL(fileURLWithPath: executable.path + ".missing-resume"))
@@ -8538,7 +8548,9 @@ final class PlayhouseUITests: XCTestCase {
         let seededLegacyLink = seededLegacyResponse.descendants(matching: .staticText).matching(
             NSPredicate(format: "value CONTAINS %@", "Comment 1")
         ).firstMatch
-        XCTAssertTrue(seededLegacyLink.waitForExistence(timeout: 5))
+        XCTAssertTrue(seededLegacyLink.waitToExist(timeout: 5))
+        // The opened transcript is still pinning its latest turn; a screenshot of a moving row misses the glyphs.
+        XCTAssertTrue(waitForStableFrame(seededLegacyLink), "The seeded comment link should stop moving before its glyphs are measured.")
         // Locate the rendered marker glyphs directly; accessibility text-view
         // frames include font-dependent padding and do not match glyph positions.
         let seededCommentHint = element("response-comment-hover-card")
@@ -8627,7 +8639,7 @@ final class PlayhouseUITests: XCTestCase {
         let confirmedHintAppearance = try XCTUnwrap(hintAppearedAt, "The timing probe must observe the hint window.")
         XCTAssertGreaterThanOrEqual(confirmedHintAppearance.timeIntervalSince(confirmedHoverStart), 0.19,
                                     "The hint should wait about 200 ms after pointer entry.")
-        XCTAssertTrue(seededCommentHint.waitForExistence(timeout: 5),
+        XCTAssertTrue(seededCommentHint.waitToExist(timeout: 5),
                       "A native pointer hover on the comment glyphs should open their hint.")
         XCTAssertFalse(visibleAppWindowIDs().subtracting(windowsBeforeHover).isEmpty,
                        "The visible hint should create a window detectable by the timing probe.")
@@ -8696,7 +8708,7 @@ final class PlayhouseUITests: XCTestCase {
         add(conversationHierarchy)
         XCTAssertTrue(revealWholeTranscript(), "The source turn should load as the reader scrolls up.")
         let userView = element("user-message-\(sourceID)")
-        XCTAssertTrue(userView.waitForExistence(timeout: 10))
+        XCTAssertTrue(userView.waitToExist(timeout: 10))
         let transcriptScrollView = element("conversation-scroll-view")
         for _ in 0..<4 where userView.frame.midY < transcriptScrollView.frame.minY + 20 {
             transcriptScrollView.swipeDown()
@@ -8722,7 +8734,7 @@ final class PlayhouseUITests: XCTestCase {
         }
         let addComment = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
         selectAllText(userView)
-        XCTAssertTrue(addComment.waitForExistence(timeout: 5), "Selecting transcript text should expose Add comment.")
+        XCTAssertTrue(addComment.waitToExist(timeout: 5), "Selecting transcript text should expose Add comment.")
         XCTAssertGreaterThan(userView.frame.height, 40, "The selected text should wrap across multiple lines.")
         XCTAssertLessThan(abs(addComment.frame.midX - userView.frame.midX), 70,
                           "For a multiline selection, the floating hint should center over the selected lines.")
@@ -8734,7 +8746,7 @@ final class PlayhouseUITests: XCTestCase {
                                  "The floating hint should sit above the multiline selection.")
         addComment.click()
         let initialCommentField = element("comment-input-field")
-        XCTAssertTrue(initialCommentField.waitForExistence(timeout: 5))
+        XCTAssertTrue(initialCommentField.waitToExist(timeout: 5))
         XCTAssertLessThan(initialCommentField.frame.height, 40, "The comment entry should be a compact single-line field.")
         assertCommentFieldBesideHint(initialCommentField)
         initialCommentField.typeText("Discard this comment")
@@ -8746,7 +8758,7 @@ final class PlayhouseUITests: XCTestCase {
             (element("assistant-message-\(assistantID)").descendants(matching: .staticText).firstMatch,
              String(repeating: "Please clarify this response in detail, including how each part connects to the question. ", count: 8), true),
         ] {
-            XCTAssertTrue(sourceView.waitForExistence(timeout: 5))
+            XCTAssertTrue(sourceView.waitToExist(timeout: 5))
             let orangePixelsBefore = orangePixelCount(in: sourceView.screenshot())
             if selectAll {
                 assistantSelection = (sourceView.value as? String ?? "")
@@ -8756,10 +8768,10 @@ final class PlayhouseUITests: XCTestCase {
             } else {
                 selectPrefix(sourceView)
             }
-            XCTAssertTrue(addComment.waitForExistence(timeout: 5))
+            XCTAssertTrue(addComment.waitToExist(timeout: 5))
             addComment.click()
             let field = element("comment-input-field")
-            XCTAssertTrue(field.waitForExistence(timeout: 5))
+            XCTAssertTrue(field.waitToExist(timeout: 5))
             assertCommentFieldBesideHint(field)
             XCTAssertLessThan(field.frame.height, 40, "The comment input should stay compact.")
             let submitComment = element("add-comment-button")
@@ -8791,7 +8803,7 @@ final class PlayhouseUITests: XCTestCase {
         app.menuItems["conversation-mode-goal"].click()
         XCTAssertTrue(commentModeMenu.label.contains("Goal"), "The composer should enter Goal mode before sending pending comments.")
         let composer = app.textViews["message-composer"]
-        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertTrue(composer.waitToExist(timeout: 5))
         composer.click()
         composer.typeText("Keep this freeform follow-up.")
         XCTAssertTrue((composer.value as? String ?? "").contains("Keep this freeform follow-up."),
@@ -8845,7 +8857,7 @@ final class PlayhouseUITests: XCTestCase {
         let renderedAnnotatedUserView = element("user-message-\(annotatedUserID)")
         let renderedCommentResponse = element("assistant-message-\(annotatedAssistantID)")
         let reloadedTranscript = element("conversation-scroll-view")
-        XCTAssertTrue(renderedCommentResponse.waitForExistence(timeout: 10),
+        XCTAssertTrue(renderedCommentResponse.waitToExist(timeout: 10),
                       "The reloaded conversation should finish loading before scrolling through history.")
         // Scroll up only until both restored messages sit where the checks below
         // need them; a fixed swipe count kept scrolling past the top.
@@ -8857,13 +8869,13 @@ final class PlayhouseUITests: XCTestCase {
         for _ in 0..<6 where !restoredSourceTurnIsInView() {
             reloadedTranscript.swipeDown()
         }
-        XCTAssertTrue(restoredUserView.waitForExistence(timeout: 10))
+        XCTAssertTrue(restoredUserView.waitToExist(timeout: 10))
         XCTAssertGreaterThanOrEqual(restoredUserView.frame.minY, reloadedTranscript.frame.minY + 8)
         XCTAssertLessThan(restoredUserView.frame.minY, reloadedTranscript.frame.maxY - 40)
         XCTAssertTrue(accessibleLabelOrValue(of: restoredUserView).contains("Literal # Response comments: stays visible."),
                       "Ordinary user text that resembles the comment heading should remain visible.")
         XCTAssertGreaterThan(orangePixelCount(in: restoredUserView.screenshot()), 5, "Reloading history should restore the user's orange range.")
-        XCTAssertTrue(restoredAssistantView.waitForExistence(timeout: 10))
+        XCTAssertTrue(restoredAssistantView.waitToExist(timeout: 10))
         XCTAssertGreaterThanOrEqual(restoredAssistantView.frame.minY, reloadedTranscript.frame.minY + 8)
         XCTAssertLessThan(restoredAssistantView.frame.minY, reloadedTranscript.frame.maxY - 40)
         XCTAssertGreaterThan(orangePixelCount(in: restoredAssistantView.screenshot()), 5, "Reloading history should restore the assistant's orange range.")
@@ -8871,19 +8883,19 @@ final class PlayhouseUITests: XCTestCase {
         let legacyCommentLink = legacyResponse.descendants(matching: .staticText).matching(
             NSPredicate(format: "value CONTAINS %@", "Comment 1")
         ).firstMatch
-        XCTAssertTrue(legacyCommentLink.waitForExistence(timeout: 5))
+        XCTAssertTrue(legacyCommentLink.waitToExist(timeout: 5))
         for _ in 0..<10 where legacyCommentLink.frame.maxY > reloadedTranscript.frame.maxY - 8 {
             reloadedTranscript.scroll(byDeltaX: 0, deltaY: -80)
         }
         XCTAssertGreaterThanOrEqual(legacyCommentLink.frame.minY, reloadedTranscript.frame.minY + 8)
         XCTAssertLessThanOrEqual(legacyCommentLink.frame.maxY, reloadedTranscript.frame.maxY - 8)
         legacyCommentLink.coordinate(withNormalizedOffset: CGVector(dx: seededMarkerPointX, dy: 0.8)).hover()
-        XCTAssertTrue(element("response-comment-hover-card").waitForExistence(timeout: 5),
+        XCTAssertTrue(element("response-comment-hover-card").waitToExist(timeout: 5),
                       "Older saved comment payloads should still restore reply details.")
         XCTAssertTrue(element("response-comment-hover-card").label.contains("legacy highlighted words"))
         XCTAssertTrue(element("response-comment-hover-card").label.contains(legacyComment))
-        XCTAssertTrue(renderedAnnotatedUserView.waitForExistence(timeout: 10))
-        XCTAssertTrue(renderedCommentResponse.waitForExistence(timeout: 10), "The comment reply should render after history reload.")
+        XCTAssertTrue(renderedAnnotatedUserView.waitToExist(timeout: 10))
+        XCTAssertTrue(renderedCommentResponse.waitToExist(timeout: 10), "The comment reply should render after history reload.")
         for _ in 0..<25 where renderedAnnotatedUserView.frame.maxY > reloadedTranscript.frame.maxY - 8 {
             reloadedTranscript.scroll(byDeltaX: 0, deltaY: -100)
         }
@@ -8934,7 +8946,7 @@ final class PlayhouseUITests: XCTestCase {
         ))
         markerPoint.hover()
         let commentHint = element("response-comment-hover-card")
-        XCTAssertTrue(commentHint.waitForExistence(timeout: 5), "Hovering the first comment number should open its details hint.")
+        XCTAssertTrue(commentHint.waitToExist(timeout: 5), "Hovering the first comment number should open its details hint.")
         attachScreenshot(named: "First response comment hover popover")
         XCTAssertGreaterThanOrEqual(commentHint.frame.width, 300, "The details hint should be wide enough to read both fields.")
         XCTAssertLessThanOrEqual(commentHint.frame.width, 360, "The details hint should stay medium-sized.")
@@ -9027,16 +9039,16 @@ final class PlayhouseUITests: XCTestCase {
         secondResponseLine.click()
         secondResponseLine.typeKey("a", modifierFlags: .command)
         let addCommentOnly = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
-        XCTAssertTrue(addCommentOnly.waitForExistence(timeout: 5))
+        XCTAssertTrue(addCommentOnly.waitToExist(timeout: 5))
         // The selection starts in the first paragraph, which can be scrolled above the
         // transcript; the hint then stays at the top of the selection's visible part.
         XCTAssertTrue(addCommentOnly.isHittable && reloadedTranscript.frame.contains(addCommentOnly.frame),
                       "The Add comment hint should stay on screen when the selection starts above the visible transcript.")
         addCommentOnly.click()
         let commentOnlyField = element("comment-input-field")
-        XCTAssertTrue(commentOnlyField.waitForExistence(timeout: 5))
+        XCTAssertTrue(commentOnlyField.waitToExist(timeout: 5))
         commentOnlyField.typeText("Explain this reply\r")
-        XCTAssertTrue(element("pending-comment-count").waitForExistence(timeout: 5), "The comment-only selection should become a pending comment.")
+        XCTAssertTrue(element("pending-comment-count").waitToExist(timeout: 5), "The comment-only selection should become a pending comment.")
         XCTAssertTrue(accessibleLabelOrValue(of: element("pending-comment-count")).contains("1 comment"),
                       "A selection across paragraphs should add one comment, not one per paragraph.")
         XCTAssertGreaterThan(orangePixels(in: firstResponseLine), firstLineOrangeBefore + 5,
@@ -9081,7 +9093,7 @@ final class PlayhouseUITests: XCTestCase {
         // Reopening shows only the newest turn; the commented reply is in an earlier one.
         XCTAssertTrue(waitUntil({ firstResponseLine.exists }, timeout: 5) || revealWholeTranscript(),
                       "The commented reply should render after reopening.")
-        XCTAssertTrue(firstResponseLine.waitForExistence(timeout: 10))
+        XCTAssertTrue(firstResponseLine.waitToExist(timeout: 10))
         XCTAssertGreaterThan(orangePixels(in: firstResponseLine), firstLineOrangeBefore + 5,
                              "Reopening should restore the cross-paragraph highlight on its first paragraph.")
         XCTAssertGreaterThan(orangePixels(in: secondResponseLine), secondLineOrangeBefore + 5,
@@ -9111,7 +9123,7 @@ final class PlayhouseUITests: XCTestCase {
             let expectedTitle = variant == "title-success" ? "Generated Claude title" : prompt
             let expectedBranch = variant == "title-success" ? "generated-claude-title" : "explain-claude-fallback-title"
             let composer = element("message-composer")
-            XCTAssertTrue(composer.waitForExistence(timeout: 10))
+            XCTAssertTrue(composer.waitToExist(timeout: 10))
             composer.click()
             composer.typeText(prompt)
             element("send-message-button").click()
@@ -9129,7 +9141,7 @@ final class PlayhouseUITests: XCTestCase {
             try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/\(expectedBranch)")
             XCTAssertEqual(record["savedPrompt"] as? String, prompt)
             XCTAssertEqual(record["conversationProvider"] as? String, "claude")
-            XCTAssertTrue(transcriptMessage(prompt).waitForExistence(timeout: 10))
+            XCTAssertTrue(transcriptMessage(prompt).waitToExist(timeout: 10))
             let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
             let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
             XCTAssertTrue(messages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == prompt })
@@ -9148,7 +9160,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertEqual(reconciled["status"] as? String, settled["status"] as? String)
             XCTAssertEqual(reconciled["title"] as? String, expectedTitle)
             element("back-to-board-button").click()
-            XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label == %@", expectedTitle)).firstMatch.waitForExistence(timeout: 10),
+            XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label == %@", expectedTitle)).firstMatch.waitToExist(timeout: 10),
                           "The saved Claude title should appear on the board.")
         }
     }
@@ -9185,7 +9197,7 @@ final class PlayhouseUITests: XCTestCase {
         let secondPrompt = "Inspect the workspace while the other conversation is busy."
         openTask(named: "Held Claude conversation")
         let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
         composer.click()
         composer.typeText(firstPrompt)
         element("send-message-button").click()
@@ -9196,13 +9208,13 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         openTask(named: "Parallel Claude conversation")
         let parallelComposer = element("message-composer")
-        XCTAssertTrue(parallelComposer.waitForExistence(timeout: 10))
+        XCTAssertTrue(parallelComposer.waitToExist(timeout: 10))
         parallelComposer.click()
         parallelComposer.typeText(secondPrompt)
         let parallelSend = element("send-message-button")
         XCTAssertTrue(parallelSend.isEnabled, "A Claude turn in another conversation must not block this conversation's composer.")
         parallelSend.click()
-        XCTAssertTrue(app.staticTexts["Inspection done: the workspace is ready."].waitForExistence(timeout: 30),
+        XCTAssertTrue(app.staticTexts["Inspection done: the workspace is ready."].waitToExist(timeout: 30),
                       "The parallel conversation should show its own answer while the other turn is held.")
         XCTAssertEqual(try taskRecord(id: firstID)?["status"] as? String, "In Progress",
                        "The held turn must still be running when the parallel conversation finishes.")
@@ -9216,7 +9228,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: firstID)?["status"] as? String) == "Waiting Response" }, timeout: 20))
         element("back-to-board-button").click()
         openTask(named: "Held Claude conversation")
-        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 20),
+        XCTAssertTrue(app.staticTexts["OK."].waitToExist(timeout: 20),
                       "The held conversation should show its own answer once released.")
 
         let firstHistory = try XCTUnwrap(try runCLI(["conversation", "history", firstID])["result"] as? [String: Any])
@@ -9288,7 +9300,7 @@ final class PlayhouseUITests: XCTestCase {
         let secondPrompt = "Second Claude turn after failure."
         openTask(named: "Failing Claude conversation")
         let firstComposer = element("message-composer")
-        XCTAssertTrue(firstComposer.waitForExistence(timeout: 10))
+        XCTAssertTrue(firstComposer.waitToExist(timeout: 10))
         firstComposer.click()
         firstComposer.typeText(firstPrompt)
         element("send-message-button").click()
@@ -9314,7 +9326,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse((parallelRuntime["activeThreadIDs"] as? [String] ?? []).contains(parallelSessionID), "The parallel turn has ended.")
         XCTAssertNotNil((parallelRuntime["conversationRevisions"] as? [String: Any])?[secondID], "The parallel turn advanced its own revision.")
         let heldStop = element("pause-response-button")
-        XCTAssertTrue(heldStop.waitForExistence(timeout: 5), "The open conversation's held turn still offers Stop after another task's turn.")
+        XCTAssertTrue(heldStop.waitToExist(timeout: 5), "The open conversation's held turn still offers Stop after another task's turn.")
         XCTAssertTrue(heldStop.isEnabled, "Stop stays enabled while the open conversation's own turn is held.")
         XCTAssertFalse(transcriptMessage("OK.").exists, "The parallel conversation's answer must not appear in the open one.")
         attachScreenshot(named: "Open conversation keeps its held turn after a parallel task answers")
@@ -9331,7 +9343,7 @@ final class PlayhouseUITests: XCTestCase {
         }.compactMap { $0["activeThreadID"] as? String })
         XCTAssertEqual(failureThreadIDs, [firstSessionID], "Only the failing conversation's Claude process should exit with a failure.")
         // The failed send keeps its prompt in the conversation, so it isn't also returned to the composer.
-        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "The failing turn should be reported in its conversation.")
+        XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 10), "The failing turn should be reported in its conversation.")
         XCTAssertTrue(transcriptMessage(firstPrompt).exists, "The failing turn's prompt stays in its conversation.")
         XCTAssertEqual(firstComposer.value as? String, "", "The failing turn's prompt must not return to the composer.")
         XCTAssertEqual(try taskRecord(id: firstID)?["hasUnsentDraft"] as? Bool, false, "The failing turn's prompt must not be saved as an unsent draft.")
@@ -9348,11 +9360,11 @@ final class PlayhouseUITests: XCTestCase {
 
         returnToBoard()
         openTask(named: "Failing Claude conversation")
-        XCTAssertTrue(transcriptMessage(firstPrompt).waitForExistence(timeout: 15), "Reopening keeps the failing prompt in the conversation.")
+        XCTAssertTrue(transcriptMessage(firstPrompt).waitToExist(timeout: 15), "Reopening keeps the failing prompt in the conversation.")
         XCTAssertEqual(element("message-composer").value as? String, "", "Reopening must not restore the failing prompt to the composer.")
         returnToBoard()
         openTask(named: "Unaffected Claude conversation")
-        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15), "The reopened UI should show the parallel answer from persisted history.")
+        XCTAssertTrue(app.staticTexts["OK."].waitToExist(timeout: 15), "The reopened UI should show the parallel answer from persisted history.")
     }
 
     // case-contract: test_claude_stop_leaves_parallel_conversation_running | Stopping one Claude turn pauses only that conversation while a second Claude conversation runs in parallel. The parallel conversation answers and keeps its own activity rows and measured durations while the first turn is still thinking; the stopped task moves to Waiting Response with no failure reason, records no answer, and leaves the parallel task's Waiting Response result untouched. A fresh CLI/XPC read confirms both results.
@@ -9387,7 +9399,7 @@ final class PlayhouseUITests: XCTestCase {
         let parallelPrompt = "Inspect the workspace while the other conversation is busy."
         openTask(named: "Stopped Claude conversation")
         let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
         composer.click()
         composer.typeText("Hold until stopped.")
         element("send-message-button").click()
@@ -9398,11 +9410,11 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         openTask(named: "Running Claude conversation")
         let parallelComposer = element("message-composer")
-        XCTAssertTrue(parallelComposer.waitForExistence(timeout: 10))
+        XCTAssertTrue(parallelComposer.waitToExist(timeout: 10))
         parallelComposer.click()
         parallelComposer.typeText(parallelPrompt)
         element("send-message-button").click()
-        XCTAssertTrue(app.staticTexts["Inspection done: the workspace is ready."].waitForExistence(timeout: 30),
+        XCTAssertTrue(app.staticTexts["Inspection done: the workspace is ready."].waitToExist(timeout: 30),
                       "The parallel conversation should answer while the other turn is still thinking.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: runningID)?["status"] as? String) == "Waiting Response" }, timeout: 15))
         XCTAssertEqual(try taskRecord(id: stoppedID)?["status"] as? String, "In Progress")
@@ -9416,7 +9428,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10),
                       "Claude should receive its native interrupt for the stopped conversation.")
         try Data("acknowledge interrupt\n".utf8).write(to: release)
-        XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 20),
+        XCTAssertTrue(element("continue-response-button").waitToExist(timeout: 20),
                       "The stopped turn should reset its own composer to the resumable state.")
 
         // Only the stopped conversation carries the paused result.
@@ -9474,7 +9486,7 @@ final class PlayhouseUITests: XCTestCase {
 
         openTask(named: "Concurrent conversation sends")
         let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
         composer.click()
         composer.typeText(firstPrompt)
         element("send-message-button").click()
@@ -9500,7 +9512,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress", "A queued same-task send must not mark the task Blocked.")
 
         try "Release the first serialized turn.\n".write(to: firstRelease, atomically: true, encoding: .utf8)
-        XCTAssertTrue(element("send-message-button").waitForExistence(timeout: 15), "The UI send should finish after the fixture is released.")
+        XCTAssertTrue(element("send-message-button").waitToExist(timeout: 15), "The UI send should finish after the fixture is released.")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: secondStarted.path) }, timeout: 15), "The CLI send should start after the UI turn releases its reservation.")
         let secondResponse = try finishCLIProcess(try XCTUnwrap(secondTurn))
         XCTAssertTrue(secondResponse["ok"] as? Bool == true)
@@ -9544,8 +9556,8 @@ final class PlayhouseUITests: XCTestCase {
         let secondPersistedMessage = conversation.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", secondPrompt)).firstMatch
         XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
-        XCTAssertTrue(firstPersistedMessage.waitForExistence(timeout: 10), "Reopening the task should retain the first completed send in conversation history.")
-        XCTAssertTrue(secondPersistedMessage.waitForExistence(timeout: 10), "Reopening the task should load the completed second send from the real app-server thread.")
+        XCTAssertTrue(firstPersistedMessage.waitToExist(timeout: 10), "Reopening the task should retain the first completed send in conversation history.")
+        XCTAssertTrue(secondPersistedMessage.waitToExist(timeout: 10), "Reopening the task should load the completed second send from the real app-server thread.")
     }
 
     // case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up with its attached image, clears the preview, and marks the row with its image count; the queued image persists across reopening without returning to the composer, and malformed queued images fail validation. Its row Steer uses the active turn ID, delivers both text and image to the provider, appears in the transcript with its image, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
@@ -9561,7 +9573,7 @@ final class PlayhouseUITests: XCTestCase {
         codexFixtureExecutable = sharedFixture.path
         launchWindowTitle = "Playhouse · steer-queue-test"
         launchApp(defaultParent: fixture.parent.path)
-        XCTAssertTrue(app.windows.matching(NSPredicate(format: "title == %@", launchWindowTitle!)).firstMatch.waitForExistence(timeout: 5), "The configured launch title should identify the worktree in the window chrome.")
+        XCTAssertTrue(app.windows.matching(NSPredicate(format: "title == %@", launchWindowTitle!)).firstMatch.waitToExist(timeout: 5), "The configured launch title should identify the worktree in the window chrome.")
         try createTaskFixture(title: "Active turn message controls", roots: [fixture.primary.path])
         openTask(named: "Active turn message controls")
 
@@ -9571,10 +9583,10 @@ final class PlayhouseUITests: XCTestCase {
         let missedRowSteerText = "Queue this missed row steer for its own turn."
         let rowSteeringText = "Send this queued follow-up into the active turn."
         let queuedText = "After the current work, verify the saved follow-up."
-        XCTAssertTrue(modelPrompt().waitForExistence(timeout: 15), "Conversation history should finish loading before the composer is used.")
+        XCTAssertTrue(modelPrompt().waitToExist(timeout: 15), "Conversation history should finish loading before the composer is used.")
         XCTAssertFalse(app.staticTexts["Start a conversation"].exists, "The empty state should not include the removed generic heading.")
         let composer = app.textViews.matching(identifier: "message-composer").firstMatch
-        XCTAssertTrue(composer.waitForExistence(timeout: 10), "The native message editor should be exposed as a text view.")
+        XCTAssertTrue(composer.waitToExist(timeout: 10), "The native message editor should be exposed as a text view.")
         let composerReady = waitUntil({ composer.isHittable }, timeout: 15)
         if !composerReady {
             attachScreenshot(named: "Composer unavailable before active-turn test")
@@ -9638,9 +9650,9 @@ final class PlayhouseUITests: XCTestCase {
         try XCTUnwrap(cliBitmap.representation(using: .png, properties: [:])).write(to: cliImage)
         let remoteSteer = try runCLI(["conversation", "steer", taskID, "--message", steeringText, "--image", cliImage.path])["result"] as? [String: Any]
         XCTAssertEqual(remoteSteer?["accepted"] as? Bool, true, "CLI/XPC steering should route to the UI-owned active turn.")
-        XCTAssertTrue(transcriptMessage(steeringText).waitForExistence(timeout: 10))
+        XCTAssertTrue(transcriptMessage(steeringText).waitToExist(timeout: 10))
         let transcriptImages = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-image-"))
-        XCTAssertTrue(transcriptImages.firstMatch.waitForExistence(timeout: 5), "An image-bearing CLI/XPC steer should render in the visible transcript. \(app.debugDescription)")
+        XCTAssertTrue(transcriptImages.firstMatch.waitToExist(timeout: 5), "An image-bearing CLI/XPC steer should render in the visible transcript. \(app.debugDescription)")
         XCTAssertEqual(transcriptImages.count, 1)
         let uiSteeringText = "Make the final change concise and focused."
         let uiBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
@@ -9650,9 +9662,9 @@ final class PlayhouseUITests: XCTestCase {
         composer.click()
         composer.typeText(uiSteeringText)
         composer.typeKey("v", modifierFlags: .command)
-        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "An image attached to a steer should remain previewed until accepted.")
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "An image attached to a steer should remain previewed until accepted.")
         composer.typeKey(.return, modifierFlags: .command)
-        XCTAssertTrue(transcriptMessage(uiSteeringText).waitForExistence(timeout: 10), "Command-Return should steer the active turn with the composer text and image.")
+        XCTAssertTrue(transcriptMessage(uiSteeringText).waitToExist(timeout: 10), "Command-Return should steer the active turn with the composer text and image.")
         XCTAssertEqual(transcriptImages.count, 2)
         XCTAssertFalse(element("pending-chat-images").exists, "An accepted steer should clear its image preview.")
         XCTAssertEqual(composer.value as? String, "", "An accepted Command-Return steer should clear the draft.")
@@ -9663,7 +9675,7 @@ final class PlayhouseUITests: XCTestCase {
         composer.click()
         composer.typeText(missedUISteerText)
         composer.typeKey("v", modifierFlags: .command)
-        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "The fallback steer's image should remain attached until queue acceptance.")
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "The fallback steer's image should remain attached until queue acceptance.")
         composer.typeKey(.return, modifierFlags: .command)
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "" }, timeout: 10), "A missed UI steer should be accepted into the follow-up queue and clear the composer.")
         XCTAssertFalse(element("codex-chat-error").exists, "A missed UI steer should not show an error.")
@@ -9682,14 +9694,14 @@ final class PlayhouseUITests: XCTestCase {
         let missedRowItem = try XCTUnwrap(queued?.first(where: { $0["text"] as? String == missedRowSteerText }))
         let queuedID = try XCTUnwrap(missedRowItem["id"] as? String)
         let queuedRowText = element("queued-message-text-\(queuedID)")
-        XCTAssertTrue(queuedRowText.waitForExistence(timeout: 10), "Queued text should be visible in its composer row. app=\(app.debugDescription)")
+        XCTAssertTrue(queuedRowText.waitToExist(timeout: 10), "Queued text should be visible in its composer row. app=\(app.debugDescription)")
         XCTAssertEqual(queuedRowText.value as? String, missedRowSteerText, "The queue row should expose the actual follow-up text.")
         XCTAssertTrue(element("steer-queued-message-\(queuedID)").exists, "A queued follow-up should offer a per-row steer action.")
         XCTAssertTrue(element("queued-message-more-\(queuedID)").exists, "A queued follow-up should offer its more-actions menu.")
         element("back-to-board-button").click()
         openTask(named: "Active turn message controls")
         let reopenedQueuedRow = element("queued-message-text-\(queuedID)")
-        XCTAssertTrue(reopenedQueuedRow.waitForExistence(timeout: 10), "The queued row should render after reopening the task during the active turn.")
+        XCTAssertTrue(reopenedQueuedRow.waitToExist(timeout: 10), "The queued row should render after reopening the task during the active turn.")
         XCTAssertEqual(reopenedQueuedRow.value as? String, missedRowSteerText)
         XCTAssertTrue(element("steer-queued-message-\(queuedID)").exists, "Reopening should restore the queued row Steer action.")
         try "expected active turn id stale-turn but found fixture-turn\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
@@ -9702,7 +9714,7 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         openTask(named: "Active turn message controls")
         let reopenedMissedRow = element("queued-message-text-\(queuedID)")
-        XCTAssertTrue(reopenedMissedRow.waitForExistence(timeout: 10), "The missed row steer should persist in queued state after reopening.")
+        XCTAssertTrue(reopenedMissedRow.waitToExist(timeout: 10), "The missed row steer should persist in queued state after reopening.")
         XCTAssertEqual(missedRowFallback["text"] as? String, missedRowSteerText)
         let retainedAfterInvalidRemoval = try runCLI(["conversation", "queue", taskID, "--message", "Keep this queued after an unknown removal."])["result"] as? [String: Any]
         let retainedQueueID = try XCTUnwrap(retainedAfterInvalidRemoval?["id"] as? String)
@@ -9719,7 +9731,7 @@ final class PlayhouseUITests: XCTestCase {
         composer.click()
         composer.typeText(rowSteeringText)
         composer.typeKey("v", modifierFlags: .command)
-        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "The queued follow-up's image should be previewed before Return.")
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "The queued follow-up's image should be previewed before Return.")
         XCTAssertEqual(composer.value as? String, rowSteeringText, "The native composer should contain the second follow-up before Return.")
         let activeTurnControl = element("pause-response-button")
         XCTAssertEqual(activeTurnControl.label, "Stop response", "The fixture turn should still be active before queueing a second follow-up.")
@@ -9733,12 +9745,12 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(acceptedQueueImages.count, 1)
         XCTAssertTrue(acceptedQueueImages[0].hasPrefix("data:image/png;base64,"))
         XCTAssertFalse(element("pending-chat-images").exists, "Queueing a follow-up should clear its image preview.")
-        XCTAssertTrue(element("queued-message-images-\(acceptedQueueID)").waitForExistence(timeout: 5), "A queued row should show that it carries an image.")
+        XCTAssertTrue(element("queued-message-images-\(acceptedQueueID)").waitToExist(timeout: 5), "A queued row should show that it carries an image.")
         XCTAssertEqual(element("queued-message-images-\(acceptedQueueID)").label, "1 attached image")
         attachScreenshot(named: "Queued follow-up with an attached image")
         element("back-to-board-button").click()
         openTask(named: "Active turn message controls")
-        XCTAssertTrue(element("queued-message-images-\(acceptedQueueID)").waitForExistence(timeout: 10), "The queued row's image should persist across reopening.")
+        XCTAssertTrue(element("queued-message-images-\(acceptedQueueID)").waitToExist(timeout: 10), "The queued row's image should persist across reopening.")
         XCTAssertFalse(element("pending-chat-images").exists, "A queued image must not return to the composer after reopening.")
         let imagesBeforeRowSteer = transcriptImages.count
         element("steer-queued-message-\(acceptedQueueID)").click()
@@ -9746,7 +9758,7 @@ final class PlayhouseUITests: XCTestCase {
             !((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).contains { $0["id"] as? String == acceptedQueueID }
         }, timeout: 10), "Steering a queued row should remove it after successful delivery.")
         XCTAssertFalse(element("queued-message-text-\(acceptedQueueID)").exists, "Successful steering should remove the queued text from its row.")
-        XCTAssertTrue(transcriptMessage(rowSteeringText).waitForExistence(timeout: 10), "Per-row steering should appear in the active conversation.")
+        XCTAssertTrue(transcriptMessage(rowSteeringText).waitToExist(timeout: 10), "Per-row steering should appear in the active conversation.")
         XCTAssertTrue(waitUntil({ transcriptImages.count == imagesBeforeRowSteer + 1 }, timeout: 10), "A steered queued row should show its image in the transcript. \(app.debugDescription)")
         attachScreenshot(named: "Steered queued follow-up shows its image")
         composer.click()
@@ -9765,20 +9777,20 @@ final class PlayhouseUITests: XCTestCase {
         let afterTurnRow = try XCTUnwrap((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.first(where: { $0["text"] as? String == queuedText }))
         let afterTurnRowID = try XCTUnwrap(afterTurnRow["id"] as? String)
         let afterTurnRowText = element("queued-message-text-\(afterTurnRowID)")
-        XCTAssertTrue(afterTurnRowText.waitForExistence(timeout: 10), "The after-turn follow-up should appear as a visible queue row before delivery.")
+        XCTAssertTrue(afterTurnRowText.waitToExist(timeout: 10), "The after-turn follow-up should appear as a visible queue row before delivery.")
 
         try "Release the active turn.\n".write(to: release, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({
             ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).isEmpty
         }, timeout: 20), "The queued message should dispatch once after the matching completed notification.")
         XCTAssertTrue(waitUntil({ !afterTurnRowText.exists }, timeout: 10), "The accepted after-turn follow-up should disappear from the visible queue.")
-        XCTAssertTrue(transcriptMessage(queuedText).waitForExistence(timeout: 10), "The accepted after-turn follow-up should appear in the conversation transcript.")
+        XCTAssertTrue(transcriptMessage(queuedText).waitToExist(timeout: 10), "The accepted after-turn follow-up should appear in the conversation transcript.")
         // No turn is running now, so the composer would send; queue the row directly.
         let targetedText = "Retry this row as its own turn."
         let targetedRow = try XCTUnwrap(try runCLI(["conversation", "queue", taskID, "--message", targetedText])["result"] as? [String: Any])
         let targetedID = try XCTUnwrap(targetedRow["id"] as? String)
         try "hold targeted delivery\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".hold-next-queued-turn"), atomically: true, encoding: .utf8)
-        XCTAssertTrue(element("steer-queued-message-\(targetedID)").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("steer-queued-message-\(targetedID)").waitToExist(timeout: 5))
         element("steer-queued-message-\(targetedID)").click()
         let targetedReady = URL(fileURLWithPath: sharedFixture.path + ".queued-turn-ready")
         let targetedRelease = URL(fileURLWithPath: sharedFixture.path + ".queued-turn-release")
@@ -9805,7 +9817,7 @@ final class PlayhouseUITests: XCTestCase {
         let targetedRowOverlap = try XCTUnwrap(try runCLI(["conversation", "queue", taskID, "--message", targetedRowText])["result"] as? [String: Any])
         let targetedRowID = try XCTUnwrap(targetedRowOverlap["id"] as? String)
         try "hold targeted row delivery\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".hold-next-queued-turn"), atomically: true, encoding: .utf8)
-        XCTAssertTrue(element("steer-queued-message-\(targetedRowID)").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("steer-queued-message-\(targetedRowID)").waitToExist(timeout: 5))
         element("steer-queued-message-\(targetedRowID)").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: targetedReady.path) }, timeout: 10), "The targeted row turn should be held while a second row steer is submitted.")
         let missedRowOverlapText = "Queue this missed row steer behind targeted dispatch."
@@ -9815,20 +9827,20 @@ final class PlayhouseUITests: XCTestCase {
         let missedRowOverlap = try XCTUnwrap((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.first(where: { $0["text"] as? String == missedRowOverlapText }))
         let missedRowOverlapID = try XCTUnwrap(missedRowOverlap["id"] as? String)
         try "expected active turn id stale-turn but found fixture-turn\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
-        XCTAssertTrue(element("steer-queued-message-\(missedRowOverlapID)").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("steer-queued-message-\(missedRowOverlapID)").waitToExist(timeout: 5))
         // Steer from the CLI, so this window learns of the requeue only through the bridge.
         let missedRowSteer = try XCTUnwrap(try runCLI(["conversation", "queue-steer", taskID, missedRowOverlapID])["result"] as? [String: Any])
         XCTAssertEqual(missedRowSteer["queued"] as? Bool, true, "A missed queued-row steer should stay queued while targeted dispatch is active.")
         XCTAssertTrue(waitUntil({
             ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).first(where: { $0["id"] as? String == missedRowOverlapID })?["state"] as? String == "queued"
         }, timeout: 10), "The missed queued-row steer should remain queued until the targeted turn ends.")
-        XCTAssertTrue(element("queued-message-text-\(missedRowOverlapID)").waitForExistence(timeout: 5), "A missed queued-row steer from the CLI should show its row again in the app before the targeted turn ends.")
+        XCTAssertTrue(element("queued-message-text-\(missedRowOverlapID)").waitToExist(timeout: 5), "A missed queued-row steer from the CLI should show its row again in the app before the targeted turn ends.")
         XCTAssertTrue(element("steer-queued-message-\(missedRowOverlapID)").exists, "The returned row should offer Steer again.")
         attachScreenshot(named: "Missed row steer returns to the queue")
         relaunchApp()
         openTask(named: "Active turn message controls")
         let relaunchedMissedRow = element("queued-message-text-\(missedRowOverlapID)")
-        XCTAssertTrue(relaunchedMissedRow.waitForExistence(timeout: 10), "The missed queued-row steer should remain visible after app relaunch.")
+        XCTAssertTrue(relaunchedMissedRow.waitToExist(timeout: 10), "The missed queued-row steer should remain visible after app relaunch.")
         XCTAssertEqual(relaunchedMissedRow.value as? String, missedRowOverlapText)
         let persistedMissedRow = try XCTUnwrap((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.first(where: { $0["id"] as? String == missedRowOverlapID }))
         XCTAssertEqual(persistedMissedRow["state"] as? String, "queued", "App relaunch must not turn a durable queued steer into Needs action.")
@@ -9841,9 +9853,9 @@ final class PlayhouseUITests: XCTestCase {
         let immediateRow = try XCTUnwrap(try runCLI(["conversation", "queue", taskID, "--message", immediateSteerText])["result"] as? [String: Any])
         let immediateRowID = try XCTUnwrap(immediateRow["id"] as? String)
         let immediateSteerButton = element("steer-queued-message-\(immediateRowID)")
-        XCTAssertTrue(immediateSteerButton.waitForExistence(timeout: 10), "A queued follow-up should be visible while no turn is active.")
+        XCTAssertTrue(immediateSteerButton.waitToExist(timeout: 10), "A queued follow-up should be visible while no turn is active.")
         immediateSteerButton.click()
-        XCTAssertTrue(transcriptMessage(immediateSteerText).waitForExistence(timeout: 10), "A missed steer with no active turn should be delivered visibly in its own turn.")
+        XCTAssertTrue(transcriptMessage(immediateSteerText).waitToExist(timeout: 10), "A missed steer with no active turn should be delivered visibly in its own turn.")
         XCTAssertTrue(waitUntil({
             ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).isEmpty
         }, timeout: 10), "The synchronous own-turn drain should remove the queued row before completion is reported.")
@@ -9861,7 +9873,7 @@ final class PlayhouseUITests: XCTestCase {
         let failedTargetID = try XCTUnwrap(failedTarget["id"] as? String)
         let laterID = try XCTUnwrap(laterItem["id"] as? String)
         try "fail targeted turn start\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".fail-next-turn-start"), atomically: true, encoding: .utf8)
-        XCTAssertTrue(element("steer-queued-message-\(failedTargetID)").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("steer-queued-message-\(failedTargetID)").waitToExist(timeout: 5))
         element("steer-queued-message-\(failedTargetID)").click()
         XCTAssertTrue(waitUntil({
             let items = (try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []
@@ -9869,7 +9881,7 @@ final class PlayhouseUITests: XCTestCase {
                 items.first(where: { $0["id"] as? String == laterID })?["state"] as? String == "queued"
         }, timeout: 10), "A failed targeted turn should need action while later follow-ups stay queued.")
         let needsActionIndicator = element("queued-message-needs-action-\(failedTargetID)")
-        XCTAssertTrue(needsActionIndicator.waitForExistence(timeout: 5), "The failed targeted row should visibly require user action.")
+        XCTAssertTrue(needsActionIndicator.waitToExist(timeout: 5), "The failed targeted row should visibly require user action.")
         XCTAssertEqual(accessibleLabelOrValue(of: needsActionIndicator), "Follow-up needs your action")
         XCTAssertTrue(element("retry-queued-message-\(failedTargetID)").exists, "The failed targeted row should expose its retry action.")
         XCTAssertTrue(element("queued-message-text-\(laterID)").exists, "The later queued row should remain visible after the targeted failure.")
@@ -9931,18 +9943,18 @@ final class PlayhouseUITests: XCTestCase {
         // The composer's paperclip became the Skills button, so images arrive by paste.
         XCTAssertFalse(element("attach-chat-image-button").exists, "The composer no longer has an image picker button.")
         let pasteComposer = element("message-composer")
-        XCTAssertTrue(pasteComposer.waitForExistence(timeout: 10))
+        XCTAssertTrue(pasteComposer.waitToExist(timeout: 10))
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setData(try Data(contentsOf: image), forType: .png)
         pasteComposer.click()
         pasteComposer.typeKey("v", modifierFlags: .command)
-        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "The pasted image should appear in the composer preview.")
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "The pasted image should appear in the composer preview.")
         let pendingImage = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "pending-chat-image-")).firstMatch
-        XCTAssertTrue(pendingImage.waitForExistence(timeout: 5))
+        XCTAssertTrue(pendingImage.waitToExist(timeout: 5))
         let pendingThumbnailFrame = pendingImage.frame
         pendingImage.click()
         let pendingFullSizeImage = element("chat-image-full-size")
-        XCTAssertTrue(pendingFullSizeImage.waitForExistence(timeout: 5), "Clicking a composer attachment should open its image in the large viewer.")
+        XCTAssertTrue(pendingFullSizeImage.waitToExist(timeout: 5), "Clicking a composer attachment should open its image in the large viewer.")
         XCTAssertGreaterThan(pendingFullSizeImage.frame.width, pendingThumbnailFrame.width, "The composer attachment viewer should be larger than its thumbnail.")
         element("close-chat-image-viewer").click()
         XCTAssertFalse(element("chat-image-full-size").exists, "Closing the composer image viewer should return to the conversation.")
@@ -9963,12 +9975,12 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(freshImageTask["draftImageDataURLs"] as? [String], draftImages)
         element("back-to-board-button").click()
         openTask(named: "Image conversation")
-        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "Reopening a backlog task should restore its image preview.")
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "Reopening a backlog task should restore its image preview.")
         let composer = element("message-composer")
         composer.click()
         composer.typeText("What is shown in this screenshot?")
         element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 10))
         let pickedTurnHistoryURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
         var pickedTurnJSON: [String: Any]?
         XCTAssertTrue(waitUntil({
@@ -9997,10 +10009,10 @@ final class PlayhouseUITests: XCTestCase {
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         let firstAnswer = element("assistant-message-item_assistant_fixture_1")
-        XCTAssertTrue(firstAnswer.waitForExistence(timeout: 10))
+        XCTAssertTrue(firstAnswer.waitToExist(timeout: 10))
         XCTAssertEqual(firstAnswer.label, "Answers received: Blue / fixture-secret.")
-        XCTAssertTrue(element("user-message-item_user_fixture_1").waitForExistence(timeout: 10), "Reloaded history should retain the pasted attachment.")
-        XCTAssertTrue(element("chat-image-item_user_fixture_1-0").waitForExistence(timeout: 10), "Conversation history should render the pasted image.")
+        XCTAssertTrue(element("user-message-item_user_fixture_1").waitToExist(timeout: 10), "Reloaded history should retain the pasted attachment.")
+        XCTAssertTrue(element("chat-image-item_user_fixture_1-0").waitToExist(timeout: 10), "Conversation history should render the pasted image.")
         XCTAssertTrue(waitUntil({
             (try? self.taskRecord(id: imageTaskID)?["status"] as? String) == "Waiting Response"
         }, timeout: 10), "The first image turn should settle before the follow-up turn starts.")
@@ -10012,21 +10024,22 @@ final class PlayhouseUITests: XCTestCase {
         let recentCodexEvents = ((try? diagnosticEvents()) ?? []).suffix(20).compactMap { $0["event"] as? String }
         XCTAssertTrue(composerEnabled, "The composer should be enabled after the first image turn settles. Recent events: \(recentCodexEvents)")
         element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10), "The follow-up turn should refresh the existing conversation history.")
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 10), "The follow-up turn should refresh the existing conversation history.")
         selectQuestionOption("Blue")
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         let followupMessage = transcriptMessage(followupPrompt)
-        XCTAssertTrue(followupMessage.waitForExistence(timeout: 10), "The follow-up prompt should appear in the conversation.")
+        XCTAssertTrue(followupMessage.waitToExist(timeout: 10), "The follow-up prompt should appear in the conversation.")
         // Hidden outcome reminders take fixture item numbers between visible turns.
+        // Visible replies to those reminders are assistant rows too, so match the answer itself.
         let followupAnswer = app.groups.matching(NSPredicate(
-            format: "identifier BEGINSWITH %@ AND identifier != %@",
-            "assistant-message-item_assistant_fixture_", "assistant-message-item_assistant_fixture_1"
+            format: "identifier BEGINSWITH %@ AND identifier != %@ AND label == %@",
+            "assistant-message-item_assistant_fixture_", "assistant-message-item_assistant_fixture_1",
+            "Answers received: Blue / fixture-secret."
         )).firstMatch
-        XCTAssertTrue(followupAnswer.waitForExistence(timeout: 10))
-        XCTAssertEqual(followupAnswer.label, "Answers received: Blue / fixture-secret.")
+        XCTAssertTrue(followupAnswer.waitToExist(timeout: 10), "The follow-up answer should render as its own assistant message.")
         XCTAssertTrue(revealWholeTranscript(), "The earlier image turn should load as the reader scrolls up.")
-        XCTAssertTrue(element("chat-image-item_user_fixture_1-0").waitForExistence(timeout: 10), "Refreshing history after another turn should keep the earlier image visible.")
+        XCTAssertTrue(element("chat-image-item_user_fixture_1-0").waitToExist(timeout: 10), "Refreshing history after another turn should keep the earlier image visible.")
         let refreshedHistory = try runCLI(["conversation", "history", try taskID(named: "Image conversation")])["result"] as? [String: Any]
         let refreshedUserMessages = (refreshedHistory?["messages"] as? [[String: Any]] ?? []).filter { $0["role"] as? String == "user" }
         XCTAssertEqual(refreshedUserMessages.first?["imageDataURLs"] as? [String], [pickedImage], "A fresh XPC history read should retain the earlier image after a later turn.")
@@ -10051,14 +10064,14 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         openTask(named: "Image conversation")
         XCTAssertTrue(waitUntil({ self.transcriptContains(agentCaption) }, timeout: 10), "The agent image caption should appear as an assistant message after reopening.")
-        XCTAssertTrue(element("chat-image-\(agentImageID)-0").waitForExistence(timeout: 10), "The specific agent-published image should render in its assistant message after reopening.")
-        XCTAssertTrue(element("chat-image-\(agentJPEGID)-0").waitForExistence(timeout: 10), "The specific agent-published JPEG should render in its assistant message after reopening.")
+        XCTAssertTrue(element("chat-image-\(agentImageID)-0").waitToExist(timeout: 10), "The specific agent-published image should render in its assistant message after reopening.")
+        XCTAssertTrue(element("chat-image-\(agentJPEGID)-0").waitToExist(timeout: 10), "The specific agent-published JPEG should render in its assistant message after reopening.")
         let agentThumbnail = app.buttons["chat-image-\(agentImageID)-0"]
-        XCTAssertTrue(agentThumbnail.waitForExistence(timeout: 5), "An agent-published assistant image should be clickable.")
+        XCTAssertTrue(agentThumbnail.waitToExist(timeout: 5), "An agent-published assistant image should be clickable.")
         let agentThumbnailFrame = agentThumbnail.frame
         agentThumbnail.click()
         let agentFullSizeImage = element("chat-image-full-size")
-        XCTAssertTrue(agentFullSizeImage.waitForExistence(timeout: 5), "Clicking an agent-published assistant image should open it in the large viewer.")
+        XCTAssertTrue(agentFullSizeImage.waitToExist(timeout: 5), "Clicking an agent-published assistant image should open it in the large viewer.")
         XCTAssertGreaterThan(agentFullSizeImage.frame.width, agentThumbnailFrame.width, "The viewer should display the assistant image larger than its transcript thumbnail.")
         // The 520pt assistant thumbnail would still be beaten by a 600pt-wide sheet, so pin
         // the floor above what the smaller sheet can produce.
@@ -10066,7 +10079,7 @@ final class PlayhouseUITests: XCTestCase {
         element("close-chat-image-viewer").click()
         XCTAssertFalse(element("chat-image-full-size").exists, "Closing the assistant image viewer should return to the conversation.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         try FileManager.default.removeItem(at: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))
         try createTaskFixture(title: "Pasted image conversation", roots: [fixture.primary.path])
         openTask(named: "Pasted image conversation")
@@ -10095,27 +10108,27 @@ final class PlayhouseUITests: XCTestCase {
         pastedComposer.click()
         app.menuBars.menuBarItems["Edit"].click()
         let pasteMenuItem = app.menuItems["Paste"].firstMatch
-        XCTAssertTrue(pasteMenuItem.waitForExistence(timeout: 5))
+        XCTAssertTrue(pasteMenuItem.waitToExist(timeout: 5))
         XCTAssertTrue(pasteMenuItem.isEnabled, "The native text editor must enable Paste for an image-only clipboard.")
         pasteMenuItem.click()
-        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "Pasting an image should create a composer preview.")
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "Pasting an image should create a composer preview.")
         element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 10))
         selectQuestionOption("Blue")
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         let pastedAnswer = app.descendants(matching: .any).matching(
             NSPredicate(format: "label == %@", "Answers received: Blue / fixture-secret.")
         ).firstMatch
-        XCTAssertTrue(pastedAnswer.waitForExistence(timeout: 10))
-        XCTAssertTrue(element("user-message-item_user_fixture_1").waitForExistence(timeout: 10), "History reload should leave the pasted attachment in the conversation.")
-        XCTAssertTrue(element("chat-image-item_user_fixture_1-0").waitForExistence(timeout: 10), "Conversation history should render the pasted image itself.")
+        XCTAssertTrue(pastedAnswer.waitToExist(timeout: 10))
+        XCTAssertTrue(element("user-message-item_user_fixture_1").waitToExist(timeout: 10), "History reload should leave the pasted attachment in the conversation.")
+        XCTAssertTrue(element("chat-image-item_user_fixture_1-0").waitToExist(timeout: 10), "Conversation history should render the pasted image itself.")
         let transcriptImage = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-image-")).firstMatch
-        XCTAssertTrue(transcriptImage.waitForExistence(timeout: 5))
+        XCTAssertTrue(transcriptImage.waitToExist(timeout: 5))
         let thumbnailFrame = transcriptImage.frame
         transcriptImage.click()
         let fullSizeImage = element("chat-image-full-size")
-        XCTAssertTrue(fullSizeImage.waitForExistence(timeout: 5), "Clicking a transcript attachment should open the original image in the large viewer.")
+        XCTAssertTrue(fullSizeImage.waitToExist(timeout: 5), "Clicking a transcript attachment should open the original image in the large viewer.")
         XCTAssertEqual(fullSizeImage.label, "Full-size attached image")
         XCTAssertGreaterThan(fullSizeImage.frame.width, thumbnailFrame.width, "The viewer should display the image larger than its transcript thumbnail.")
         element("close-chat-image-viewer").click()
@@ -10176,7 +10189,7 @@ final class PlayhouseUITests: XCTestCase {
         ])["result"] as? [String: Any]
         let imageID = try XCTUnwrap(published?["id"] as? String)
         try Data("Release Claude's turn.\n".utf8).write(to: release)
-        XCTAssertTrue(app.staticTexts["Claude answer after the image."].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["Claude answer after the image."].waitToExist(timeout: 20))
 
         let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
         let messages = try XCTUnwrap(history?["messages"] as? [[String: Any]])
@@ -10185,7 +10198,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertLessThan(imageIndex, answerIndex, "The active-turn image should precede Claude's answer in the durable transcript.")
         element("back-to-board-button").click()
         openTask(named: "Claude active image")
-        XCTAssertTrue(element("chat-image-\(imageID)-0").waitForExistence(timeout: 10), "Reopening the Claude conversation should render the exact published image.")
+        XCTAssertTrue(element("chat-image-\(imageID)-0").waitToExist(timeout: 10), "Reopening the Claude conversation should render the exact published image.")
     }
 
     // case-contract: test_claude_large_image_message_reaches_idle_agent | A Claude Code agent that has answered initialize and gone idle receives a user message carrying a screenshot larger than its input FIFO's buffer: the send completes with Claude's answer, the agent receives the whole image, the user message keeps that image when history is read over a fresh CLI/XPC connection and when the conversation is reopened, and a later text turn in the same conversation still completes. Claude Code's runtime, like the kqueue-reading fixture, is never woken by one oversized blocking write, so such a message must reach it without freezing the daemon. Codex agents talk over a socket and are not affected.
@@ -10219,13 +10232,13 @@ final class PlayhouseUITests: XCTestCase {
         NSPasteboard.general.setData(screenshotPNG, forType: .png)
         composer.click()
         composer.typeKey("v", modifierFlags: .command)
-        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "The pasted screenshot should appear in the composer.")
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "The pasted screenshot should appear in the composer.")
         composer.typeText("Describe this screenshot.")
         attachScreenshot(named: "Large screenshot ready to send to an idle Claude agent")
         element("send-message-button").click()
         // The send starts a fresh agent that answers initialize and goes idle before the message
         // arrives; a single blocking write of the message would leave every conversation frozen.
-        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 20), "Claude's answer to the screenshot message should appear.")
+        XCTAssertTrue(app.staticTexts["OK."].waitToExist(timeout: 20), "Claude's answer to the screenshot message should appear.")
 
         let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
@@ -10241,18 +10254,23 @@ final class PlayhouseUITests: XCTestCase {
         let received = try XCTUnwrap(imageTurn["images"] as? [[String: Any]])
         XCTAssertEqual(received.count, 1)
         XCTAssertEqual(received.first?["base64Length"] as? Int, encoded.count, "Claude Code should receive the whole image.")
-        XCTAssertTrue(element("chat-image-\(messageID)-0").waitForExistence(timeout: 10), "The sent screenshot should show in the transcript.")
+        XCTAssertTrue(element("chat-image-\(messageID)-0").waitToExist(timeout: 10), "The sent screenshot should show in the transcript.")
         attachScreenshot(named: "Claude answered the large screenshot message")
 
+        // Reopen while the screenshot turn is still the latest: a reopened conversation renders
+        // from its newest user turn, and older turns page in on scroll.
+        element("back-to-board-button").click()
+        openTask(named: "Claude screenshot")
+        XCTAssertTrue(element("chat-image-\(messageID)-0").waitToExist(timeout: 10), "Reopening the conversation should still show the screenshot.")
+        attachScreenshot(named: "Reopened conversation keeps the screenshot")
+
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
         composer.click()
         composer.typeText("Thanks, that is all.")
         element("send-message-button").click()
         let answers = app.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", "OK.", "OK."))
         XCTAssertTrue(waitUntil({ answers.count >= 2 }, timeout: 20), "A later text turn in the same conversation should still complete.")
-        element("back-to-board-button").click()
-        openTask(named: "Claude screenshot")
-        XCTAssertTrue(element("chat-image-\(messageID)-0").waitForExistence(timeout: 10), "Reopening the conversation should still show the screenshot.")
-        attachScreenshot(named: "Reopened conversation keeps the screenshot and both answers")
+        attachScreenshot(named: "A later text turn completes after the screenshot")
     }
 
     // case-contract: test_codex_agent_image_published_during_active_turn | While a Codex turn is active, CLI/XPC image publication avoids requesting provider history; the assistant image is tied to that turn, appears after its native response and before the next turn in ordered history, and remains visible after reopening the conversation.
@@ -10295,7 +10313,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: historyRead.path), "Publishing during a Codex turn must not request its busy provider history.")
         try FileManager.default.removeItem(at: observeHistory)
         try Data("Release Codex's turn.\n".utf8).write(to: release)
-        XCTAssertTrue(element("chat-image-\(imageID)-0").waitForExistence(timeout: 20), "The image returned during the active turn should render in the transcript.")
+        XCTAssertTrue(element("chat-image-\(imageID)-0").waitToExist(timeout: 20), "The image returned during the active turn should render in the transcript.")
 
         let followupText = "Start a later turn after the generated image."
         composer.click()
@@ -10303,7 +10321,7 @@ final class PlayhouseUITests: XCTestCase {
         element("send-message-button").click()
         let visibleImage = element("chat-image-\(imageID)-0")
         let visibleFollowup = transcriptMessage(followupText)
-        XCTAssertTrue(visibleFollowup.waitForExistence(timeout: 10), "The later user turn should be visible in the transcript.")
+        XCTAssertTrue(visibleFollowup.waitToExist(timeout: 10), "The later user turn should be visible in the transcript.")
         XCTAssertLessThan(visibleImage.frame.minY, visibleFollowup.frame.minY, "The rendered generated image should appear before the later user turn.")
 
         let history = try runCLI(["conversation", "history", try taskID(named: "Codex active image")])["result"] as? [String: Any]
@@ -10318,7 +10336,7 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         openTask(named: "Codex active image")
         XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
-        XCTAssertTrue(element("chat-image-\(imageID)-0").waitForExistence(timeout: 10), "Reopening the Codex conversation should render the exact published image.")
+        XCTAssertTrue(element("chat-image-\(imageID)-0").waitToExist(timeout: 10), "Reopening the Codex conversation should render the exact published image.")
     }
 
     /// Sends a held fixture turn from the window, reopens the conversation so it
@@ -10383,7 +10401,7 @@ final class PlayhouseUITests: XCTestCase {
         // A reopened conversation is a new view that no longer reads the send's stream.
         element("back-to-board-button").click()
         openTask(named: title)
-        XCTAssertTrue(transcriptMessage(prompt).waitForExistence(timeout: 10), "The reopened conversation should load the running turn's prompt.")
+        XCTAssertTrue(transcriptMessage(prompt).waitToExist(timeout: 10), "The reopened conversation should load the running turn's prompt.")
         XCTAssertFalse(visibleText(progressText).exists, "No progress exists before the fixture continues.")
         let taskID = try taskID(named: title)
         func revision() throws -> Int {
@@ -10394,9 +10412,9 @@ final class PlayhouseUITests: XCTestCase {
 
         try Data("Show progress.\n".utf8).write(to: resume)
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 20), "The \(display) fixture should hold the turn while its progress is visible.")
-        XCTAssertTrue(visibleText(progressText).waitForExistence(timeout: 10), "The reopened conversation should show the running turn's commentary without waiting for the turn to end.")
+        XCTAssertTrue(visibleText(progressText).waitToExist(timeout: 10), "The reopened conversation should show the running turn's commentary without waiting for the turn to end.")
         let runningRow = element("codex-activity-row-\(activityID)")
-        XCTAssertTrue(runningRow.waitForExistence(timeout: 10), "The reopened conversation should show the running tool row.")
+        XCTAssertTrue(runningRow.waitToExist(timeout: 10), "The reopened conversation should show the running tool row.")
         XCTAssertTrue(runningRow.label.contains("In progress"), "The tool row should still be running while the turn holds.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: ready.path), "The turn should still be held while its progress shows.")
         XCTAssertFalse(visibleText(finalText).exists, "The final answer must not appear before the turn finishes.")
@@ -10411,7 +10429,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(providerResumeCount(), resumesBeforeReopen, "Following the running turn must read its thread as loaded, not resume it with history's default model.")
 
         try Data("Finish the turn.\n".utf8).write(to: release)
-        XCTAssertTrue(visibleText(finalText).waitForExistence(timeout: 30), "The reopened conversation should show the final answer once the turn settles.")
+        XCTAssertTrue(visibleText(finalText).waitToExist(timeout: 30), "The reopened conversation should show the final answer once the turn settles.")
         XCTAssertTrue(waitUntil({ ((try? revision()) ?? 0) > progressedRevision }, timeout: 10), "The revision should rise again when the turn ends.")
     }
 
@@ -10479,7 +10497,7 @@ final class PlayhouseUITests: XCTestCase {
         // Claude's newest text is shown once something follows it, so each held
         // stage shows every line but its last.
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready(1).path) }, timeout: 20), "The fixture should hold the first streamed stage.")
-        XCTAssertTrue(line(19).waitForExistence(timeout: 10), "The first stage's lines should stream into the transcript.")
+        XCTAssertTrue(line(19).waitToExist(timeout: 10), "The first stage's lines should stream into the transcript.")
         XCTAssertTrue(waitUntil({ isInView(line(19)) }, timeout: 5), "Following the bottom should keep the newest streamed line in view; line=\(line(19).frame), viewport=\(scrollView.frame).")
         let question = transcriptMessage(prompt)
         XCTAssertTrue(isOutOfView(question), "A reply taller than the viewport should carry the question out of view while following; question=\(question.frame), viewport=\(scrollView.frame).")
@@ -10487,7 +10505,7 @@ final class PlayhouseUITests: XCTestCase {
 
         try release(1)
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready(2).path) }, timeout: 20), "The fixture should hold the second streamed stage.")
-        XCTAssertTrue(line(27).waitForExistence(timeout: 10))
+        XCTAssertTrue(line(27).waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ isInView(line(27)) }, timeout: 5), "Following should continue as later lines arrive; line=\(line(27).frame), viewport=\(scrollView.frame).")
 
         // Scrolling up stops following: the next stage leaves the reader where they were.
@@ -10506,7 +10524,7 @@ final class PlayhouseUITests: XCTestCase {
         readingFrame = readingLine.frame
         try release(2)
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready(3).path) }, timeout: 20), "The fixture should hold the third streamed stage.")
-        XCTAssertTrue(line(35).waitForExistence(timeout: 10), "The third stage's lines should still stream in.")
+        XCTAssertTrue(line(35).waitToExist(timeout: 10), "The third stage's lines should still stream in.")
         // Give a wrongly resumed follow time to move the viewport before judging it.
         _ = waitUntil({ !isOutOfView(line(35)) }, timeout: 2)
         XCTAssertTrue(isOutOfView(line(35)), "After scrolling up, new lines should arrive below without pulling the reader down; line=\(line(35).frame), viewport=\(scrollView.frame).")
@@ -10521,13 +10539,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(isInView(line(35)), "Scrolling down should reach the newest line.")
         try release(3)
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready(4).path) }, timeout: 20), "The fixture should hold the fourth streamed stage.")
-        XCTAssertTrue(line(43).waitForExistence(timeout: 10), "The fourth stage's lines should stream in.")
+        XCTAssertTrue(line(43).waitToExist(timeout: 10), "The fourth stage's lines should stream in.")
         XCTAssertTrue(waitUntil({ isInView(line(43)) }, timeout: 5), "Back at the bottom, following should resume and keep the newest line in view while the turn runs; line=\(line(43).frame), viewport=\(scrollView.frame).")
         attachScreenshot(named: "Following resumed at the bottom")
         // The held reply is far taller than the viewport, so its bottom is its newest line.
         assertTranscriptEndsWithoutOverscroll(question: question, lastRow: line(43), in: scrollView, turnFitsViewport: false)
         try release(4)
-        XCTAssertTrue(finalLine.waitForExistence(timeout: 30), "The final line should arrive once the reply is released.")
+        XCTAssertTrue(finalLine.waitToExist(timeout: 30), "The final line should arrive once the reply is released.")
         XCTAssertTrue(waitUntil({ isInView(finalLine) }, timeout: 10), "The settled turn should leave its final line in view; line=\(finalLine.frame), viewport=\(scrollView.frame).")
         // Settling folds the streamed lines into Worked for, so the settled turn fits the
         // viewport again and its question returns to the top.
@@ -10545,7 +10563,7 @@ final class PlayhouseUITests: XCTestCase {
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ self.fixtureTurnCount(executable, containing: followUp) > 0 && self.noTurnIsRunning() }, timeout: 30),
                       "The follow-up turn should finish.")
-        XCTAssertTrue(closing.waitForExistence(timeout: 10), "The follow-up's answer should render.")
+        XCTAssertTrue(closing.waitToExist(timeout: 10), "The follow-up's answer should render.")
         assertTranscriptEndsWithoutOverscroll(question: transcriptMessage(followUp), lastRow: try latestMessageRow(titled: title), in: scrollView, turnFitsViewport: false)
         attachScreenshot(named: "Scrolled to the bottom after a short follow-up")
 
@@ -10553,7 +10571,7 @@ final class PlayhouseUITests: XCTestCase {
         // the earlier one held back above it; scrolling straight down must reach the same end.
         element("back-to-board-button").click()
         openTask(named: title)
-        XCTAssertTrue(closing.waitForExistence(timeout: 10), "The reopened conversation should show the newest answer.")
+        XCTAssertTrue(closing.waitToExist(timeout: 10), "The reopened conversation should show the newest answer.")
         assertTranscriptEndsWithoutOverscroll(question: transcriptMessage(followUp), lastRow: try latestMessageRow(titled: title), in: scrollView, turnFitsViewport: false)
         attachScreenshot(named: "Reopened conversation scrolled to the bottom")
     }
@@ -10641,7 +10659,7 @@ final class PlayhouseUITests: XCTestCase {
                     && !turnIsActive()
             }, timeout: 40), "The \(display) fixture turn \(index + 1) should finish with an answer.")
             if index == 0 {
-                XCTAssertFalse(element("conversation-tool-call-\(callIDs[0])").waitForExistence(timeout: 2),
+                XCTAssertFalse(element("conversation-tool-call-\(callIDs[0])").waitToExist(timeout: 2),
                                "While its turn is the latest, a call stays in Worked for instead of rendering inline.")
             }
         }
@@ -10650,7 +10668,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(revealWholeTranscript(), "The earlier turn should load as the reader scrolls up.")
         let rows = callIDs.map { element("conversation-tool-call-\($0)") }
         for row in rows {
-            XCTAssertTrue(row.waitForExistence(timeout: 10), "The earlier turn's call should render inline: \(row.identifier)")
+            XCTAssertTrue(row.waitToExist(timeout: 10), "The earlier turn's call should render inline: \(row.identifier)")
         }
         let intro = visibleText(introText)
         let middle = visibleText(middleText)
@@ -10687,7 +10705,7 @@ final class PlayhouseUITests: XCTestCase {
         let collapsedHeight = listingOutput.frame.height
         XCTAssertFalse(element("conversation-tool-call-toggle-\(callIDs[0])").exists, "A short call has nothing more to show.")
         let toggle = element("conversation-tool-call-toggle-\(callIDs[1])")
-        XCTAssertTrue(toggle.waitForExistence(timeout: 5), "A call whose output runs past the clipped lines can expand.")
+        XCTAssertTrue(toggle.waitToExist(timeout: 5), "A call whose output runs past the clipped lines can expand.")
         toggle.click()
         XCTAssertTrue(waitUntil({ listingOutput.frame.height > collapsedHeight + 10 }, timeout: 5),
                       "Expanding should show every output line, not just the clipped ones.")
@@ -10697,7 +10715,7 @@ final class PlayhouseUITests: XCTestCase {
         let firstStep = app.descendants(matching: .any).matching(NSPredicate(
             format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-markdown-ordered-list-item-", "git status --short was clean."
         )).firstMatch
-        XCTAssertTrue(firstStep.waitForExistence(timeout: 5),
+        XCTAssertTrue(firstStep.waitToExist(timeout: 5),
                       "A numbered list right under a paragraph line should render as list items, with its inline code text unchanged.")
         XCTAssertFalse(firstStep.label.contains("Here is what ran"), "The list item should not be merged into the paragraph above it.")
         XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(
@@ -10714,7 +10732,7 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         openTask(named: title)
         XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load the earlier turn as the reader scrolls up.")
-        XCTAssertTrue(element("conversation-tool-call-\(callIDs[0])").waitForExistence(timeout: 10),
+        XCTAssertTrue(element("conversation-tool-call-\(callIDs[0])").waitToExist(timeout: 10),
                       "The earlier turn's calls should still render inline after reopening the task.")
         XCTAssertTrue(text(of: element("conversation-tool-call-input-\(callIDs[0])")).contains("git status --short"))
     }
@@ -10745,13 +10763,13 @@ final class PlayhouseUITests: XCTestCase {
         let invalid = dataDirectory.appendingPathComponent("invalid-chat-image.png")
         try Data("not an image".utf8).write(to: invalid)
         let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setData(try Data(contentsOf: invalid), forType: .png)
         composer.click()
         composer.typeKey("v", modifierFlags: .command)
         let error = element("codex-chat-error")
-        XCTAssertTrue(error.waitForExistence(timeout: 5), "Pasting malformed image bytes should show a visible validation error.")
+        XCTAssertTrue(error.waitToExist(timeout: 5), "Pasting malformed image bytes should show a visible validation error.")
         XCTAssertTrue(error.label.localizedCaseInsensitiveContains("valid images"))
         XCTAssertTrue(element("send-message-button").isEnabled == false, "An invalid image must not enable send.")
 
@@ -10763,7 +10781,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the submitted user message remains visible in the transcript. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the transcript never shows blank space: the submitted user message is in view, or, once the turn's activity has outgrown the viewport and the transcript follows it, the message sits above the latest live activity, which is in view. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
@@ -10786,16 +10804,27 @@ final class PlayhouseUITests: XCTestCase {
             try? "Release tool completions after assertion failure.\n".write(to: toolRelease, atomically: true, encoding: .utf8)
         }
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: toolReady.path) }, timeout: 20), "The fixture should pause after the tool start notifications.")
-        XCTAssertTrue(transcriptMessage("Show tool activity.").isHittable, "While the sent turn is still held active, the submitted user message must remain visible instead of leaving the transcript in blank space.")
         XCTAssertFalse(element("current-activity-indicator").exists, "The conversation header should not show a live activity line while responding.")
         let latestActiveRow = element("codex-activity-row-item_fixture_active_long_command")
-        XCTAssertTrue(latestActiveRow.waitForExistence(timeout: 10), "The latest active process should appear outside Working for.")
+        XCTAssertTrue(latestActiveRow.waitToExist(timeout: 10), "The latest active process should appear outside Working for.")
+        // The open Working for list can outgrow the viewport, and then the transcript follows
+        // the live activity. Either way the viewport must show the turn, never blank space.
+        let sentMessage = transcriptMessage("Show tool activity.")
+        let transcriptViewport = element("conversation-scroll-view")
+        XCTAssertTrue(waitUntil({
+            let viewport = transcriptViewport.frame
+            let message = sentMessage.frame
+            let latest = latestActiveRow.frame
+            guard sentMessage.exists else { return false }
+            if viewport.contains(message) { return true }
+            return message.maxY <= latest.minY && viewport.contains(latest)
+        }, timeout: 5), "While the sent turn is still held active, the transcript must show the submitted message, or the latest live activity below it, instead of blank space.")
         XCTAssertLessThan(latestActiveRow.frame.height, 45, "The long active command should remain a single truncated line.")
         let activityDisclosure = element("codex-activity-disclosure")
         XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Expanded, down chevron" }, timeout: 10),
                       "A turn in flight should show its work instead of hiding it behind Working for.")
         let activityDetails = element("codex-activity-details")
-        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Working for should already list this turn's tool activity.")
+        XCTAssertTrue(activityDetails.waitToExist(timeout: 5), "Working for should already list this turn's tool activity.")
         attachScreenshot(named: "Working for stays open while the turn runs")
         // Activity rows are groups; their details and durations are child texts.
         func rowText(_ id: String) -> String {
@@ -10813,9 +10842,9 @@ final class PlayhouseUITests: XCTestCase {
         let dynamicRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").firstMatch
         let legacyDynamicRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").firstMatch
         let commandRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_active_long_command").firstMatch
-        XCTAssertTrue(mcpRow.waitForExistence(timeout: 10), "Older MCP calls should remain inside expanded Working for.")
-        XCTAssertTrue(dynamicRow.waitForExistence(timeout: 10), "Older dynamic calls should remain inside expanded Working for.")
-        XCTAssertTrue(legacyDynamicRow.waitForExistence(timeout: 10), "The legacy dynamic call should remain inside expanded Working for.")
+        XCTAssertTrue(mcpRow.waitToExist(timeout: 10), "Older MCP calls should remain inside expanded Working for.")
+        XCTAssertTrue(dynamicRow.waitToExist(timeout: 10), "Older dynamic calls should remain inside expanded Working for.")
+        XCTAssertTrue(legacyDynamicRow.waitToExist(timeout: 10), "The legacy dynamic call should remain inside expanded Working for.")
         XCTAssertFalse(commandRow.exists, "The active command should stay outside expanded Working for.")
         XCTAssertTrue(latestActiveRow.label.contains("In progress"))
         for identifier in ["item_fixture_mcp_call", "item_fixture_dynamic_call"] {
@@ -10830,17 +10859,17 @@ final class PlayhouseUITests: XCTestCase {
         // the live elapsed-time display the continuously-open window shows above,
         // so this checks status and content, not the running duration.
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         openTask(named: "Tool activity")
-        XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 20))
+        XCTAssertTrue(activityDisclosure.waitToExist(timeout: 20))
         XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Expanded, down chevron" }, timeout: 15),
                       "Reopening a task mid-turn should land on the same open section instead of hiding the work behind Working for.")
-        XCTAssertTrue(activityDetails.waitForExistence(timeout: 10), "The reopened live turn should render its progress without a click.")
-        XCTAssertTrue(mcpRow.waitForExistence(timeout: 10), "Reopening mid-turn should still show in-flight calls inside Working for.")
-        XCTAssertTrue(dynamicRow.waitForExistence(timeout: 5))
-        XCTAssertTrue(legacyDynamicRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(activityDetails.waitToExist(timeout: 10), "The reopened live turn should render its progress without a click.")
+        XCTAssertTrue(mcpRow.waitToExist(timeout: 10), "Reopening mid-turn should still show in-flight calls inside Working for.")
+        XCTAssertTrue(dynamicRow.waitToExist(timeout: 5))
+        XCTAssertTrue(legacyDynamicRow.waitToExist(timeout: 5))
         XCTAssertTrue(mcpRow.label.contains("In progress"), "A reopened in-flight call should still read as in progress.")
-        XCTAssertTrue(latestActiveRow.waitForExistence(timeout: 10), "The reopened window should still show the latest active process outside Working for.")
+        XCTAssertTrue(latestActiveRow.waitToExist(timeout: 10), "The reopened window should still show the latest active process outside Working for.")
         XCTAssertFalse(commandRow.exists, "The active command should stay outside expanded Working for after reopening.")
         // The open section is a default, not a lock: a reader can fold it mid-turn,
         // and it must stay folded across the activity updates that follow.
@@ -10859,8 +10888,8 @@ final class PlayhouseUITests: XCTestCase {
                        "An activity update arriving mid-turn must not reopen a section the reader folded.")
         XCTAssertFalse(activityDetails.exists, "The reader's mid-turn collapse should survive the completing command.")
         activityDisclosure.click()
-        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Expanded Working for should contain tool activity rows.")
-        XCTAssertTrue(waitUntil({ commandRow.waitForExistence(timeout: 0.1) }, timeout: 10), "A completed command should move inside Working for.")
+        XCTAssertTrue(activityDetails.waitToExist(timeout: 5), "Expanded Working for should contain tool activity rows.")
+        XCTAssertTrue(waitUntil({ commandRow.waitToExist(timeout: 0.1) }, timeout: 10), "A completed command should move inside Working for.")
         XCTAssertTrue(commandRow.label.contains("Completed"), "The command should read Completed once the section is reopened.")
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
@@ -10923,13 +10952,13 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Tool activity")
         element("codex-activity-disclosure").click()
         let reloadedActivityDetails = element("codex-activity-details")
-        XCTAssertTrue(reloadedActivityDetails.waitForExistence(timeout: 5))
+        XCTAssertTrue(reloadedActivityDetails.waitToExist(timeout: 5))
         let reloadedMcpRow = reloadedActivityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").firstMatch
-        XCTAssertTrue(reloadedMcpRow.waitForExistence(timeout: 20), "Completed MCP activity should remain in Working for after history reload.")
+        XCTAssertTrue(reloadedMcpRow.waitToExist(timeout: 20), "Completed MCP activity should remain in Working for after history reload.")
         let reloadedDynamicRow = reloadedActivityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").firstMatch
         let reloadedLegacyDynamicRow = reloadedActivityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").firstMatch
-        XCTAssertTrue(reloadedDynamicRow.waitForExistence(timeout: 10), "Failed dynamic activity should remain after history reload.")
-        XCTAssertTrue(reloadedLegacyDynamicRow.waitForExistence(timeout: 10), "Legacy dynamic activity should remain after history reload.")
+        XCTAssertTrue(reloadedDynamicRow.waitToExist(timeout: 10), "Failed dynamic activity should remain after history reload.")
+        XCTAssertTrue(reloadedLegacyDynamicRow.waitToExist(timeout: 10), "Legacy dynamic activity should remain after history reload.")
         XCTAssertTrue(reloadedMcpRow.label.contains("MCP · lookup"))
         XCTAssertTrue(reloadedMcpRow.label.contains("Completed"))
         XCTAssertTrue(rowText("item_fixture_mcp_call").contains("fixture-server"))
@@ -10971,7 +11000,7 @@ final class PlayhouseUITests: XCTestCase {
         defer { try? "Release compaction after assertion failure.\n".write(to: release, atomically: true, encoding: .utf8) }
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 20))
         let row = element("context-compaction-row-item_playhouse_compaction")
-        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        XCTAssertTrue(row.waitToExist(timeout: 10))
         XCTAssertTrue(row.label.contains("In progress"))
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "context-compaction-row-item_playhouse_compaction").count, 1)
         XCTAssertFalse((row.label + " " + (row.value as? String ?? "")).contains("COMPACTION_OPAQUE_SENTINEL"))
@@ -10991,14 +11020,14 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse((row.label + " " + (row.value as? String ?? "")).contains("COMPACTION_OPAQUE_SENTINEL"))
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "COMPACTION_OPAQUE_SENTINEL")).count, 0)
         let finalMessage = app.staticTexts["Context compaction completed."]
-        XCTAssertTrue(finalMessage.waitForExistence(timeout: 10))
+        XCTAssertTrue(finalMessage.waitToExist(timeout: 10))
         XCTAssertLessThan(row.frame.minY, finalMessage.frame.minY)
         let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
         XCTAssertEqual((history?["activities"] as? [[String: Any]] ?? []).filter { $0["isContextCompaction"] as? Bool == true }.count, 1)
         element("back-to-board-button").click()
         openTask(named: "Context compaction")
         let reloaded = element("context-compaction-row-item_playhouse_compaction")
-        XCTAssertTrue(reloaded.waitForExistence(timeout: 20))
+        XCTAssertTrue(reloaded.waitToExist(timeout: 20))
         XCTAssertTrue(reloaded.label.contains("Completed"))
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "context-compaction-row-item_playhouse_compaction").count, 1)
         XCTAssertFalse((reloaded.label + " " + (reloaded.value as? String ?? "")).contains("COMPACTION_OPAQUE_SENTINEL"))
@@ -11040,7 +11069,7 @@ final class PlayhouseUITests: XCTestCase {
             !self.element("codex-working-duration").exists
         }, timeout: 20), "The streamed long history should settle before the conversation is reopened.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "The completed long history should return to the board before reopening.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10), "The completed long history should return to the board before reopening.")
         openTask(named: "Long conversation history")
         let scrollView = element("conversation-scroll-view")
         XCTAssertTrue(waitUntil({
@@ -11125,7 +11154,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ providerMenu.isEnabled }, timeout: 10), "The provider menu should be available once the long history settles.")
         providerMenu.click()
         let claudeChoice = app.menuItems["conversation-provider-claude"]
-        XCTAssertTrue(claudeChoice.waitForExistence(timeout: 5))
+        XCTAssertTrue(claudeChoice.waitToExist(timeout: 5))
         claudeChoice.click()
         XCTAssertTrue(waitUntil({
             scrollView.value as? String == "Showing latest 2 of 120 messages"
@@ -11157,7 +11186,7 @@ final class PlayhouseUITests: XCTestCase {
             return record["status"] as? String != "In Progress" && (record["pendingSubmittedPrompt"] as? String) == nil
         }, timeout: 20), "The long turn should settle before the conversation is reopened.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "The completed turn should return to the board before reopening.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10), "The completed turn should return to the board before reopening.")
 
         openTask(named: "Sent prompt past history page")
         let scrollView = element("conversation-scroll-view")
@@ -11182,7 +11211,7 @@ final class PlayhouseUITests: XCTestCase {
             (try? self.taskRecord(id: taskID)?["hasUnsentDraft"] as? Bool) == true
         }, timeout: 10), "The typed draft should be saved as an unsent draft.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         openTask(named: "Sent prompt past history page")
         XCTAssertTrue(waitUntil({
             (self.element("message-composer").value as? String) == "Keep this draft."
@@ -11343,7 +11372,7 @@ final class PlayhouseUITests: XCTestCase {
         scrollUp(until: { isVisible(oldest) })
         XCTAssertTrue(waitUntil({ isVisible(oldest) }, timeout: 5), "Scrolling to the top shows the first turn.")
         let firstImage = element("chat-image-\(firstUserID)-0")
-        XCTAssertTrue(firstImage.waitForExistence(timeout: 5), "The first turn's image is filled in when its page loads.")
+        XCTAssertTrue(firstImage.waitToExist(timeout: 5), "The first turn's image is filled in when its page loads.")
         // The image renders above its message's text, so scroll until it is in view too.
         scrollUp(until: { isVisible(firstImage) })
         XCTAssertTrue(waitUntil({ isVisible(firstImage) }, timeout: 5), "The first turn's image is shown in the transcript.")
@@ -11422,22 +11451,22 @@ final class PlayhouseUITests: XCTestCase {
         defer { try? "Release active child fixture.\n".write(to: subagentRelease, atomically: true, encoding: .utf8) }
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: subagentReady.path) }, timeout: 20), "The fixture should expose the active child interval before completion.")
         let activityDisclosure = element("codex-activity-disclosure")
-        XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 10), "Active child work should appear in conversation activity.")
+        XCTAssertTrue(activityDisclosure.waitToExist(timeout: 10), "Active child work should appear in conversation activity.")
         // Every activity in flight here renders outside the section, so the open
         // section has nothing inside it yet; its state is the chevron, not content.
         XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Expanded, down chevron" }, timeout: 10),
                       "A turn in flight should show its work instead of hiding it behind Working for.")
         let activeChildButton = element("codex-subagent-row-00000000-0000-0000-0000-000000000002")
-        XCTAssertTrue(activeChildButton.waitForExistence(timeout: 10), "The running child should appear as a clickable timeline row beside the open Codex activity.")
+        XCTAssertTrue(activeChildButton.waitToExist(timeout: 10), "The running child should appear as a clickable timeline row beside the open Codex activity.")
         XCTAssertEqual(activityDisclosure.descendants(matching: .any).matching(identifier: "codex-subagent-row-00000000-0000-0000-0000-000000000002").count, 0,
                        "Active agents should not be nested inside Working for.")
         XCTAssertTrue(activeChildButton.label.contains("Sandbox review"))
         XCTAssertTrue(activeChildButton.label.contains("started working"))
         let agentIcon = activeChildButton.images.matching(NSPredicate(format: "label == %@", "Sandbox review agent icon")).firstMatch
-        XCTAssertTrue(agentIcon.waitForExistence(timeout: 5), "The requested robot icon should render in the child timeline row.")
+        XCTAssertTrue(agentIcon.waitToExist(timeout: 5), "The requested robot icon should render in the child timeline row.")
         assertSubagentIconArtwork(agentIcon)
         let secondActiveChildButton = element("codex-subagent-row-00000000-0000-0000-0000-000000000003")
-        XCTAssertTrue(secondActiveChildButton.waitForExistence(timeout: 5),
+        XCTAssertTrue(secondActiveChildButton.waitToExist(timeout: 5),
                       "Every active agent should remain visible outside the Codex activity section.")
         // The open section is a default, not a lock: folding it mid-turn sticks.
         activityDisclosure.click()
@@ -11455,7 +11484,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(childMetadata.contains("/agents/Sandbox review"))
         XCTAssertTrue(childMetadata.contains("gpt-6-sol"))
         XCTAssertTrue(childMetadata.contains("high"))
-        XCTAssertTrue(secondActiveChildButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(secondActiveChildButton.waitToExist(timeout: 5))
         XCTAssertTrue(secondActiveChildButton.label.contains("Some agent"), "Underscored agent names should render with spaces and sentence capitalization.")
         XCTAssertTrue(secondActiveChildButton.label.contains("started working"))
         let secondChildMetadata = subagentRowMetadata(secondActiveChildButton)
@@ -11465,7 +11494,7 @@ final class PlayhouseUITests: XCTestCase {
             format: "identifier == %@ AND label CONTAINS %@", "subagent-row-chevron", "Some agent"
         )).firstMatch.exists, "Each agent row should show an arrow that opens it.")
         activeChildButton.click()
-        XCTAssertTrue(element("subagent-conversation-panel").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("subagent-conversation-panel").waitToExist(timeout: 5))
         try "Release child to finish and answer read-only inspection requests.\n".write(to: subagentRelease, atomically: true, encoding: .utf8)
         XCTAssertTrue(element("subagent-back-button").exists)
         XCTAssertTrue(app.staticTexts["Read only"].exists)
@@ -11544,7 +11573,7 @@ final class PlayhouseUITests: XCTestCase {
         app.activate()
         XCTAssertEqual(app.state, .runningForeground, "Playhouse must be foreground before inspecting the conversation.")
 
-        XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 20), "A delegated task should appear in conversation activity.")
+        XCTAssertTrue(activityDisclosure.waitToExist(timeout: 20), "A delegated task should appear in conversation activity.")
         XCTAssertTrue(activityDisclosure.label.contains("Worked for"), "The completed turn should use the Worked for disclosure.")
         XCTAssertEqual(activityDisclosure.value as? String, "Collapsed, right chevron",
                        "The final answer should arrive with all Codex activity collapsed.")
@@ -11556,7 +11585,7 @@ final class PlayhouseUITests: XCTestCase {
         }
         activityDisclosure.click()
         let activityRow = element("codex-activity-row-item_playhouse_subagent")
-        XCTAssertTrue(activityRow.waitForExistence(timeout: 10))
+        XCTAssertTrue(activityRow.waitToExist(timeout: 10))
         XCTAssertTrue(activityRow.label.contains("Task delegated to subagent"))
         XCTAssertTrue(activityRow.label.contains("Completed"))
         XCTAssertTrue(app.staticTexts["Agents used"].exists)
@@ -11564,7 +11593,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"))
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "An unknown child kind should remain inspectable.")
         let activityDetail = element("codex-activity-detail-item_playhouse_subagent")
-        XCTAssertTrue(activityDetail.waitForExistence(timeout: 5))
+        XCTAssertTrue(activityDetail.waitToExist(timeout: 5))
         let detailDescription = "\(activityDetail.label) \(activityDetail.value as? String ?? "")"
         XCTAssertTrue(detailDescription.contains("Inspect the project structure and report relevant files."))
         let childThreadID = "00000000-0000-0000-0000-000000000002"
@@ -11587,7 +11616,7 @@ final class PlayhouseUITests: XCTestCase {
             transcriptScrollView.scroll(byDeltaX: 0, deltaY: -150)
         }
         completedChildRow.click()
-        XCTAssertTrue(element("subagent-conversation-panel").waitForExistence(timeout: 5),
+        XCTAssertTrue(element("subagent-conversation-panel").waitToExist(timeout: 5),
                       "An expanded finished agent row should open its conversation.")
         XCTAssertTrue(app.staticTexts["Read only"].exists)
         XCTAssertFalse(element("message-composer").exists)
@@ -11595,9 +11624,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !self.element("subagent-conversation-panel").exists }, timeout: 5))
 
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "The task should close before checking its saved conversation history.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10), "The task should close before checking its saved conversation history.")
         openTask(named: "Subagent delegation")
-        XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 10))
+        XCTAssertTrue(activityDisclosure.waitToExist(timeout: 10))
         XCTAssertTrue(activityDisclosure.label.contains("Worked for"), "The reopened final answer should retain the Worked for disclosure.")
         XCTAssertEqual(activityDisclosure.value as? String, "Collapsed, right chevron")
         for childID in ["00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000004"] {
@@ -11643,10 +11672,10 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Plan mode Markdown")
 
         let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
+        XCTAssertTrue(modeMenu.waitToExist(timeout: 10))
         modeMenu.click()
         let planMode = app.menuItems["Plan mode"]
-        XCTAssertTrue(planMode.waitForExistence(timeout: 5))
+        XCTAssertTrue(planMode.waitToExist(timeout: 5))
         planMode.click()
         XCTAssertTrue(modeMenu.label.contains("Plan mode"))
 
@@ -11655,17 +11684,17 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((emptyConversation?["messages"] as? [[String: Any]])?.count ?? 0, 0, "The handoff availability check should start with an empty conversation.")
         XCTAssertEqual(element("message-composer").value as? String ?? "", "")
         let startImplementingInEmptyConversation = element("start-implementing-button")
-        XCTAssertFalse(startImplementingInEmptyConversation.waitForExistence(timeout: 2), "Plan mode should not offer Start Implementing before a first message exists.")
+        XCTAssertFalse(startImplementingInEmptyConversation.waitToExist(timeout: 2), "Plan mode should not offer Start Implementing before a first message exists.")
 
         modeMenu.click()
         let goalComposerMode = app.menuItems["conversation-mode-goal"]
-        XCTAssertTrue(goalComposerMode.waitForExistence(timeout: 5))
+        XCTAssertTrue(goalComposerMode.waitToExist(timeout: 5))
         goalComposerMode.click()
         XCTAssertTrue(modeMenu.label.contains("Goal"), "The composer should enter Goal mode.")
         XCTAssertFalse(startImplementingInEmptyConversation.exists, "Entering Goal mode should not reveal Start Implementing in an empty conversation.")
         modeMenu.click()
         let planModeAfterGoal = app.menuItems["Plan mode"]
-        XCTAssertTrue(planModeAfterGoal.waitForExistence(timeout: 5))
+        XCTAssertTrue(planModeAfterGoal.waitToExist(timeout: 5))
         planModeAfterGoal.click()
         XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Plan mode should be selectable again after Goal.")
         let composer = element("message-composer")
@@ -11678,7 +11707,7 @@ final class PlayhouseUITests: XCTestCase {
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Implementation plan"))
             .firstMatch
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: deltaReady(1).path) }, timeout: 10), "The fixture should pause after the first plan delta.")
-        XCTAssertTrue(assistantMarkdown.waitForExistence(timeout: 10), "The first plan delta should appear before the turn completes.")
+        XCTAssertTrue(assistantMarkdown.waitToExist(timeout: 10), "The first plan delta should appear before the turn completes.")
         // The streamed message can be replaced by its persisted item; read the partial plan once.
         let partialPlan = assistantMarkdown.label
         XCTAssertTrue(partialPlan.contains("workspace model"), "The partial plan should show its streamed content.")
@@ -11686,7 +11715,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(partialPlan.contains("Final verification"), "The rest of the plan should wait for the fixture release.")
         let planQuestion = transcriptMessage("Plan the task.")
         let planTranscriptScrollView = element("conversation-scroll-view")
-        XCTAssertTrue(planQuestion.waitForExistence(timeout: 5))
+        XCTAssertTrue(planQuestion.waitToExist(timeout: 5))
         XCTAssertTrue(waitUntil({
             planQuestion.frame.minY >= planTranscriptScrollView.frame.minY - 4
                 && planQuestion.frame.minY <= planTranscriptScrollView.frame.minY + 120
@@ -11786,7 +11815,7 @@ final class PlayhouseUITests: XCTestCase {
         let markdownContent = app.staticTexts.matching(
             NSPredicate(format: "value CONTAINS %@", "Implementation plan")
         ).firstMatch
-        XCTAssertTrue(markdownContent.waitForExistence(timeout: 5), "The plan should render as one selectable Markdown text view.")
+        XCTAssertTrue(markdownContent.waitToExist(timeout: 5), "The plan should render as one selectable Markdown text view.")
         let sharedProse = markdownContent.value as? String ?? ""
         for text in ["Start with the workspace model.", "A separate paragraph confirms readable spacing",
                      "Implementation detail 01", "Second numbered step"] {
@@ -11797,7 +11826,7 @@ final class PlayhouseUITests: XCTestCase {
         let visibleOrderedItem = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-markdown-ordered-list-item-", "First numbered step"))
             .firstMatch
-        XCTAssertTrue(visibleOrderedItem.waitForExistence(timeout: 5))
+        XCTAssertTrue(visibleOrderedItem.waitToExist(timeout: 5))
         XCTAssertTrue(scrollFullyIntoView(visibleOrderedItem, in: element("conversation-scroll-view")))
         visibleOrderedItem.click()
         visibleOrderedItem.typeKey("a", modifierFlags: .command)
@@ -11814,7 +11843,7 @@ final class PlayhouseUITests: XCTestCase {
         let firstOrderedItem = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-markdown-ordered-list-item-", "First numbered step"))
             .firstMatch
-        XCTAssertTrue(firstOrderedItem.waitForExistence(timeout: 5), "The first ordered list item should render as its own block.")
+        XCTAssertTrue(firstOrderedItem.waitToExist(timeout: 5), "The first ordered list item should render as its own block.")
         XCTAssertFalse(firstOrderedItem.label.contains("Second numbered step"), "Ordered list items should stay on separate lines instead of being merged.")
         XCTAssertFalse(firstOrderedItem.label.contains("Two numbered steps follow"), "A list right under a paragraph line should not merge into that paragraph.")
         let secondOrderedItem = app.descendants(matching: .any)
@@ -11825,19 +11854,19 @@ final class PlayhouseUITests: XCTestCase {
         let codeBlockLanguageLabel = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "assistant-markdown-code-block-language-"))
             .firstMatch
-        XCTAssertTrue(codeBlockLanguageLabel.waitForExistence(timeout: 5), "The fenced code block should render with a visible language label.")
+        XCTAssertTrue(codeBlockLanguageLabel.waitToExist(timeout: 5), "The fenced code block should render with a visible language label.")
         XCTAssertEqual(accessibleLabelOrValue(of: codeBlockLanguageLabel), "Javascript", "The fenced code block's declared language should be displayed.")
         let codeBlockCopyButton = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "assistant-markdown-code-block-copy-"))
             .firstMatch
-        XCTAssertTrue(codeBlockCopyButton.waitForExistence(timeout: 5), "The fenced code block should render with a copy button.")
+        XCTAssertTrue(codeBlockCopyButton.waitToExist(timeout: 5), "The fenced code block should render with a copy button.")
         codeBlockCopyButton.click()
         XCTAssertEqual(NSPasteboard.general.string(forType: .string), "console.log(\"Hello, world!\");", "Copying the code block should place its exact source on the pasteboard, not the Markdown fence or surrounding prose.")
 
         let markdownTable = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier MATCHES %@", "assistant-markdown-table-[0-9]+"))
             .firstMatch
-        XCTAssertTrue(markdownTable.waitForExistence(timeout: 5), "A Markdown pipe table should render as its own grid block.")
+        XCTAssertTrue(markdownTable.waitToExist(timeout: 5), "A Markdown pipe table should render as its own grid block.")
         func tableCell(_ suffix: String) -> XCUIElement {
             app.descendants(matching: .any)
                 .matching(NSPredicate(format: "identifier MATCHES %@", "assistant-markdown-table-[0-9]+-\(suffix)"))
@@ -11877,7 +11906,7 @@ final class PlayhouseUITests: XCTestCase {
                 && latestListItem.frame.maxY > conversationScrollView.frame.minY
         }, timeout: 5), "Reopening a long conversation should position its final message in the visible viewport.")
         let startImplementing = element("start-implementing-button")
-        XCTAssertTrue(startImplementing.waitForExistence(timeout: 5), "Plan mode should offer a dedicated implementation handoff.")
+        XCTAssertTrue(startImplementing.waitToExist(timeout: 5), "Plan mode should offer a dedicated implementation handoff.")
         XCTAssertEqual(element("message-composer").value as? String ?? "", "", "The handoff should be available while the composer is empty.")
         XCTAssertTrue(startImplementing.isEnabled, "Start Implementing should not require draft text.")
         XCTAssertFalse(element("start-implementing-unavailable-reason").exists, "A task with a working folder shows no missing-repository warning.")
@@ -11922,10 +11951,10 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Plan without repository")
 
         let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
+        XCTAssertTrue(modeMenu.waitToExist(timeout: 10))
         modeMenu.click()
         let planMode = app.menuItems["Plan mode"]
-        XCTAssertTrue(planMode.waitForExistence(timeout: 5))
+        XCTAssertTrue(planMode.waitToExist(timeout: 5))
         planMode.click()
         XCTAssertTrue(modeMenu.label.contains("Plan mode"))
         let composer = element("message-composer")
@@ -11936,14 +11965,14 @@ final class PlayhouseUITests: XCTestCase {
         let reason = "Add a repository to this task to start implementing."
         let startImplementing = element("start-implementing-button")
         let warning = element("start-implementing-unavailable-reason")
-        XCTAssertTrue(startImplementing.waitForExistence(timeout: 30), "Planning works without a repository, so the handoff appears once the plan turn ends.")
+        XCTAssertTrue(startImplementing.waitToExist(timeout: 30), "Planning works without a repository, so the handoff appears once the plan turn ends.")
         XCTAssertTrue(waitUntil({
             conversationMessages().contains { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
         }, timeout: 30), "The plan turn completes without a repository or folder.")
         XCTAssertEqual(turnModes(), ["plan"], "The plan turn ran in Plan mode.")
         XCTAssertFalse(startImplementing.isEnabled, "Implementing needs somewhere to change, so the handoff stays disabled.")
         XCTAssertEqual(startImplementing.value as? String, reason, "The button's accessibility explains why it is unavailable.")
-        XCTAssertTrue(warning.waitForExistence(timeout: 5), "The reason is visible without hovering.")
+        XCTAssertTrue(warning.waitToExist(timeout: 5), "The reason is visible without hovering.")
         XCTAssertEqual(warning.label, "No repository")
         XCTAssertEqual(warning.value as? String, reason, "The warning carries the same reason as the button.")
         XCTAssertLessThan(abs(warning.frame.midY - startImplementing.frame.midY), 4, "The warning sits beside the button in the composer toolbar.")
@@ -11962,7 +11991,7 @@ final class PlayhouseUITests: XCTestCase {
 
         // The warning is the way to fix it: it opens the header's repository picker.
         warning.click()
-        XCTAssertTrue(element("conversation-repository-search").waitForExistence(timeout: 5), "The warning opens the repository picker.")
+        XCTAssertTrue(element("conversation-repository-search").waitToExist(timeout: 5), "The warning opens the repository picker.")
         chooseRepositorySuggestion("primary")
         // The header picker adds the repository as the task's root; its worktree is named and
         // created by the next send, so the handoff below is what creates it.
@@ -12025,7 +12054,7 @@ final class PlayhouseUITests: XCTestCase {
 
         if !usesLiveCodex {
             let row = element("active-goal-progress-row")
-            XCTAssertTrue(row.waitForExistence(timeout: 10))
+            XCTAssertTrue(row.waitToExist(timeout: 10))
             let goalTitle = accessibleLabelOrValue(of: element("active-goal-title"))
             XCTAssertTrue(goalTitle.contains("Paused goal"), "Unexpected Goal title: \(goalTitle)")
             XCTAssertTrue(goalTitle.contains(objective), "Unexpected Goal objective: \(goalTitle)")
@@ -12040,7 +12069,7 @@ final class PlayhouseUITests: XCTestCase {
             goalMenuItem.click()
             XCTAssertTrue(modeMenu.label.contains("Goal"))
             element("send-message-button").click()
-            XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 5))
+            XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 5))
             XCTAssertTrue(element("codex-chat-error").label.contains("4,000 characters"))
             XCTAssertTrue(accessibleLabelOrValue(of: element("active-goal-title")).contains(objective))
             XCTAssertTrue(accessibleLabelOrValue(of: element("active-goal-title")).contains("Paused goal"))
@@ -12055,10 +12084,10 @@ final class PlayhouseUITests: XCTestCase {
             launchApp(defaultParent: fixture.parent.path)
             openTask(named: "Durable goal")
             let replacementRow = element("active-goal-progress-row")
-            XCTAssertTrue(replacementRow.waitForExistence(timeout: 10), "A replacement Goal should be restored after a CLI/XPC set.")
+            XCTAssertTrue(replacementRow.waitToExist(timeout: 10), "A replacement Goal should be restored after a CLI/XPC set.")
             XCTAssertTrue(accessibleLabelOrValue(of: element("active-goal-title")).contains(replacementObjective))
             let replacementTimer = element("goal-elapsed-time")
-            XCTAssertTrue(replacementTimer.waitForExistence(timeout: 10))
+            XCTAssertTrue(replacementTimer.waitToExist(timeout: 10))
             let replacementTimerText = accessibleLabelOrValue(of: replacementTimer)
             let replacementSeconds = Int(replacementTimerText.replacingOccurrences(of: "s", with: ""))
             XCTAssertNotNil(replacementSeconds, "Expected a replacement Goal timer in seconds, got: \(replacementTimerText)")
@@ -12076,10 +12105,10 @@ final class PlayhouseUITests: XCTestCase {
         composer.click()
         composer.typeText("/goal")
         let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitForExistence(timeout: 5))
+        XCTAssertTrue(modeMenu.waitToExist(timeout: 5))
         XCTAssertTrue(modeMenu.label.contains("Goal"))
         element("send-message-button").click()
-        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 5), "Blank Goal text should show a validation error.")
+        XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 5), "Blank Goal text should show a validation error.")
         XCTAssertTrue(element("codex-chat-error").label.contains("4,000 characters"))
         XCTAssertTrue((try runCLI(["conversation", "goal", taskID, "get"])["result"] as? NSNull) != nil, "Blank Goal submission must not create an objective.")
 
@@ -12091,7 +12120,7 @@ final class PlayhouseUITests: XCTestCase {
         composer.typeText(objective)
         element("send-message-button").click()
         let row = element("active-goal-progress-row")
-        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        XCTAssertTrue(row.waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({
             self.element("goal-achieved-banner").exists
                 || row.value as? String == "Work started"
@@ -12101,7 +12130,7 @@ final class PlayhouseUITests: XCTestCase {
         let conversationScrollView = element("conversation-scroll-view")
         let achievedBanner = conversationScrollView.descendants(matching: .any)
             .matching(identifier: "goal-achieved-banner").firstMatch
-        XCTAssertTrue(achievedBanner.waitForExistence(timeout: 180), "Codex should replace the active Goal row with an achieved summary after completing the objective.")
+        XCTAssertTrue(achievedBanner.waitToExist(timeout: 180), "Codex should replace the active Goal row with an achieved summary after completing the objective.")
         let firstAchievementText = accessibleLabelOrValue(of: achievedBanner)
         XCTAssertTrue(firstAchievementText.contains("Goal achieved in"))
         XCTAssertNotEqual(firstAchievementText, "Goal achieved in 0s", "A first Goal without prior usage should retain its reported elapsed duration.")
@@ -12125,7 +12154,7 @@ final class PlayhouseUITests: XCTestCase {
         let migratedConversation = element("conversation-scroll-view")
         let migratedBanner = migratedConversation.descendants(matching: .any)
             .matching(identifier: "goal-achieved-banner").firstMatch
-        XCTAssertTrue(migratedBanner.waitForExistence(timeout: 10), "A completed Goal created before timing metadata existed should be reconstructed from Codex history.")
+        XCTAssertTrue(migratedBanner.waitToExist(timeout: 10), "A completed Goal created before timing metadata existed should be reconstructed from Codex history.")
         XCTAssertNotEqual(
             accessibleLabelOrValue(of: migratedBanner),
             "Goal achieved in 0s",
@@ -12144,7 +12173,7 @@ final class PlayhouseUITests: XCTestCase {
         element("send-message-button").click()
         let followupMessage = conversationScrollView.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS %@", followupPrompt)).firstMatch
-        XCTAssertTrue(followupMessage.waitForExistence(timeout: 10), "The follow-up question should appear in the conversation.")
+        XCTAssertTrue(followupMessage.waitToExist(timeout: 10), "The follow-up question should appear in the conversation.")
         let achievementRow = conversationScrollView.descendants(matching: .any)
             .matching(identifier: "goal-achievement-timeline-row").firstMatch
         XCTAssertTrue(waitUntil({
@@ -12173,7 +12202,7 @@ final class PlayhouseUITests: XCTestCase {
         composer.typeText(secondObjective)
         element("send-message-button").click()
         let secondGoalTimer = element("goal-elapsed-time")
-        XCTAssertTrue(secondGoalTimer.waitForExistence(timeout: 10), "A new Goal should show its own elapsed timer.")
+        XCTAssertTrue(secondGoalTimer.waitToExist(timeout: 10), "A new Goal should show its own elapsed timer.")
         let secondGoalTimerText = accessibleLabelOrValue(of: secondGoalTimer)
         let secondGoalSeconds = Int(secondGoalTimerText.replacingOccurrences(of: "s", with: ""))
         XCTAssertNotNil(secondGoalSeconds, "Expected a fresh seconds timer, got: \(secondGoalTimerText)")
@@ -12201,21 +12230,21 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
         element("back-to-board-button").click()
         let archiveButton = element("done-archive-button")
-        XCTAssertTrue(archiveButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(archiveButton.waitToExist(timeout: 10))
         archiveButton.click()
         let archivedGoal = element("done-archive-task-\(taskID)")
-        XCTAssertTrue(archivedGoal.waitForExistence(timeout: 10), "The completed Goal task should be available in the Done archive.")
+        XCTAssertTrue(archivedGoal.waitToExist(timeout: 10), "The completed Goal task should be available in the Done archive.")
         archivedGoal.click()
-        XCTAssertTrue(element("archived-conversation-read-only").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("archived-conversation-read-only").waitToExist(timeout: 10))
         let reopenedConversation = element("conversation-scroll-view")
         let restoredBanner = reopenedConversation.descendants(matching: .any)
             .matching(identifier: "goal-achieved-banner").firstMatch
-        XCTAssertTrue(restoredBanner.waitForExistence(timeout: 10), "A completed Goal should remain visible in the read-only conversation after archiving its task.")
+        XCTAssertTrue(restoredBanner.waitToExist(timeout: 10), "A completed Goal should remain visible in the read-only conversation after archiving its task.")
         XCTAssertTrue(accessibleLabelOrValue(of: restoredBanner).contains("Goal achieved in"))
         let restoredAchievementRows = reopenedConversation.descendants(matching: .any)
             .matching(identifier: "goal-achievement-timeline-row")
         XCTAssertEqual(restoredAchievementRows.count, 2, "Both completed Goal events should remain in the archived conversation.")
-        XCTAssertTrue(reopenedConversation.scrollBars.firstMatch.waitForExistence(timeout: 5), "The archived Goal transcript should expose scrolling when its conversation overflows.")
+        XCTAssertTrue(reopenedConversation.scrollBars.firstMatch.waitToExist(timeout: 5), "The archived Goal transcript should expose scrolling when its conversation overflows.")
         let secondAchievementYBeforeScroll = restoredAchievementRows.element(boundBy: 1).frame.minY
         reopenedConversation.swipeDown()
         XCTAssertTrue(waitUntil({
@@ -12225,7 +12254,7 @@ final class PlayhouseUITests: XCTestCase {
             .matching(NSPredicate(format: "label CONTAINS %@", followupPrompt)).firstMatch
         let restoredSecondAchievement = restoredAchievementRows.element(boundBy: 1)
         let restoredFirstAchievement = restoredAchievementRows.element(boundBy: 0)
-        XCTAssertTrue(restoredFollowup.waitForExistence(timeout: 10))
+        XCTAssertTrue(restoredFollowup.waitToExist(timeout: 10))
         for _ in 0..<8 where !waitUntil({
             restoredFirstAchievement.frame.maxY < restoredFollowup.frame.minY
         }, timeout: 1) {
@@ -12302,7 +12331,7 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try XCTUnwrap(created["id"] as? String)
         openTask(named: "Shared Codex server")
         sendFromComposer("Hello from the window.")
-        XCTAssertTrue(transcriptMessage("Hello from the window.").waitForExistence(timeout: 15))
+        XCTAssertTrue(transcriptMessage("Hello from the window.").waitToExist(timeout: 15))
         XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 30), "The window's Codex turn should finish.")
         let server = try assertOneLiveServer("After the window's send")
         let pid = try XCTUnwrap(server["pid"] as? Int)
@@ -12323,7 +12352,7 @@ final class PlayhouseUITests: XCTestCase {
         composer.typeText(objective)
         element("send-message-button").click()
         let row = element("active-goal-progress-row")
-        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        XCTAssertTrue(row.waitToExist(timeout: 10))
         // The window shows the followed Goal turn running with its stop control.
         let goalWorking = { self.element("pause-response-button").exists }
         XCTAssertTrue(waitUntil(goalWorking, timeout: 30), "The window should follow the Goal's work turn.")
@@ -12395,7 +12424,7 @@ final class PlayhouseUITests: XCTestCase {
         // A Goal the CLI sets on the shared server reaches the open window without reopening the task.
         let cliObjective = "Set from the command line."
         XCTAssertEqual(try cliGoal([taskID, "set", "--text", cliObjective])?["objective"] as? String, cliObjective)
-        XCTAssertTrue(row.waitForExistence(timeout: 10), "The open window should show the Goal the CLI set on the same app-server.")
+        XCTAssertTrue(row.waitToExist(timeout: 10), "The open window should show the Goal the CLI set on the same app-server.")
         XCTAssertTrue(waitUntil({ accessibleLabelOrValue(of: self.element("active-goal-title")).contains(cliObjective) }, timeout: 10))
         try assertOneLiveServer("After a CLI Goal set", pid: pid)
         attachScreenshot(named: "shared-codex-server-4-cli-goal-in-window")
@@ -12403,7 +12432,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !row.exists }, timeout: 10), "The CLI's clear should reach the open window.")
 
         element("back-to-board-button").click()
-        XCTAssertTrue(element("agents-info-codex-account").waitForExistence(timeout: 15))
+        XCTAssertTrue(element("agents-info-codex-account").waitToExist(timeout: 15))
         XCTAssertTrue(accessibleLabelOrValue(of: element("agents-info-codex-account")).contains("codex-fixture@example.com"),
                       "Agents info shows the Codex account read through the shared app-server.")
         try assertOneLiveServer("With the window and the CLI both done", pid: pid)
@@ -12428,7 +12457,7 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
         openTask(named: "Legacy Codex server")
         sendFromComposer("Before the upgrade.")
-        XCTAssertTrue(transcriptMessage("Before the upgrade.").waitForExistence(timeout: 15))
+        XCTAssertTrue(transcriptMessage("Before the upgrade.").waitToExist(timeout: 15))
         XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 30), "The window's first turn should finish.")
         let (path, manifest) = try XCTUnwrap(agentManifest(kind: "codex", service: environment))
         let parts = try XCTUnwrap(manifest["keyParts"] as? [String])
@@ -12464,7 +12493,7 @@ final class PlayhouseUITests: XCTestCase {
 
         openTask(named: "Legacy Codex server")
         sendFromComposer("After the upgrade.")
-        XCTAssertTrue(transcriptMessage("After the upgrade.").waitForExistence(timeout: 15))
+        XCTAssertTrue(transcriptMessage("After the upgrade.").waitToExist(timeout: 15))
         XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 30), "The window's send should finish on the new server.")
         XCTAssertFalse(element("codex-chat-error").exists, "The send on the new server succeeds.")
         XCTAssertTrue(try historyTexts(taskID: taskID, environment: environment).contains("After the upgrade."), "The new server holds the conversation.")
@@ -12499,7 +12528,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(cliModelIDs.contains("default"), "The default pseudo-model should not appear in the selectable list.")
 
         let modelPicker = element("model-picker-menu")
-        XCTAssertTrue(modelPicker.waitForExistence(timeout: 5), "The composer should expose the model picker.")
+        XCTAssertTrue(modelPicker.waitToExist(timeout: 5), "The composer should expose the model picker.")
         modelPicker.click()
         let optionIDs = { self.app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "model-option-")).allElementsBoundByIndex.compactMap(\.identifier) }
         XCTAssertTrue(waitUntil({
@@ -12588,7 +12617,7 @@ final class PlayhouseUITests: XCTestCase {
 
         openTask(named: "Conversation modes")
         let modelPicker = element("model-picker-menu")
-        XCTAssertTrue(modelPicker.waitForExistence(timeout: 5), "The composer should expose a model returned by Codex.")
+        XCTAssertTrue(modelPicker.waitToExist(timeout: 5), "The composer should expose a model returned by Codex.")
         XCTAssertTrue(modelPicker.label.contains("effort: Medium"), "The selected model effort should default to Medium.")
         func displayedModelValue() -> String {
             let rawValue = modelPicker.value as? String ?? modelPicker.label
@@ -12626,7 +12655,7 @@ final class PlayhouseUITests: XCTestCase {
         modelMenu.click()
         let optionID = "model-option-\(alternateID)"
         let modelOption = app.buttons.matching(identifier: optionID).firstMatch
-        XCTAssertTrue(modelOption.waitForExistence(timeout: 5), "The model picker should list each model returned by Codex.")
+        XCTAssertTrue(modelOption.waitToExist(timeout: 5), "The model picker should list each model returned by Codex.")
         modelOption.click()
         let alternateName = alternateModel["name"] as? String ?? alternateID
         XCTAssertTrue(displayedModelValue().caseInsensitiveCompare(selectedModelName) == .orderedSame
@@ -12643,7 +12672,7 @@ final class PlayhouseUITests: XCTestCase {
 
         modelPicker.click()
         let effortSlider = element("model-effort-slider")
-        XCTAssertTrue(effortSlider.waitForExistence(timeout: 5), "The model popover should expose an effort slider.")
+        XCTAssertTrue(effortSlider.waitToExist(timeout: 5), "The model popover should expose an effort slider.")
         XCTAssertEqual(effortSlider.label, "Model effort")
         XCTAssertEqual(effortTitle(of: effortSlider), "Medium", "The slider should expose its selected effort accessibly.")
         assertPixel(effortSlider.screenshot().image, normalizedX: 0.34, normalizedY: 0.5, rgb: (255, 255, 255), accuracy: 30)
@@ -12691,7 +12720,7 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 5), "Effort changes should persist after the picker is dismissed.")
         let limitedOption = app.buttons["model-option-gpt-6-mini"]
         modelPicker.click()
-        XCTAssertTrue(limitedOption.waitForExistence(timeout: 5))
+        XCTAssertTrue(limitedOption.waitToExist(timeout: 5))
         limitedOption.click()
         XCTAssertTrue(modelPicker.label.contains(alternateName) && modelPicker.label.contains("effort: Extra High"),
             "The composer should retain its committed model and effort while a restricted model is being previewed.")
@@ -12705,7 +12734,7 @@ final class PlayhouseUITests: XCTestCase {
             return result["effort"] as? String == "medium"
         }, timeout: 5), "The clamped effort should persist after the picker is dismissed.")
         modelPicker.click()
-        XCTAssertTrue(effortSlider.waitForExistence(timeout: 5))
+        XCTAssertTrue(effortSlider.waitToExist(timeout: 5))
         effortSlider.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).click()
         XCTAssertTrue(waitUntil({
             effortTitle(of: effortSlider) == "Medium"
@@ -12713,13 +12742,13 @@ final class PlayhouseUITests: XCTestCase {
                 && modelPicker.label.contains("effort: Medium")
         }, timeout: 5), "The restricted slider must not select an unsupported High effort.")
         let defaultOption = app.buttons["model-option-\(selectedModelID)"]
-        XCTAssertTrue(defaultOption.waitForExistence(timeout: 5))
+        XCTAssertTrue(defaultOption.waitToExist(timeout: 5))
         defaultOption.click()
         XCTAssertTrue(modelPicker.label.contains("GPT-6 Mini"), "The model label should remain committed until picker dismissal.")
         modelPicker.click()
         XCTAssertTrue(waitUntil({ modelPicker.label.contains(selectedModelName) }, timeout: 5))
         modelPicker.click()
-        XCTAssertTrue(effortSlider.waitForExistence(timeout: 5))
+        XCTAssertTrue(effortSlider.waitToExist(timeout: 5))
         effortSlider.coordinate(withNormalizedOffset: CGVector(dx: 2.0 / 3.0, dy: 0.5)).click()
         XCTAssertTrue(waitUntil({
             accessibleLabelOrValue(of: element("selected-model-effort")) == "High" && modelPicker.label.contains("effort: Medium")
@@ -12734,14 +12763,14 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         openTask(named: "Conversation modes")
         let reopenedPicker = element("model-picker-menu")
-        XCTAssertTrue(reopenedPicker.waitForExistence(timeout: 5))
+        XCTAssertTrue(reopenedPicker.waitToExist(timeout: 5))
         reopenedPicker.click()
         XCTAssertTrue(waitUntil({ accessibleLabelOrValue(of: element("selected-model-effort")) == "High" }, timeout: 5), "Reopening the task should restore its effort selection.")
         reopenedPicker.click()
 
         let alternateOptionAfterReopen = app.buttons["model-option-\(alternateID)"]
         reopenedPicker.click()
-        XCTAssertTrue(alternateOptionAfterReopen.waitForExistence(timeout: 5))
+        XCTAssertTrue(alternateOptionAfterReopen.waitToExist(timeout: 5))
         alternateOptionAfterReopen.click()
         reopenedPicker.click()
         XCTAssertTrue(waitUntil({ modelPicker.label.contains(alternateName) }, timeout: 5))
@@ -12752,24 +12781,24 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         openTask(named: "Conversation modes")
         let restoredModelPicker = element("model-picker-menu")
-        XCTAssertTrue(restoredModelPicker.waitForExistence(timeout: 5))
+        XCTAssertTrue(restoredModelPicker.waitToExist(timeout: 5))
         XCTAssertTrue(waitUntil({ restoredModelPicker.label.contains(alternateName) }, timeout: 5), "Reopening the task should restore the last selected model.")
 
         try createTaskFixture(title: "Global model selection", roots: [fixture.primary.path])
         element("back-to-board-button").click()
         openTask(named: "Global model selection")
         let globalModelPicker = element("model-picker-menu")
-        XCTAssertTrue(globalModelPicker.waitForExistence(timeout: 5))
+        XCTAssertTrue(globalModelPicker.waitToExist(timeout: 5))
         XCTAssertTrue(waitUntil({ globalModelPicker.label.contains(alternateName) }, timeout: 5),
             "A newly opened conversation should use the global model selected in the previous conversation.")
         element("back-to-board-button").click()
         openTask(named: "Conversation modes")
 
         let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
+        XCTAssertTrue(modeMenu.waitToExist(timeout: 10))
         modeMenu.click()
         let planMode = app.menuItems["Plan mode"]
-        XCTAssertTrue(planMode.waitForExistence(timeout: 5))
+        XCTAssertTrue(planMode.waitToExist(timeout: 5))
         planMode.click()
         XCTAssertTrue(modeMenu.label.contains("Plan mode"))
 
@@ -12828,9 +12857,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(persistedClaudeModels.first?["name"] as? String, "Cached Claude Model", "A fresh XPC request should read the seeded real preferences cache.")
         openTask(named: "Claude cached models")
         let claudePicker = element("model-picker-menu")
-        XCTAssertTrue(claudePicker.waitForExistence(timeout: 5))
+        XCTAssertTrue(claudePicker.waitToExist(timeout: 5))
         claudePicker.click()
-        XCTAssertTrue(app.buttons["model-option-cached-model"].waitForExistence(timeout: 5), "The distinct cached Claude option should render before server discovery completes.")
+        XCTAssertTrue(app.buttons["model-option-cached-model"].waitToExist(timeout: 5), "The distinct cached Claude option should render before server discovery completes.")
         try? FileManager.default.removeItem(at: modelsDelay)
         XCTAssertTrue(waitUntil({
             app.buttons["model-option-claude-opus-5-5"].exists
@@ -12851,9 +12880,9 @@ final class PlayhouseUITests: XCTestCase {
         let offlineTaskID = try XCTUnwrap(offlineTask["id"] as? String)
         openTask(named: "Claude cached offline")
         let offlinePicker = element("model-picker-menu")
-        XCTAssertTrue(offlinePicker.waitForExistence(timeout: 5))
+        XCTAssertTrue(offlinePicker.waitToExist(timeout: 5))
         offlinePicker.click()
-        XCTAssertTrue(app.buttons["model-option-offline-cached-model"].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.buttons["model-option-offline-cached-model"].waitToExist(timeout: 5),
             "A failed provider launch should leave the cached Claude choice visible.")
         let retainedOfflineCache = try XCTUnwrap((try runCLI(["conversation", "models", offlineTaskID, "--cached"])["result"] as? [String: Any])?["models"] as? [[String: Any]])
         XCTAssertEqual(retainedOfflineCache.first?["name"] as? String, "Offline Cached Claude")
@@ -12869,17 +12898,17 @@ final class PlayhouseUITests: XCTestCase {
         try createTaskFixture(title: "Codex effort UI", roots: [fixture.primary.path])
         let taskID = try taskID(named: "Codex effort UI")
         openTask(named: "Codex effort UI")
-        XCTAssertTrue(app.staticTexts["Send a message to Codex · Luna."].waitForExistence(timeout: 10), "The default model's short name labels the empty conversation.")
+        XCTAssertTrue(app.staticTexts["Send a message to Codex · Luna."].waitToExist(timeout: 10), "The default model's short name labels the empty conversation.")
         let picker = element("model-picker-menu")
-        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        XCTAssertTrue(picker.waitToExist(timeout: 10))
         picker.click()
         let slider = element("model-effort-slider")
-        XCTAssertTrue(slider.waitForExistence(timeout: 5))
+        XCTAssertTrue(slider.waitToExist(timeout: 5))
         slider.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).click()
         XCTAssertTrue(waitUntil({ accessibleLabelOrValue(of: element("selected-model-effort")) == "Extra High" }, timeout: 5))
         app.buttons["model-option-gpt-6-sol"].click()
         picker.click()
-        XCTAssertTrue(app.staticTexts["Send a message to Codex · Sol."].waitForExistence(timeout: 10), "Selecting another model updates its short name in the label, instead of staying stuck on the default.")
+        XCTAssertTrue(app.staticTexts["Send a message to Codex · Sol."].waitToExist(timeout: 10), "Selecting another model updates its short name in the label, instead of staying stuck on the default.")
         XCTAssertEqual((try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "gpt-6-sol")
         let unsupported = try runCLI([
             "conversation", "send", taskID, "--message", "Unsupported effort.", "--model", "gpt-6-mini"
@@ -12891,7 +12920,7 @@ final class PlayhouseUITests: XCTestCase {
         composer.click()
         composer.typeText("Check Codex effort dispatch.")
         element("send-message-button").click()
-        XCTAssertTrue(transcriptMessage("Answers received: Blue / fixture-secret.").waitForExistence(timeout: 15), "The Codex fixture's reply should arrive.")
+        XCTAssertTrue(transcriptMessage("Answers received: Blue / fixture-secret.").waitToExist(timeout: 15), "The Codex fixture's reply should arrive.")
         XCTAssertTrue(app.staticTexts["Codex · Sol"].exists, "The sent reply's label reflects the model actually selected for the turn, not the hardcoded default.")
         var transcript = try XCTUnwrap(try conversationState(taskID))
         var segments = try XCTUnwrap(transcript["segments"] as? [[String: Any]])
@@ -12922,7 +12951,7 @@ final class PlayhouseUITests: XCTestCase {
         let effortHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         let latestReplyItem = try XCTUnwrap(ordinaryMessages(effortHistory["messages"] as? [[String: Any]] ?? []).last { ($0["role"] as? String) == "assistant" }?["id"] as? String)
         XCTAssertNotEqual(latestReplyItem, "item_assistant_fixture_1")
-        XCTAssertTrue(app.staticTexts.matching(identifier: "message-time-\(latestReplyItem)").firstMatch.waitForExistence(timeout: 5),
+        XCTAssertTrue(app.staticTexts.matching(identifier: "message-time-\(latestReplyItem)").firstMatch.waitToExist(timeout: 5),
                       "The latest reply displays its provider-supplied timestamp.")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         let history = try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any]
@@ -12947,17 +12976,17 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try taskID(named: "Codex kept model UI")
         openTask(named: "Codex kept model UI")
         let picker = element("model-picker-menu")
-        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        XCTAssertTrue(picker.waitToExist(timeout: 10))
         picker.click()
         app.buttons["model-option-gpt-6-sol"].click()
         picker.click()
-        XCTAssertTrue(app.staticTexts["Send a message to Codex · Sol."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Send a message to Codex · Sol."].waitToExist(timeout: 10))
         let composer = element("message-composer")
         composer.click()
         composer.typeText("Run on Sol.")
         element("send-message-button").click()
         let reply = "Answers received: Blue / fixture-secret."
-        XCTAssertTrue(transcriptMessage(reply).waitForExistence(timeout: 15), "The Sol turn's reply should arrive.")
+        XCTAssertTrue(transcriptMessage(reply).waitToExist(timeout: 15), "The Sol turn's reply should arrive.")
         XCTAssertTrue(app.staticTexts["Codex · Sol"].exists)
         // The turn just ended with Sol still selected: reopening reuses the loaded
         // thread instead of resuming it with the hardcoded default (Luna).
@@ -12965,7 +12994,7 @@ final class PlayhouseUITests: XCTestCase {
         try "gpt-6-sol\n".write(to: keptModel, atomically: true, encoding: .utf8)
         returnToBoard()
         openTask(named: "Codex kept model UI")
-        XCTAssertTrue(transcriptMessage(reply).waitForExistence(timeout: 10))
+        XCTAssertTrue(transcriptMessage(reply).waitToExist(timeout: 10))
         XCTAssertFalse(waitUntil({ !FileManager.default.fileExists(atPath: keptModel.path) }, timeout: 3),
                        "History must not resume a thread already loaded with the task's model.")
         XCTAssertFalse(element("codex-chat-error").exists)
@@ -12987,9 +13016,9 @@ final class PlayhouseUITests: XCTestCase {
         )
         XCTAssertEqual(resumes.last, ["requested": "gpt-6-mini", "reported": "gpt-6-sol"],
                        "History resumes with the task's selected model, not the hardcoded default.")
-        XCTAssertTrue(transcriptMessage(reply).waitForExistence(timeout: 10), "History still shows the Sol reply.")
+        XCTAssertTrue(transcriptMessage(reply).waitToExist(timeout: 10), "History still shows the Sol reply.")
         XCTAssertTrue(app.staticTexts["Codex · Sol"].exists)
-        XCTAssertFalse(element("codex-chat-error").waitForExistence(timeout: 2),
+        XCTAssertFalse(element("codex-chat-error").waitToExist(timeout: 2),
                        "Loading history must not fail when Codex keeps the loaded thread's model.")
         attachScreenshot(named: "History loads after Codex keeps the Sol thread model")
         // A send on a model the thread wasn't loaded with still has its model confirmed.
@@ -13005,14 +13034,14 @@ final class PlayhouseUITests: XCTestCase {
         composer.typeText("Run on Luna.")
         element("send-message-button").click()
         let error = element("codex-chat-error")
-        XCTAssertTrue(error.waitForExistence(timeout: 15), "A send whose model Codex didn't confirm must fail visibly.")
+        XCTAssertTrue(error.waitToExist(timeout: 15), "A send whose model Codex didn't confirm must fail visibly.")
         XCTAssertTrue(error.label.contains("Codex selected gpt-6-sol instead of gpt-6-luna"), error.label)
         XCTAssertFalse(FileManager.default.fileExists(atPath: keptModel.path))
         attachScreenshot(named: "A send still reports a Codex model mismatch")
         composer.click()
         composer.typeText("Run on Luna again.")
         element("send-message-button").click()
-        XCTAssertTrue(app.staticTexts["Codex · Luna"].waitForExistence(timeout: 15), "The confirmed Luna send replies on Luna.")
+        XCTAssertTrue(app.staticTexts["Codex · Luna"].waitToExist(timeout: 15), "The confirmed Luna send replies on Luna.")
         XCTAssertFalse(error.exists, "A successful send clears the mismatch error.")
         let turns = try XCTUnwrap(
             (try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any])?["turns"] as? [[String: Any]]
@@ -13036,9 +13065,9 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try XCTUnwrap(created["id"] as? String)
         openTask(named: "Claude effort UI")
         let picker = element("model-picker-menu")
-        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        XCTAssertTrue(picker.waitToExist(timeout: 10))
         picker.click()
-        XCTAssertTrue(app.buttons["model-option-claude-opus-5-5"].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.buttons["model-option-claude-opus-5-5"].waitToExist(timeout: 5),
             "The model popover should list the latest concrete Opus model.")
         XCTAssertFalse(app.buttons["model-option-default"].exists, "The Claude Default pseudo-model should not appear in the menu.")
         XCTAssertFalse(app.buttons["model-option-opus"].exists, "The versioned Opus model should replace its alias.")
@@ -13051,11 +13080,11 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Claude model list shows the newest version of each family", fullScreen: true)
         app.buttons["model-option-claude-opus-5-5"].click()
         picker.click()
-        XCTAssertTrue(app.staticTexts["Send a message to Claude · Opus 5.5."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Send a message to Claude · Opus 5.5."].waitToExist(timeout: 10))
         attachScreenshot(named: "Composer shows the selected Claude Opus 5.5 model")
         picker.click()
         let slider = element("model-effort-slider")
-        XCTAssertTrue(slider.waitForExistence(timeout: 5))
+        XCTAssertTrue(slider.waitToExist(timeout: 5))
         slider.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).click()
         XCTAssertTrue(waitUntil({ accessibleLabelOrValue(of: element("selected-model-effort")) == "Extra High" }, timeout: 5))
         picker.click()
@@ -13063,8 +13092,8 @@ final class PlayhouseUITests: XCTestCase {
         composer.click()
         composer.typeText("Check Claude effort dispatch.")
         element("send-message-button").click()
-        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15))
-        XCTAssertTrue(app.staticTexts["Claude · Opus 5.5"].exists)
+        XCTAssertTrue(app.staticTexts["OK."].waitToExist(timeout: 15))
+        XCTAssertTrue(app.staticTexts["Claude · Opus 5.5"].waitToExist(timeout: 5))
         picker.click()
         app.buttons["model-option-claude-sonnet-5-5"].click()
         picker.click()
@@ -13108,7 +13137,7 @@ final class PlayhouseUITests: XCTestCase {
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Blocked" }, timeout: 15))
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 15))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 15))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Blocked")
         XCTAssertTrue(element("blocked-waiting-indicator").exists)
         assertTaskVisible("Empty Claude question", inColumn: "Blocked")
@@ -13137,24 +13166,24 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Ask a restart-safe structured question.")
         element("send-message-button").click()
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
 
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Restart-safe Claude question", inColumn: "Waiting Response")
         openTask(named: "Restart-safe Claude question")
-        XCTAssertTrue(element("conversation-user-input-request").exists)
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10), "Reopening should restore the pending question.")
 
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12), "Playhouse should finish its bounded shutdown before relaunch.")
         relaunchApp()
         openTask(named: "Restart-safe Claude question")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10), "The saved question should return after the app and provider process restart.")
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10), "The saved question should return after the app and provider process restart.")
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Restart-safe Claude question", inColumn: "Waiting Response")
         openTask(named: "Restart-safe Claude question")
         let recoveryPause = URL(fileURLWithPath: executable.path + ".recovery-pause")
@@ -13162,7 +13191,7 @@ final class PlayhouseUITests: XCTestCase {
         let recoveryRelease = URL(fileURLWithPath: executable.path + ".recovery-release")
         try "Hold the recovery turn open.\n".write(to: recoveryPause, atomically: true, encoding: .utf8)
         defer { try? "Release after assertion failure.\n".write(to: recoveryRelease, atomically: true, encoding: .utf8) }
-        element("ai-question-option-question-1-Green").click()
+        selectQuestionOption(identifier: "ai-question-option-question-1-Green")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: recoveryReady.path) }, timeout: 15),
                       "The fixture should hold the recovery turn open.")
@@ -13171,7 +13200,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
         attachScreenshot(named: "Answered question card hidden while its recovery turn runs")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         openTask(named: "Restart-safe Claude question")
         // The private answer placeholder is not a turn the user started, so reopening anchors on
         // the question that started this conversation and keeps it in view.
@@ -13186,26 +13215,25 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(transcriptContains("Recovered answer: Green."))
         attachScreenshot(named: "Reopened task mid-recovery keeps the answered question hidden")
 
-        // The bridge daemon owns the recovery turn; killing it mid-turn must bring
-        // the question back for retry.
-        let status = try XCTUnwrap(try runCLI(["status"])["result"] as? [String: Any])
-        let daemonPID = try XCTUnwrap(status["processID"] as? Int)
-        XCTAssertEqual(kill(pid_t(daemonPID), SIGKILL), 0, "The test should stop the daemon running the recovery turn.")
-        XCTAssertTrue(waitUntil({ kill(pid_t(daemonPID), 0) != 0 }, timeout: 5), "The killed daemon should exit.")
-        try "Release the orphaned recovery turn.\n".write(to: recoveryRelease, atomically: true, encoding: .utf8)
-        for marker in [recoveryPause, recoveryReady, recoveryRelease] {
+        // The recovery's Claude Code process dies mid-turn (agents outlive a daemon restart, so
+        // killing the daemon would not end it); the question must come back for retry.
+        let recoveryTurn = try XCTUnwrap(try diagnosticEvents().last { $0["event"] as? String == "claude.turn.started" })
+        let recoveryPID = try XCTUnwrap((recoveryTurn["claudePID"] as? String).flatMap { pid_t($0) })
+        XCTAssertEqual(kill(recoveryPID, SIGKILL), 0, "The test should stop the Claude Code process running the recovery turn.")
+        XCTAssertTrue(waitUntil({ kill(recoveryPID, 0) != 0 }, timeout: 5), "The killed recovery process should exit.")
+        for marker in [recoveryPause, recoveryReady] {
             try? FileManager.default.removeItem(at: marker)
         }
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 15),
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 15),
                       "A failed recovery should restore its question card in the open window.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         openTask(named: "Restart-safe Claude question")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10),
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10),
                       "A recovery interrupted mid-turn should show its question again after reopening.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         attachScreenshot(named: "Question returns for retry after the recovery dies mid-turn")
-        element("ai-question-option-question-1-Green").click()
+        selectQuestionOption(identifier: "ai-question-option-question-1-Green")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(waitUntil({ self.transcriptContains("Recovered answer: Green.") }, timeout: 15))
         XCTAssertFalse(element("conversation-user-input-request").exists)
@@ -13235,25 +13263,25 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Restart-safe Claude plan question")
         let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
+        XCTAssertTrue(modeMenu.waitToExist(timeout: 10))
         modeMenu.click()
         let planMode = app.menuItems["Plan mode"]
-        XCTAssertTrue(planMode.waitForExistence(timeout: 5))
+        XCTAssertTrue(planMode.waitToExist(timeout: 5))
         planMode.click()
         XCTAssertTrue(modeMenu.label.contains("Plan mode"))
         element("message-composer").click()
         element("message-composer").typeText("Ask a restart-safe structured question.")
         element("send-message-button").click()
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
 
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12), "Playhouse should finish its bounded shutdown before relaunch.")
         relaunchApp()
         openTask(named: "Restart-safe Claude plan question")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10), "The saved question should return after the app and provider process restart.")
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10), "The saved question should return after the app and provider process restart.")
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
-        element("ai-question-option-question-1-Green").click()
+        selectQuestionOption(identifier: "ai-question-option-question-1-Green")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(waitUntil({ self.transcriptContains("Recovered answer: Green.") }, timeout: 15))
         XCTAssertFalse(element("conversation-user-input-request").exists)
@@ -13304,7 +13332,7 @@ final class PlayhouseUITests: XCTestCase {
                       "The fixture should pause after its status-only completion update.")
 
         let subagentRow = element("codex-subagent-row-toolu_background_agent")
-        XCTAssertTrue(subagentRow.waitForExistence(timeout: 10), "A background Agent/Task call should render a live subagent row.")
+        XCTAssertTrue(subagentRow.waitToExist(timeout: 10), "A background Agent/Task call should render a live subagent row.")
         XCTAssertTrue(subagentRow.label.contains("started working"), subagentRow.label)
         XCTAssertTrue(
             waitUntil({ self.transcriptContains("STARTED") }, timeout: 10),
@@ -13318,17 +13346,22 @@ final class PlayhouseUITests: XCTestCase {
         let reportIdentifier = "agent-report-row-toolu_background_agent"
         XCTAssertFalse(element(reportIdentifier).exists, "A status-only completion must not render progress text as the agent result.")
         try "Release summary notification.\n".write(to: summaryRelease, atomically: true, encoding: .utf8)
-        var expandedWorkedFor = false
+        // The fixture reports no outcome, so an outcome nudge turn follows at once; each turn
+        // that settles folds Worked for closed again. Expand only after everything has settled.
+        XCTAssertTrue(waitForStatus(taskID, "Waiting Response"), "The turn and its outcome nudge should settle.")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 15), "The window should show the settled turn.")
         XCTAssertTrue(
             waitUntil({
                 // The final answer folds agent rows into a collapsed Worked for;
                 // expand only when it is actually collapsed.
                 let disclosure = self.element("codex-activity-disclosure")
-                if !subagentRow.exists, !expandedWorkedFor, disclosure.exists,
+                if !subagentRow.exists, disclosure.exists,
                    disclosure.label.hasPrefix("Worked for"),
                    (disclosure.value as? String ?? "").hasPrefix("Collapsed") {
-                    disclosure.click()
-                    expandedWorkedFor = true
+                    // The settled transcript can leave the disclosure scrolled under the header.
+                    if self.scrollFullyIntoView(disclosure, in: self.element("conversation-scroll-view")) {
+                        disclosure.click()
+                    }
                 }
                 return self.app.descendants(matching: .any).matching(NSPredicate(
                     format: "identifier == %@ AND label CONTAINS %@", "codex-subagent-row-toolu_background_agent", "finished working"
@@ -13337,7 +13370,7 @@ final class PlayhouseUITests: XCTestCase {
             "The row must resolve to completed only once the real notification arrives, not the launch confirmation."
         )
         let report = app.descendants(matching: .any).matching(identifier: reportIdentifier)
-        XCTAssertTrue(report.firstMatch.waitForExistence(timeout: 10), "The completed background-agent result should appear in the parent conversation transcript.")
+        XCTAssertTrue(report.firstMatch.waitToExist(timeout: 10), "The completed background-agent result should appear in the parent conversation transcript.")
         XCTAssertEqual(report.count, 1, "The result should appear exactly once in the parent conversation.")
         XCTAssertTrue(report.firstMatch.label.contains("Explore finished working"),
                       "The result should appear as the agent's row, not as a reply bubble: \(report.firstMatch.label)")
@@ -13348,7 +13381,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(scrollFullyIntoView(report.firstMatch, in: element("conversation-scroll-view")))
         attachScreenshot(named: "Claude background agent report row")
         report.firstMatch.descendants(matching: .any).matching(identifier: "subagent-row-chevron").firstMatch.click()
-        XCTAssertTrue(element("subagent-conversation-panel").waitForExistence(timeout: 5), "The agent row's arrow should open the agent's window.")
+        XCTAssertTrue(element("subagent-conversation-panel").waitToExist(timeout: 5), "The agent row's arrow should open the agent's window.")
         XCTAssertTrue(waitUntil({ self.transcriptContains("Background check finished.") }, timeout: 10),
                       "The agent window should show the agent's report.")
         attachScreenshot(named: "Claude background agent report opened")
@@ -13385,11 +13418,11 @@ final class PlayhouseUITests: XCTestCase {
         relaunchApp()
         openTask(named: "Claude background agent")
         let restoredReport = app.descendants(matching: .any).matching(identifier: reportIdentifier)
-        XCTAssertTrue(restoredReport.firstMatch.waitForExistence(timeout: 10), "The result should remain visible after reopening the conversation.")
+        XCTAssertTrue(restoredReport.firstMatch.waitToExist(timeout: 10), "The result should remain visible after reopening the conversation.")
         XCTAssertEqual(restoredReport.count, 1, "Reopening should not duplicate the result message.")
 
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         let failedTask = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Claude failed background agent", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
@@ -13444,7 +13477,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse((failedHistory["messages"] as? [[String: Any]] ?? []).contains { $0["phase"] as? String == "subagent_report" })
 
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         let wakePause = URL(fileURLWithPath: executable.path + ".background-wake-pause")
         let wakeReady = URL(fileURLWithPath: executable.path + ".background-wake-ready")
         let wakeRelease = URL(fileURLWithPath: executable.path + ".background-wake-release")
@@ -13564,7 +13597,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(messages.filter { $0["role"] as? String == "assistant" }.last?["text"] as? String, "SHELL HANDLED")
 
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         try FileManager.default.removeItem(at: stage("running-pause"))
         try FileManager.default.removeItem(at: stage("wake-pause"))
         try "Pause between the first and the woken turn's results.\n".write(to: stage("second-result-pause"), atomically: true, encoding: .utf8)
@@ -13655,7 +13688,7 @@ final class PlayhouseUITests: XCTestCase {
         ], "The nudged turn's work should be recorded in order after the stale answer.")
         XCTAssertEqual(messages.last?["text"] as? String, finalReport, "The final report is the latest message.")
         let imageID = try XCTUnwrap(messages.first { $0["phase"] as? String == "agent_image" }?["id"] as? String)
-        XCTAssertTrue(element("chat-image-\(imageID)-0").waitForExistence(timeout: 10), "The screenshot the nudged turn presented should render.")
+        XCTAssertTrue(element("chat-image-\(imageID)-0").waitToExist(timeout: 10), "The screenshot the nudged turn presented should render.")
         let timeline = (history["timelineActivities"] as? [[String: Any]] ?? []).filter { $0["id"] as? String == "toolu_nudged_check" }
         XCTAssertEqual(timeline.first?["input"] as? String, "echo NUDGED CHECK PASSED", "The nudged turn's shell call should be a timeline row.")
         XCTAssertTrue(transcriptContains("ended without reporting a task outcome"), "The nudge Playhouse sent is shown in the transcript.")
@@ -13663,12 +13696,12 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(transcriptContains("Playhouse private outcome"), "No placeholder replaces the nudge.")
         attachScreenshot(named: "Claude nudged turn work follows the stale answer")
         XCTAssertTrue(expandLatestWorkedFor(), "The nudged turn's work should collapse into an expandable Worked for summary.")
-        XCTAssertTrue(element("codex-activity-row-toolu_nudged_check").waitForExistence(timeout: 10),
+        XCTAssertTrue(element("codex-activity-row-toolu_nudged_check").waitToExist(timeout: 10),
                       "The nudged turn's shell call should be listed in its Worked for details.")
         for text in nudgedCommentary {
             XCTAssertTrue(waitUntil({ self.transcriptContains(text) }, timeout: 10), "Worked for should list the nudged turn's commentary: \(text)")
         }
-        XCTAssertTrue(element("agent-report-row-toolu_nudged_suite").waitForExistence(timeout: 10),
+        XCTAssertTrue(element("agent-report-row-toolu_nudged_suite").waitToExist(timeout: 10),
                       "The background suite's report from the woken turn should render as its agent row.")
         attachScreenshot(named: "Claude nudged turn Worked for shows its call and agent report")
         let page = try XCTUnwrap(try runCLI(["conversation", "history", taskID, "--limit", "3"], extraEnvironment: claudeEnvironment)["result"] as? [String: Any])
@@ -13681,7 +13714,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Claude nudged task in Review")
         openTask(named: "Claude nudged work")
         XCTAssertTrue(waitUntil({ self.transcriptContains(finalReport) }, timeout: 15), "Reopening keeps the nudged turn's final report.")
-        XCTAssertTrue(element("chat-image-\(imageID)-0").waitForExistence(timeout: 10), "Reopening keeps the nudged turn's screenshot.")
+        XCTAssertTrue(element("chat-image-\(imageID)-0").waitToExist(timeout: 10), "Reopening keeps the nudged turn's screenshot.")
         XCTAssertTrue(expandLatestWorkedFor(), "Reopening keeps the nudged turn's Worked for summary.")
         XCTAssertTrue(waitUntil({ self.transcriptContains(nudgedCommentary[0]) }, timeout: 10), "Reopening keeps the nudged turn's commentary.")
 
@@ -13736,7 +13769,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(transcriptContains("Playhouse private outcome"), "No placeholder replaces the nudge.")
         attachScreenshot(named: "Codex nudged turn work follows the earlier answer")
         XCTAssertTrue(expandLatestWorkedFor(), "The nudged turn's work should collapse into an expandable Worked for summary.")
-        XCTAssertTrue(element("codex-activity-row-item_nudged_check_1").waitForExistence(timeout: 10),
+        XCTAssertTrue(element("codex-activity-row-item_nudged_check_1").waitToExist(timeout: 10),
                       "The nudged turn's shell command should be listed in its Worked for details.")
         XCTAssertTrue(waitUntil({ self.transcriptContains(commentary) }, timeout: 10), "Worked for should list the nudged turn's commentary.")
         attachScreenshot(named: "Codex nudged turn Worked for shows its command")
@@ -13758,7 +13791,7 @@ final class PlayhouseUITests: XCTestCase {
         let disclosure = element("codex-activity-disclosure")
         guard waitUntil({ disclosure.exists && disclosure.label.hasPrefix("Worked for") }, timeout: 15) else { return false }
         if (disclosure.value as? String ?? "").hasPrefix("Collapsed") { disclosure.click() }
-        return element("codex-activity-details").waitForExistence(timeout: 5)
+        return element("codex-activity-details").waitToExist(timeout: 5)
     }
 
     /// Sends an ordinary turn from the composer, then checks that the earlier nudged
@@ -13779,7 +13812,7 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 60), "The later ordinary turn should finish with an answer.")
         XCTAssertTrue(revealWholeTranscript(), "The earlier nudged turn should load as the reader scrolls up.")
         let input = element("conversation-tool-call-input-\(callID)")
-        XCTAssertTrue(input.waitForExistence(timeout: 10), "After a later turn, the nudged turn's call should render inline.")
+        XCTAssertTrue(input.waitToExist(timeout: 10), "After a later turn, the nudged turn's call should render inline.")
         XCTAssertTrue([input.label, input.value as? String ?? ""].joined(separator: " ").contains("echo NUDGED CHECK PASSED"),
                       "The inline call should show the nudged turn's exact command.")
         for text in visibleTexts {
@@ -13844,7 +13877,7 @@ final class PlayhouseUITests: XCTestCase {
         let queued = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
         let queuedID = try XCTUnwrap(queued?.first(where: { $0["text"] as? String == followUp })?["id"] as? String)
         let steerButton = element("steer-queued-message-\(queuedID)")
-        XCTAssertTrue(steerButton.waitForExistence(timeout: 10), "The queued follow-up should offer its row Steer action.")
+        XCTAssertTrue(steerButton.waitToExist(timeout: 10), "The queued follow-up should offer its row Steer action.")
         attachScreenshot(named: "Parked turn with the queued follow-up ready to steer")
 
         steerButton.click()
@@ -13932,7 +13965,7 @@ final class PlayhouseUITests: XCTestCase {
         composer.typeKey(.return, modifierFlags: [])
         let queued = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
         let queuedID = try XCTUnwrap(queued?.first(where: { $0["text"] as? String == stranded })?["id"] as? String)
-        XCTAssertTrue(element("queued-message-text-\(queuedID)").waitForExistence(timeout: 10),
+        XCTAssertTrue(element("queued-message-text-\(queuedID)").waitToExist(timeout: 10),
                       "A follow-up sent while the parked turn is active must wait in the queue.")
 
         try Data("Release the consumed-wake fixture pause.\n".utf8).write(to: release, options: .atomic)
@@ -14007,21 +14040,21 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Ask a restart-safe structured question.")
         element("send-message-button").click()
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10))
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Claude private recovery failure")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10))
         try "Playhouse owns this Claude fixture marker.\n".write(
             to: URL(fileURLWithPath: executable.path + ".recovery-error"),
             atomically: true,
             encoding: .utf8
         )
-        element("ai-question-option-question-1-Green").click()
+        selectQuestionOption(identifier: "ai-question-option-question-1-Green")
         element("submit-ai-answers-button").click()
         let error = element("codex-chat-error")
-        XCTAssertTrue(error.waitForExistence(timeout: 15))
+        XCTAssertTrue(error.waitToExist(timeout: 15))
         XCTAssertEqual(error.label, "The private answer could not be applied. Please answer the question again.")
         XCTAssertTrue(element("conversation-user-input-request").exists)
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Answer: Green")).firstMatch.exists)
@@ -14029,7 +14062,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response",
                        "An unanswered question stays available for retry after a failed recovery attempt.")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Claude private recovery failure", inColumn: "Waiting Response")
         openTask(named: "Claude private recovery failure")
         XCTAssertTrue(element("conversation-user-input-request").exists)
@@ -14037,9 +14070,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Claude private recovery failure")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 15))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 15))
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Claude private recovery failure", inColumn: "Waiting Response")
         openTask(named: "Claude private recovery failure")
         XCTAssertTrue(element("conversation-user-input-request").exists)
@@ -14065,11 +14098,11 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Ask a restart-safe structured question.")
         element("send-message-button").click()
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         // The fixture exits right after asking, so the send reports failure; wait until the app
         // has handled it, or the checks below could pass before the handler runs.
-        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "The provider exit should be reported in the conversation.")
+        XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 10), "The provider exit should be reported in the conversation.")
         XCTAssertTrue(transcriptMessage("Ask a restart-safe structured question.").exists,
             "The prompt Codex received stays in the conversation after its send reports failure.")
         XCTAssertEqual(element("message-composer").value as? String, "",
@@ -14079,7 +14112,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Restart-safe Codex question")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10))
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
         XCTAssertEqual(try taskRecord(id: taskID)?["hasUnsentDraft"] as? Bool, false,
             "A prompt the provider received before it exited must not be saved as an unsent draft.")
@@ -14089,17 +14122,17 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("conversation-provider-menu").isEnabled, "A saved structured question must block provider switching after restart.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Restart-safe Codex question", inColumn: "Waiting Response")
         openTask(named: "Restart-safe Codex question")
         XCTAssertTrue(element("conversation-user-input-request").exists)
 
-        element("ai-question-option-color-Green").click()
+        selectQuestionOption(identifier: "ai-question-option-color-Green")
         let secretAnswer = element("ai-question-answer-token")
         secretAnswer.click()
         secretAnswer.typeText(" fixture-secret ")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(transcriptMessage("Recovered answer: Green; private token [redacted secret answer] was applied.").waitForExistence(timeout: 15))
+        XCTAssertTrue(transcriptMessage("Recovered answer: Green; private token [redacted secret answer] was applied.").waitToExist(timeout: 15))
         XCTAssertTrue(transcriptMessage("[Private answer sent after restart]").exists)
         XCTAssertFalse(element("conversation-user-input-request").exists)
         let providerHistory = try String(contentsOf: URL(fileURLWithPath: executable.path + ".history"), encoding: .utf8)
@@ -14120,7 +14153,7 @@ final class PlayhouseUITests: XCTestCase {
         relaunchApp()
         openTask(named: "Restart-safe Codex question")
         let persistedHiddenAnswer = transcriptMessage("[Response to private answer hidden]")
-        XCTAssertTrue(persistedHiddenAnswer.waitForExistence(timeout: 15),
+        XCTAssertTrue(persistedHiddenAnswer.waitToExist(timeout: 15),
             "After restart, history should hide the assistant response from a secret recovery turn.")
         XCTAssertTrue(transcriptMessage("[Private answer sent after restart]").exists)
         let persistedActivityDisclosure = element("codex-activity-disclosure")
@@ -14137,7 +14170,7 @@ final class PlayhouseUITests: XCTestCase {
         followUpComposer.click()
         followUpComposer.typeText("Follow up after private recovery.")
         element("send-message-button").click()
-        XCTAssertTrue(app.staticTexts["Follow-up after private recovery complete."].waitForExistence(timeout: 15),
+        XCTAssertTrue(app.staticTexts["Follow-up after private recovery complete."].waitToExist(timeout: 15),
             "A normal follow-up after private recovery should remain visible in the refreshed conversation.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 30),
             "The follow-up with no reported outcome should finish after two hidden reminders.")
@@ -14153,7 +14186,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Restart-safe Codex question")
-        XCTAssertTrue(app.staticTexts["Follow-up after private recovery complete."].waitForExistence(timeout: 15),
+        XCTAssertTrue(app.staticTexts["Follow-up after private recovery complete."].waitToExist(timeout: 15),
             "The safe follow-up response should remain visible after reopening provider history.")
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists,
             "The earlier secret must remain absent after the normal follow-up and another app restart.")
@@ -14171,45 +14204,45 @@ final class PlayhouseUITests: XCTestCase {
         noSecretComposer.click()
         noSecretComposer.typeText("Ask a restart-safe non-secret question.")
         element("send-message-button").click()
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10))
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Codex recovery without a secret")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10))
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "private token")).firstMatch.exists)
-        element("ai-question-option-color-Blue").click()
+        selectQuestionOption(identifier: "ai-question-option-color-Blue")
         element("submit-ai-answers-button").click()
         let noSecretAnswer = transcriptMessage("Recovered answer: Blue; no secret was required.")
-        XCTAssertTrue(noSecretAnswer.waitForExistence(timeout: 15), "Codex recovery without secret answers should preserve its safe response.")
+        XCTAssertTrue(noSecretAnswer.waitToExist(timeout: 15), "Codex recovery without secret answers should preserve its safe response.")
         XCTAssertFalse(transcriptMessage("[Response to private answer hidden]").exists)
         XCTAssertEqual(try taskRecord(id: noSecretTaskID)?["status"] as? String, "Waiting Response")
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Codex recovery without a secret")
-        XCTAssertTrue(transcriptMessage("Recovered answer: Blue; no secret was required.").waitForExistence(timeout: 15),
+        XCTAssertTrue(transcriptMessage("Recovered answer: Blue; no secret was required.").waitToExist(timeout: 15),
             "The safe answer should remain visible after reopening a non-secret recovery conversation.")
 
         let secondQuestionComposer = element("message-composer")
         secondQuestionComposer.click()
         secondQuestionComposer.typeText("Ask a second restart-safe structured question.")
         element("send-message-button").click()
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10))
         XCTAssertTrue(app.staticTexts["What is the private token?"].exists)
-        element("ai-question-option-color-Green").click()
+        selectQuestionOption(identifier: "ai-question-option-color-Green")
         let tokenAnswer = element("ai-question-answer-token")
         tokenAnswer.click()
         tokenAnswer.typeText("fixture-secret")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(transcriptMessage("Recovered answer: Green; private token [redacted secret answer] was applied.").waitForExistence(timeout: 15))
+        XCTAssertTrue(transcriptMessage("Recovered answer: Green; private token [redacted secret answer] was applied.").waitToExist(timeout: 15))
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Codex recovery without a secret")
         XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
-        XCTAssertTrue(transcriptMessage("Recovered answer: Blue; no secret was required.").waitForExistence(timeout: 15),
+        XCTAssertTrue(transcriptMessage("Recovered answer: Blue; no secret was required.").waitToExist(timeout: 15),
             "A later secret recovery must leave the earlier safe no-secret response visible after restart.")
         XCTAssertTrue(transcriptMessage("[Response to private answer hidden]").exists,
             "The secret recovery response must remain hidden after restart.")
@@ -14235,23 +14268,23 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Ask a restart-safe structured question.")
         element("send-message-button").click()
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10))
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Fail-closed secret recovery")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10))
         try "Playhouse owns this Codex fixture failure marker.\n".write(
             to: URL(fileURLWithPath: executable.path + ".provider-error-async"),
             atomically: true,
             encoding: .utf8
         )
-        element("ai-question-option-color-Green").click()
+        selectQuestionOption(identifier: "ai-question-option-color-Green")
         let secretAnswer = element("ai-question-answer-token")
         secretAnswer.click()
         secretAnswer.typeText("fixture-secret")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 15))
+        XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 15))
         XCTAssertEqual(element("codex-chat-error").label, "The private answer could not be applied. Please answer the question again.")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists)
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Answer: Green")).firstMatch.exists)
@@ -14260,7 +14293,7 @@ final class PlayhouseUITests: XCTestCase {
                        "An unanswered question stays available for retry after a failed recovery attempt.")
         XCTAssertFalse((try taskRecord(id: taskID)?["statusMessage"] as? String ?? "").contains("fixture-secret"))
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Fail-closed secret recovery", inColumn: "Waiting Response")
         openTask(named: "Fail-closed secret recovery")
         XCTAssertTrue(element("conversation-user-input-request").exists)
@@ -14269,7 +14302,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Fail-closed secret recovery")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 15))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 15))
         XCTAssertTrue(transcriptMessage("[Private answer sent after restart]").exists)
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists,
             "The failed recovery marker must keep history redacted after app restart.")
@@ -14283,7 +14316,7 @@ final class PlayhouseUITests: XCTestCase {
         relaunchApp()
         openTask(named: "Fail-closed secret recovery")
         let historyError = element("codex-chat-error")
-        XCTAssertTrue(historyError.waitForExistence(timeout: 15))
+        XCTAssertTrue(historyError.waitToExist(timeout: 15))
         XCTAssertEqual(historyError.label, "History for a private recovery conversation could not be loaded.")
         XCTAssertFalse(historyError.label.contains("fixture-secret"), "A history RPC error must not expose the re-entered secret.")
         XCTAssertTrue(element("conversation-user-input-request").exists, "A history failure must leave the unanswered recovery request visible.")
@@ -14313,23 +14346,24 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Ask a structured question.")
         element("send-message-button").click()
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Claude question", inColumn: "Waiting Response")
         openTask(named: "Other provider conversation")
-        XCTAssertTrue(element("message-composer").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("message-composer").waitToExist(timeout: 5))
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Claude question", inColumn: "Waiting Response")
         openTask(named: "Claude question")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 5))
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
-        element("ai-question-option-question-1-Blue").click()
+        selectQuestionOption(identifier: "ai-question-option-question-1-Blue")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(transcriptMessage("Answer received: Blue.").waitForExistence(timeout: 10))
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        XCTAssertTrue(transcriptMessage("Answer received: Blue.").waitToExist(timeout: 10))
+        // The answer renders as it streams; the status moves once the turn ends.
+        XCTAssertTrue(waitForStatus(taskID, "Waiting Response"), "The answered turn should end in Waiting Response.")
     }
 
     // case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, in-progress, and waiting-response instructions, which fails the private turn; both the question and the private rejection instructions stay out of the transcript. Playhouse then stops driving the work and marks the task Blocked naming that reason, rather than spending the remaining nudges.
@@ -14356,15 +14390,17 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Finish while a structured question remains pending.")
         element("send-message-button").click()
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10))
+        // The question flips the task to Waiting Response at once; the turn then ends with no
+        // outcome and restores In Progress so the outcome reminder decides. Read the settled state.
+        XCTAssertTrue(waitForStatus(taskID, "In Progress", timeout: 10), "A successful turn with a pending question should settle back in In Progress.")
         let pendingHistory = try runCLI(["conversation", "history", taskID])
         XCTAssertNotNil((pendingHistory["result"] as? [String: Any])?["pendingUserInputRequest"])
         let pendingFixtureHistory = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
         let pendingTurns = try XCTUnwrap((try JSONSerialization.jsonObject(with: pendingFixtureHistory) as? [String: Any])?["turns"] as? [[String: Any]])
         XCTAssertEqual(pendingTurns.count, 1)
         XCTAssertFalse(pendingTurns.contains { ($0["userText"] as? String)?.contains("Playhouse internal outcome nudge:") == true }, "A successful turn with a pending question must not receive outcome nudges.")
-        element("ai-question-option-question-1-Blue").click()
+        selectQuestionOption(identifier: "ai-question-option-question-1-Blue")
         element("submit-ai-answers-button").click()
         // The answered turn already finished, so the answer may arrive as a recovery turn.
         XCTAssertTrue(waitUntil({
@@ -14397,7 +14433,7 @@ final class PlayhouseUITests: XCTestCase {
         )).firstMatch.exists, "Claude's private rejection instructions must not appear in the visible transcript.")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse internal outcome nudge:")).firstMatch.exists)
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Claude reminder question", inColumn: "Blocked")
     }
 
@@ -14451,16 +14487,16 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("conversation-user-input-request").exists)
         element("back-to-board-button").click()
         openTask(named: "Repair original question")
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 10))
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
-        element("ai-question-option-color-Green").click()
+        selectQuestionOption(identifier: "ai-question-option-color-Green")
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(transcriptMessage("Recovered answer: Green; private token [redacted secret answer] was applied.").waitForExistence(timeout: 15))
+        XCTAssertTrue(transcriptMessage("Recovered answer: Green; private token [redacted secret answer] was applied.").waitToExist(timeout: 15))
         relaunchApp()
         openTask(named: "Repair original question")
         XCTAssertFalse(element("ai-question-form-title").exists)
-        XCTAssertTrue(transcriptMessage("[Response to private answer hidden]").waitForExistence(timeout: 10))
+        XCTAssertTrue(transcriptMessage("[Response to private answer hidden]").waitToExist(timeout: 10))
         let history = try runCLI(["conversation", "history", target])["result"]
         let historyBytes = try JSONSerialization.data(withJSONObject: try XCTUnwrap(history))
         XCTAssertFalse(String(decoding: historyBytes, as: UTF8.self).contains("fixture-secret"))
@@ -14481,7 +14517,7 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Codex questions")
         let modeMenu = element("conversation-mode-menu")
-        XCTAssertTrue(modeMenu.waitForExistence(timeout: 5))
+        XCTAssertTrue(modeMenu.waitToExist(timeout: 5))
         modeMenu.click()
         app.menuItems["Plan mode"].click()
         XCTAssertTrue(modeMenu.label.contains("Plan mode"))
@@ -14489,30 +14525,30 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").typeText("Please share your plan.")
         element("send-message-button").click()
 
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 10))
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
         XCTAssertTrue(element("conversation-user-input-request").exists, "The question should appear inline in the conversation.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(waitUntil({ !element("ai-question-confirmation-sheet").exists }, timeout: 5))
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         assertTaskVisible("Codex questions", inColumn: "Waiting Response")
         attachScreenshot(named: "Pending question remains part of its active conversation")
         openTask(named: "Another conversation")
-        XCTAssertTrue(element("message-composer").waitForExistence(timeout: 5), "A different conversation should open while the question is pending.")
+        XCTAssertTrue(element("message-composer").waitToExist(timeout: 5), "A different conversation should open while the question is pending.")
         element("message-composer").click()
         element("message-composer").typeText("Please ask parallel questions.")
         element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 10))
         let parallelThread = try XCTUnwrap(taskRecord(id: parallelID)?["codexThreadID"] as? String)
         let originalThread = try XCTUnwrap(taskRecord(id: taskID)?["codexThreadID"] as? String)
         XCTAssertNotEqual(parallelThread, originalThread)
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         openTask(named: "Codex questions")
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5), "Returning should restore the pending question inline.")
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 5), "Returning should restore the pending question inline.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         XCTAssertFalse(element("submit-ai-answers-button").isEnabled, "Blank answers must not be submitted.")
         let greenOption = element("ai-question-option-color-Green")
@@ -14538,7 +14574,7 @@ final class PlayhouseUITests: XCTestCase {
         }
         XCTAssertEqual(resumedStatus, "In Progress", "The unanswered question must not move the active task out of In Progress.")
 
-        XCTAssertTrue(app.staticTexts["Which color should I use next?"].waitForExistence(timeout: 10), "A second question must return to the original task after the other task replaced the shared callback.")
+        XCTAssertTrue(app.staticTexts["Which color should I use next?"].waitToExist(timeout: 10), "A second question must return to the original task after the other task replaced the shared callback.")
         func pendingQuestion(_ owner: String) throws -> [String: Any] {
             let transcript = try XCTUnwrap(try conversationState(owner))
             return try XCTUnwrap(transcript["pendingUserInputRequest"] as? [String: Any])
@@ -14563,15 +14599,15 @@ final class PlayhouseUITests: XCTestCase {
             (try taskRecord(id: taskID)?["statusMessage"] as? String)?.contains("couldn't run the private turn") == true,
             "The Blocked reason must name why Playhouse stopped driving the work."
         )
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10), "Wait for A's completed provider response before checking B still owns its question.")
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitToExist(timeout: 10), "Wait for A's completed provider response before checking B still owns its question.")
         XCTAssertNil(try XCTUnwrap(try conversationState(taskID))["pendingUserInputRequest"])
         XCTAssertFalse(element("ai-question-form-title").exists)
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Codex questions", inColumn: "Blocked")
         openTask(named: "Another conversation")
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5), "Finishing the first task must preserve the parallel question.")
-        element("ai-question-option-color-Blue").click()
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 5), "Finishing the first task must preserve the parallel question.")
+        selectQuestionOption(identifier: "ai-question-option-color-Blue")
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         let parallelDeadline = Date().addingTimeInterval(90)
@@ -14585,11 +14621,11 @@ final class PlayhouseUITests: XCTestCase {
         )
         XCTAssertTrue(waitUntil({ !self.element("ai-question-form-title").exists }, timeout: 10))
         XCTAssertNil(try XCTUnwrap(try conversationState(parallelID))["pendingUserInputRequest"])
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitToExist(timeout: 10))
         element("back-to-board-button").click()
         openTask(named: "Another conversation")
         XCTAssertFalse(element("ai-question-form-title").exists)
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitToExist(timeout: 10))
     }
 
     // case-contract: test_codex_empty_question_request_is_rejected | A failed turn preserves its blocked reason and appears in the compact Blocked section above Backlog with a user-intervention indication; retrying clears that section, and the successful retry returns to Waiting Response without an explicit completed outcome.
@@ -14605,7 +14641,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(failedTurn["ok"] as? Bool ?? true)
         XCTAssertEqual(try taskRecord(named: "Empty Codex questions")?["status"] as? String, "Blocked")
         launchApp(defaultParent: fixture.parent.path)
-        XCTAssertTrue(element("column-heading-blocked").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("column-heading-blocked").waitToExist(timeout: 5))
         XCTAssertTrue(element("blocked-waiting-indicator").exists)
         assertTaskVisible("Empty Codex questions", inColumn: "Blocked")
         let boardViewport = element("board-columns-scroll-view")
@@ -14636,25 +14672,25 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Ask non-blocking questions.")
         element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 10))
         XCTAssertTrue(element("conversation-user-input-request").exists, "The non-blocking question should be inline, not presented in a modal.")
         XCTAssertEqual(try taskRecord(named: "Non-blocking question")?["status"] as? String, "In Progress")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Non-blocking question", inColumn: "In Progress")
         openTask(named: "Another non-blocking conversation")
-        XCTAssertTrue(element("message-composer").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("message-composer").waitToExist(timeout: 5))
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Non-blocking question", inColumn: "In Progress")
         openTask(named: "Non-blocking question")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 5), "Returning should restore the pending question inline.")
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 5), "Returning should restore the pending question inline.")
         XCTAssertEqual(try taskRecord(named: "Non-blocking question")?["status"] as? String, "In Progress")
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Non-blocking question", inColumn: "In Progress")
         openTask(named: "Non-blocking question")
-        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 5))
         let otherOption = app.buttons["Other"]
         XCTAssertTrue(otherOption.exists, "An allowed free-text answer must have an explicit Other radio choice.")
         otherOption.click()
@@ -14681,7 +14717,7 @@ final class PlayhouseUITests: XCTestCase {
         }
         XCTAssertEqual(nonblockingStatus, "In Progress", "A non-blocking recovery answer should leave the task active until the resumed turn completes.")
         // The recovered turn carried a secret answer, so its reply stays hidden, as in CLI/XPC history.
-        XCTAssertTrue(transcriptMessage("[Response to private answer hidden]").waitForExistence(timeout: 10))
+        XCTAssertTrue(transcriptMessage("[Response to private answer hidden]").waitToExist(timeout: 10))
         XCTAssertFalse(app.groups.matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists, "The secret answer must not appear in the transcript.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(named: "Non-blocking question")?["status"] as? String) == "Waiting Response" }, timeout: 20))
         let fixturePath = try XCTUnwrap(codexFixtureExecutable)
@@ -14693,7 +14729,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse internal outcome nudge:")).firstMatch.exists)
         XCTAssertFalse(element("conversation-user-input-request").exists)
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Non-blocking question", inColumn: "Waiting Response")
     }
 
@@ -14709,7 +14745,7 @@ final class PlayhouseUITests: XCTestCase {
         element("send-message-button").click()
 
         let card = element("async-question-item_playhouse_async_question")
-        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        XCTAssertTrue(card.waitToExist(timeout: 10))
         let yesOption = element("async-question-option-item_playhouse_async_question-0-0")
         let noOption = element("async-question-option-item_playhouse_async_question-0-1")
         XCTAssertEqual(yesOption.label, "Yes, update paired tests and run required verification")
@@ -14718,13 +14754,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("assistant-message-item_playhouse_async_question").exists,
                        "Structured choices should appear in an answer card instead of a Markdown bubble.")
         XCTAssertFalse(element("submit-async-questions-item_playhouse_async_question").isEnabled)
-        XCTAssertTrue(app.staticTexts["I can continue while you decide."].waitForExistence(timeout: 10),
+        XCTAssertTrue(app.staticTexts["I can continue while you decide."].waitToExist(timeout: 10),
                       "The assistant message after the question must remain separate.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: WorkspaceFixture.root.appendingPathComponent("codex-fixture-async-question.question-ready").path),
                       "The question fixture must still have an active turn.")
         element("back-to-board-button").click()
         openTask(named: "Async Codex question")
-        XCTAssertTrue(app.staticTexts["I can continue while you decide."].waitForExistence(timeout: 10),
+        XCTAssertTrue(app.staticTexts["I can continue while you decide."].waitToExist(timeout: 10),
                       "Reopening during the active turn must load Codex history, not only restore the pending question request.")
         XCTAssertTrue(app.staticTexts["Codex · Luna"].exists,
                       "The reopened active history message must retain its accepted-turn model label.")
@@ -14743,14 +14779,14 @@ final class PlayhouseUITests: XCTestCase {
 
         XCTAssertTrue(waitUntil({ self.transcriptContains("Additional detail: Keep the draft intact.") }, timeout: 10), "The full two-answer reply must be sent.")
         let response = element("assistant-message-item_playhouse_async_answer_steered")
-        XCTAssertTrue(response.waitForExistence(timeout: 10))
+        XCTAssertTrue(response.waitToExist(timeout: 10))
         XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
         XCTAssertTrue(response.label.contains("Additional detail: Keep the draft intact."))
         XCTAssertTrue(card.exists)
         XCTAssertTrue(app.staticTexts["Answered"].exists)
         XCTAssertEqual(composer.value as? String, "An unsent draft stays here.")
         let laterCard = element("async-question-item_playhouse_async_later_question")
-        XCTAssertTrue(laterCard.waitForExistence(timeout: 10))
+        XCTAssertTrue(laterCard.waitToExist(timeout: 10))
         let idleDeadline = Date().addingTimeInterval(10)
         while !element("send-message-button").isEnabled && Date() < idleDeadline {
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
@@ -14764,14 +14800,14 @@ final class PlayhouseUITests: XCTestCase {
         let completedResponse = app.groups.matching(NSPredicate(
             format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-item_playhouse_async_answer_", "Finish after the turn."
         )).firstMatch
-        XCTAssertTrue(completedResponse.waitForExistence(timeout: 10),
+        XCTAssertTrue(completedResponse.waitToExist(timeout: 10),
                       "A question answered after its original turn must refresh the visible conversation.")
         XCTAssertTrue(completedResponse.label.contains("Answers received: One more check: Finish after the turn."))
         XCTAssertEqual(composer.value as? String, "An unsent draft stays here.")
         element("back-to-board-button").click()
         openTask(named: "Async Codex question")
         XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
-        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        XCTAssertTrue(card.waitToExist(timeout: 5))
         XCTAssertTrue(app.staticTexts["Answered"].exists)
         XCTAssertTrue(laterCard.exists)
         XCTAssertTrue(laterCard.staticTexts["Answered"].exists, "The later question must stay answered after reopening.")
@@ -14790,7 +14826,7 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").typeText("Ask a queued async question.")
         element("send-message-button").click()
         let card = element("async-question-item_playhouse_async_question")
-        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        XCTAssertTrue(card.waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({
             ((try? self.taskRecord(id: taskID))?["status"] as? String) == "Waiting Response"
         }, timeout: 10), "The first turn must finish before queueing the answer.")
@@ -14799,7 +14835,7 @@ final class PlayhouseUITests: XCTestCase {
         element("async-question-answer-item_playhouse_async_question-1").click()
         element("async-question-answer-item_playhouse_async_question-1").typeText("Retry this answer.")
         element("submit-async-questions-item_playhouse_async_question").click()
-        XCTAssertTrue(card.staticTexts["Pending"].waitForExistence(timeout: 10))
+        XCTAssertTrue(card.staticTexts["Pending"].waitToExist(timeout: 10))
         let queueResult = try runCLI(["conversation", "queue-list", taskID])
         let queued = try XCTUnwrap((queueResult["result"] as? [[String: Any]])?.first)
         XCTAssertEqual(queued["asyncQuestionItemID"] as? String, "item_playhouse_async_question")
@@ -14809,16 +14845,16 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(pendingAnswered["itemIDs"] as? [String], [], "A pending async answer is not answered yet.")
         element("back-to-board-button").click()
         openTask(named: "Queued async question")
-        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        XCTAssertTrue(card.waitToExist(timeout: 5))
         XCTAssertTrue(card.staticTexts["Pending"].exists)
         let retry = element("retry-queued-message-\(queuedID.uppercased())")
-        XCTAssertTrue(retry.waitForExistence(timeout: 5))
+        XCTAssertTrue(retry.waitToExist(timeout: 5))
         retry.click()
         // The fixture numbers answer items per turn, so find the answer by content.
         let response = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-item_playhouse_async_answer_", "Answers received: Test and verify"))
             .firstMatch
-        XCTAssertTrue(response.waitForExistence(timeout: 10))
+        XCTAssertTrue(response.waitToExist(timeout: 10))
         XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
         XCTAssertTrue(response.label.contains("Additional detail: Retry this answer."))
         XCTAssertTrue(card.staticTexts["Answered"].exists)
@@ -14835,14 +14871,14 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Start work that will be interrupted.")
         element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 10))
         let interruptedActivity = element("codex-activity-disclosure")
-        XCTAssertTrue(interruptedActivity.waitForExistence(timeout: 10), "A live turn should surface its activity section.")
+        XCTAssertTrue(interruptedActivity.waitToExist(timeout: 10), "A live turn should surface its activity section.")
         XCTAssertTrue(waitUntil({ interruptedActivity.value as? String == "Expanded, down chevron" }, timeout: 10),
                       "A turn in flight should show its work instead of hiding it behind Working for.")
         // The lone reported activity is still running, so it occupies the live slot
         // outside the section; the open section itself has nothing inside it yet.
-        XCTAssertTrue(element("codex-activity-row-item_fixture_interrupted_command").waitForExistence(timeout: 10),
+        XCTAssertTrue(element("codex-activity-row-item_fixture_interrupted_command").waitToExist(timeout: 10),
                       "The live turn should render its reported activity without a click.")
         let interruptedID = try taskID(named: "Interrupted turn")
         let queuedText = "Follow up after I review the interrupted turn."
@@ -14852,7 +14888,7 @@ final class PlayhouseUITests: XCTestCase {
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
 
-        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("codex-chat-error").waitToExist(timeout: 10))
         // The turn settles with no answer. Its reported activity keeps the section
         // mounted on the same conversation, so it must be folded rather than gone:
         // asserting the section still exists is what makes the collapse meaningful.
@@ -14862,7 +14898,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("codex-activity-details").exists, "A settled interrupted turn should not rest on expanded activity details.")
         XCTAssertFalse(element("pause-response-button").exists, "The interrupted turn should no longer be responding.")
         attachScreenshot(named: "Activity folds away when an interrupted turn settles")
-        XCTAssertTrue(app.staticTexts["Follow-up needs your action"].waitForExistence(timeout: 10), "An interrupted turn must retain its queued message for an explicit retry.")
+        XCTAssertTrue(app.staticTexts["Follow-up needs your action"].waitToExist(timeout: 10), "An interrupted turn must retain its queued message for an explicit retry.")
         let blocked = try XCTUnwrap(taskRecord(named: "Interrupted turn"))
         XCTAssertEqual(blocked["status"] as? String, "Blocked")
         XCTAssertTrue((blocked["statusMessage"] as? String)?.localizedCaseInsensitiveContains("interrupted") == true)
@@ -14882,13 +14918,13 @@ final class PlayhouseUITests: XCTestCase {
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Interrupted turn", prompt: "Retry the interrupted task.")
         XCTAssertEqual(try taskRecord(named: "Interrupted turn")?["status"] as? String, "Review")
         let retryQueuedButton = element("retry-queued-message-\(queuedID.uppercased())")
-        XCTAssertTrue(retryQueuedButton.waitForExistence(timeout: 10), "The retained follow-up should remain explicitly retryable after reopening and completing a new turn.")
+        XCTAssertTrue(retryQueuedButton.waitToExist(timeout: 10), "The retained follow-up should remain explicitly retryable after reopening and completing a new turn.")
         retryQueuedButton.click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10), "Explicit retry should submit the queued message to Codex.")
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 10), "Explicit retry should submit the queued message to Codex.")
         selectQuestionOption("Blue")
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({
             (((try? self.runCLI(["conversation", "queue-list", interruptedID])["result"] as? [[String: Any]]) ?? [])).isEmpty
         }, timeout: 10), "A completed explicit retry should remove the queued item.")
@@ -14919,8 +14955,8 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Reopen active turn")
         // The bridge daemon owns the turn, so quitting the window leaves it running.
         XCTAssertEqual(try taskRecord(named: "Reopen active turn")?["status"] as? String, "In Progress", "A clean quit should leave the daemon-owned turn running.")
-        XCTAssertTrue(transcriptMessage("Leave this turn active while Playhouse closes.").waitForExistence(timeout: 10), "The visible transcript should restore the prompt after a clean quit.")
-        XCTAssertTrue(app.staticTexts["In Progress"].waitForExistence(timeout: 10), "The reopened window should show the still-running turn.")
+        XCTAssertTrue(transcriptMessage("Leave this turn active while Playhouse closes.").waitToExist(timeout: 10), "The visible transcript should restore the prompt after a clean quit.")
+        XCTAssertTrue(app.staticTexts["In Progress"].waitToExist(timeout: 10), "The reopened window should show the still-running turn.")
         let interruptedHistory = try runCLI(["conversation", "history", try taskID(named: "Reopen active turn")])["result"] as? [String: Any]
         XCTAssertTrue(
             ((interruptedHistory?["messages"] as? [[String: Any]]) ?? []).contains {
@@ -14975,7 +15011,7 @@ final class PlayhouseUITests: XCTestCase {
         waitForBoardOrAbortSuite()
         openTask(named: "Unexpected restart")
         XCTAssertEqual(try taskRecord(id: unexpectedTaskID)?["status"] as? String, "In Progress", "The daemon-owned turn should survive the window's unexpected termination.")
-        XCTAssertTrue(transcriptMessage(unexpectedPrompt).waitForExistence(timeout: 10), "The visible transcript should restore the prompt after unexpected termination.")
+        XCTAssertTrue(transcriptMessage(unexpectedPrompt).waitToExist(timeout: 10), "The visible transcript should restore the prompt after unexpected termination.")
         let unexpectedHistory = try runCLI(["conversation", "history", unexpectedTaskID])["result"] as? [String: Any]
         XCTAssertTrue(
             ((unexpectedHistory?["messages"] as? [[String: Any]]) ?? []).contains {
@@ -15004,7 +15040,7 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Git changes")
 
-        XCTAssertTrue(element("unviewed-changes-section").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("unviewed-changes-section").waitToExist(timeout: 10))
         assertText("unviewed-changes-title", equals: "Changes")
         assertText("viewed-changes-title", equals: "Viewed")
         XCTAssertTrue(element("viewed-changes-section").exists)
@@ -15041,7 +15077,7 @@ final class PlayhouseUITests: XCTestCase {
         )
 
         element("workspace-change-unviewed-shared.txt").click()
-        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-diff-overlay").waitToExist(timeout: 10))
         assertText("workspace-diff-title", equals: "shared.txt")
         assertText("workspace-diff-source", equals: "suggested-parent/changes · Since branch base")
         assertText("workspace-diff-editor-status", equals: "Side-by-side")
@@ -15063,12 +15099,12 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 10), "Marking a file viewed should persist its Viewed entry.")
         XCTAssertFalse(((marked?["unviewed"] as? [[String: Any]]) ?? []).contains { $0["path"] as? String == "shared.txt" })
         element("viewed-changes-section").click()
-        XCTAssertTrue(element("workspace-change-viewed-shared.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-viewed-shared.txt").waitToExist(timeout: 10))
         XCTAssertFalse(element("mark-viewed-shared.txt").exists, "Viewed entries must not offer the mark-viewed action.")
         try "Edited after viewing.\n".write(to: fixture.changes.appendingPathComponent("shared.txt"), atomically: true, encoding: .utf8)
         element("refresh-workspace-changes-button").click()
         XCTAssertTrue(
-            element("workspace-change-unviewed-shared.txt").waitForExistence(timeout: 10),
+            element("workspace-change-unviewed-shared.txt").waitToExist(timeout: 10),
             "A later edit should be listed as a change still to review."
         )
         XCTAssertTrue(
@@ -15076,7 +15112,7 @@ final class PlayhouseUITests: XCTestCase {
             "The already-reviewed work should stay listed under Viewed."
         )
         element("workspace-change-viewed-shared.txt").click()
-        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-diff-overlay").waitToExist(timeout: 10))
         assertText("workspace-diff-source", equals: "suggested-parent/changes · Since branch base")
         let reviewedMonacoValue = renderedDiffValue()
         XCTAssertTrue(reviewedMonacoValue.contains("Original:\nShared baseline.\n"))
@@ -15086,7 +15122,7 @@ final class PlayhouseUITests: XCTestCase {
         )
         app.typeKey(.escape, modifierFlags: [])
         element("workspace-change-unviewed-shared.txt").click()
-        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-diff-overlay").waitToExist(timeout: 10))
         assertText("workspace-diff-source", equals: "suggested-parent/changes · Since last viewed")
         assertText("workspace-diff-editor-status", equals: "Side-by-side")
         assertText("workspace-diff-highlight-status", equals: "1 change highlighted")
@@ -15099,7 +15135,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "A re-edited file is listed under both Viewed and Changes")
 
         element("mark-viewed-untracked.txt").click()
-        XCTAssertTrue(element("workspace-change-viewed-untracked.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-viewed-untracked.txt").waitToExist(timeout: 10))
         let stagedStatus = try runGitOutput(fixture.changes, "status", "--porcelain", "--", "untracked.txt")
         XCTAssertEqual(
             stagedStatus.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -15108,10 +15144,10 @@ final class PlayhouseUITests: XCTestCase {
         )
         try "Untracked file, edited after viewing.\n".write(to: fixture.changes.appendingPathComponent("untracked.txt"), atomically: true, encoding: .utf8)
         element("refresh-workspace-changes-button").click()
-        XCTAssertTrue(element("workspace-change-unviewed-untracked.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-unviewed-untracked.txt").waitToExist(timeout: 10))
         XCTAssertTrue(element("workspace-change-viewed-untracked.txt").exists)
         element("workspace-change-unviewed-untracked.txt").click()
-        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-diff-overlay").waitToExist(timeout: 10))
         let recreatedUntrackedValue = renderedDiffValue()
         XCTAssertTrue(recreatedUntrackedValue.contains("Original:\nUntracked file.\n"))
         XCTAssertTrue(recreatedUntrackedValue.contains("Modified:\nUntracked file, edited after viewing.\n"))
@@ -15125,12 +15161,12 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 10), "Marking the deletion viewed should persist before the file is recreated.")
         try "Recreated after viewing.\n".write(to: fixture.changes.appendingPathComponent("deleted.txt"), atomically: true, encoding: .utf8)
         element("refresh-workspace-changes-button").click()
-        XCTAssertTrue(element("workspace-change-unviewed-deleted.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-unviewed-deleted.txt").waitToExist(timeout: 10))
         XCTAssertTrue(element("workspace-change-viewed-deleted.txt").exists)
         assertText("workspace-change-viewed-deleted.txt", equals: "deleted.txt, deleted, reviewed")
         assertText("workspace-change-unviewed-deleted.txt", equals: "deleted.txt, added, pending")
         element("workspace-change-unviewed-deleted.txt").click()
-        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-diff-overlay").waitToExist(timeout: 10))
         let recreatedMonacoValue = renderedDiffValue()
         XCTAssertTrue(recreatedMonacoValue.contains("Original:\n\nModified:\nRecreated after viewing.\n"))
         app.typeKey(.escape, modifierFlags: [])
@@ -15144,13 +15180,13 @@ final class PlayhouseUITests: XCTestCase {
         // nets to zero change once both the deletion and the replacement are reviewed.
         try "Ephemeral content.\n".write(to: fixture.changes.appendingPathComponent("ephemeral.txt"), atomically: true, encoding: .utf8)
         element("refresh-workspace-changes-button").click()
-        XCTAssertTrue(element("mark-viewed-ephemeral.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("mark-viewed-ephemeral.txt").waitToExist(timeout: 10))
         element("mark-viewed-ephemeral.txt").click()
-        XCTAssertTrue(element("workspace-change-viewed-ephemeral.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-viewed-ephemeral.txt").waitToExist(timeout: 10))
         try FileManager.default.removeItem(at: fixture.changes.appendingPathComponent("ephemeral.txt"))
         element("refresh-workspace-changes-button").click()
         XCTAssertTrue(
-            element("workspace-change-unviewed-ephemeral.txt").waitForExistence(timeout: 10),
+            element("workspace-change-unviewed-ephemeral.txt").waitToExist(timeout: 10),
             "Deleting a reviewed new file lists the deletion as a change still to review."
         )
         element("mark-viewed-ephemeral.txt").click()
@@ -15169,7 +15205,7 @@ final class PlayhouseUITests: XCTestCase {
         try "Reborn content.\n".write(to: fixture.changes.appendingPathComponent("ephemeral.txt"), atomically: true, encoding: .utf8)
         element("refresh-workspace-changes-button").click()
         XCTAssertTrue(
-            element("workspace-change-unviewed-ephemeral.txt").waitForExistence(timeout: 10),
+            element("workspace-change-unviewed-ephemeral.txt").waitToExist(timeout: 10),
             "Recreating the file afterward surfaces it as a fresh change to review."
         )
 
@@ -15261,7 +15297,7 @@ final class PlayhouseUITests: XCTestCase {
 
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Mark all viewed")
-        XCTAssertTrue(element("workspace-change-unviewed-shared.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-unviewed-shared.txt").waitToExist(timeout: 10))
         XCTAssertTrue(element("mark-all-viewed-button").exists, "The Changes header offers Mark all as viewed while it lists files.")
         XCTAssertFalse(element("mark-unviewed-shared.txt").exists, "Changes entries offer mark-viewed, not unview.")
         attachScreenshot(named: "The Changes header offers Mark all as viewed")
@@ -15286,7 +15322,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("workspace-change-unviewed-shared.txt").waitForNonExistence(timeout: 10))
         XCTAssertFalse(element("mark-all-viewed-button").exists, "With nothing pending, the header no longer offers Mark all as viewed.")
         element("viewed-changes-section").click()
-        XCTAssertTrue(element("workspace-change-viewed-shared.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-viewed-shared.txt").waitToExist(timeout: 10))
         for path in pendingPaths {
             XCTAssertTrue(element("workspace-change-viewed-\(path)").exists, "\(path) should be listed under Viewed.")
             XCTAssertTrue(element("mark-unviewed-\(path)").exists, "Each Viewed entry offers Mark as unviewed.")
@@ -15295,7 +15331,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Every file is listed under Viewed with an unview action")
 
         element("mark-unviewed-shared.txt").click()
-        XCTAssertTrue(element("workspace-change-unviewed-shared.txt").waitForExistence(timeout: 10), "Unviewing lists the file under Changes again.")
+        XCTAssertTrue(element("workspace-change-unviewed-shared.txt").waitToExist(timeout: 10), "Unviewing lists the file under Changes again.")
         XCTAssertTrue(element("workspace-change-viewed-shared.txt").waitForNonExistence(timeout: 10))
         XCTAssertTrue(element("mark-viewed-shared.txt").exists)
         XCTAssertTrue(element("mark-all-viewed-button").exists)
@@ -15310,7 +15346,7 @@ final class PlayhouseUITests: XCTestCase {
             "Unviewing leaves the Git index as it was."
         )
         element("workspace-change-unviewed-shared.txt").click()
-        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-diff-overlay").waitToExist(timeout: 10))
         assertText("workspace-diff-source", equals: "review-parent/changes · Since branch base")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(element("workspace-diff-overlay").waitForNonExistence(timeout: 2))
@@ -15339,19 +15375,19 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "The collapsed Changes section keeps its header and pending count")
 
         openTask(named: "Clean changes")
-        XCTAssertTrue(element("workspace-changes-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-changes-title").waitToExist(timeout: 10))
         assertText("toggle-workspace-changes-section-button", equals: "Collapsed")
         XCTAssertFalse(element("workspace-changes-empty").exists, "The collapsed section state is global, so another task opens with it collapsed.")
         XCTAssertFalse(element("collapsed-workspace-changes-section-count").exists, "A task with nothing pending shows no count.")
         // The chevron's whole frame toggles, not only the drawn glyph at its center.
         element("toggle-workspace-changes-section-button").coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).click()
-        XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10), "Clicking the chevron's leading edge expands the section.")
+        XCTAssertTrue(element("workspace-changes-empty").waitToExist(timeout: 10), "Clicking the chevron's leading edge expands the section.")
         assertText("toggle-workspace-changes-section-button", equals: "Expanded")
         element("toggle-workspace-changes-section-button").coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).click()
         XCTAssertTrue(element("workspace-changes-empty").waitForNonExistence(timeout: 5), "Clicking the chevron's trailing edge collapses the section.")
         assertText("toggle-workspace-changes-section-button", equals: "Collapsed")
         element("workspace-changes-title").click()
-        XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10), "Clicking the section title expands it.")
+        XCTAssertTrue(element("workspace-changes-empty").waitToExist(timeout: 10), "Clicking the section title expands it.")
         assertText("toggle-workspace-changes-section-button", equals: "Expanded")
 
         // Every refresh used to swap No changes for the loading placeholder while Git ran.
@@ -15370,21 +15406,21 @@ final class PlayhouseUITests: XCTestCase {
 
         // Separately, the whole sidebar hides to a narrow rail.
         element("hide-task-sidebar-button").click()
-        XCTAssertTrue(element("task-sidebar-collapsed").waitForExistence(timeout: 5), "The sidebar hides to a narrow rail.")
+        XCTAssertTrue(element("task-sidebar-collapsed").waitToExist(timeout: 5), "The sidebar hides to a narrow rail.")
         XCTAssertFalse(element("workspace-changes-title").exists)
         XCTAssertFalse(element("collapsed-task-sidebar-count").exists, "A task with nothing pending shows no count.")
         XCTAssertLessThan(element("task-sidebar-collapsed").frame.width, 60)
 
         openTask(named: "Mark all viewed")
-        XCTAssertTrue(element("task-sidebar-collapsed").waitForExistence(timeout: 10), "The hidden sidebar state is global, so another task opens with it hidden.")
+        XCTAssertTrue(element("task-sidebar-collapsed").waitToExist(timeout: 10), "The hidden sidebar state is global, so another task opens with it hidden.")
         assertText("collapsed-task-sidebar-count", equals: "Changes to review: 1")
         attachScreenshot(named: "The hidden sidebar keeps the pending count")
         element("show-task-sidebar-button").click()
-        XCTAssertTrue(element("workspace-changes-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-changes-title").waitToExist(timeout: 10))
         XCTAssertFalse(element("task-sidebar-collapsed").exists)
         assertText("toggle-workspace-changes-section-button", equals: "Expanded")
         XCTAssertTrue(
-            element("workspace-change-unviewed-shared.txt").waitForExistence(timeout: 10),
+            element("workspace-change-unviewed-shared.txt").waitToExist(timeout: 10),
             "Expanding the section in one task expands it everywhere."
         )
     }
@@ -15410,7 +15446,7 @@ final class PlayhouseUITests: XCTestCase {
 
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "External Git")
-        XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-changes-empty").waitToExist(timeout: 10))
         let initialInventory = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
         XCTAssertEqual((initialInventory?["unviewed"] as? [[String: Any]])?.count, 0)
         XCTAssertEqual((initialInventory?["viewed"] as? [[String: Any]])?.count, 0)
@@ -15424,7 +15460,7 @@ final class PlayhouseUITests: XCTestCase {
         try runGit(repository, "add", "base-only.txt")
         try runGit(repository, "commit", "-m", "Base-only commit")
 
-        XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").waitToExist(timeout: 10))
         XCTAssertFalse(element("workspace-change-unviewed-base-only.txt").exists)
         let branchInventory = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
         let branchEntries = branchInventory?["unviewed"] as? [[String: Any]] ?? []
@@ -15434,8 +15470,8 @@ final class PlayhouseUITests: XCTestCase {
 
         try "Edited externally.\n".write(to: branchFile, atomically: true, encoding: .utf8)
         try "Untracked external file.\n".write(to: worktree.appendingPathComponent("untracked.txt"), atomically: true, encoding: .utf8)
-        XCTAssertTrue(element("workspace-change-unviewed-untracked.txt").waitForExistence(timeout: 10))
-        XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-unviewed-untracked.txt").waitToExist(timeout: 10))
+        XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").waitToExist(timeout: 10))
         let dirty = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
         XCTAssertEqual((dirty?["unviewed"] as? [[String: Any]])?.map { $0["path"] as? String }, ["tracked.txt", "untracked.txt"])
         XCTAssertTrue((dirty?["unviewed"] as? [[String: Any]])?.allSatisfy { $0["isUncommitted"] as? Bool == true } ?? false)
@@ -15466,7 +15502,7 @@ final class PlayhouseUITests: XCTestCase {
         // A file written after the merge only appears once the sidebar has rescanned the merged
         // branch, so waiting for its row proves the absence check below runs against fresh state.
         try "Written after the merge.\n".write(to: worktree.appendingPathComponent("post-merge.txt"), atomically: true, encoding: .utf8)
-        XCTAssertTrue(element("workspace-change-unviewed-post-merge.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-unviewed-post-merge.txt").waitToExist(timeout: 10))
         let staleBase = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
         let staleBaseEntries = staleBase?["unviewed"] as? [[String: Any]] ?? []
         XCTAssertEqual(staleBaseEntries.map { $0["path"] as? String }, ["post-merge.txt", "tracked.txt", "untracked.txt"])
@@ -15479,7 +15515,7 @@ final class PlayhouseUITests: XCTestCase {
         try runGit(repository, "commit", "-m", "Unpushed local base commit")
         try runGit(worktree, "merge", "--no-edit", "main")
         try "Written after the local merge.\n".write(to: worktree.appendingPathComponent("post-ahead.txt"), atomically: true, encoding: .utf8)
-        XCTAssertTrue(element("workspace-change-unviewed-post-ahead.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-unviewed-post-ahead.txt").waitToExist(timeout: 10))
         let aheadBase = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
         let aheadBaseEntries = aheadBase?["unviewed"] as? [[String: Any]] ?? []
         XCTAssertEqual(aheadBaseEntries.map { $0["path"] as? String }, ["post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"])
@@ -15495,7 +15531,7 @@ final class PlayhouseUITests: XCTestCase {
         try runGit(repository, "commit", "-m", "Base commit merged without committing")
         try runGit(worktree, "merge", "--no-commit", "--no-ff", "main")
         let mergeNotice = element("workspace-changes-merge-in-progress")
-        XCTAssertTrue(mergeNotice.waitForExistence(timeout: 10))
+        XCTAssertTrue(mergeNotice.waitToExist(timeout: 10))
         let mergingRepositoryLabel = URL(fileURLWithPath: taskRepository).pathComponents.suffix(2).joined(separator: "/")
         XCTAssertTrue(mergeNotice.label.contains(mergingRepositoryLabel), "The merge notice should name the merging repository: \(mergeNotice.label)")
         XCTAssertFalse(element("workspace-change-unviewed-tracked.txt").exists)
@@ -15507,7 +15543,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "An open merge hides the files it staged")
 
         try runGit(worktree, "merge", "--abort")
-        XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ !mergeNotice.exists }, timeout: 10))
         let aborted = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
         XCTAssertEqual(aborted?["mergingRepositories"] as? [String], [])
@@ -15539,7 +15575,7 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Many changes")
         let notice = element("workspace-changes-too-many")
-        XCTAssertTrue(notice.waitForExistence(timeout: 15))
+        XCTAssertTrue(notice.waitToExist(timeout: 15))
         XCTAssertTrue(notice.label.contains("1001 changed files"), "The notice should name the count: \(notice.label)")
         XCTAssertFalse(element("workspace-changes-list").exists, "The file list must not render over the limit.")
         let inventory = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
@@ -15548,7 +15584,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Over 1000 changed files shows a notice instead of the list")
 
         try FileManager.default.removeItem(at: generated.appendingPathComponent("file-1000.txt"))
-        XCTAssertTrue(element("workspace-changes-list").waitForExistence(timeout: 15))
+        XCTAssertTrue(element("workspace-changes-list").waitToExist(timeout: 15))
         XCTAssertTrue(waitUntil({ !notice.exists }, timeout: 10))
         let underLimit = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
         XCTAssertEqual((underLimit?["unviewed"] as? [[String: Any]])?.count, 1000)
@@ -15601,7 +15637,7 @@ final class PlayhouseUITests: XCTestCase {
         }
 
         openTask(named: "Pending Terminal Task")
-        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(toggle.waitToExist(timeout: 10))
         XCTAssertFalse(toggle.isEnabled, "The terminal button stays disabled until the task's worktree is created.")
         toggle.click()
         XCTAssertFalse(element("task-terminal-panel").exists, "A disabled button opens no panel.")
@@ -15613,24 +15649,24 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ toggle.isEnabled }, timeout: 10), "The button enables once the worktree exists.")
 
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         openTask(named: "No Repository Terminal")
-        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(toggle.waitToExist(timeout: 10))
         XCTAssertFalse(toggle.isEnabled, "A task with no repository has no worktree, so no terminal.")
 
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         openTask(named: "Terminal Task")
         let sidebar = element("task-sidebar")
         let commandRow = element("sidebar-command-row")
-        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(toggle.waitToExist(timeout: 10))
         XCTAssertTrue(toggle.isEnabled)
         XCTAssertTrue(commandRow.exists)
         XCTAssertEqual(toggle.value as? String, "Hidden")
         XCTAssertFalse(element("task-terminal-panel").exists, "The terminal stays hidden until the button opens it.")
         // The row's accessibility frame spans only its buttons, so placement is measured against the sidebar.
         XCTAssertTrue(commandRow.buttons["toggle-terminal-button"].exists, "The terminal button belongs to the command row.")
-        XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-changes-empty").waitToExist(timeout: 10))
         XCTAssertGreaterThan(toggle.frame.minY, element("workspace-changes-empty").frame.maxY, "The command row sits below the Changes list.")
         XCTAssertEqual(toggle.frame.maxY, sidebar.frame.maxY, accuracy: 10, "The command row is the sidebar's bottom row.")
         XCTAssertEqual(toggle.frame.maxX, sidebar.frame.maxX, accuracy: 14, "Command row buttons align to the right.")
@@ -15644,7 +15680,7 @@ final class PlayhouseUITests: XCTestCase {
         let conversationFrameBefore = conversation.frame
         toggle.click()
         let panel = element("task-terminal-panel")
-        XCTAssertTrue(panel.waitForExistence(timeout: 5))
+        XCTAssertTrue(panel.waitToExist(timeout: 5))
         XCTAssertTrue(waitUntil({ abs(panel.frame.maxX - window.frame.maxX) <= 2 }, timeout: 5), "The panel settles against the window's right edge.")
         XCTAssertGreaterThan(panel.frame.minX, sidebar.frame.maxX, "The panel opens on the right, leaving the sidebar in place.")
         XCTAssertLessThan(panel.frame.minX, conversation.frame.maxX, "The panel floats over the conversation's right side.")
@@ -15654,7 +15690,7 @@ final class PlayhouseUITests: XCTestCase {
         assertText("task-terminal-title", equals: "Terminal")
 
         let terminal = element("task-terminal-view")
-        XCTAssertTrue(terminal.waitForExistence(timeout: 10))
+        XCTAssertTrue(terminal.waitToExist(timeout: 10))
         XCTAssertNotEqual(worktree.standardizedFileURL.path, repository.standardizedFileURL.path, "The terminal never opens in the source repository.")
         terminal.click()
         // `pwd -P` keeps the /private prefix that Foundation's symlink resolution drops for /tmp.
@@ -15697,7 +15733,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !panel.exists }, timeout: 5), "Hide slides the panel away.")
         XCTAssertEqual(toggle.value as? String, "Hidden")
         toggle.click()
-        XCTAssertTrue(terminal.waitForExistence(timeout: 5))
+        XCTAssertTrue(terminal.waitToExist(timeout: 5))
         terminal.click()
         terminal.typeText("printf 'again=%s;\\n' \"$$\"\n")
         XCTAssertTrue(waitUntil({
@@ -15707,7 +15743,7 @@ final class PlayhouseUITests: XCTestCase {
 
         // Dragging the left border resizes the panel, within limits, and the width is remembered.
         let handle = element("terminal-resize-handle")
-        XCTAssertTrue(handle.waitForExistence(timeout: 5))
+        XCTAssertTrue(handle.waitToExist(timeout: 5))
         XCTAssertEqual(handle.frame.midX, panel.frame.minX, accuracy: 6, "The resize handle is the panel's left border.")
         let widthBefore = panel.frame.width
         let conversationBeforeResize = conversation.frame
@@ -15734,13 +15770,13 @@ final class PlayhouseUITests: XCTestCase {
 
         terminal.typeText("exit\n")
         let exitStatus = element("task-terminal-exit-status")
-        XCTAssertTrue(exitStatus.waitForExistence(timeout: 10), "Exiting the shell is reported in the panel.")
+        XCTAssertTrue(exitStatus.waitToExist(timeout: 10), "Exiting the shell is reported in the panel.")
         let exitText = exitStatus.value as? String ?? exitStatus.label
         XCTAssertTrue(exitText.hasPrefix("Shell exited"), exitText)
         attachScreenshot(named: "Terminal reports the shell exited and offers Restart")
         element("restart-terminal-button").click()
         XCTAssertTrue(waitUntil({ !exitStatus.exists }, timeout: 5), "Restart clears the exit report.")
-        XCTAssertTrue(terminal.waitForExistence(timeout: 5))
+        XCTAssertTrue(terminal.waitToExist(timeout: 5))
         terminal.click()
         terminal.typeText("printf 'dir=%s task=%s pid=%s;\\n' \"$(pwd -P)\" \"$PLAYHOUSE_TASK_ID\" \"$$\"\n")
         var restartedPID = ""
@@ -15755,7 +15791,7 @@ final class PlayhouseUITests: XCTestCase {
 
         // A worktree that is missing shows an error with Try Again, which recovers once it is back.
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         // The terminal falls back to a task's next existing worktree, so every one is moved aside.
         let pendingWorktrees = try XCTUnwrap(
             (try taskRecord(id: pendingTaskID))?["repositoryWorktrees"] as? [[String: Any]]
@@ -15766,10 +15802,10 @@ final class PlayhouseUITests: XCTestCase {
             try FileManager.default.moveItem(at: URL(fileURLWithPath: path, isDirectory: true), to: URL(fileURLWithPath: path + "-moved", isDirectory: true))
         }
         openTask(named: "Pending Terminal Task")
-        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(toggle.waitToExist(timeout: 10))
         XCTAssertTrue(toggle.isEnabled)
         toggle.click()
-        XCTAssertTrue(element("task-terminal-error").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("task-terminal-error").waitToExist(timeout: 10))
         let errorMessage = element("task-terminal-error-message")
         let errorText = errorMessage.value as? String ?? errorMessage.label
         XCTAssertTrue(errorText.contains("no longer exists"), errorText)
@@ -15779,7 +15815,7 @@ final class PlayhouseUITests: XCTestCase {
             try FileManager.default.moveItem(at: URL(fileURLWithPath: path + "-moved", isDirectory: true), to: URL(fileURLWithPath: path, isDirectory: true))
         }
         element("retry-terminal-button").click()
-        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "Try Again starts a shell once the worktree is back.")
+        XCTAssertTrue(terminal.waitToExist(timeout: 10), "Try Again starts a shell once the worktree is back.")
         XCTAssertFalse(element("task-terminal-error").exists)
         XCTAssertNotEqual(pendingWorktree, repository.standardizedFileURL.path)
         let resolvedPendingWorktree = try XCTUnwrap(realpath(pendingWorktree, nil).map { pointer in
@@ -15794,10 +15830,10 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Try Again opens the shell once the worktree is back")
 
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         element("chat-sidebar-button").click()
-        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
-        XCTAssertTrue(element("message-composer").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        XCTAssertTrue(element("message-composer").waitToExist(timeout: 10))
         XCTAssertFalse(toggle.exists, "The standalone chat has no task sidebar, so no terminal button.")
     }
 
@@ -15834,17 +15870,17 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ button.exists && button.isHittable }, timeout: 10), "The composer should offer the schedule button beside Send.")
         button.click()
         let hint = element("schedule-hint")
-        XCTAssertTrue(hint.waitForExistence(timeout: 5), "The schedule button should open its hint.")
+        XCTAssertTrue(hint.waitToExist(timeout: 5), "The schedule button should open its hint.")
         return hint
     }
 
     private func clickScheduledTaskMenuItem(taskID: String, item identifier: String, title: String) {
         let actions = element("scheduled-task-actions-\(taskID)")
-        XCTAssertTrue(actions.waitForExistence(timeout: 10), "The scheduled task row should have an actions menu.")
+        XCTAssertTrue(actions.waitToExist(timeout: 10), "The scheduled task row should have an actions menu.")
         actions.click()
         let byIdentifier = app.menuItems.matching(identifier: identifier).firstMatch
-        let item = byIdentifier.waitForExistence(timeout: 3) ? byIdentifier : app.menuItems[title]
-        XCTAssertTrue(item.waitForExistence(timeout: 3), "\(title) should be in the row's menu.")
+        let item = byIdentifier.waitToExist(timeout: 3) ? byIdentifier : app.menuItems[title]
+        XCTAssertTrue(item.waitToExist(timeout: 3), "\(title) should be in the row's menu.")
         item.click()
     }
 
@@ -15884,9 +15920,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ send.label == "Schedule task" }, timeout: 5))
 
         send.click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "Scheduling returns to the board.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10), "Scheduling returns to the board.")
         let badge = element("task-schedule-badge-\(taskID)")
-        XCTAssertTrue(badge.waitForExistence(timeout: 10), "A one-time scheduled task stays on the board with a clock badge.")
+        XCTAssertTrue(badge.waitToExist(timeout: 10), "A one-time scheduled task stays on the board with a clock badge.")
         let record = try XCTUnwrap(taskRecord(id: taskID))
         XCTAssertEqual(record["status"] as? String, "Backlog")
         let schedule = try XCTUnwrap(record["schedule"] as? [String: Any])
@@ -15950,9 +15986,9 @@ final class PlayhouseUITests: XCTestCase {
         let late = try XCTUnwrap(try runCLI(["schedule", "tick", "--now", scheduleISO(fireAt.addingTimeInterval(7200))], extraEnvironment: environment)["result"] as? [String: Any])
         XCTAssertEqual((late["dropped"] as? [[String: Any]])?.compactMap { $0["taskID"] as? String }, [taskID])
         let message = element("task-status-message-\(taskID)")
-        XCTAssertTrue(message.waitForExistence(timeout: 10), "The missed task shows why it's blocked.")
+        XCTAssertTrue(message.waitToExist(timeout: 10), "The missed task shows why it's blocked.")
         XCTAssertTrue(accessibleLabelOrValue(of: message).hasPrefix("Missed scheduled run"))
-        XCTAssertTrue(element("column-blocked").buttons["task-card-\(taskID)"].waitForExistence(timeout: 10), "A missed run lands in Blocked.")
+        XCTAssertTrue(element("column-blocked").buttons["task-card-\(taskID)"].waitToExist(timeout: 10), "A missed run lands in Blocked.")
         XCTAssertEqual(claudeFixturePrompts(), [], "A missed run starts no turn.")
         attachScreenshot(named: "A missed one-time run waits in Blocked")
 
@@ -15977,7 +16013,7 @@ final class PlayhouseUITests: XCTestCase {
         let dropped = try XCTUnwrap(missed["dropped"] as? [[String: Any]])
         XCTAssertEqual(dropped.count, 1, "Missed occurrences collapse into one run.")
         let runID = try XCTUnwrap(dropped.first?["taskID"] as? String)
-        XCTAssertTrue(element("column-blocked").buttons["task-card-\(runID)"].waitForExistence(timeout: 10), "The missed recurring run is a Blocked board task.")
+        XCTAssertTrue(element("column-blocked").buttons["task-card-\(runID)"].waitToExist(timeout: 10), "The missed recurring run is a Blocked board task.")
         let run = try XCTUnwrap(taskRecord(id: runID))
         XCTAssertEqual(run["title"] as? String, "Weekly report")
         XCTAssertEqual(run["scheduleSourceTaskID"] as? String, templateID)
@@ -16019,7 +16055,7 @@ final class PlayhouseUITests: XCTestCase {
         _ = openScheduleHint()
         selectSkillsTab("Recurring", picker: "schedule-kind-picker")
         let title = element("schedule-title-field")
-        XCTAssertTrue(title.waitForExistence(timeout: 5), "A recurring schedule asks for a title.")
+        XCTAssertTrue(title.waitToExist(timeout: 5), "A recurring schedule asks for a title.")
         XCTAssertTrue(element("schedule-repeat-picker").exists)
         title.click()
         title.typeKey("a", modifierFlags: .command)
@@ -16032,7 +16068,7 @@ final class PlayhouseUITests: XCTestCase {
         let send = element("send-message-button")
         XCTAssertTrue(waitUntil({ send.label == "Schedule task" }, timeout: 5))
         send.click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: templateID)?["schedule"] as? [String: Any])?["kind"] as? String) == "recurring" }, timeout: 10))
         Thread.sleep(forTimeInterval: 1)
         XCTAssertFalse(element("task-card-\(templateID)").exists, "A recurring template isn't a board task.")
@@ -16045,9 +16081,11 @@ final class PlayhouseUITests: XCTestCase {
         )
 
         element("scheduled-tasks-button").click()
-        XCTAssertTrue(element("scheduled-tasks-page").waitForExistence(timeout: 10), "The sidebar button opens the Scheduled Tasks page.")
+        XCTAssertTrue(element("scheduled-tasks-page").waitToExist(timeout: 10), "The sidebar button opens the Scheduled Tasks page.")
+        // The page slides in over the board; clicks before it settles land on the board.
+        XCTAssertTrue(waitForStableFrame(element("scheduled-tasks-page")), "The Scheduled Tasks page should finish sliding in.")
         let row = element("scheduled-task-row-\(templateID)")
-        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        XCTAssertTrue(row.waitToExist(timeout: 10))
         XCTAssertEqual(accessibleLabelOrValue(of: element("scheduled-task-title-\(templateID)")), "Daily standup")
         XCTAssertTrue(accessibleLabelOrValue(of: element("scheduled-task-summary-\(templateID)")).hasPrefix("Every day at 09:00"))
         attachScreenshot(named: "Scheduled Tasks page lists the recurring task")
@@ -16067,7 +16105,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(advanced.timeIntervalSince(firstRun), 86400, accuracy: 3600, "A daily schedule advances by one day.")
 
         let active = element("scheduled-task-active-\(templateID)")
-        XCTAssertTrue(active.waitForExistence(timeout: 5))
+        XCTAssertTrue(active.waitToExist(timeout: 5))
         active.click()
         XCTAssertTrue(waitUntil({ ((try? self.taskRecord(id: templateID)?["schedule"] as? [String: Any])?["paused"] as? Bool) == true }, timeout: 10), "The row's switch pauses the schedule.")
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("scheduled-task-summary-\(templateID)")).hasSuffix("Paused") }, timeout: 5))
@@ -16086,10 +16124,10 @@ final class PlayhouseUITests: XCTestCase {
 
         element("scheduled-tasks-back-button").click()
         XCTAssertTrue(waitForDisappearance(element("scheduled-tasks-page"), timeout: 5))
-        XCTAssertTrue(element("task-card-\(runID)").waitForExistence(timeout: 10), "A run is followed on the board.")
+        XCTAssertTrue(element("task-card-\(runID)").waitToExist(timeout: 10), "A run is followed on the board.")
         attachScreenshot(named: "Recurring runs appear on the board as ordinary tasks")
         _ = try runCLI(["schedule", "clear", templateID])
-        XCTAssertTrue(element("task-card-\(templateID)").waitForExistence(timeout: 10), "Clearing the schedule puts the task on the board.")
+        XCTAssertTrue(element("task-card-\(templateID)").waitToExist(timeout: 10), "Clearing the schedule puts the task on the board.")
     }
 
     // case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
@@ -16097,14 +16135,16 @@ final class PlayhouseUITests: XCTestCase {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-schedule-edit")
         launchApp(defaultParent: fixture.parent.path)
         element("scheduled-tasks-button").click()
-        XCTAssertTrue(element("scheduled-tasks-page").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("scheduled-tasks-page").waitToExist(timeout: 10))
+        // The page slides in over the board; clicks before it settles land on the board.
+        XCTAssertTrue(waitForStableFrame(element("scheduled-tasks-page")), "The Scheduled Tasks page should finish sliding in.")
         XCTAssertTrue(element("scheduled-tasks-empty").exists, "An empty page says so plainly.")
         attachScreenshot(named: "Scheduled Tasks page with no schedules")
 
         element("scheduled-new-task-button").click()
-        XCTAssertTrue(element("schedule-hint").waitForExistence(timeout: 10), "New Task opens the conversation with the schedule hint open.")
+        XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "New Task opens the conversation with the schedule hint open.")
         let title = element("schedule-title-field")
-        XCTAssertTrue(title.waitForExistence(timeout: 5), "The hint starts on Recurring.")
+        XCTAssertTrue(title.waitToExist(timeout: 5), "The hint starts on Recurring.")
         attachScreenshot(named: "New Task from the page opens with the schedule hint")
         title.click()
         title.typeText("Morning summary")
@@ -16116,7 +16156,7 @@ final class PlayhouseUITests: XCTestCase {
         send.click()
 
         let row = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "scheduled-task-row-")).firstMatch
-        XCTAssertTrue(row.waitForExistence(timeout: 10), "Scheduling from the page returns to the page with the new row.")
+        XCTAssertTrue(row.waitToExist(timeout: 10), "Scheduling from the page returns to the page with the new row.")
         let listed = try XCTUnwrap((try runCLI(["schedule", "list"])["result"] as? [String: Any])?["tasks"] as? [[String: Any]])
         XCTAssertEqual(listed.count, 1)
         let taskID = try XCTUnwrap(listed.first?["id"] as? String)
@@ -16140,7 +16180,7 @@ final class PlayhouseUITests: XCTestCase {
         let repeatPicker = element("schedule-repeat-picker")
         repeatPicker.click()
         let weekdays = app.menuItems["Weekdays"]
-        XCTAssertTrue(weekdays.waitForExistence(timeout: 5))
+        XCTAssertTrue(weekdays.waitToExist(timeout: 5))
         weekdays.click()
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("schedule-summary")).hasPrefix("Weekdays at 17:15") }, timeout: 5))
         attachScreenshot(named: "Hint edited to a new title and repeat")
@@ -16166,11 +16206,11 @@ final class PlayhouseUITests: XCTestCase {
 
         clickScheduledTaskMenuItem(taskID: taskID, item: "scheduled-task-delete-\(taskID)", title: "Delete…")
         let confirm = element("confirm-delete-scheduled-task-button")
-        let confirmButton = confirm.waitForExistence(timeout: 5) ? confirm : app.buttons["Delete"]
+        let confirmButton = confirm.waitToExist(timeout: 5) ? confirm : app.buttons["Delete"]
         confirmButton.click()
         XCTAssertTrue(waitForDisappearance(element("scheduled-task-row-\(taskID)"), timeout: 10), "Deleting removes the row.")
         XCTAssertEqual(((try runCLI(["schedule", "list"])["result"] as? [String: Any])?["tasks"] as? [Any])?.count, 0)
-        XCTAssertTrue(element("scheduled-tasks-empty").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("scheduled-tasks-empty").waitToExist(timeout: 5))
         attachScreenshot(named: "Scheduled Tasks page after deleting the schedule")
 
         // A one-time schedule removed in the hint: Send runs the task now and ends the schedule.
@@ -16180,7 +16220,7 @@ final class PlayhouseUITests: XCTestCase {
         let onceAt = Date().addingTimeInterval(3600)
         _ = try runCLI(["schedule", "set", onceID, "--prompt", "Tell me a story.", "--once", scheduleISO(onceAt)])
         let onceRow = element("scheduled-task-open-\(onceID)")
-        XCTAssertTrue(onceRow.waitForExistence(timeout: 10), "The page lists the new one-time schedule.")
+        XCTAssertTrue(onceRow.waitToExist(timeout: 10), "The page lists the new one-time schedule.")
         onceRow.click()
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "Tell me a story." }, timeout: 10))
         _ = openScheduleHint()
@@ -16203,9 +16243,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(cleared["hasUnsentDraft"] as? Bool, true)
         if element("back-to-board-button").exists { element("back-to-board-button").click() }
         // A task opened from the Scheduled Tasks page returns to that page, which covers the board.
-        if element("scheduled-tasks-back-button").waitForExistence(timeout: 3) { element("scheduled-tasks-back-button").click() }
+        if element("scheduled-tasks-back-button").waitToExist(timeout: 3) { element("scheduled-tasks-back-button").click() }
         XCTAssertTrue(waitForDisappearance(element("scheduled-tasks-page")), "The Scheduled Tasks page should close before opening another task.")
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "The board should show before opening the cleared-schedule task.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10), "The board should show before opening the cleared-schedule task.")
         openTask(named: "Cleared schedule")
         XCTAssertTrue(waitUntil({
             (self.element("message-composer").value as? String) == "Keep this prompt."
@@ -16222,7 +16262,7 @@ final class PlayhouseUITests: XCTestCase {
             "task", "create", "--title", "Token usage task", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any])?["id"] as? String)
         let card = app.buttons["Token usage task"]
-        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        XCTAssertTrue(card.waitToExist(timeout: 10))
         let counter = element("task-token-usage-counter-\(taskID)")
         XCTAssertFalse(counter.exists, "A task with no recorded tokens should hide its card counter.")
         attachScreenshot(named: "Task card hides its counter before any tokens are recorded")
@@ -16234,7 +16274,7 @@ final class PlayhouseUITests: XCTestCase {
         card.rightClick()
         element("token-stats-task-menu-item").click()
         let emptyState = element("token-stats-empty")
-        XCTAssertTrue(emptyState.waitForExistence(timeout: 10), "Token Stats should say plainly that nothing has been recorded yet.")
+        XCTAssertTrue(emptyState.waitToExist(timeout: 10), "Token Stats should say plainly that nothing has been recorded yet.")
         XCTAssertFalse(element("token-stats-total").exists, "An empty task should show no totals.")
         attachScreenshot(named: "Token Stats modal before any turns have run")
         element("close-token-stats-button").click()
@@ -16328,7 +16368,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertNil(legacyCalls["totalTokensExcludingCacheReads"], "Without the split there is no per-call figure.")
         XCTAssertEqual(legacySummary["tokensExcludingCacheReads"] as? Int, 170, "The fallback is the turn buckets minus cache reads.")
         let legacyCard = app.buttons[legacyTitle]
-        XCTAssertTrue(legacyCard.waitForExistence(timeout: 10))
+        XCTAssertTrue(legacyCard.waitToExist(timeout: 10))
         legacyCard.rightClick()
         element("token-stats-task-menu-item").click()
         assertText("token-stats-total-sent", equals: "1,500")
@@ -16345,7 +16385,7 @@ final class PlayhouseUITests: XCTestCase {
         try createTaskFixture(title: "Codex token usage", roots: [fixture.primary.path])
         let taskID = try taskID(named: "Codex token usage")
         let card = app.buttons["Codex token usage"]
-        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        XCTAssertTrue(card.waitToExist(timeout: 10))
 
         // A bare send only reports its usage once the terminal `turn/completed`
         // notification arrives, and the default fixture never emits one on its
@@ -16449,7 +16489,7 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try XCTUnwrap((try runCLI([
             "task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any])?["id"] as? String)
-        XCTAssertTrue(app.buttons[title].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons[title].waitToExist(timeout: 10))
         _ = try runCLI(["conversation", "send", taskID, "--message", "Show token waste."], extraEnvironment: environment)
         return (taskID, environment)
     }
@@ -16457,15 +16497,15 @@ final class PlayhouseUITests: XCTestCase {
     private func openTokenStats(of title: String) {
         app.buttons[title].rightClick()
         let statsAction = element("token-stats-task-menu-item")
-        XCTAssertTrue(statsAction.waitForExistence(timeout: 5), "The task context menu should offer Token Stats.")
+        XCTAssertTrue(statsAction.waitToExist(timeout: 5), "The task context menu should offer Token Stats.")
         statsAction.click()
-        XCTAssertTrue(element("token-stats-section-overview").waitForExistence(timeout: 10), "Token Stats opens on its Overview section.")
+        XCTAssertTrue(element("token-stats-section-overview").waitToExist(timeout: 10), "Token Stats opens on its Overview section.")
     }
 
     /// `section` is the section's identifier suffix: wasters, tools, overhead or overview.
     private func showTokenStatsSection(_ section: String) {
         let tab = element("token-stats-section-\(section)")
-        XCTAssertTrue(tab.waitForExistence(timeout: 5), "Token Stats should offer its \(section) section.")
+        XCTAssertTrue(tab.waitToExist(timeout: 5), "Token Stats should offer its \(section) section.")
         tab.click()
     }
 
@@ -16473,10 +16513,10 @@ final class PlayhouseUITests: XCTestCase {
     func test_task_token_waste_ranks_claude_items_by_size() throws {
         let (taskID, environment) = try runClaudeTokenWasteTurn(title: "Claude token waste")
         _ = try runCLI(["task", "create", "--title", "No conversation yet", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"])
-        XCTAssertTrue(app.buttons["No conversation yet"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["No conversation yet"].waitToExist(timeout: 10))
         openTokenStats(of: "No conversation yet")
         showTokenStatsSection("wasters")
-        XCTAssertTrue(element("token-stats-map-unavailable").waitForExistence(timeout: 10), "A task with no conversation has nothing to map.")
+        XCTAssertTrue(element("token-stats-map-unavailable").waitToExist(timeout: 10), "A task with no conversation has nothing to map.")
         XCTAssertFalse(element("token-stats-raw-input-button").isEnabled, "There is no raw input to open yet.")
         attachScreenshot(named: "A task with no conversation has no token map yet")
         element("close-token-stats-button").click()
@@ -16486,7 +16526,7 @@ final class PlayhouseUITests: XCTestCase {
 
         showTokenStatsSection("wasters")
         assertText("token-stats-waster-0-label", equals: "fixturelogs/query_logs")
-        XCTAssertTrue(element("token-stats-waster-0-removed").waitForExistence(timeout: 5), "The compaction removed the log.")
+        XCTAssertTrue(element("token-stats-waster-0-removed").waitToExist(timeout: 5), "The compaction removed the log.")
         assertText("token-stats-waster-0-requests", equals: "×63")
         let tokensPerCopy = try duplicateTokens(taskID: taskID, environment: environment)
         assertText("token-stats-duplicate-0-copies", equals: "2 copies of \(tokensPerCopy)")
@@ -16500,7 +16540,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Tools and MCP servers by the tokens they added")
 
         showTokenStatsSection("overhead")
-        XCTAssertTrue(element(containingAccessibilityText: "MCP server fixturelogs · 2 tool definitions").waitForExistence(timeout: 5))
+        XCTAssertTrue(element(containingAccessibilityText: "MCP server fixturelogs · 2 tool definitions").waitToExist(timeout: 5))
         XCTAssertTrue(element(containingAccessibilityText: "System prompt (part 1)").exists)
         XCTAssertTrue(element("token-stats-agent-claude/fxw").exists, "The subagent's file is its own agent.")
         attachScreenshot(named: "Overhead sent with every request, and each agent")
@@ -16516,11 +16556,11 @@ final class PlayhouseUITests: XCTestCase {
     private func revealRawInputRow(_ identifier: String) {
         let row = element(identifier)
         let list = element("raw-input-list")
-        XCTAssertTrue(list.waitForExistence(timeout: 10))
+        XCTAssertTrue(list.waitToExist(timeout: 10))
         for _ in 0..<20 where !row.exists {
             list.scroll(byDeltaX: 0, deltaY: -300)
         }
-        XCTAssertTrue(row.waitForExistence(timeout: 5), "\(identifier) should be on screen after scrolling the list.")
+        XCTAssertTrue(row.waitToExist(timeout: 5), "\(identifier) should be on screen after scrolling the list.")
     }
 
     private func duplicateTokens(taskID: String, environment: [String: String]) throws -> String {
@@ -16534,7 +16574,7 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Codex token waste", roots: [fixture.primary.path])
         let taskID = try taskID(named: "Codex token waste")
-        XCTAssertTrue(app.buttons["Codex token waste"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Codex token waste"].waitToExist(timeout: 10))
 
         // As in the Codex token usage case, the fixture holds the turn open
         // until Playhouse reports its outcome, then completes it.
@@ -16576,13 +16616,13 @@ final class PlayhouseUITests: XCTestCase {
         openTokenStats(of: "Codex token waste")
         showTokenStatsSection("wasters")
         assertText("token-stats-waster-0-label", equals: "fixturelogs/query_logs")
-        XCTAssertTrue(element("token-stats-waster-0-removed").waitForExistence(timeout: 5), "The compaction removed the log.")
+        XCTAssertTrue(element("token-stats-waster-0-removed").waitToExist(timeout: 5), "The compaction removed the log.")
         assertText("token-stats-cache-miss-0-request", equals: "Request 4")
         attachScreenshot(named: "Codex wasters rank the MCP log first")
         element("token-stats-waster-0-show").click()
         assertText("raw-input-text-label", equals: "fixturelogs/query_logs")
         let firstLine = element("raw-input-text-line-1")
-        XCTAssertTrue(firstLine.waitForExistence(timeout: 10), "The Codex log's full text opens from its waster row.")
+        XCTAssertTrue(firstLine.waitToExist(timeout: 10), "The Codex log's full text opens from its waster row.")
         XCTAssertTrue(
             accessibleLabelOrValue(of: firstLine).contains("2026-11-03T10:00:01Z INFO fixture log line 0001"),
             "The first line is the log exactly as Codex saved it."
@@ -16591,7 +16631,7 @@ final class PlayhouseUITests: XCTestCase {
         element("close-raw-input-button").click()
         showTokenStatsSection("overhead")
         XCTAssertTrue(
-            element(containingAccessibilityText: "Tool definitions and other context Codex does not save").waitForExistence(timeout: 5),
+            element(containingAccessibilityText: "Tool definitions and other context Codex does not save").waitToExist(timeout: 5),
             "Codex's unsaved tool definitions show as one hidden-overhead line."
         )
         XCTAssertTrue(element("token-stats-agent-codex/\(threadID)-subagent").exists, "The subagent thread is its own agent.")
@@ -16599,7 +16639,7 @@ final class PlayhouseUITests: XCTestCase {
 
         element("token-stats-raw-input-button").click()
         let requestScope = element("raw-input-scope-request")
-        XCTAssertTrue(requestScope.waitForExistence(timeout: 10))
+        XCTAssertTrue(requestScope.waitToExist(timeout: 10))
         requestScope.click()
         assertText("raw-input-request-number", equals: "Request 5 of 5")
         assertText("raw-input-request-exactness", equals: "Reconstructed")
@@ -16655,7 +16695,7 @@ final class PlayhouseUITests: XCTestCase {
         for _ in 0..<60 where !lastRow.exists {
             list.scroll(byDeltaX: 0, deltaY: -800)
         }
-        XCTAssertTrue(lastRow.waitForExistence(timeout: 10), "Scrolling to the end loads the next page of rows.")
+        XCTAssertTrue(lastRow.waitToExist(timeout: 10), "Scrolling to the end loads the next page of rows.")
         XCTAssertTrue(
             waitUntil({ self.accessibleLabelOrValue(of: loadedRows) == "\(allRows.count) of \(allRows.count) loaded" }, timeout: 10),
             "The second page is fetched only once the list scrolls to its end."
@@ -16665,14 +16705,14 @@ final class PlayhouseUITests: XCTestCase {
 
         showTokenStatsSection("wasters")
         let show = element("token-stats-waster-0-show")
-        XCTAssertTrue(show.waitForExistence(timeout: 5))
+        XCTAssertTrue(show.waitToExist(timeout: 5))
         show.click()
         assertText("raw-input-text-label", equals: "fixturelogs/query_logs")
         let call = element("raw-input-text-call")
-        XCTAssertTrue(call.waitForExistence(timeout: 5), "A tool result names the call that produced it.")
+        XCTAssertTrue(call.waitToExist(timeout: 5), "A tool result names the call that produced it.")
         let callText = accessibleLabelOrValue(of: call)
         XCTAssertTrue(callText.contains("fixturelogs/query_logs") && callText.contains("5000"), "The call names the tool and its arguments: \(callText)")
-        XCTAssertTrue(element("raw-input-text-line-1").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("raw-input-text-line-1").waitToExist(timeout: 5))
         XCTAssertTrue(
             waitUntil({ self.accessibleLabelOrValue(of: summary).hasPrefix("\(allRows.count) items") }, timeout: 10),
             "A removed waster opens in the everything-sent scope."
@@ -16690,7 +16730,7 @@ final class PlayhouseUITests: XCTestCase {
         for _ in 0..<80 where !lastLine.exists {
             text.scroll(byDeltaX: 0, deltaY: -1500)
         }
-        XCTAssertTrue(lastLine.waitForExistence(timeout: 10), "Scrolling the text loads its later chunks up to the last line.")
+        XCTAssertTrue(lastLine.waitToExist(timeout: 10), "Scrolling the text loads its later chunks up to the last line.")
         assertText("raw-input-text-loaded", equals: "\(logLength) of \(logLength) characters loaded")
         attachScreenshot(named: "Scrolling the log reaches its last line")
         element("close-raw-input-button").click()
@@ -16708,7 +16748,7 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try XCTUnwrap((try runCLI([
             "task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any])?["id"] as? String)
-        XCTAssertTrue(app.buttons[title].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons[title].waitToExist(timeout: 10))
         _ = try runCLI(["conversation", "send", taskID, "--message", "Show instruction resume."], extraEnvironment: environment)
 
         openTokenStats(of: title)
@@ -16716,7 +16756,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ rawInputButton.exists && rawInputButton.isEnabled }, timeout: 10), "The raw input opens once the map has loaded.")
         rawInputButton.click()
         let requestScope = element("raw-input-scope-request")
-        XCTAssertTrue(requestScope.waitForExistence(timeout: 10), "The raw input offers a single-request scope.")
+        XCTAssertTrue(requestScope.waitToExist(timeout: 10), "The raw input offers a single-request scope.")
         requestScope.click()
         assertText("raw-input-request-number", equals: "Request 5 of 5")
         assertText("raw-input-summary", equals: "16 items · 9,100 tokens")
@@ -16741,7 +16781,7 @@ final class PlayhouseUITests: XCTestCase {
 
         element("raw-input-request-row-11").click()
         let secondLine = element("raw-input-text-line-2")
-        XCTAssertTrue(secondLine.waitForExistence(timeout: 10), "Selecting the second copy opens its full text.")
+        XCTAssertTrue(secondLine.waitToExist(timeout: 10), "Selecting the second copy opens its full text.")
         XCTAssertTrue(
             accessibleLabelOrValue(of: secondLine).contains("Instruction files were re-read when this session started"),
             "The second copy is the instructions re-read on resume."
@@ -16754,7 +16794,7 @@ final class PlayhouseUITests: XCTestCase {
         previous.click()
         assertText("raw-input-request-number", equals: "Request 3 of 5")
         assertText("raw-input-summary", equals: "10 items · 4,400 tokens")
-        XCTAssertTrue(element("raw-input-request-row-3").waitForExistence(timeout: 5), "The first copy was already sent.")
+        XCTAssertTrue(element("raw-input-request-row-3").waitToExist(timeout: 5), "The first copy was already sent.")
         XCTAssertFalse(element("raw-input-request-row-3-repeat").exists, "Before the resume the instructions were sent once.")
         XCTAssertFalse(element("raw-input-request-row-11").exists, "Request 3 sent only ten items.")
         XCTAssertTrue(accessibleLabelOrValue(of: element("raw-input-request-usage")).contains("items add up to 4,400 · 0 repeated"))
@@ -16792,7 +16832,7 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try XCTUnwrap((try runCLI([
             "task", "create", "--title", "Counter heat task", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any])?["id"] as? String)
-        XCTAssertTrue(app.buttons["Counter heat task"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Counter heat task"].waitToExist(timeout: 10))
         // "Tell me a story." reports a task outcome, so it ends in exactly one
         // Claude result message instead of the several internal nudge turns an
         // outcome-less prompt would trigger in the same session.
@@ -16813,10 +16853,10 @@ final class PlayhouseUITests: XCTestCase {
 
         app.typeKey(",", modifierFlags: .command)
         let preferences = settingsWindow
-        XCTAssertTrue(preferences.waitForExistence(timeout: 10), "Workspace Settings did not open.")
+        XCTAssertTrue(preferences.waitToExist(timeout: 10), "Workspace Settings did not open.")
         let maxField = preferences.descendants(matching: .any)
             .matching(identifier: "token-usage-color-max-field").firstMatch
-        XCTAssertTrue(maxField.waitForExistence(timeout: 5), "Settings should expose the token usage maximum.")
+        XCTAssertTrue(maxField.waitToExist(timeout: 5), "Settings should expose the token usage maximum.")
         XCTAssertEqual(maxField.value as? String, "20,000,000", "The field should show the stored maximum.")
         attachScreenshot(named: "Workspace Settings exposes the token usage color maximum")
         maxField.click()
@@ -16850,7 +16890,7 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try XCTUnwrap((try runCLI([
             "task", "create", "--title", "Claude CPU usage", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any])?["id"] as? String)
-        XCTAssertTrue(app.buttons["Claude CPU usage"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Claude CPU usage"].waitToExist(timeout: 10))
 
         let bar = element("task-cpu-usage-bar-\(taskID)")
         let card = element("task-card-\(taskID)")
@@ -16871,7 +16911,7 @@ final class PlayhouseUITests: XCTestCase {
             (try? self.runCLI(["task", "get", taskID])["result"] as? [String: Any])?["claudeSessionID"] != nil
         }, timeout: 10), "The Claude fixture turn should start a session while it burns CPU.")
 
-        XCTAssertTrue(bar.waitForExistence(timeout: 10), "A busy Claude task should show its left-edge CPU bar.")
+        XCTAssertTrue(bar.waitToExist(timeout: 10), "A busy Claude task should show its left-edge CPU bar.")
         attachScreenshot(named: "Task card shows a busy Claude task's CPU bar")
         // Against the default, core-count-scaled ceiling, one burning core is a
         // small fraction of the total, so the bar should still read cool green
@@ -16908,8 +16948,8 @@ final class PlayhouseUITests: XCTestCase {
         let idleID = try XCTUnwrap((try runCLI([
             "task", "create", "--title", "Codex idle worktree", "--prompt", "Fixture task description.", "--root", fixture.secondary.path, "--provider", "codex",
         ])["result"] as? [String: Any])?["id"] as? String)
-        XCTAssertTrue(app.buttons["Codex busy worktree"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["Codex idle worktree"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Codex busy worktree"].waitToExist(timeout: 10))
+        XCTAssertTrue(app.buttons["Codex idle worktree"].waitToExist(timeout: 10))
 
         let busyBar = element("task-cpu-usage-bar-\(busyID)")
         let idleBar = element("task-cpu-usage-bar-\(idleID)")
@@ -16950,8 +16990,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(children["idle"].map { URL(fileURLWithPath: $0.workingDirectory).resolvingSymlinksInPath().path },
                        fixture.secondary.resolvingSymlinksInPath().path, "The idle command runs in its task's folder.")
 
-        XCTAssertTrue(busyBar.waitForExistence(timeout: 15), "The busy Codex task should show its left-edge CPU bar.")
-        XCTAssertTrue(idleBar.waitForExistence(timeout: 15), "A running Codex task with an idle command still shows its (empty) CPU bar.")
+        XCTAssertTrue(busyBar.waitToExist(timeout: 15), "The busy Codex task should show its left-edge CPU bar.")
+        XCTAssertTrue(idleBar.waitToExist(timeout: 15), "A running Codex task with an idle command still shows its (empty) CPU bar.")
         attachScreenshot(named: "Busy and idle Codex task cards both show a CPU bar")
 
         var readings: [String: [String: Any]] = [:]
@@ -17089,14 +17129,14 @@ final class PlayhouseUITests: XCTestCase {
         let button = element("open-skills-button")
         XCTAssertTrue(waitUntil({ button.exists && button.isHittable }, timeout: 15), "The composer should show the Skills button.", file: file, line: line)
         button.click()
-        XCTAssertTrue(element("skills-page").waitForExistence(timeout: 10), "The Skills button should open the Skills page.", file: file, line: line)
-        XCTAssertFalse(element("skills-loading").waitForExistence(timeout: 0.5) && !waitUntil({ !self.element("skills-loading").exists }, timeout: 10),
+        XCTAssertTrue(element("skills-page").waitToExist(timeout: 10), "The Skills button should open the Skills page.", file: file, line: line)
+        XCTAssertFalse(element("skills-loading").waitToExist(timeout: 0.5) && !waitUntil({ !self.element("skills-loading").exists }, timeout: 10),
                        "The Skills page should finish loading.", file: file, line: line)
     }
 
     private func selectSkillsTab(_ label: String, picker identifier: String = "skills-tab-picker", file: StaticString = #filePath, line: UInt = #line) {
         let picker = element(identifier)
-        XCTAssertTrue(picker.waitForExistence(timeout: 5), file: file, line: line)
+        XCTAssertTrue(picker.waitToExist(timeout: 5), file: file, line: line)
         let candidates = [picker.radioButtons[label], picker.buttons[label], picker.descendants(matching: .any)[label]]
         guard let segment = candidates.first(where: { $0.exists }) else {
             XCTFail("\(identifier) has no \(label) tab.", file: file, line: line)
@@ -17107,18 +17147,18 @@ final class PlayhouseUITests: XCTestCase {
 
     private func clickSkillMenuItem(skill: String, item identifier: String, title: String, file: StaticString = #filePath, line: UInt = #line) {
         let actions = element("skill-actions-\(skill)")
-        XCTAssertTrue(actions.waitForExistence(timeout: 10), "\(skill) should have an actions menu.", file: file, line: line)
+        XCTAssertTrue(actions.waitToExist(timeout: 10), "\(skill) should have an actions menu.", file: file, line: line)
         actions.click()
         let byIdentifier = app.menuItems.matching(identifier: identifier).firstMatch
-        let item = byIdentifier.waitForExistence(timeout: 3) ? byIdentifier : app.menuItems[title]
-        XCTAssertTrue(item.waitForExistence(timeout: 5), "The actions menu should offer \(title).", file: file, line: line)
+        let item = byIdentifier.waitToExist(timeout: 3) ? byIdentifier : app.menuItems[title]
+        XCTAssertTrue(item.waitToExist(timeout: 5), "The actions menu should offer \(title).", file: file, line: line)
         item.click()
     }
 
     private func clickDialogButton(_ identifier: String, title: String, file: StaticString = #filePath, line: UInt = #line) {
         let byIdentifier = element(identifier)
-        let button = byIdentifier.waitForExistence(timeout: 3) ? byIdentifier : app.buttons[title].firstMatch
-        XCTAssertTrue(button.waitForExistence(timeout: 5), "The dialog should offer \(title).", file: file, line: line)
+        let button = byIdentifier.waitToExist(timeout: 3) ? byIdentifier : app.buttons[title].firstMatch
+        XCTAssertTrue(button.waitToExist(timeout: 5), "The dialog should offer \(title).", file: file, line: line)
         button.click()
     }
 
@@ -17157,11 +17197,11 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 5), "The Skills page settles as a full page spanning the window's width down to its bottom edge, not an inset modal.")
         XCTAssertGreaterThan(element("skills-page").frame.height, window.height * 0.85, "The Skills page fills the window.")
 
-        XCTAssertTrue(element("skills-repo-section-skills-catalog-repo").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("skills-repo-section-skills-catalog-repo").waitToExist(timeout: 10))
         XCTAssertTrue(element("skills-repo-section-skills-empty-repo").exists)
         XCTAssertTrue(element("skills-empty-skills-empty-repo").exists, "A repository without skills shows an empty state.")
         for name in ["repo-agents", "repo-claude", "repo-shared"] {
-            XCTAssertTrue(element("skill-row-\(name)").waitForExistence(timeout: 5), "\(name) should be listed.")
+            XCTAssertTrue(element("skill-row-\(name)").waitToExist(timeout: 5), "\(name) should be listed.")
             XCTAssertTrue(element("skill-provider-\(name)-claude").exists, "\(name) should be usable by Claude.")
             XCTAssertTrue(element("skill-provider-\(name)-codex").exists, "\(name) should be usable by Codex.")
         }
@@ -17186,22 +17226,22 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Skills search with no matching skill")
         search.typeKey("a", modifierFlags: .command)
         search.typeKey(.delete, modifierFlags: [])
-        XCTAssertTrue(element("skill-row-repo-shared").waitForExistence(timeout: 5), "Clearing the search shows every skill again.")
+        XCTAssertTrue(element("skill-row-repo-shared").waitToExist(timeout: 5), "Clearing the search shows every skill again.")
 
         selectSkillsTab("Global")
         for name in ["global-agents", "global-claude", "codex-legacy"] {
-            XCTAssertTrue(element("skill-row-\(name)").waitForExistence(timeout: 5), "\(name) should be a global skill.")
+            XCTAssertTrue(element("skill-row-\(name)").waitToExist(timeout: 5), "\(name) should be a global skill.")
             XCTAssertTrue(element("skill-provider-\(name)-claude").exists && element("skill-provider-\(name)-codex").exists)
         }
         XCTAssertFalse(element("skill-row-synced-skill").exists, "claude.ai's synced skills are built-in, not global.")
         attachScreenshot(named: "Skills page Global tab")
 
         selectSkillsTab("Built-in")
-        XCTAssertTrue(element("skill-row-codex-system-skill").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("skill-row-codex-system-skill").waitToExist(timeout: 5))
         XCTAssertTrue(element("skill-provider-codex-system-skill-codex").exists)
         XCTAssertFalse(element("skill-provider-codex-system-skill-claude").exists, "A built-in names only the provider it ships with.")
         XCTAssertTrue(element("skill-provider-synced-skill-claude").exists)
-        XCTAssertTrue(element("skill-row-simplify").waitForExistence(timeout: 20), "Claude Code's built-ins load from its own session.")
+        XCTAssertTrue(element("skill-row-simplify").waitToExist(timeout: 20), "Claude Code's built-ins load from its own session.")
         XCTAssertTrue(element("skill-provider-simplify-claude").exists)
         attachScreenshot(named: "Skills page Built-in tab")
 
@@ -17221,7 +17261,7 @@ final class PlayhouseUITests: XCTestCase {
 
         element("skills-back-button").click()
         XCTAssertTrue(waitUntil({ !self.element("skills-page").exists }, timeout: 5), "Back returns to the conversation.")
-        XCTAssertTrue(element("message-composer").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("message-composer").waitToExist(timeout: 5))
     }
 
     // case-contract: test_skills_create_update_move_and_delete_on_disk | Creating a skill writes SKILL.md with name and description frontmatter into the open Agent Skills layout, ~/.agents/skills for a global skill or the chosen task worktree's .agents/skills for a repository skill; invalid names, a missing description, a duplicate name, and the built-in scope are rejected with nothing written. Editing saves the new SKILL.md exactly as written, keeping frontmatter Playhouse does not parse, and rejects a renamed or description-less frontmatter while keeping the file. Clicking a skill row opens the editor modal straight on its whole SKILL.md, frontmatter included, with no structured header form, and its Preview tab shows that Markdown rendered with the frontmatter as a table; saving there writes the edited file, a description-less edit is rejected in the editor while keeping the file, and after the editor closes the page still answers clicks. A structured CLI edit rewrites the header (reading a YAML list as one field), removes an emptied field, keeps frontmatter Playhouse does not edit, and rejects an unknown field or an empty description while keeping the file. Clicking a built-in skill with a folder opens it read-only, without Save. New Skill asks only for a name, a description, and instructions it can preview, and a header field given to the CLI's create is written into the new SKILL.md. Moving a skill between a repository and the global gallery moves its folder and rejects a move onto an existing name. Deleting removes the folder from disk, built-in skills are read-only, and every change is visible to a fresh CLI process and on the Skills page.
@@ -17240,11 +17280,11 @@ final class PlayhouseUITests: XCTestCase {
 
         element("new-skill-button").click()
         let name = element("new-skill-name")
-        XCTAssertTrue(name.waitForExistence(timeout: 5), "New Skill should open its sheet.")
+        XCTAssertTrue(name.waitToExist(timeout: 5), "New Skill should open its sheet.")
         typeIntoField(name, text: "Release Notes")
         typeIntoField(element("new-skill-description"), text: "Draft release notes")
         element("new-skill-create").click()
-        XCTAssertTrue(element("new-skill-error").waitForExistence(timeout: 5), "An invalid name shows an error in the sheet.")
+        XCTAssertTrue(element("new-skill-error").waitToExist(timeout: 5), "An invalid name shows an error in the sheet.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: globalFolder.path), "A rejected skill writes nothing.")
         attachScreenshot(named: "New Skill sheet rejects an invalid name")
         name.click()
@@ -17253,7 +17293,7 @@ final class PlayhouseUITests: XCTestCase {
         typeIntoField(element("new-skill-body"), text: "Summarize merged changes.")
         element("new-skill-create").click()
         XCTAssertTrue(waitUntil({ !self.element("new-skill-name").exists }, timeout: 10), "Creating closes the sheet.")
-        XCTAssertTrue(element("skill-row-release-notes").waitForExistence(timeout: 10), "The new skill shows on the Global tab.")
+        XCTAssertTrue(element("skill-row-release-notes").waitToExist(timeout: 10), "The new skill shows on the Global tab.")
         let manifest = globalFolder.appendingPathComponent("release-notes/SKILL.md")
         XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8),
                        "---\nname: release-notes\ndescription: \"Draft release notes\"\n---\n\nSummarize merged changes.\n")
@@ -17264,7 +17304,7 @@ final class PlayhouseUITests: XCTestCase {
         let row = element("skill-row-release-notes")
         row.click()
         let editor = element("skill-editor")
-        XCTAssertTrue(element("skill-editor-panel").waitForExistence(timeout: 5), "Clicking a skill opens its editor modal.")
+        XCTAssertTrue(element("skill-editor-panel").waitToExist(timeout: 5), "Clicking a skill opens its editor modal.")
         XCTAssertEqual(accessibleLabelOrValue(of: element("skill-editor-name")), "release-notes", "The editor is titled with the skill's name.")
         let created = "---\nname: release-notes\ndescription: \"Draft release notes\"\n---\n\nSummarize merged changes.\n"
         XCTAssertEqual(editor.value as? String, created, "The editor opens the whole SKILL.md, frontmatter included.")
@@ -17274,19 +17314,19 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "The skill editor opens SKILL.md for editing")
         selectSkillsTab("Preview", picker: "skill-editor-tab-picker")
         let preview = element("skill-editor-preview")
-        XCTAssertTrue(preview.waitForExistence(timeout: 5), "The Preview tab shows the Markdown rendered.")
+        XCTAssertTrue(preview.waitToExist(timeout: 5), "The Preview tab shows the Markdown rendered.")
         XCTAssertFalse(editor.exists, "The Preview tab replaces the text editor.")
         XCTAssertTrue(element("skill-editor-preview-frontmatter").staticTexts["release-notes"].exists, "The preview shows the frontmatter as a table of its entries.")
         XCTAssertTrue(preview.staticTexts["Summarize merged changes."].exists, "The preview renders the instructions.")
         XCTAssertFalse(preview.staticTexts["---"].exists, "The preview does not show the raw frontmatter fences.")
         attachScreenshot(named: "The skill editor's Preview tab renders the Markdown")
         selectSkillsTab("Edit", picker: "skill-editor-tab-picker")
-        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertTrue(editor.waitToExist(timeout: 5))
         editor.click()
         editor.typeKey("a", modifierFlags: .command)
         editor.typeText("---\nname: release-notes\n---\n\nNo description.\n")
         element("skill-editor-save").click()
-        XCTAssertTrue(element("skill-editor-error").waitForExistence(timeout: 5), "A description-less SKILL.md is rejected in the editor.")
+        XCTAssertTrue(element("skill-editor-error").waitToExist(timeout: 5), "A description-less SKILL.md is rejected in the editor.")
         attachScreenshot(named: "The skill editor rejects a SKILL.md without a description")
         XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8), created, "A rejected edit keeps the file.")
 
@@ -17294,12 +17334,11 @@ final class PlayhouseUITests: XCTestCase {
         element("skill-editor-cancel").click()
         XCTAssertTrue(waitUntil({ !self.element("skill-editor-panel").exists }, timeout: 5), "Cancel closes the editor.")
         selectSkillsTab("Repo")
-        XCTAssertTrue(element("skills-empty-skills-manage-repo").waitForExistence(timeout: 5), "After the editor closes, a click on the Repo tab still switches tabs.")
+        XCTAssertTrue(element("skills-empty-skills-manage-repo").waitToExist(timeout: 5), "After the editor closes, a click on the Repo tab still switches tabs.")
         selectSkillsTab("Global")
-        XCTAssertTrue(row.waitForExistence(timeout: 5), "A click on the Global tab switches back.")
+        XCTAssertTrue(row.waitToExist(timeout: 5), "A click on the Global tab switches back.")
         XCTAssertEqual(try String(contentsOf: manifest, encoding: .utf8), created, "Cancel discards the edit.")
-        row.click()
-        XCTAssertTrue(element("skill-editor-panel").waitForExistence(timeout: 5), "A click on the skill row opens the editor again after it was closed.")
+        XCTAssertTrue(openPanel("skill-editor-panel", with: row), "A click on the skill row opens the editor again after it was closed.")
         XCTAssertEqual(editor.value as? String, created, "The reopened editor shows the file, not the discarded edit.")
         let edited = "---\nname: release-notes\ndescription: Draft concise release notes\nmetadata:\n  owner: docs\n---\n\n# Release notes\n\n- Group changes by area.\n"
         editor.click()
@@ -17345,7 +17384,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !self.element("skill-editor-panel").exists }, timeout: 5))
 
         element("new-skill-button").click()
-        XCTAssertTrue(element("new-skill-name").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("new-skill-name").waitToExist(timeout: 5))
         typeIntoField(element("new-skill-name"), text: "repo-new")
         typeIntoField(element("new-skill-description"), text: "Repository only")
         XCTAssertFalse(element("new-skill-field-compatibility").exists || element("new-skill-field-license").exists,
@@ -17357,7 +17396,7 @@ final class PlayhouseUITests: XCTestCase {
         let destination = element("new-skill-scope")
         destination.click()
         let repositoryOption = app.menuItems["skills-manage-repo"]
-        XCTAssertTrue(repositoryOption.waitForExistence(timeout: 5), "Save to should offer the task's repository.")
+        XCTAssertTrue(repositoryOption.waitToExist(timeout: 5), "Save to should offer the task's repository.")
         repositoryOption.click()
         element("new-skill-create").click()
         XCTAssertTrue(waitUntil({ !self.element("new-skill-name").exists }, timeout: 10))
@@ -17368,7 +17407,7 @@ final class PlayhouseUITests: XCTestCase {
                        "---\nname: repo-new\ndescription: \"Repository only\"\n---\n\n## Steps\n\n1. Check the repository.\n",
                        "New Skill writes the name, description, and instructions into SKILL.md.")
         selectSkillsTab("Repo")
-        XCTAssertTrue(element("skill-row-repo-new").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("skill-row-repo-new").waitToExist(timeout: 10))
         clickSkillMenuItem(skill: "repo-new", item: "skill-move-global-repo-new", title: "Move to Global")
         XCTAssertTrue(waitUntil({ !self.element("skill-row-repo-new").exists }, timeout: 10), "A moved skill leaves the Repo tab.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: globalFolder.appendingPathComponent("repo-new/SKILL.md").path))
@@ -17387,7 +17426,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: manifest.path), "A rejected move leaves the skill in place.")
 
         selectSkillsTab("Global")
-        XCTAssertTrue(element("skill-row-repo-new").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("skill-row-repo-new").waitToExist(timeout: 10))
         clickSkillMenuItem(skill: "repo-new", item: "skill-delete-repo-new", title: "Delete…")
         XCTAssertTrue(waitUntil({ self.element("confirm-delete-skill").exists || self.app.buttons["Delete"].exists }, timeout: 5))
         attachScreenshot(named: "Delete skill confirmation")
@@ -17400,15 +17439,14 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(skillsByName(fresh["global"])["release-notes"]?["description"] as? String, "Draft release notes by area")
 
         selectSkillsTab("Built-in")
-        XCTAssertTrue(element("skill-row-codex-system-skill").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("skill-row-codex-system-skill").waitToExist(timeout: 10))
         element("skill-actions-codex-system-skill").click()
-        XCTAssertTrue(app.menuItems["Reveal in Finder"].waitForExistence(timeout: 5), "The built-in's actions menu should open.")
+        XCTAssertTrue(app.menuItems["Reveal in Finder"].waitToExist(timeout: 5), "The built-in's actions menu should open.")
         for title in ["Edit…", "Delete…", "Move to Global"] {
             XCTAssertFalse(app.menuItems[title].exists, "A built-in skill is read-only, so its menu has no \(title).")
         }
         app.typeKey(.escape, modifierFlags: [])
-        element("skill-row-codex-system-skill").click()
-        XCTAssertTrue(element("skill-editor-panel").waitForExistence(timeout: 5), "Clicking a built-in skill shows it.")
+        XCTAssertTrue(openPanel("skill-editor-panel", with: element("skill-row-codex-system-skill")), "Clicking a built-in skill shows it.")
         let builtinText = element("skill-editor").value as? String
         XCTAssertTrue(builtinText?.contains("Bundled with Codex") == true, "A built-in skill shows its SKILL.md.")
         element("skill-editor").click()
@@ -17450,7 +17488,7 @@ final class PlayhouseUITests: XCTestCase {
         selectSkillsTab("Global")
 
         let toggle = element("skill-toggle-global-agents")
-        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(toggle.waitToExist(timeout: 10))
         XCTAssertTrue(isOn(toggle))
         // The page reads Claude Code's built-ins once when it opens.
         XCTAssertTrue(waitUntil({ claudeSessions() > sessionsAtLaunch }, timeout: 20), "Opening the Skills page reads Claude Code's built-ins.")
@@ -17480,7 +17518,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.element("confirm-link-skill").exists || self.app.buttons["Create Link"].exists }, timeout: 5))
         attachScreenshot(named: "Make available outside Playhouse confirmation")
         clickDialogButton("confirm-link-skill", title: "Create Link")
-        XCTAssertTrue(element("skill-linked-global-agents").waitForExistence(timeout: 10), "A linked skill shows as Linked.")
+        XCTAssertTrue(element("skill-linked-global-agents").waitToExist(timeout: 10), "A linked skill shows as Linked.")
         let link = claudeSkills.appendingPathComponent("global-agents")
         XCTAssertEqual(realPath(try FileManager.default.destinationOfSymbolicLink(atPath: link.path)),
                        realPath(skillsHome.appendingPathComponent(".agents/skills/global-agents").path))
@@ -17488,7 +17526,7 @@ final class PlayhouseUITests: XCTestCase {
 
         clickSkillMenuItem(skill: "blocked", item: "skill-link-blocked", title: "Make Available Outside Playhouse…")
         clickDialogButton("confirm-link-skill", title: "Create Link")
-        XCTAssertTrue(element("skills-error").waitForExistence(timeout: 10), "A link onto an existing file shows an error.")
+        XCTAssertTrue(element("skills-error").waitToExist(timeout: 10), "A link onto an existing file shows an error.")
         XCTAssertTrue(accessibleLabelOrValue(of: element("skills-error")).contains("already exists"), "The error names the existing file.")
         attachScreenshot(named: "A blocked outside link shows its error")
         XCTAssertEqual(try String(contentsOf: claudeSkills.appendingPathComponent("blocked"), encoding: .utf8), "Not a skill, just a file in the way.\n")
@@ -17497,7 +17535,7 @@ final class PlayhouseUITests: XCTestCase {
         selectSkillsTab("Repo")
         clickSkillMenuItem(skill: "repo-agents", item: "skill-link-repo-agents", title: "Make Available Outside Playhouse…")
         clickDialogButton("confirm-link-skill", title: "Create Link")
-        XCTAssertTrue(element("skill-linked-repo-agents").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("skill-linked-repo-agents").waitToExist(timeout: 10))
         XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: worktree.appendingPathComponent(".claude/skills/repo-agents").path),
                        "../../.agents/skills/repo-agents", "A repository link is relative, so it can be committed.")
 
@@ -17534,14 +17572,14 @@ final class PlayhouseUITests: XCTestCase {
         openSkillsPage()
 
         // There is no Select button: a press and hold is how selecting starts, and Done leaves it.
-        XCTAssertTrue(element("new-skill-button").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("new-skill-button").waitToExist(timeout: 5))
         XCTAssertFalse(element("skills-select-button").exists, "The header has no Select button.")
         element("skill-actions-repo-one").click()
-        XCTAssertTrue(app.menuItems["Delete…"].waitForExistence(timeout: 5), "The actions menu should open.")
+        XCTAssertTrue(app.menuItems["Delete…"].waitToExist(timeout: 5), "The actions menu should open.")
         XCTAssertFalse(app.menuItems["Select"].exists, "The actions menu has no Select item.")
         app.typeKey(.escape, modifierFlags: [])
         element("skill-row-repo-one").press(forDuration: 1.0)
-        XCTAssertTrue(element("skill-select-repo-one").waitForExistence(timeout: 5), "Selecting shows a checkbox on each row.")
+        XCTAssertTrue(element("skill-select-repo-one").waitToExist(timeout: 5), "Selecting shows a checkbox on each row.")
         XCTAssertFalse(element("skill-editor-panel").exists, "A press and hold selects rather than opening the editor.")
         element("skills-selection-done").click()
         XCTAssertTrue(waitUntil({ !self.element("skill-select-repo-one").exists }, timeout: 5), "Done stops selecting.")
@@ -17560,7 +17598,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.selectionCount() == "3 selected" }, timeout: 5), "A click selects a skill, across tabs.")
         attachScreenshot(named: "Several skills selected for one action")
         selectSkillsTab("Built-in")
-        XCTAssertTrue(element("skill-row-codex-system-skill").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("skill-row-codex-system-skill").waitToExist(timeout: 10))
         XCTAssertFalse(element("skill-select-codex-system-skill").exists, "A built-in skill shows no checkbox.")
         element("skill-row-codex-system-skill").click()
         XCTAssertEqual(selectionCount(), "3 selected", "A built-in skill cannot be selected.")
@@ -17581,7 +17619,7 @@ final class PlayhouseUITests: XCTestCase {
         clickDialogButton("confirm-delete-skill", title: "Delete")
         XCTAssertTrue(waitUntil({ !self.element("skill-row-global-one").exists && !self.element("skill-row-global-two").exists }, timeout: 10),
                       "Deleted skills leave the page.")
-        XCTAssertTrue(element("new-skill-button").waitForExistence(timeout: 5), "Deleting the selection ends selecting.")
+        XCTAssertTrue(element("new-skill-button").waitToExist(timeout: 5), "Deleting the selection ends selecting.")
         attachScreenshot(named: "Global tab after deleting several skills")
         XCTAssertFalse(FileManager.default.fileExists(atPath: globalFolder.appendingPathComponent("global-one").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: globalFolder.appendingPathComponent("global-two").path))
@@ -17589,7 +17627,7 @@ final class PlayhouseUITests: XCTestCase {
                        "A repository skill in the selection is deleted from the worktree.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.appendingPathComponent(".agents/skills/repo-keep/SKILL.md").path), "Unselected skills stay.")
         selectSkillsTab("Repo")
-        XCTAssertTrue(element("skill-row-repo-keep").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("skill-row-repo-keep").waitToExist(timeout: 5))
         XCTAssertFalse(element("skill-row-repo-one").exists)
         let fresh = try skillCatalog(taskID: taskID)
         XCTAssertEqual((fresh["global"] as? [Any])?.count, 0)
@@ -17632,10 +17670,10 @@ final class PlayhouseUITests: XCTestCase {
 
         openTask(named: "Skills fix source")
         openSkillsPage()
-        XCTAssertTrue(element("skill-fix-repo-dup").waitForExistence(timeout: 10), "A conflicting skill offers Fix with Agent.")
+        XCTAssertTrue(element("skill-fix-repo-dup").waitToExist(timeout: 10), "A conflicting skill offers Fix with Agent.")
         XCTAssertFalse(element("skill-fix-repo-ok").exists, "A skill without a problem has nothing to fix.")
         selectSkillsTab("Global")
-        XCTAssertTrue(element("skill-fix-global-dup").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("skill-fix-global-dup").waitToExist(timeout: 5))
         XCTAssertTrue(element("skill-fix-global-broken").exists, "An invalid skill offers Fix with Agent too.")
         attachScreenshot(named: "Conflicting and invalid skills offer Fix with Agent")
 
@@ -17653,7 +17691,7 @@ final class PlayhouseUITests: XCTestCase {
         // Several skills, selected across tabs, fixed in one task.
         openTask(named: "Skills fix source")
         openSkillsPage()
-        XCTAssertTrue(element("skill-row-repo-dup").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("skill-row-repo-dup").waitToExist(timeout: 10))
         element("skill-row-repo-dup").press(forDuration: 1.0)
         XCTAssertTrue(waitUntil({ self.selectionCount() == "1 selected" }, timeout: 5))
         selectSkillsTab("Global")
@@ -17680,7 +17718,7 @@ final class PlayhouseUITests: XCTestCase {
                        Set([".agents/skills", ".claude/skills"].map { realPath(skillsHome.appendingPathComponent($0).path) }),
                        "Global skill folders are opened to the agent.")
         XCTAssertTrue(waitUntil({ turns().contains { $0["userText"] as? String == prompt } }, timeout: 20), "The conversation sends the fixing prompt.")
-        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'user-message-'")).firstMatch.waitForExistence(timeout: 10),
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'user-message-'")).firstMatch.waitToExist(timeout: 10),
                       "The prompt shows in the new task's conversation.")
         XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String ?? "").isEmpty }, timeout: 10),
                       "The sent prompt leaves the composer, so it cannot be sent twice.")
@@ -17724,12 +17762,12 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Claude skills")
         openSkillsPage()
         let offToggle = element("skill-toggle-repo-off")
-        XCTAssertTrue(offToggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(offToggle.waitToExist(timeout: 10))
         offToggle.click()
         XCTAssertTrue(waitUntil({ !self.isOn(self.element("skill-toggle-repo-off")) }, timeout: 10))
         selectSkillsTab("Built-in")
         let bundledToggle = element("skill-toggle-simplify")
-        XCTAssertTrue(bundledToggle.waitForExistence(timeout: 20), "Claude Code's built-ins load on the Built-in tab.")
+        XCTAssertTrue(bundledToggle.waitToExist(timeout: 20), "Claude Code's built-ins load on the Built-in tab.")
         bundledToggle.click()
         XCTAssertTrue(waitUntil({ !self.isOn(self.element("skill-toggle-simplify")) }, timeout: 10))
         selectSkillsTab("Repo")
@@ -17764,7 +17802,7 @@ final class PlayhouseUITests: XCTestCase {
         element("skill-toggle-repo-off").click()
         XCTAssertTrue(waitUntil({ self.isOn(self.element("skill-toggle-repo-off")) }, timeout: 10))
         selectSkillsTab("Built-in")
-        XCTAssertTrue(element("skill-toggle-simplify").waitForExistence(timeout: 20))
+        XCTAssertTrue(element("skill-toggle-simplify").waitToExist(timeout: 20))
         element("skill-toggle-simplify").click()
         XCTAssertTrue(waitUntil({ self.isOn(self.element("skill-toggle-simplify")) }, timeout: 10))
         element("skills-back-button").click()
@@ -17812,7 +17850,7 @@ final class PlayhouseUITests: XCTestCase {
             return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
         }
         func answerQuestionIfAsked() {
-            guard element("ai-question-form-title").waitForExistence(timeout: 10) else { return }
+            guard element("ai-question-form-title").waitToExist(timeout: 10) else { return }
             selectQuestionOption("Blue")
             typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
             element("submit-ai-answers-button").click()
@@ -17821,7 +17859,7 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Codex skills")
         openSkillsPage()
         let offToggle = element("skill-toggle-repo-off")
-        XCTAssertTrue(offToggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(offToggle.waitToExist(timeout: 10))
         offToggle.click()
         XCTAssertTrue(waitUntil({ !self.isOn(self.element("skill-toggle-repo-off")) }, timeout: 10))
         element("skill-use-repo-claude").click()
@@ -17902,7 +17940,7 @@ final class PlayhouseUITests: XCTestCase {
         openSkillsPage(file: file, line: line)
         XCTAssertEqual(accessibleLabelOrValue(of: element("skills-title")), "Skills, Rules & MCP", "The page is titled Skills, Rules & MCP.", file: file, line: line)
         selectSkillsTab("Rules", picker: "skills-kind-picker", file: file, line: line)
-        XCTAssertTrue(element("rules-page").waitForExistence(timeout: 10), "The Rules picker shows the rules.", file: file, line: line)
+        XCTAssertTrue(element("rules-page").waitToExist(timeout: 10), "The Rules picker shows the rules.", file: file, line: line)
         XCTAssertTrue(waitUntil({ !self.element("rules-loading").exists }, timeout: 10), "The rules finish loading.", file: file, line: line)
     }
 
@@ -17913,15 +17951,15 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ actions.exists && actions.isHittable && !self.element("rule-editor-panel").exists && !self.element("new-rule-panel").exists }, timeout: 10),
                       "\(key) should have an actions menu.", file: file, line: line)
         actions.click()
-        if !app.menuItems["Reveal in Finder"].waitForExistence(timeout: 3) { actions.click() }
-        XCTAssertTrue(app.menuItems["Reveal in Finder"].waitForExistence(timeout: 5), "\(key)'s actions menu opens.", file: file, line: line)
+        if !app.menuItems["Reveal in Finder"].waitToExist(timeout: 3) { actions.click() }
+        XCTAssertTrue(app.menuItems["Reveal in Finder"].waitToExist(timeout: 5), "\(key)'s actions menu opens.", file: file, line: line)
     }
 
     private func clickRuleMenuItem(rule key: String, item identifier: String, title: String, file: StaticString = #filePath, line: UInt = #line) {
         openRuleActions(key, file: file, line: line)
         let byIdentifier = app.menuItems.matching(identifier: identifier).firstMatch
-        let item = byIdentifier.waitForExistence(timeout: 3) ? byIdentifier : app.menuItems[title]
-        XCTAssertTrue(item.waitForExistence(timeout: 5), "The actions menu should offer \(title).", file: file, line: line)
+        let item = byIdentifier.waitToExist(timeout: 3) ? byIdentifier : app.menuItems[title]
+        XCTAssertTrue(item.waitToExist(timeout: 5), "The actions menu should offer \(title).", file: file, line: line)
         item.click()
     }
 
@@ -17957,7 +17995,7 @@ final class PlayhouseUITests: XCTestCase {
         openRulesPage()
 
         for name in ["rules-catalog-repo", "rules-linked-repo", "rules-override-repo", "rules-empty-repo"] {
-            XCTAssertTrue(element("rules-repo-section-\(name)").waitForExistence(timeout: 10), "\(name) has a section.")
+            XCTAssertTrue(element("rules-repo-section-\(name)").waitToExist(timeout: 10), "\(name) has a section.")
         }
         XCTAssertTrue(element("rules-empty-rules-empty-repo").exists, "A repository without rules shows an empty state.")
         for name in ["AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md", ".claude/rules/api.md", ".claude/rules/style/naming.md"] {
@@ -17983,7 +18021,7 @@ final class PlayhouseUITests: XCTestCase {
 
         selectSkillsTab("Global", picker: "rules-tab-picker")
         let shared = "~/.agents/AGENTS.md"
-        XCTAssertTrue(element("rule-row-\(shared)").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("rule-row-\(shared)").waitToExist(timeout: 5))
         XCTAssertEqual(accessibleLabelOrValue(of: element("rule-shared-\(shared)")), "Playhouse shares it with Claude and Codex.",
                        "Neither CLI reads ~/.agents/AGENTS.md on its own.")
         for name in ["~/.claude/CLAUDE.md", "~/.claude/rules/global-style.md"] {
@@ -17998,7 +18036,7 @@ final class PlayhouseUITests: XCTestCase {
         selectSkillsTab("Managed", picker: "rules-tab-picker")
         let managed = realPath(rulesManaged.appendingPathComponent("CLAUDE.md").path)
         let managedRow = element("rule-row-managed:claude/CLAUDE.md")
-        XCTAssertTrue(managedRow.waitForExistence(timeout: 5), "The managed CLAUDE.md is listed (\(managed)).")
+        XCTAssertTrue(managedRow.waitToExist(timeout: 5), "The managed CLAUDE.md is listed (\(managed)).")
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'rule-toggle-'")).firstMatch.exists,
                        "The managed CLAUDE.md can't be turned off.")
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'rule-provider-' AND identifier ENDSWITH '-codex'")).firstMatch.exists,
@@ -18035,38 +18073,35 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Rules manage")
         openRulesPage()
 
-        element("new-rule-button").click()
-        XCTAssertTrue(element("new-rule-panel").waitForExistence(timeout: 5), "New Rule opens its panel.")
+        XCTAssertTrue(openPanel("new-rule-panel", with: element("new-rule-button")), "New Rule opens its panel.")
         element("new-rule-create").click()
-        XCTAssertTrue(element("new-rule-error").waitForExistence(timeout: 5), "Empty instructions are rejected in the panel.")
+        XCTAssertTrue(element("new-rule-error").waitToExist(timeout: 5), "Empty instructions are rejected in the panel.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: sharedFile.path), "A rejected rule writes nothing.")
         attachScreenshot(named: "New Rule rejects empty instructions")
         typeIntoField(element("new-rule-body"), text: "Answer briefly.")
         element("new-rule-create").click()
         XCTAssertTrue(waitUntil({ !self.element("new-rule-panel").exists }, timeout: 10), "Creating closes the panel.")
-        XCTAssertTrue(element("rule-row-~/.agents/AGENTS.md").waitForExistence(timeout: 10), "The new global rule shows on the Global tab.")
+        XCTAssertTrue(element("rule-row-~/.agents/AGENTS.md").waitToExist(timeout: 10), "The new global rule shows on the Global tab.")
         XCTAssertEqual(try String(contentsOf: sharedFile, encoding: .utf8), "Answer briefly.\n", "A global rule is ~/.agents/AGENTS.md.")
 
-        element("new-rule-button").click()
-        XCTAssertTrue(element("new-rule-panel").waitForExistence(timeout: 5))
+        XCTAssertTrue(openPanel("new-rule-panel", with: element("new-rule-button")))
         element("new-rule-scope").click()
-        XCTAssertTrue(app.menuItems["rules-manage-repo"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.menuItems["rules-manage-repo"].waitToExist(timeout: 5))
         app.menuItems["rules-manage-repo"].click()
         XCTAssertFalse(element("new-rule-name").exists, "Shared instructions need no name.")
         typeIntoField(element("new-rule-body"), text: "Run the linter.")
         element("new-rule-create").click()
         XCTAssertTrue(waitUntil({ !self.element("new-rule-panel").exists }, timeout: 10))
-        XCTAssertTrue(element("rule-row-rules-manage-repo:AGENTS.md").waitForExistence(timeout: 10), "The repository's AGENTS.md shows on the Repo tab.")
+        XCTAssertTrue(element("rule-row-rules-manage-repo:AGENTS.md").waitToExist(timeout: 10), "The repository's AGENTS.md shows on the Repo tab.")
         XCTAssertEqual(try String(contentsOf: worktree.appendingPathComponent("AGENTS.md"), encoding: .utf8), "Run the linter.\n",
                        "Shared instructions in a repository are its worktree's AGENTS.md.")
 
-        element("new-rule-button").click()
-        XCTAssertTrue(element("new-rule-panel").waitForExistence(timeout: 5))
+        XCTAssertTrue(openPanel("new-rule-panel", with: element("new-rule-button")))
         selectSkillsTab("Topic rule", picker: "new-rule-form")
         let scope = element("new-rule-scope")
         scope.click()
         let repoItem = app.menuItems["rules-manage-repo"]
-        XCTAssertTrue(repoItem.waitForExistence(timeout: 5), "New Rule can save into the task's repository.")
+        XCTAssertTrue(repoItem.waitToExist(timeout: 5), "New Rule can save into the task's repository.")
         repoItem.click()
         typeIntoField(element("new-rule-name"), text: "api-style")
         typeIntoField(element("new-rule-paths"), text: "src/**/*.ts, lib/**")
@@ -18075,21 +18110,20 @@ final class PlayhouseUITests: XCTestCase {
         element("new-rule-create").click()
         XCTAssertTrue(waitUntil({ !self.element("new-rule-panel").exists }, timeout: 10))
         let topicKey = "rules-manage-repo:.claude/rules/api-style.md"
-        XCTAssertTrue(element("rule-row-\(topicKey)").waitForExistence(timeout: 10), "The topic rule shows on the Repo tab.")
+        XCTAssertTrue(element("rule-row-\(topicKey)").waitToExist(timeout: 10), "The topic rule shows on the Repo tab.")
         XCTAssertEqual(accessibleLabelOrValue(of: element("rule-paths-\(topicKey)")), "src/**/*.ts, lib/**")
         attachScreenshot(named: "A new path-scoped topic rule shows its globs")
         let topicFile = worktree.appendingPathComponent(".claude/rules/api-style.md")
         XCTAssertEqual(try String(contentsOf: topicFile, encoding: .utf8), "---\npaths:\n  - \"src/**/*.ts\"\n  - \"lib/**\"\n---\n\nValidate every input.\n")
         XCTAssertFalse(FileManager.default.fileExists(atPath: repository.appendingPathComponent(".claude").path), "The source checkout is left alone.")
 
-        element("new-rule-button").click()
-        XCTAssertTrue(element("new-rule-panel").waitForExistence(timeout: 5))
+        XCTAssertTrue(openPanel("new-rule-panel", with: element("new-rule-button")))
         selectSkillsTab("Topic rule", picker: "new-rule-form")
         typeIntoField(element("new-rule-name"), text: "global-topic")
         typeIntoField(element("new-rule-body"), text: "Global topic.")
         element("new-rule-create").click()
         XCTAssertTrue(waitUntil({ !self.element("new-rule-panel").exists }, timeout: 10))
-        XCTAssertTrue(element("rule-row-~/.claude/rules/global-topic.md").waitForExistence(timeout: 10), "A global topic rule shows on the Global tab.")
+        XCTAssertTrue(element("rule-row-~/.claude/rules/global-topic.md").waitToExist(timeout: 10), "A global topic rule shows on the Global tab.")
         XCTAssertEqual(try String(contentsOf: rulesClaudeConfig.appendingPathComponent("rules/global-topic.md"), encoding: .utf8), "Global topic.\n",
                        "A named global rule goes in Claude's rules folder.")
         XCTAssertFalse(element("rule-paths-~/.claude/rules/global-topic.md").exists, "A topic rule without globs always loads.")
@@ -18105,15 +18139,14 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: sharedFile, encoding: .utf8), "Answer briefly.\n", "An existing rule file is left alone.")
 
         selectSkillsTab("Global", picker: "rules-tab-picker")
-        element("rule-row-~/.agents/AGENTS.md").click()
-        XCTAssertTrue(element("rule-editor-panel").waitForExistence(timeout: 5), "Clicking a rule opens its editor.")
+        XCTAssertTrue(openPanel("rule-editor-panel", with: element("rule-row-~/.agents/AGENTS.md")), "Clicking a rule opens its editor.")
         let editor = element("rule-editor")
         XCTAssertEqual(editor.value as? String, "Answer briefly.\n", "The editor opens the whole file.")
         editor.click()
         editor.typeKey("a", modifierFlags: .command)
         editor.typeText("  \n")
         element("rule-editor-save").click()
-        XCTAssertTrue(element("rule-editor-error").waitForExistence(timeout: 5), "Empty instructions are rejected in the editor.")
+        XCTAssertTrue(element("rule-editor-error").waitToExist(timeout: 5), "Empty instructions are rejected in the editor.")
         XCTAssertEqual(try String(contentsOf: sharedFile, encoding: .utf8), "Answer briefly.\n", "A rejected edit keeps the file.")
         let edited = "# Personal rules\n\n- Answer briefly.\n- Cite files.\n"
         editor.click()
@@ -18133,9 +18166,8 @@ final class PlayhouseUITests: XCTestCase {
 
         selectSkillsTab("Managed", picker: "rules-tab-picker")
         let managedRow = element("rule-row-managed:claude/CLAUDE.md")
-        XCTAssertTrue(managedRow.waitForExistence(timeout: 5))
-        managedRow.click()
-        XCTAssertTrue(element("rule-editor-panel").waitForExistence(timeout: 5), "The managed CLAUDE.md opens to read.")
+        XCTAssertTrue(managedRow.waitToExist(timeout: 5))
+        XCTAssertTrue(openPanel("rule-editor-panel", with: managedRow), "The managed CLAUDE.md opens to read.")
         XCTAssertFalse(element("rule-editor-save").exists, "The managed CLAUDE.md opens read-only, without Save.")
         let managedEditor = element("rule-editor")
         managedEditor.click()
@@ -18184,7 +18216,7 @@ final class PlayhouseUITests: XCTestCase {
 
         let agents = "rules-link-repo:AGENTS.md"
         let toggle = element("rule-toggle-\(agents)")
-        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(toggle.waitToExist(timeout: 10))
         XCTAssertTrue(element("rule-native-\(agents)").exists, "An AGENTS.md with no CLAUDE.md beside it is read by both CLIs on their own.")
         XCTAssertFalse(element("rule-linked-\(agents)").exists, "A file nothing links to is not shown as Linked.")
         XCTAssertTrue(isOn(toggle))
@@ -18192,7 +18224,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !self.isOn(toggle) }, timeout: 0.75), "The switch flips as soon as it is clicked.")
         XCTAssertTrue(waitUntil({ ((try? rule("repo:\(working.path)#AGENTS.md"))??["enabled"] as? Bool) == false }, timeout: 10),
                       "Turning a rule off is saved where a fresh CLI process reads it.")
-        XCTAssertTrue(element("rule-always-on-\(agents)").waitForExistence(timeout: 5), "The page says Codex still reads the file itself.")
+        XCTAssertTrue(element("rule-always-on-\(agents)").waitToExist(timeout: 5), "The page says Codex still reads the file itself.")
         XCTAssertTrue(element("rule-provider-\(agents)-codex").exists)
         XCTAssertFalse(element("rule-provider-\(agents)-claude").exists, "Turning it off stops Claude following it.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: skillsCodexHome.appendingPathComponent("config.toml").path), "Codex's config is not written.")
@@ -18207,7 +18239,7 @@ final class PlayhouseUITests: XCTestCase {
 
         selectSkillsTab("Global", picker: "rules-tab-picker")
         let shared = "~/.agents/AGENTS.md"
-        XCTAssertTrue(element("rule-toggle-\(shared)").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("rule-toggle-\(shared)").waitToExist(timeout: 5))
         element("rule-toggle-\(shared)").click()
         XCTAssertTrue(waitUntil({ !self.element("rule-provider-\(shared)-claude").exists && !self.element("rule-provider-\(shared)-codex").exists }, timeout: 10),
                       "A rule only Playhouse shares reaches neither agent once off.")
@@ -18218,7 +18250,7 @@ final class PlayhouseUITests: XCTestCase {
 
         clickRuleMenuItem(rule: shared, item: "rule-link-\(shared)", title: "Make Available Outside Playhouse…")
         clickDialogButton("confirm-link-rule", title: "Create Link")
-        XCTAssertTrue(element("rules-error").waitForExistence(timeout: 10), "A link onto an existing file shows an error.")
+        XCTAssertTrue(element("rules-error").waitToExist(timeout: 10), "A link onto an existing file shows an error.")
         XCTAssertTrue(accessibleLabelOrValue(of: element("rules-error")).contains("already exists"))
         attachScreenshot(named: "A blocked outside link shows its error")
         XCTAssertEqual(try String(contentsOf: claudeFile, encoding: .utf8), "Mine, in the way.\n", "An existing file is left untouched.")
@@ -18228,7 +18260,7 @@ final class PlayhouseUITests: XCTestCase {
 
         clickRuleMenuItem(rule: shared, item: "rule-link-\(shared)", title: "Make Available Outside Playhouse…")
         clickDialogButton("confirm-link-rule", title: "Create Link")
-        XCTAssertTrue(element("rule-linked-\(shared)").waitForExistence(timeout: 10), "A linked rule shows as Linked.")
+        XCTAssertTrue(element("rule-linked-\(shared)").waitToExist(timeout: 10), "A linked rule shows as Linked.")
         for link in [codexLink, claudeFile] {
             let destination = try FileManager.default.destinationOfSymbolicLink(atPath: link.path)
             XCTAssertTrue(destination.hasPrefix("/"), "A global link is absolute.")
@@ -18243,7 +18275,7 @@ final class PlayhouseUITests: XCTestCase {
         let otherClaude = "rules-link-claude-repo:CLAUDE.md"
         clickRuleMenuItem(rule: otherClaude, item: "rule-link-\(otherClaude)", title: "Make Available Outside Playhouse…")
         clickDialogButton("confirm-link-rule", title: "Create Link")
-        XCTAssertTrue(element("rule-linked-\(otherClaude)").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("rule-linked-\(otherClaude)").waitToExist(timeout: 10))
         XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: otherWorktree.appendingPathComponent("AGENTS.md").path), "CLAUDE.md",
                        "A repository link is relative, so it can be committed.")
         attachScreenshot(named: "A repository CLAUDE.md linked as AGENTS.md")
@@ -18285,10 +18317,10 @@ final class PlayhouseUITests: XCTestCase {
 
         openTask(named: "Rules fix source")
         openRulesPage()
-        XCTAssertTrue(element("rule-fix-rules-fix-repo:CLAUDE.md").waitForExistence(timeout: 10), "A rule with a problem offers Fix with Agent.")
+        XCTAssertTrue(element("rule-fix-rules-fix-repo:CLAUDE.md").waitToExist(timeout: 10), "A rule with a problem offers Fix with Agent.")
         XCTAssertFalse(element("rule-fix-rules-fix-repo:AGENTS.md").exists, "A rule without a problem has nothing to fix.")
         selectSkillsTab("Global", picker: "rules-tab-picker")
-        XCTAssertTrue(element("rule-fix-~/.claude/rules/broken.md").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("rule-fix-~/.claude/rules/broken.md").waitToExist(timeout: 5))
         attachScreenshot(named: "A broken global rule offers Fix with Agent")
 
         element("rule-fix-~/.claude/rules/broken.md").click()
@@ -18307,7 +18339,7 @@ final class PlayhouseUITests: XCTestCase {
 
         openTask(named: "Rules fix source")
         openRulesPage()
-        XCTAssertTrue(element("rule-fix-rules-fix-repo:CLAUDE.md").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("rule-fix-rules-fix-repo:CLAUDE.md").waitToExist(timeout: 10))
         element("rule-fix-rules-fix-repo:CLAUDE.md").click()
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Fix rule CLAUDE.md" }, timeout: 15))
         let fixing = try XCTUnwrap(try boardTaskRecords().first { $0["title"] as? String == "Fix rule CLAUDE.md" })
@@ -18359,7 +18391,7 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Claude rules")
         openRulesPage()
         let local = "rules-claude-repo:CLAUDE.local.md"
-        XCTAssertTrue(element("rule-toggle-\(local)").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("rule-toggle-\(local)").waitToExist(timeout: 10))
         element("rule-toggle-\(local)").click()
         XCTAssertTrue(waitUntil({ !self.isOn(self.element("rule-toggle-\(local)")) }, timeout: 10))
         XCTAssertEqual(accessibleLabelOrValue(of: element("rule-shared-rules-claude-extra:AGENTS.md")), "Playhouse shares it with Claude and Codex.",
@@ -18437,7 +18469,7 @@ final class PlayhouseUITests: XCTestCase {
             return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
         }
         func answerQuestionIfAsked() {
-            guard element("ai-question-form-title").waitForExistence(timeout: 10) else { return }
+            guard element("ai-question-form-title").waitToExist(timeout: 10) else { return }
             selectQuestionOption("Blue")
             typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
             element("submit-ai-answers-button").click()
@@ -18446,7 +18478,7 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Codex rules")
         openRulesPage()
         let off = "rules-codex-repo:.claude/rules/off.md"
-        XCTAssertTrue(element("rule-toggle-\(off)").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("rule-toggle-\(off)").waitToExist(timeout: 10))
         element("rule-toggle-\(off)").click()
         XCTAssertTrue(waitUntil({ !self.isOn(self.element("rule-toggle-\(off)")) }, timeout: 10))
         XCTAssertEqual(accessibleLabelOrValue(of: element("rule-shared-rules-codex-repo:CLAUDE.md")), "Playhouse shares it with Codex.",
@@ -18524,7 +18556,7 @@ final class PlayhouseUITests: XCTestCase {
         openSkillsPage(file: file, line: line)
         XCTAssertEqual(accessibleLabelOrValue(of: element("skills-title")), "Skills, Rules & MCP", "The page is titled Skills, Rules & MCP.", file: file, line: line)
         selectSkillsTab("MCP", picker: "skills-kind-picker", file: file, line: line)
-        XCTAssertTrue(element("mcp-page").waitForExistence(timeout: 10), "The MCP picker shows the servers.", file: file, line: line)
+        XCTAssertTrue(element("mcp-page").waitToExist(timeout: 10), "The MCP picker shows the servers.", file: file, line: line)
         XCTAssertTrue(waitUntil({ !self.element("mcp-loading").exists }, timeout: 10), "The servers finish loading.", file: file, line: line)
     }
 
@@ -18535,9 +18567,9 @@ final class PlayhouseUITests: XCTestCase {
                       "\(key) should have an actions menu.", file: file, line: line)
         actions.click()
         let byIdentifier = app.menuItems.matching(identifier: identifier).firstMatch
-        if !byIdentifier.waitForExistence(timeout: 3), !app.menuItems[title].exists { actions.click() }
-        let item = byIdentifier.waitForExistence(timeout: 3) ? byIdentifier : app.menuItems[title]
-        XCTAssertTrue(item.waitForExistence(timeout: 5), "The actions menu should offer \(title).", file: file, line: line)
+        if !byIdentifier.waitToExist(timeout: 3), !app.menuItems[title].exists { actions.click() }
+        let item = byIdentifier.waitToExist(timeout: 3) ? byIdentifier : app.menuItems[title]
+        XCTAssertTrue(item.waitToExist(timeout: 5), "The actions menu should offer \(title).", file: file, line: line)
         item.click()
     }
 
@@ -18582,7 +18614,7 @@ final class PlayhouseUITests: XCTestCase {
         openMcpPage()
 
         for name in ["mcp-catalog-repo", "mcp-other-repo", "mcp-empty-repo"] {
-            XCTAssertTrue(element("mcp-repo-section-\(name)").waitForExistence(timeout: 10), "\(name) has a section.")
+            XCTAssertTrue(element("mcp-repo-section-\(name)").waitToExist(timeout: 10), "\(name) has a section.")
         }
         XCTAssertTrue(element("mcp-empty-mcp-empty-repo").exists, "A repository without servers shows an empty state.")
         XCTAssertTrue(element("mcp-file-problem").exists, "An unreadable config file is reported.")
@@ -18606,7 +18638,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "MCP Repo tab lists each repository's servers")
 
         selectSkillsTab("Global", picker: "mcp-tab-picker")
-        XCTAssertTrue(element("mcp-row-shared").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("mcp-row-shared").waitToExist(timeout: 5))
         XCTAssertTrue(element("mcp-native-shared").exists, "A server both global files define the same way is one entry both CLIs start.")
         XCTAssertFalse(element("mcp-shared-shared").exists)
         XCTAssertTrue(element("mcp-conflict-clash").exists, "Two global definitions that differ are a conflict.")
@@ -18622,8 +18654,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "MCP Global tab")
         // The inline server is last on a long list, below the visible part of the page.
         XCTAssertTrue(scrollFullyIntoView(element("mcp-row-inline-tool"), in: element("mcp-list")), "The inline server scrolls into view.")
-        element("mcp-row-inline-tool").click()
-        XCTAssertTrue(element("mcp-editor-panel").waitForExistence(timeout: 5), "An inline server opens to read.")
+        XCTAssertTrue(openPanel("mcp-editor-panel", with: element("mcp-row-inline-tool")), "An inline server opens to read.")
         XCTAssertFalse(element("mcp-editor-save").exists, "An inline config.toml server opens without Save.")
         XCTAssertTrue(accessibleLabelOrValue(of: element("mcp-editor-read-only")).contains("inline"), "The editor says why it is read-only.")
         attachScreenshot(named: "An inline config.toml server opens read-only")
@@ -18632,14 +18663,14 @@ final class PlayhouseUITests: XCTestCase {
         let inlineActions = element("mcp-actions-inline-tool")
         XCTAssertTrue(waitUntil({ inlineActions.isHittable }, timeout: 5))
         inlineActions.click()
-        XCTAssertTrue(app.menuItems["View…"].waitForExistence(timeout: 5), "An inline server offers View rather than Edit.")
+        XCTAssertTrue(app.menuItems["View…"].waitToExist(timeout: 5), "An inline server offers View rather than Edit.")
         XCTAssertFalse(app.menuItems["Delete…"].exists || app.menuItems["Make Available Outside Playhouse…"].exists,
                        "An inline server offers no Delete or link.")
         app.typeKey(.escape, modifierFlags: [])
 
         selectSkillsTab("Managed", picker: "mcp-tab-picker")
         let managed = "managed:company"
-        XCTAssertTrue(element("mcp-row-\(managed)").waitForExistence(timeout: 5), "The managed server is listed.")
+        XCTAssertTrue(element("mcp-row-\(managed)").waitToExist(timeout: 5), "The managed server is listed.")
         XCTAssertTrue(element("mcp-provider-\(managed)-claude").exists)
         XCTAssertFalse(element("mcp-provider-\(managed)-codex").exists, "The managed server is Claude's only.")
         XCTAssertFalse(element("mcp-toggle-\(managed)").exists, "The managed server can't be turned off.")
@@ -18659,7 +18690,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !self.element("skills-page").exists }, timeout: 5), "Back returns to the conversation.")
     }
 
-    // case-contract: test_mcp_create_update_and_delete_in_both_configs | New Server writes a global server straight into both Claude Code's ~/.claude.json mcpServers and Codex's config.toml [mcp_servers] table, with ${NAME} environment references written as Codex env_vars and every other setting, comment and server in both files kept; a repository server goes into the chosen task worktree's .mcp.json and the source checkout is left alone. An invalid name, a missing command, an SSE server, a URL that is not http, an environment reference Codex can't pass through, the managed scope, and an existing name are rejected with nothing written. Clicking a server opens its editor, and saving rewrites it in every file that defines it while keeping each provider's own keys, such as Codex's startup_timeout_sec and Claude's oauth; an invalid edit and an edit to a server written inline in config.toml are rejected while keeping the files. Deleting a server removes it from every file that defines it, and every change is visible to a fresh CLI process and on the page.
+    // case-contract: test_mcp_create_update_and_delete_in_both_configs | New Server writes a global server straight into both Claude Code's ~/.claude.json mcpServers and Codex's config.toml [mcp_servers] table, with ${NAME} environment references written as Codex env_vars and every other setting, comment and server in both files kept; a repository server goes into the chosen task worktree's .mcp.json and the source checkout is left alone. An invalid name, a missing command, an SSE server, a URL that is not http, an environment reference Codex can't pass through, the managed scope, and an existing name are rejected with nothing written. Clicking a server opens its editor, and saving rewrites it in every file that defines it while keeping each provider's own keys, such as Codex's startup_timeout_sec and Claude's oauth; an invalid edit and an edit to a server written inline in config.toml are rejected while keeping the files. Deleting a server removes it from every file that defines it, and every change is visible to a fresh CLI process and on the page. Right after a create closes its panel, one click on New Server opens it again.
     func test_mcp_create_update_and_delete_in_both_configs() throws {
         let repository = try makeSkillRepository("mcp-manage-repo", skills: [:])
         try writeMcpJSON(mcpClaudeState, ["numStartups": 7, "mcpServers": [
@@ -18680,12 +18711,11 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "MCP manage")
         openMcpPage()
 
-        element("new-mcp-server-button").click()
-        XCTAssertTrue(element("mcp-editor-panel").waitForExistence(timeout: 5), "New Server opens its panel.")
+        XCTAssertTrue(openPanel("mcp-editor-panel", with: element("new-mcp-server-button")), "New Server opens its panel.")
         typeIntoField(element("mcp-editor-name"), text: "bad name")
         typeIntoField(element("mcp-editor-command"), text: "npx")
         element("mcp-editor-save").click()
-        XCTAssertTrue(element("mcp-editor-error").waitForExistence(timeout: 5), "An invalid name is rejected in the panel.")
+        XCTAssertTrue(element("mcp-editor-error").waitToExist(timeout: 5), "An invalid name is rejected in the panel.")
         XCTAssertNil((try readMcpJSON(mcpClaudeState)["mcpServers"] as? [String: Any])?["bad name"], "A rejected server writes nothing.")
         attachScreenshot(named: "New Server rejects an invalid name")
         replaceText(in: element("mcp-editor-name"), with: "notes")
@@ -18701,7 +18731,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "New Server panel for a global local command")
         element("mcp-editor-save").click()
         XCTAssertTrue(waitUntil({ !self.element("mcp-editor-panel").exists }, timeout: 10), "Creating closes the panel.")
-        XCTAssertTrue(element("mcp-row-notes").waitForExistence(timeout: 10), "The new global server shows on the Global tab.")
+        XCTAssertTrue(element("mcp-row-notes").waitToExist(timeout: 10), "The new global server shows on the Global tab.")
         XCTAssertTrue(element("mcp-native-notes").exists, "A new global server is in both CLIs' configuration.")
         let state = try readMcpJSON(mcpClaudeState)
         let notes = try XCTUnwrap((state["mcpServers"] as? [String: Any])?["notes"] as? [String: Any])
@@ -18716,10 +18746,9 @@ final class PlayhouseUITests: XCTestCase {
         }
         attachScreenshot(named: "A new global server both CLIs start")
 
-        element("new-mcp-server-button").click()
-        XCTAssertTrue(element("mcp-editor-panel").waitForExistence(timeout: 5))
+        XCTAssertTrue(openPanel("mcp-editor-panel", with: element("new-mcp-server-button")))
         element("mcp-editor-scope").click()
-        XCTAssertTrue(app.menuItems["mcp-manage-repo"].waitForExistence(timeout: 5), "New Server can save into the task's repository.")
+        XCTAssertTrue(app.menuItems["mcp-manage-repo"].waitToExist(timeout: 5), "New Server can save into the task's repository.")
         app.menuItems["mcp-manage-repo"].click()
         selectSkillsTab("Remote HTTP", picker: "mcp-editor-kind")
         typeIntoField(element("mcp-editor-name"), text: "repo-search")
@@ -18727,7 +18756,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(accessibleLabelOrValue(of: element("mcp-editor-target")).contains(".mcp.json"))
         element("mcp-editor-save").click()
         XCTAssertTrue(waitUntil({ !self.element("mcp-editor-panel").exists }, timeout: 10))
-        XCTAssertTrue(element("mcp-row-mcp-manage-repo:repo-search").waitForExistence(timeout: 10), "The repository server shows on the Repo tab.")
+        XCTAssertTrue(element("mcp-row-mcp-manage-repo:repo-search").waitToExist(timeout: 10), "The repository server shows on the Repo tab.")
         XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-mcp-manage-repo:repo-search")), "Playhouse passes it to Codex.")
         let projectJSON = try readMcpJSON(worktree.appendingPathComponent(".mcp.json"))
         XCTAssertEqual(((projectJSON["mcpServers"] as? [String: Any])?["repo-search"] as? [String: Any])?["url"] as? String, "https://search.example.com/mcp")
@@ -18748,13 +18777,12 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: mcpCodexConfig, encoding: .utf8), beforeRejected.1, "A rejected server writes nothing to Codex's file.")
 
         selectSkillsTab("Global", picker: "mcp-tab-picker")
-        element("mcp-row-legacy").click()
-        XCTAssertTrue(element("mcp-editor-panel").waitForExistence(timeout: 5), "Clicking a server opens its editor.")
+        XCTAssertTrue(openPanel("mcp-editor-panel", with: element("mcp-row-legacy")), "Clicking a server opens its editor.")
         let url = element("mcp-editor-url")
         XCTAssertEqual(url.value as? String, "https://legacy.example.com/mcp", "The editor opens the server's definition.")
         replaceText(in: url, with: "ftp://legacy.example.com")
         element("mcp-editor-save").click()
-        XCTAssertTrue(element("mcp-editor-error").waitForExistence(timeout: 5), "An invalid edit is rejected in the editor.")
+        XCTAssertTrue(element("mcp-editor-error").waitToExist(timeout: 5), "An invalid edit is rejected in the editor.")
         XCTAssertTrue(try String(contentsOf: mcpCodexConfig, encoding: .utf8).contains("url = \"https://legacy.example.com/mcp\""), "A rejected edit keeps the files.")
         replaceText(in: url, with: "https://legacy.example.com/v2")
         attachScreenshot(named: "Editing a global server")
@@ -18774,8 +18802,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: mcpCodexConfig, encoding: .utf8), beforeInline, "An edit to an inline server keeps the file.")
 
         selectSkillsTab("Managed", picker: "mcp-tab-picker")
-        element("mcp-row-managed:company").click()
-        XCTAssertTrue(element("mcp-editor-panel").waitForExistence(timeout: 5), "The managed server opens to read.")
+        XCTAssertTrue(openPanel("mcp-editor-panel", with: element("mcp-row-managed:company")), "The managed server opens to read.")
         XCTAssertFalse(element("mcp-editor-save").exists, "The managed server opens read-only, without Save.")
         element("mcp-editor-cancel").click()
         XCTAssertTrue(waitUntil({ !self.element("mcp-editor-panel").exists }, timeout: 5))
@@ -18818,13 +18845,13 @@ final class PlayhouseUITests: XCTestCase {
         selectSkillsTab("Global", picker: "mcp-tab-picker")
 
         let toggle = element("mcp-toggle-claude-tool")
-        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(toggle.waitToExist(timeout: 10))
         XCTAssertTrue(isOn(toggle))
         toggle.click()
         XCTAssertTrue(waitUntil({ !self.isOn(toggle) }, timeout: 0.75), "The switch flips as soon as it is clicked.")
         XCTAssertTrue(waitUntil({ ((try? server("global:claude-tool"))??["enabled"] as? Bool) == false }, timeout: 10),
                       "Turning a server off is saved where a fresh CLI process reads it.")
-        XCTAssertTrue(element("mcp-always-on-claude-tool").waitForExistence(timeout: 5), "The page says Claude still starts it itself.")
+        XCTAssertTrue(element("mcp-always-on-claude-tool").waitToExist(timeout: 5), "The page says Claude still starts it itself.")
         XCTAssertTrue(element("mcp-provider-claude-tool-claude").exists)
         XCTAssertFalse(element("mcp-provider-claude-tool-codex").exists, "Turning it off stops Codex getting it.")
         XCTAssertEqual(try String(contentsOf: mcpClaudeState, encoding: .utf8), beforeClaude, "Claude Code's configuration is not written.")
@@ -18849,7 +18876,7 @@ final class PlayhouseUITests: XCTestCase {
         let actions = element("mcp-actions-clash")
         XCTAssertTrue(waitUntil({ actions.exists && actions.isHittable }, timeout: 10))
         actions.click()
-        XCTAssertTrue(app.menuItems["Reveal in Finder"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.menuItems["Reveal in Finder"].waitToExist(timeout: 5))
         XCTAssertFalse(app.menuItems["Make Available Outside Playhouse…"].exists, "A conflicting server can't be linked.")
         app.typeKey(.escape, modifierFlags: [])
         assertCLIError(try runCLI(["mcp", "link", "--task", taskID, "--server", "global:clash"], expectedStatus: 2), code: "invalid_argument")
@@ -18857,14 +18884,14 @@ final class PlayhouseUITests: XCTestCase {
 
         clickMcpMenuItem(server: "claude-tool", item: "mcp-link-claude-tool", title: "Make Available Outside Playhouse…")
         clickDialogButton("confirm-link-mcp", title: "Add to Both CLIs")
-        XCTAssertTrue(element("mcp-native-claude-tool").waitForExistence(timeout: 10), "A linked server is one entry both CLIs start.")
+        XCTAssertTrue(element("mcp-native-claude-tool").waitToExist(timeout: 10), "A linked server is one entry both CLIs start.")
         let linkedCodex = try String(contentsOf: mcpCodexConfig, encoding: .utf8)
         XCTAssertTrue(linkedCodex.contains("[mcp_servers.claude-tool]") && linkedCodex.contains("args = [\"--serve\"]"),
                       "A Claude-only server is written into Codex's config.toml.")
         attachScreenshot(named: "A Claude server linked into Codex's config")
         clickMcpMenuItem(server: "codex-tool", item: "mcp-link-codex-tool", title: "Make Available Outside Playhouse…")
         clickDialogButton("confirm-link-mcp", title: "Add to Both CLIs")
-        XCTAssertTrue(element("mcp-native-codex-tool").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("mcp-native-codex-tool").waitToExist(timeout: 10))
         let codexTool = try XCTUnwrap((try readMcpJSON(mcpClaudeState)["mcpServers"] as? [String: Any])?["codex-tool"] as? [String: Any])
         XCTAssertEqual(codexTool["env"] as? [String: String], ["CODEX_KEY": "${CODEX_KEY}"], "A Codex-only server is written into Claude Code's file.")
 
@@ -18872,7 +18899,7 @@ final class PlayhouseUITests: XCTestCase {
         let repoTool = "mcp-link-repo:repo-tool"
         clickMcpMenuItem(server: repoTool, item: "mcp-link-\(repoTool)", title: "Make Available Outside Playhouse…")
         clickDialogButton("confirm-link-mcp", title: "Add to Both CLIs")
-        XCTAssertTrue(element("mcp-native-\(repoTool)").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("mcp-native-\(repoTool)").waitToExist(timeout: 10))
         XCTAssertTrue(try String(contentsOf: worktree.appendingPathComponent(".codex/config.toml"), encoding: .utf8).contains("[mcp_servers.repo-tool]"),
                       "A repository server is written into the worktree's .codex/config.toml.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: repository.appendingPathComponent(".codex").path), "The source checkout is left alone.")
@@ -18903,11 +18930,11 @@ final class PlayhouseUITests: XCTestCase {
 
         openTask(named: "MCP fix source")
         openMcpPage()
-        XCTAssertTrue(element("mcp-fix-mcp-fix-repo:repo-clash").waitForExistence(timeout: 10), "A conflicting server offers Fix with Agent.")
+        XCTAssertTrue(element("mcp-fix-mcp-fix-repo:repo-clash").waitToExist(timeout: 10), "A conflicting server offers Fix with Agent.")
         XCTAssertTrue(element("mcp-conflict-mcp-fix-repo:repo-clash").exists)
         XCTAssertFalse(element("mcp-fix-mcp-fix-repo:fine").exists, "A server without a problem has nothing to fix.")
         selectSkillsTab("Global", picker: "mcp-tab-picker")
-        XCTAssertTrue(element("mcp-fix-clash").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("mcp-fix-clash").waitToExist(timeout: 5))
         attachScreenshot(named: "A conflicting global server offers Fix with Agent")
 
         element("mcp-fix-clash").click()
@@ -18926,7 +18953,7 @@ final class PlayhouseUITests: XCTestCase {
 
         openTask(named: "MCP fix source")
         openMcpPage()
-        XCTAssertTrue(element("mcp-fix-mcp-fix-repo:repo-clash").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("mcp-fix-mcp-fix-repo:repo-clash").waitToExist(timeout: 10))
         element("mcp-fix-mcp-fix-repo:repo-clash").click()
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Fix MCP server repo-clash" }, timeout: 15))
         let fixing = try XCTUnwrap(try boardTaskRecords().first { $0["title"] as? String == "Fix MCP server repo-clash" })
@@ -18972,13 +18999,13 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Claude MCP")
         openMcpPage()
         let repoOff = "mcp-claude-repo:repo-off"
-        XCTAssertTrue(element("mcp-toggle-\(repoOff)").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("mcp-toggle-\(repoOff)").waitToExist(timeout: 10))
         element("mcp-toggle-\(repoOff)").click()
         XCTAssertTrue(waitUntil({ !self.isOn(self.element("mcp-toggle-\(repoOff)")) }, timeout: 10))
         XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-mcp-claude-extra:extra-api")), "Playhouse passes it to Claude and Codex.")
         XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-mcp-claude-repo:repo-codex")), "Playhouse passes it to Claude and Codex.")
         selectSkillsTab("Global", picker: "mcp-tab-picker")
-        XCTAssertTrue(element("mcp-toggle-codex-off").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("mcp-toggle-codex-off").waitToExist(timeout: 5))
         element("mcp-toggle-codex-off").click()
         XCTAssertTrue(waitUntil({ !self.isOn(self.element("mcp-toggle-codex-off")) }, timeout: 10))
         XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-codex-tool")), "Playhouse passes it to Claude.")
@@ -19009,7 +19036,7 @@ final class PlayhouseUITests: XCTestCase {
 
         openMcpPage()
         selectSkillsTab("Global", picker: "mcp-tab-picker")
-        XCTAssertTrue(element("mcp-toggle-codex-off").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("mcp-toggle-codex-off").waitToExist(timeout: 5))
         element("mcp-toggle-codex-off").click()
         XCTAssertTrue(waitUntil({ self.isOn(self.element("mcp-toggle-codex-off")) }, timeout: 10))
         element("skills-back-button").click()
@@ -19048,7 +19075,7 @@ final class PlayhouseUITests: XCTestCase {
             return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
         }
         func answerQuestionIfAsked() {
-            guard element("ai-question-form-title").waitForExistence(timeout: 10) else { return }
+            guard element("ai-question-form-title").waitToExist(timeout: 10) else { return }
             selectQuestionOption("Blue")
             typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
             element("submit-ai-answers-button").click()
@@ -19057,14 +19084,14 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Codex MCP")
         openMcpPage()
         let sse = "mcp-codex-repo:repo-sse"
-        XCTAssertTrue(element("mcp-row-\(sse)").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("mcp-row-\(sse)").waitToExist(timeout: 10))
         XCTAssertFalse(element("mcp-provider-\(sse)-codex").exists, "Codex can't run an SSE server.")
         let repoCodexOff = "mcp-codex-repo:repo-codex-off"
         XCTAssertTrue(element("mcp-toggle-\(repoCodexOff)").exists)
         element("mcp-toggle-\(repoCodexOff)").click()
         XCTAssertTrue(waitUntil({ !self.isOn(self.element("mcp-toggle-\(repoCodexOff)")) }, timeout: 10))
         selectSkillsTab("Global", picker: "mcp-tab-picker")
-        XCTAssertTrue(element("mcp-toggle-codex-off").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("mcp-toggle-codex-off").waitToExist(timeout: 5))
         element("mcp-toggle-codex-off").click()
         XCTAssertTrue(waitUntil({ !self.isOn(self.element("mcp-toggle-codex-off")) }, timeout: 10))
         XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-claude-remote")), "Playhouse passes it to Codex.")
@@ -19098,11 +19125,11 @@ final class PlayhouseUITests: XCTestCase {
         let resumesBefore = history()["threadResumeCount"] as? Int ?? 0
         openMcpPage()
         selectSkillsTab("Global", picker: "mcp-tab-picker")
-        XCTAssertTrue(element("mcp-toggle-codex-off").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("mcp-toggle-codex-off").waitToExist(timeout: 5))
         element("mcp-toggle-codex-off").click()
         XCTAssertTrue(waitUntil({ self.isOn(self.element("mcp-toggle-codex-off")) }, timeout: 10))
         selectSkillsTab("Repo", picker: "mcp-tab-picker")
-        XCTAssertTrue(element("mcp-toggle-mcp-codex-repo:repo-tool").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("mcp-toggle-mcp-codex-repo:repo-tool").waitToExist(timeout: 5))
         element("mcp-toggle-mcp-codex-repo:repo-tool").click()
         XCTAssertTrue(waitUntil({ !self.isOn(self.element("mcp-toggle-mcp-codex-repo:repo-tool")) }, timeout: 10))
         element("skills-back-button").click()
@@ -19148,14 +19175,14 @@ final class PlayhouseUITests: XCTestCase {
         let taskID = try XCTUnwrap(task["id"] as? String)
         openTask(named: "MCP status")
         openMcpPage()
-        XCTAssertTrue(element("mcp-checking-status").waitForExistence(timeout: 10), "The page shows it is checking as soon as it opens.")
+        XCTAssertTrue(element("mcp-checking-status").waitToExist(timeout: 10), "The page shows it is checking as soon as it opens.")
         XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-checking-status")), "Checking sign-in…")
         XCTAssertFalse(element("mcp-signin-claude-remote-claude").exists, "No badge shows before the agents have answered.")
         attachScreenshot(named: "Checking sign-in while the agents answer")
         XCTAssertFalse(element("mcp-check-status").exists, "There is no button to press: the page checks on its own.")
         selectSkillsTab("Global", picker: "mcp-tab-picker")
-        XCTAssertTrue(element("mcp-row-claude-remote").waitForExistence(timeout: 10))
-        XCTAssertTrue(element("mcp-signin-claude-remote-claude").waitForExistence(timeout: 30),
+        XCTAssertTrue(element("mcp-row-claude-remote").waitToExist(timeout: 10))
+        XCTAssertTrue(element("mcp-signin-claude-remote-claude").waitToExist(timeout: 30),
                       "A server Claude can't start without a sign-in is marked as soon as the page has asked.")
         XCTAssertTrue(element("mcp-signin-codex-remote-codex").exists, "A server Codex can't start without a sign-in is marked.")
         XCTAssertFalse(element("mcp-signin-codex-tool-codex").exists, "A server that needs no sign-in is not marked.")
@@ -19163,7 +19190,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("mcp-error").exists, "Both agents answered.")
         attachScreenshot(named: "Opening the page marks servers that need a sign-in")
         selectSkillsTab("Managed", picker: "mcp-tab-picker")
-        XCTAssertTrue(element("mcp-connector-claude.ai Notes").waitForExistence(timeout: 5), "A claude.ai connector is listed.")
+        XCTAssertTrue(element("mcp-connector-claude.ai Notes").waitToExist(timeout: 5), "A claude.ai connector is listed.")
         let connectorSignIn = element("mcp-connector-signin-claude.ai Notes")
         XCTAssertTrue(connectorSignIn.exists, "A connector that needs a sign-in has the same badge.")
         XCTAssertTrue(connectorSignIn.isEnabled && connectorSignIn.isHittable, "The badge is a button, not a label.")
@@ -19180,8 +19207,8 @@ final class PlayhouseUITests: XCTestCase {
         try "Fail the status request.\n".write(to: codexStatusFail, atomically: true, encoding: .utf8)
         selectSkillsTab("Skills", picker: "skills-kind-picker")
         selectSkillsTab("MCP", picker: "skills-kind-picker")
-        XCTAssertTrue(element("mcp-page").waitForExistence(timeout: 10))
-        XCTAssertTrue(element("mcp-checking-status").waitForExistence(timeout: 10), "Opening the page checks again.")
+        XCTAssertTrue(element("mcp-page").waitToExist(timeout: 10))
+        XCTAssertTrue(element("mcp-checking-status").waitToExist(timeout: 10), "Opening the page checks again.")
         selectSkillsTab("Global", picker: "mcp-tab-picker")
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("mcp-error")).contains("Codex") }, timeout: 30),
                       "An agent that can't be asked is reported by name.")
@@ -19247,7 +19274,7 @@ final class PlayhouseUITests: XCTestCase {
         selectSkillsTab("Global", picker: "mcp-tab-picker")
 
         let claudeBadge = element("mcp-signin-shared-remote-claude")
-        XCTAssertTrue(claudeBadge.waitForExistence(timeout: 30), "The sign-in badges show up without pressing anything.")
+        XCTAssertTrue(claudeBadge.waitToExist(timeout: 30), "The sign-in badges show up without pressing anything.")
         XCTAssertTrue(element("mcp-signin-codex-remote-codex").exists)
         let sharedCodexBadge = element("mcp-signin-shared-remote-codex")
         XCTAssertTrue(sharedCodexBadge.exists, "A server both agents have gets a sign-in button for each of them on the same row.")
@@ -19325,10 +19352,10 @@ final class PlayhouseUITests: XCTestCase {
 
         app.typeKey(",", modifierFlags: .command)
         let preferences = settingsWindow
-        XCTAssertTrue(preferences.waitForExistence(timeout: 10), "Workspace Settings did not open.")
+        XCTAssertTrue(preferences.waitToExist(timeout: 10), "Workspace Settings did not open.")
         let maxField = preferences.descendants(matching: .any)
             .matching(identifier: "cpu-usage-color-max-field").firstMatch
-        XCTAssertTrue(maxField.waitForExistence(timeout: 5), "Settings should expose the CPU usage maximum.")
+        XCTAssertTrue(maxField.waitToExist(timeout: 5), "Settings should expose the CPU usage maximum.")
         XCTAssertEqual(maxField.value as? String, expectedDefault.formatted(), "The field should show the stored maximum.")
         attachScreenshot(named: "Workspace Settings exposes the CPU usage color maximum")
         maxField.click()
@@ -19391,7 +19418,7 @@ final class PlayhouseUITests: XCTestCase {
     func test_plugin_renderer_commits_minimal_ops_and_runs_handlers() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
-        XCTAssertTrue(element("plugin-catalog-atom-Stack").waitForExistence(timeout: 15), "Plugins ▸ Plugin Catalog opens the catalog.")
+        XCTAssertTrue(element("plugin-catalog-atom-Stack").waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog opens the catalog.")
         XCTAssertTrue(element("plugin-catalog-task-item").exists, "The sidebar lists the Task Item example.")
 
         let rendered = try XCTUnwrap(try runCLI(["plugin", "render", "--page", "Stack"])["result"] as? [String: Any])
@@ -19400,14 +19427,14 @@ final class PlayhouseUITests: XCTestCase {
         try assertPluginValuesCrossWithJSONRules()
         for atom in atoms {
             let row = element("plugin-catalog-atom-\(atom)")
-            XCTAssertTrue(row.waitForExistence(timeout: 10), "The sidebar lists the \(atom) atom.")
+            XCTAssertTrue(row.waitToExist(timeout: 10), "The sidebar lists the \(atom) atom.")
             row.click()
             let title = element("plugin-catalog-title")
             XCTAssertTrue(waitUntil({ title.exists && self.pluginText(title) == atom }, timeout: 10), "Selecting \(atom) shows its page.")
             let surface = element("plugin-catalog-surface")
-            XCTAssertTrue(surface.waitForExistence(timeout: 10), "The \(atom) page renders its JavaScript page.")
+            XCTAssertTrue(surface.waitToExist(timeout: 10), "The \(atom) page renders its JavaScript page.")
             let commit = element("plugin-last-commit")
-            XCTAssertTrue(commit.waitForExistence(timeout: 10), "The \(atom) page committed its first render.")
+            XCTAssertTrue(commit.waitToExist(timeout: 10), "The \(atom) page committed its first render.")
             XCTAssertTrue(pluginText(commit).hasPrefix("Commit 1: initial render"), pluginText(commit))
             XCTAssertFalse(element("plugin-error").exists, "The \(atom) page renders without a plugin error.")
             XCTAssertFalse(element("plugin-node-error").exists, "Every node on the \(atom) page has a registered atom.")
@@ -19416,12 +19443,12 @@ final class PlayhouseUITests: XCTestCase {
         }
 
         element("plugin-catalog-atom-Text").click()
-        XCTAssertTrue(element("text-title").waitForExistence(timeout: 10), "Text atoms render natively from the JavaScript page.")
+        XCTAssertTrue(element("text-title").waitToExist(timeout: 10), "Text atoms render natively from the JavaScript page.")
         XCTAssertEqual(pluginText(element("text-title")), "Title: 13 semibold, tracking 0.35")
 
         element("plugin-catalog-atom-Button").click()
         let pressCount = element("button-press-count")
-        XCTAssertTrue(pressCount.waitForExistence(timeout: 10))
+        XCTAssertTrue(pressCount.waitToExist(timeout: 10))
         XCTAssertEqual(pluginText(pressCount), "Pressed 0 times")
         element("button-plain").click()
         XCTAssertTrue(waitUntil({ self.pluginText(pressCount) == "Pressed 1 times" }, timeout: 5), "The tap ran the JavaScript onPress handler.")
@@ -19512,12 +19539,12 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
         let example = element("plugin-catalog-task-item")
-        XCTAssertTrue(example.waitForExistence(timeout: 15), "Plugins ▸ Plugin Catalog lists the Task Item example.")
+        XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Task Item example.")
         example.click()
         let jsSide = element("plugin-catalog-js-task-item")
         let nativeSide = element("plugin-catalog-native-task-item")
-        XCTAssertTrue(jsSide.waitForExistence(timeout: 10), "The page shows the JavaScript task item.")
-        XCTAssertTrue(nativeSide.waitForExistence(timeout: 10), "The page shows the native task item.")
+        XCTAssertTrue(jsSide.waitToExist(timeout: 10), "The page shows the JavaScript task item.")
+        XCTAssertTrue(nativeSide.waitToExist(timeout: 10), "The page shows the native task item.")
         XCTAssertFalse(element("plugin-error").exists, "The JavaScript task item renders without errors.")
 
         let id = "C0FFEE00-0000-4000-8000-000000000001"
@@ -19529,8 +19556,8 @@ final class PlayhouseUITests: XCTestCase {
                       ("task-pr-mode-", ""), ("task-pr-link-", "-193")]
         for (prefix, suffix) in shared {
             let (js, native) = pair(prefix, suffix)
-            XCTAssertTrue(js.waitForExistence(timeout: 10), "The JavaScript item has \(prefix)…")
-            XCTAssertTrue(native.waitForExistence(timeout: 10), "The native item has \(prefix)…")
+            XCTAssertTrue(js.waitToExist(timeout: 10), "The JavaScript item has \(prefix)…")
+            XCTAssertTrue(native.waitToExist(timeout: 10), "The native item has \(prefix)…")
             XCTAssertEqual(js.frame.width, native.frame.width, accuracy: 1, "\(prefix) has the same width in both.")
             XCTAssertEqual(js.frame.height, native.frame.height, accuracy: 1, "\(prefix) has the same height in both.")
         }
@@ -19574,7 +19601,7 @@ final class PlayhouseUITests: XCTestCase {
 
         pair("task-pr-mode-").js.click()
         let merge = element("task-pr-mode-merge-\(id)")
-        XCTAssertTrue(merge.waitForExistence(timeout: 5), "The mode pill opens into every mode.")
+        XCTAssertTrue(merge.waitToExist(timeout: 5), "The mode pill opens into every mode.")
         merge.click()
         XCTAssertTrue(waitUntil({ self.pluginText(self.element("js-last-action")) == "Last: mode merge" }, timeout: 5), "Choosing Merge ran onChange.")
         XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 4: update, text → nodes ") }, timeout: 5),
@@ -19584,7 +19611,7 @@ final class PlayhouseUITests: XCTestCase {
 
         jsCard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)).rightClick()
         let moveToDone = element("move-task-to-done-menu-item")
-        XCTAssertTrue(moveToDone.waitForExistence(timeout: 5), "The JavaScript card's context menu lists Move to Done.")
+        XCTAssertTrue(moveToDone.waitToExist(timeout: 5), "The JavaScript card's context menu lists Move to Done.")
         XCTAssertTrue(element("rename-task-menu-item").exists && element("delete-task-menu-item").exists,
                       "It has the native card's menu items.")
         moveToDone.click()
@@ -19594,11 +19621,11 @@ final class PlayhouseUITests: XCTestCase {
 
     private func clickPluginsMenuItem(_ title: String) {
         let menu = app.menuBars.menuBarItems["Plugins"]
-        XCTAssertTrue(menu.waitForExistence(timeout: 10), "The app menu has a Plugins menu.")
+        XCTAssertTrue(menu.waitToExist(timeout: 10), "The app menu has a Plugins menu.")
         menu.click()
         // Scoped to the Plugins menu: the Window menu also lists the catalog window by title.
         let item = menu.menuItems[title]
-        XCTAssertTrue(item.waitForExistence(timeout: 5), "The Plugins menu has \(title).")
+        XCTAssertTrue(item.waitToExist(timeout: 5), "The Plugins menu has \(title).")
         item.click()
     }
 
@@ -19637,7 +19664,7 @@ final class PlayhouseUITests: XCTestCase {
             let windowMenu = app.menuBars.menuBarItems["Window"]
             windowMenu.click()
             let zoom = app.menuItems["Zoom"]
-            if zoom.waitForExistence(timeout: 2) {
+            if zoom.waitToExist(timeout: 2) {
                 zoom.click()
             } else {
                 app.typeKey("z", modifierFlags: [.command, .option])
@@ -19682,14 +19709,14 @@ final class PlayhouseUITests: XCTestCase {
     private func waitForBoardOrAbortSuite() {
         let boardTitle = element("board-title")
         if waitUntil({ self.isPlayhouseFrontmost }, timeout: 3),
-           boardTitle.waitForExistence(timeout: 6) {
+           boardTitle.waitToExist(timeout: 6) {
             return
         }
 
         let relaunchedAfterMissingWindow: Bool
         if terminateAppAndWait(app, timeout: 8) {
             launchAppWithOpen()
-            relaunchedAfterMissingWindow = boardTitle.waitForExistence(timeout: 8)
+            relaunchedAfterMissingWindow = boardTitle.waitToExist(timeout: 8)
         } else {
             relaunchedAfterMissingWindow = false
         }
@@ -19812,10 +19839,10 @@ final class PlayhouseUITests: XCTestCase {
     private func openNewTaskConversation() {
         app.activate()
         element("new-task-button").click()
-        XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10), "New Task should create and open an empty conversation.")
+        XCTAssertTrue(element("empty-conversation").waitToExist(timeout: 10), "New Task should create and open an empty conversation.")
         XCTAssertFalse(element("conversation-repository-search").exists, "A new conversation should keep its repository picker closed.")
         let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10), "A new conversation should focus the chat composer.")
+        XCTAssertTrue(composer.waitToExist(timeout: 10), "A new conversation should focus the chat composer.")
         app.typeKey("x", modifierFlags: [])
         XCTAssertEqual(composer.value as? String, "x", "The chat composer should receive keyboard input immediately.")
         app.typeKey(XCUIKeyboardKey.delete.rawValue, modifierFlags: [])
@@ -19837,7 +19864,7 @@ final class PlayhouseUITests: XCTestCase {
     /// typeText then fails with "Neither element nor any descendant has
     /// keyboard focus".
     private func typeIntoField(_ field: XCUIElement, text: String, file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertTrue(field.waitForExistence(timeout: 5), "Text field is missing.", file: file, line: line)
+        XCTAssertTrue(field.waitToExist(timeout: 5), "Text field is missing.", file: file, line: line)
         waitForStableFrame(field)
         field.click()
         if !waitUntil({ (field.value(forKey: "hasKeyboardFocus") as? Bool) == true }, timeout: 2) {
@@ -19852,8 +19879,17 @@ final class PlayhouseUITests: XCTestCase {
     /// moment the title exists can land before the option is in place, leaving
     /// nothing selected and a Submit click that does nothing.
     private func selectQuestionOption(_ label: String, file: StaticString = #filePath, line: UInt = #line) {
-        let option = app.buttons.matching(NSPredicate(format: "label == %@", label)).firstMatch
-        XCTAssertTrue(option.waitForExistence(timeout: 5), "Question option is missing: \(label)", file: file, line: line)
+        selectQuestionOption(app.buttons.matching(NSPredicate(format: "label == %@", label)).firstMatch, named: label, file: file, line: line)
+    }
+
+    /// The same, for an option named by its accessibility identifier, where
+    /// several questions in one form offer the same label.
+    private func selectQuestionOption(identifier: String, file: StaticString = #filePath, line: UInt = #line) {
+        selectQuestionOption(element(identifier), named: identifier, file: file, line: line)
+    }
+
+    private func selectQuestionOption(_ option: XCUIElement, named label: String, file: StaticString, line: UInt) {
+        XCTAssertTrue(option.waitToExist(timeout: 5), "Question option is missing: \(label)", file: file, line: line)
         XCTAssertTrue(waitForStableFrame(option), "Question option should settle in place: \(label)", file: file, line: line)
         option.click()
         XCTAssertTrue(
@@ -19872,6 +19908,17 @@ final class PlayhouseUITests: XCTestCase {
             if frame != previous { previous = frame; stableSince = Date() }
             return !frame.isEmpty && Date().timeIntervalSince(stableSince) >= 0.4
         }, timeout: timeout)
+    }
+
+    /// Opens a slide-up panel (skills, rules, MCP) with one click on `control`
+    /// and waits for it to finish sliding in, so the next click lands on a
+    /// control that has stopped moving. One click must be enough, including
+    /// right after another panel closed: a closed panel's overlay must not catch
+    /// clicks, even while its scrim is still fading out.
+    private func openPanel(_ identifier: String, with control: XCUIElement, timeout: TimeInterval = 5) -> Bool {
+        let panel = element(identifier)
+        control.click()
+        return panel.waitToExist(timeout: timeout) && waitForStableFrame(panel)
     }
 
     private func waitUntil(_ condition: () -> Bool, timeout: TimeInterval) -> Bool {
@@ -19916,7 +19963,7 @@ final class PlayhouseUITests: XCTestCase {
         composer.click()
         composer.typeText(prompt ?? title)
         element("back-to-board-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "Returning to the board should preserve the automatically saved prompt.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10), "Returning to the board should preserve the automatically saved prompt.")
         guard let task = try? tasksFromBoardList().first, let taskID = task["id"] as? String else {
             XCTFail("The created task should remain in Backlog after saving its prompt.")
             return
@@ -19934,25 +19981,25 @@ final class PlayhouseUITests: XCTestCase {
             element("add-conversation-repository-button").click()
             searchField = element("conversation-repository-search")
         }
-        XCTAssertTrue(searchField.waitForExistence(timeout: 5), "The conversation picker should be open before choosing a repository.")
+        XCTAssertTrue(searchField.waitToExist(timeout: 5), "The conversation picker should be open before choosing a repository.")
         searchField.click()
         replaceText(searchField, with: name)
         let suggestion = element("conversation-repository-suggestion-\(name)")
-        XCTAssertTrue(suggestion.waitForExistence(timeout: 10), "No repository suggestion for \(name).")
+        XCTAssertTrue(suggestion.waitToExist(timeout: 10), "No repository suggestion for \(name).")
         XCTAssertTrue(suggestion.isHittable, "Repository suggestion \(name) should be reachable in the scrolling picker.")
         suggestion.click()
-        XCTAssertTrue(element("conversation-repository-badge-\(name)").waitForExistence(timeout: 10), "The selected repository should appear in the conversation header.")
+        XCTAssertTrue(element("conversation-repository-badge-\(name)").waitToExist(timeout: 10), "The selected repository should appear in the conversation header.")
     }
 
     private func setConversationRepositoryField(_ repositoryName: String, field: String, value: String) {
         let badge = element("conversation-repository-badge-\(repositoryName)")
-        XCTAssertTrue(badge.waitForExistence(timeout: 5), "The conversation should show \(repositoryName) before editing its settings.")
+        XCTAssertTrue(badge.waitToExist(timeout: 5), "The conversation should show \(repositoryName) before editing its settings.")
         badge.click()
         let edit = element("conversation-repository-\(field)-edit")
-        XCTAssertTrue(edit.waitForExistence(timeout: 5), "The conversation repository settings should expose the \(field) edit control.")
+        XCTAssertTrue(edit.waitToExist(timeout: 5), "The conversation repository settings should expose the \(field) edit control.")
         edit.click()
         let fieldElement = element("conversation-repository-\(field)")
-        XCTAssertTrue(fieldElement.waitForExistence(timeout: 5))
+        XCTAssertTrue(fieldElement.waitToExist(timeout: 5))
         replaceText(fieldElement, with: value)
         element("conversation-repository-\(field)-save").click()
         XCTAssertTrue(waitUntil({
@@ -19994,7 +20041,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ backToBoard.isHittable }, timeout: 5), "The back-to-board button never became clickable.")
         XCTAssertTrue(waitForStableFrame(backToBoard), "The back-to-board button kept moving.")
         backToBoard.click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5), "Clicking back-to-board should show the board.")
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 5), "Clicking back-to-board should show the board.")
     }
 
     private func openTask(named title: String, horizontalRecovery: Bool = false) {
@@ -20003,18 +20050,18 @@ final class PlayhouseUITests: XCTestCase {
         // re-render), so wait for it instead of silently staying in the task.
         let backToBoard = element("back-to-board-button")
         let boardTitle = element("board-title")
-        if backToBoard.exists || (!boardTitle.exists && backToBoard.waitForExistence(timeout: 2)) {
+        if backToBoard.exists || (!boardTitle.exists && backToBoard.waitToExist(timeout: 2)) {
             // A caller may already be mid-transition to the board (it clicked
             // back itself); then the lingering button never becomes hittable
             // and the board arriving is the success case.
             XCTAssertTrue(waitUntil({ boardTitle.exists || backToBoard.isHittable }, timeout: 5), "Neither the board nor a clickable back-to-board button appeared.")
             if !boardTitle.exists {
                 backToBoard.click()
-                XCTAssertTrue(boardTitle.waitForExistence(timeout: 5))
+                XCTAssertTrue(boardTitle.waitToExist(timeout: 5))
             }
         }
         let card = app.buttons.matching(NSPredicate(format: "label == %@", title)).firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 10), "Task card is missing: \(title)")
+        XCTAssertTrue(card.waitToExist(timeout: 10), "Task card is missing: \(title)")
         if !card.isHittable {
             let board = element("board-columns-scroll-view")
             if horizontalRecovery {
@@ -20035,7 +20082,16 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(card.isHittable, "Task card must be hittable after bounded board scrolling.")
         }
         clickTaskCardTitle(card)
-        XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10), "Clicking the task card title should open the task.")
+        XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10), "Clicking the task card title should open the task.")
+        waitForConversationLoad()
+    }
+
+    /// The history, pending question and unsent draft land after the task view
+    /// appears; reading or scrolling the transcript before then sees an empty task.
+    private func waitForConversationLoad(file: StaticString = #filePath, line: UInt = #line) {
+        let transcript = element("conversation-scroll-view")
+        XCTAssertTrue(waitUntil({ transcript.exists && transcript.value as? String != "Loading conversation history" }, timeout: 15),
+                      "The opened conversation's history should finish loading.", file: file, line: line)
     }
 
     /// Scrolls the board's columns sideways until `target` lies fully inside the
@@ -20044,7 +20100,7 @@ final class PlayhouseUITests: XCTestCase {
     /// controls sit: they stay in the hierarchy but take no hover or click.
     private func revealOnBoard(_ target: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         let board = element("board-columns-scroll-view")
-        XCTAssertTrue(target.waitForExistence(timeout: 5), "Board control is missing: \(target.identifier)", file: file, line: line)
+        XCTAssertTrue(target.waitToExist(timeout: 5), "Board control is missing: \(target.identifier)", file: file, line: line)
         // A negative delta moves the columns left, revealing content on the right;
         // flip it once if a step moved the control the wrong way.
         var direction: CGFloat = -1
@@ -20065,7 +20121,7 @@ final class PlayhouseUITests: XCTestCase {
     /// plain card.click() may open that control instead of the task.
     private func clickTaskCardTitle(_ card: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         let cardTitle = element(card.identifier.replacingOccurrences(of: "task-card-", with: "task-title-"))
-        XCTAssertTrue(cardTitle.waitForExistence(timeout: 5), "Task card title is missing: \(card.identifier)", file: file, line: line)
+        XCTAssertTrue(cardTitle.waitToExist(timeout: 5), "Task card title is missing: \(card.identifier)", file: file, line: line)
         let titleCenter = CGPoint(x: cardTitle.frame.midX, y: cardTitle.frame.midY)
         XCTAssertTrue(card.frame.contains(titleCenter), "Task card title must lie inside the visible card.", file: file, line: line)
         cardTitle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
@@ -20097,7 +20153,7 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText(prompt)
         element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("ai-question-form-title").waitToExist(timeout: 10))
         selectQuestionOption("Blue")
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
@@ -20118,7 +20174,7 @@ final class PlayhouseUITests: XCTestCase {
                 "Answers received: Blue / fixture-secret."
             )
         ).firstMatch
-        XCTAssertTrue(answer.waitForExistence(timeout: 10))
+        XCTAssertTrue(answer.waitToExist(timeout: 10))
         let expectedStatus = expectedFinalStatus ?? (reportCompletedOutcome ? "Review" : "Waiting Response")
         XCTAssertTrue(waitUntil({
             (try? self.taskRecord(id: taskID)?["status"] as? String) == expectedStatus
@@ -20130,23 +20186,23 @@ final class PlayhouseUITests: XCTestCase {
         let backToBoard = element("back-to-board-button")
         if backToBoard.exists, backToBoard.isHittable {
             backToBoard.click()
-            XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+            XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         }
         let column = element("column-\(status.lowercased().replacingOccurrences(of: " ", with: "-"))")
-        XCTAssertTrue(column.waitForExistence(timeout: 5), "Missing \(status) column.")
-        XCTAssertTrue(column.buttons[title].waitForExistence(timeout: 8), "\(title) is not in \(status).")
+        XCTAssertTrue(column.waitToExist(timeout: 5), "Missing \(status) column.")
+        XCTAssertTrue(column.buttons[title].waitToExist(timeout: 8), "\(title) is not in \(status).")
     }
 
     private func assertTaskArchived(_ title: String) throws {
         let taskID = try taskID(named: title)
         element("done-archive-button").click()
-        XCTAssertTrue(element("done-archive-task-\(taskID)").waitForExistence(timeout: 10), "\(title) should appear in the completed task archive.")
+        XCTAssertTrue(element("done-archive-task-\(taskID)").waitToExist(timeout: 10), "\(title) should appear in the completed task archive.")
         element("close-done-archive-button").click()
     }
 
     private func moveTaskToDone(_ title: String) {
         let card = app.buttons[title].firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        XCTAssertTrue(card.waitToExist(timeout: 5))
         dragTaskToDone(card)
         XCTAssertTrue(waitUntil({
             do { return try taskRecord(named: title)?["status"] as? String == "Done" }
@@ -20156,7 +20212,7 @@ final class PlayhouseUITests: XCTestCase {
 
     private func moveTaskToDone(taskID: String) {
         let card = element("task-card-\(taskID)").firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 5), "The reviewed task card should remain available by its stable task identifier.")
+        XCTAssertTrue(card.waitToExist(timeout: 5), "The reviewed task card should remain available by its stable task identifier.")
         dragTaskToDone(card)
         XCTAssertTrue(waitUntil({
             do { return try taskRecord(id: taskID)?["status"] as? String == "Done" }
@@ -20166,8 +20222,8 @@ final class PlayhouseUITests: XCTestCase {
 
     private func dragTaskToDone(_ card: XCUIElement) {
         let board = element("board-columns-scroll-view")
-        XCTAssertTrue(board.waitForExistence(timeout: 5), "The board columns should remain visible while moving a task to Done.")
-        XCTAssertTrue(element("task-done-drop-target").waitForExistence(timeout: 5), "The Done drawer should always be present at the board edge.")
+        XCTAssertTrue(board.waitToExist(timeout: 5), "The board columns should remain visible while moving a task to Done.")
+        XCTAssertTrue(element("task-done-drop-target").waitToExist(timeout: 5), "The Done drawer should always be present at the board edge.")
         let source = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         // The drawer's tab slides open once the drag begins and is then centered 32 points
         // in from the window edge.
@@ -20206,7 +20262,7 @@ final class PlayhouseUITests: XCTestCase {
         let drawer = element("task-done-drop-target")
         let board = element("board-columns-scroll-view")
         let window = app.windows.firstMatch
-        XCTAssertTrue(drawer.waitForExistence(timeout: 5), "The Done drawer should exist \(moment).", file: file, line: line)
+        XCTAssertTrue(drawer.waitToExist(timeout: 5), "The Done drawer should exist \(moment).", file: file, line: line)
         XCTAssertTrue(waitUntil({ drawer.frame.minX >= window.frame.maxX - 6 }, timeout: 3), "The Done drawer should rest as a sliver at the window edge \(moment).", file: file, line: line)
         XCTAssertGreaterThanOrEqual(drawer.frame.minX, board.frame.maxX - 1, "The Done drawer must sit beside the board columns, never over them \(moment).", file: file, line: line)
     }
@@ -20438,9 +20494,9 @@ final class PlayhouseUITests: XCTestCase {
             "History should hold the Playhouse-sent message containing: \(text)", file: file, line: line
         )
         let id = try XCTUnwrap(sent["id"] as? String, file: file, line: line)
-        XCTAssertTrue(element("playhouse-message-\(id)").waitForExistence(timeout: 10), "The message renders as an automatic Playhouse message.", file: file, line: line)
+        XCTAssertTrue(element("playhouse-message-\(id)").waitToExist(timeout: 10), "The message renders as an automatic Playhouse message.", file: file, line: line)
         let label = element("playhouse-message-label-\(id)")
-        XCTAssertTrue(label.waitForExistence(timeout: 5), "The automatic message carries its label.", file: file, line: line)
+        XCTAssertTrue(label.waitToExist(timeout: 5), "The automatic message carries its label.", file: file, line: line)
         XCTAssertTrue(label.label.contains("Automatic message from Playhouse") || ((label.value as? String) ?? "").contains("Automatic message from Playhouse"), "The label says the message is automatic: \(label.label)", file: file, line: line)
         XCTAssertFalse(element("user-message-\(id)").exists, "An automatic message is not rendered as the user's own bubble.", file: file, line: line)
     }
@@ -20497,7 +20553,8 @@ final class PlayhouseUITests: XCTestCase {
         let chatButton = element("chat-sidebar-button")
         XCTAssertTrue(waitUntil({ chatButton.exists && chatButton.isHittable }, timeout: 5), "The board's Chat button should be available again after leaving the sidebar.")
         chatButton.click()
-        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10), "The standalone chat should reopen from the board.")
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10), "The standalone chat should reopen from the board.")
+        waitForConversationLoad()
     }
 
     /// Waits for transcript text, scrolling down on each miss: the lazy transcript
@@ -20655,10 +20712,10 @@ final class PlayhouseUITests: XCTestCase {
 
     private func deleteTaskFromContextMenu(_ title: String) {
         let card = app.buttons[title].firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        XCTAssertTrue(card.waitToExist(timeout: 5))
         card.rightClick()
         let deleteAction = element("delete-task-menu-item")
-        XCTAssertTrue(deleteAction.waitForExistence(timeout: 5), "The task context menu should offer Delete Task.")
+        XCTAssertTrue(deleteAction.waitToExist(timeout: 5), "The task context menu should offer Delete Task.")
         deleteAction.click()
     }
 
@@ -20674,7 +20731,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertFalse(summary.exists, "Repository worktrees should not be repeated as additional working folders.", file: file, line: line)
             return
         }
-        XCTAssertTrue(summary.waitForExistence(timeout: 10), "Working folder summary is missing.", file: file, line: line)
+        XCTAssertTrue(summary.waitToExist(timeout: 10), "Working folder summary is missing.", file: file, line: line)
         let text = [summary.label, summary.value as? String ?? "", summary.placeholderValue ?? ""]
             .filter { !$0.isEmpty }
             .joined(separator: " ")
@@ -20705,12 +20762,12 @@ final class PlayhouseUITests: XCTestCase {
     }
 
     private func chooseFolder(in panel: XCUIElement, folder: URL, confirmationButton: String) throws {
-        XCTAssertTrue(panel.waitForExistence(timeout: 10), "The system folder panel did not open.")
+        XCTAssertTrue(panel.waitToExist(timeout: 10), "The system folder panel did not open.")
         panel.typeKey("g", modifierFlags: [.command, .shift])
         let goToSheet = app.sheets.firstMatch
-        XCTAssertTrue(goToSheet.waitForExistence(timeout: 5), "Go to Folder did not open from the system panel.")
+        XCTAssertTrue(goToSheet.waitToExist(timeout: 5), "Go to Folder did not open from the system panel.")
         let pathField = goToSheet.textFields.firstMatch
-        XCTAssertTrue(pathField.waitForExistence(timeout: 5))
+        XCTAssertTrue(pathField.waitToExist(timeout: 5))
         pathField.click()
         pathField.typeKey("a", modifierFlags: .command)
         pathField.typeText(folder.standardizedFileURL.path)
@@ -20726,7 +20783,7 @@ final class PlayhouseUITests: XCTestCase {
             "Folder panel did not navigate to \(folder.path)."
         )
         let chooseButton = panel.buttons[confirmationButton]
-        XCTAssertTrue(chooseButton.waitForExistence(timeout: 10), "Folder panel did not show \(confirmationButton).")
+        XCTAssertTrue(chooseButton.waitToExist(timeout: 10), "Folder panel did not show \(confirmationButton).")
         chooseButton.click()
     }
 
@@ -20846,7 +20903,7 @@ final class PlayhouseUITests: XCTestCase {
         composer.typeText(text)
         // A task waiting on a response offers Continue as its send action.
         let send = element("send-message-button")
-        if send.waitForExistence(timeout: 3) { send.click() } else { element("continue-response-button").click() }
+        if send.waitToExist(timeout: 3) { send.click() } else { element("continue-response-button").click() }
     }
 
     /// Command-Return steers the running turn with the composer's text.
@@ -20878,12 +20935,26 @@ final class PlayhouseUITests: XCTestCase {
 
     /// The daemon's process ID, or nil while nothing answers on that service.
     /// Unlike `runCLI`, a failed connection isn't a test failure here.
+    /// Every daemon process that wrote to this service's socket log (each logs on start).
+    private func daemonLogProcessIDs(service: String) -> Set<Int> {
+        let digest = SHA256.hash(data: Data(service.utf8)).map { String(format: "%02x", $0) }.joined()
+        let log = "/tmp/playhouse-bridge/\(getuid())/\(digest.prefix(32)).sock.log"
+        let text = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
+        let pattern = try! NSRegularExpression(pattern: #"playhouse-daemon\[(\d+)\]"#)
+        return Set(pattern.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
+            Range($0.range(at: 1), in: text).flatMap { Int(text[$0]) }
+        })
+    }
+
     private func daemonProcessID(environment: [String: String]) throws -> Int? {
         let process = Process()
         process.executableURL = cliURL
         process.arguments = ["status"]
         var processEnvironment = ProcessInfo.processInfo.environment
         processEnvironment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
+        // This read can be the first request a fresh daemon serves, and that request's provider
+        // clients follow any reattached turn, so it carries the case's fixtures like `runCLI`.
+        processEnvironment.merge(providerExecutableEnvironment) { _, new in new }
         processEnvironment.merge(environment) { _, override in override }
         process.environment = processEnvironment
         let stdout = Pipe()
@@ -20995,7 +21066,7 @@ final class PlayhouseUITests: XCTestCase {
     /// An open pill's option once its slide-in has finished, so a click lands on it.
     private func settledPillOption(_ mode: String, taskID: String) -> XCUIElement {
         let option = element("task-pr-mode-\(mode)-\(taskID)")
-        XCTAssertTrue(option.waitForExistence(timeout: 5), "The open pill should offer \(mode).")
+        XCTAssertTrue(option.waitToExist(timeout: 5), "The open pill should offer \(mode).")
         var lastFrame = CGRect.null
         XCTAssertTrue(waitUntil({
             let frame = option.frame
@@ -21008,7 +21079,7 @@ final class PlayhouseUITests: XCTestCase {
     /// Opens a task card's PR mode pill, chooses `mode`, and waits for it to fold back onto it.
     private func selectPullRequestMode(_ mode: String, taskID: String) throws {
         let pill = element("task-pr-mode-\(taskID)")
-        XCTAssertTrue(pill.waitForExistence(timeout: 5), "The task card should show its PR mode pill.")
+        XCTAssertTrue(pill.waitToExist(timeout: 5), "The task card should show its PR mode pill.")
         pill.click()
         let option = settledPillOption(mode, taskID: taskID)
         option.click()
@@ -21631,7 +21702,10 @@ final class PlayhouseUITests: XCTestCase {
         return NSPredicate(format: format, argumentArray: arguments)
     }
 
+    /// Empty for an element that does not exist (yet), so it can be polled:
+    /// reading `label` of a missing element fails the test on the spot.
     private func accessibleLabelOrValue(of element: XCUIElement) -> String {
+        guard element.exists else { return "" }
         if !element.label.isEmpty { return element.label }
         return element.value as? String ?? ""
     }
@@ -21733,4 +21807,22 @@ private struct WorkspaceFixture {
         )
     }
 
+}
+
+extension XCUIElement {
+    /// Waits like `waitForExistence(timeout:)`, polling every 0.1 s. XCTest's own wait makes
+    /// its first check about a second after it starts, even when the element is already there;
+    /// almost every wait in this suite is satisfied on that first check, so the delay added up
+    /// to roughly 40% of a full run. The activity keeps the "Waiting Ns for … to exist" step
+    /// in the log for triage.
+    func waitToExist(timeout: TimeInterval) -> Bool {
+        XCTContext.runActivity(named: "Waiting \(timeout)s for \(self) to exist") { _ in
+            let deadline = Date().addingTimeInterval(timeout)
+            while !exists {
+                guard Date() < deadline else { return false }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            }
+            return true
+        }
+    }
 }

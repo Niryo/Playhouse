@@ -73,7 +73,9 @@ struct SkillsPageView: View {
             }
         }
         .background(WorkspaceTheme.windowBackground)
-        .overlay { if kind == .skills { panels } }
+        // A closed panel's removal transition can leave the overlay catching clicks, so it
+        // takes hits only while a panel is open (see McpServersSectionView).
+        .overlay { if kind == .skills { panels.allowsHitTesting(isPresentingPanel) } }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("skills-page")
     }
@@ -1181,7 +1183,8 @@ private struct RulesSectionView: View {
             }
             .accessibilityIdentifier("rules-list")
         }
-        .overlay { panels }
+        // Takes hits only while a panel is open (see McpServersSectionView).
+        .overlay { panels.allowsHitTesting(panel != nil) }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("rules-page")
         .task { await reload() }

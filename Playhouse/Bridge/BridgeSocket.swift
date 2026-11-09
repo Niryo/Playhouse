@@ -249,6 +249,8 @@ enum BridgeDaemonLauncher {
         throw BridgeSocketError.spawnTimedOut("\(daemonExecutablePath ?? ""); last connect error: \(lastError.map { "\($0)" } ?? "none")")
     }
 
+    private static let spawnLock = NSLock()
+
     /// Lock-guarded so two callers racing to start the daemon for the same
     /// socket path don't both spawn one; the loser simply finds the winner's
     /// daemon already listening once it gets the lock.
@@ -259,6 +261,12 @@ enum BridgeDaemonLauncher {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        // The fcntl record lock below excludes other processes, but it belongs to the whole
+        // process: the app's concurrent requests at launch would each take it and each spawn a
+        // daemon, and any thread closing its descriptor to the lock file would drop the lock for
+        // all of them. This lock excludes the other threads of this process before `open`.
+        spawnLock.lock()
+        defer { spawnLock.unlock() }
         let descriptor = Darwin.open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { return }
         defer { Darwin.close(descriptor) }
