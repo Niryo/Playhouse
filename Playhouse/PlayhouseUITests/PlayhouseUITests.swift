@@ -4363,6 +4363,30 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Renamed task remains unchanged after rejected blank rename")
     }
 
+    // case-contract: test_task_title_copy_button_copies_persisted_title | The conversation title's copy button places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename; the button confirms the copy with a checkmark and its 'Title copied' label, and fresh CLI/XPC reads report the same title the copy produced.
+    func test_task_title_copy_button_copies_persisted_title() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Before copy", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Before copy")
+        let title = "Café & tea: ready ✓"
+        _ = try runCLI(["task", "rename", taskID, "--title", title])
+        let card = element("task-card-\(taskID.uppercased())")
+        XCTAssertTrue(waitUntil({ card.exists }, timeout: 10), "The renamed task should appear on the board.")
+        clickTaskCardTitle(card)
+        XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10), "Opening the renamed task should show its conversation.")
+
+        let copyTitleButton = app.buttons["task-view-title-copy-button"]
+        XCTAssertTrue(copyTitleButton.waitToExist(timeout: 10), "The conversation title should have a copy button.")
+        XCTAssertTrue(waitUntil({ accessibleLabelOrValue(of: element("task-view-title")) == title }, timeout: 10), "The header should show the persisted title.")
+        NSPasteboard.general.clearContents()
+        copyTitleButton.click()
+        XCTAssertTrue(waitUntil({ copyTitleButton.label == "Title copied" }, timeout: 3), "The copy button should confirm the copy while the checkmark is shown.")
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), title, "Copying the title should place its exact persisted text on the pasteboard.")
+        attachScreenshot(named: "Conversation title copied to the pasteboard")
+        XCTAssertTrue(waitUntil({ copyTitleButton.label == "Copy title" }, timeout: 4), "The copy button should return to its idle label after the confirmation window.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["title"] as? String, title, "The copied title should match the persisted title.")
+    }
+
     // case-contract: test_task_roots_set_get_order_deduplication_and_validation | Root editing preserves order, removes duplicates, rejects an empty list, and waits for an active conversation turn; a stale Git-folder validation is rejected after a newer folder edit, and the newer roots remain saved.
     func test_task_roots_set_get_order_deduplication_and_validation() throws {
         launchApp(defaultParent: fixture.parent.path)
