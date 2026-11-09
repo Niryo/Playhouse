@@ -79,17 +79,39 @@ enum PlayhouseSentMessage {
     static func matches(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return PrivateOutcomeNudgeMarker.matches(trimmed)
+            || ProviderAutomaticNotice.matches(trimmed)
             || trimmed.hasPrefix(pullRequestAutopilotMarker)
             || trimmed == pullRequestConflicts
             || trimmed == pullRequestConflictsRetry
     }
 
-    /// The text shown in the automatic message: a nudge's marker line only identifies it.
+    /// The text shown in the automatic message: a nudge's or notice's marker line only identifies it.
     static func displayText(_ text: String) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard PrivateOutcomeNudgeMarker.matches(trimmed) else { return trimmed }
+        guard PrivateOutcomeNudgeMarker.matches(trimmed) || ProviderAutomaticNotice.matches(trimmed) else { return trimmed }
         return trimmed.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).dropFirst().joined()
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Who sent the automatic message: Playhouse, or the provider's own runtime.
+    static func senderLabel(_ text: String) -> String {
+        ProviderAutomaticNotice.matches(text) ? "Automatic message from Claude Code" : "Automatic message from Playhouse"
+    }
+}
+
+/// A prompt a provider's runtime adds inside a turn on its own, such as Claude Code's
+/// "your previous response had no visible output" notice. Playhouse records it in the turn
+/// with this marker line so the transcript shows it as an automatic message from that
+/// runtime. Like a status nudge, it is never handed off or filed into a chat page.
+enum ProviderAutomaticNotice {
+    static let claudeCodeMarker = "Claude Code automatic notice:"
+
+    static func matches(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(claudeCodeMarker)
+    }
+
+    static func claudeCode(_ text: String) -> String {
+        "\(claudeCodeMarker)\n\(text.trimmingCharacters(in: .whitespacesAndNewlines))"
     }
 }
 

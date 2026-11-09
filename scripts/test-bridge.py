@@ -1579,7 +1579,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         reopened = self.assert_success(self.call_cli("chat", "open")[0])
         self.assertEqual(reopened["id"], legacy_id, "Migration must run once, not create a second chat.")
 
-    # case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, the Changes sidebar, and the no-repository-selected banner. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn never triggers the private task-outcome reminders, because the chat is told not to report an outcome; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer. Opening a board task while the chat sidebar is showing replaces it with that task's conversation view instead of showing both at once, and returning to the board reveals the chat sidebar again, with the chat's own model left untouched by the unrelated task. The visible chat panel opens at full board-content height, overlaps the logo header and narrow board sidebar, and hides the covered branding and sidebar controls from accessibility navigation while open; it raises the board's minimum width by the chat panel width, so the window grows to keep the shifted columns visible; it pushes the columns to the panel’s right edge; closing chat reveals the sidebar and moves the columns back beside it while the window keeps its grown width. Dragging the chat sidebar's right border resizes it, between a 320-point minimum and the larger of its default width and the screen width the board's minimum width leaves free, and reopening the sidebar, even after an app relaunch, keeps the dragged width. The border's grab strip extends only out over the board, never over the transcript's scroller along its inner side, so pressing and dragging just inside the border leaves the width unchanged. While the edge moves, the chat keeps the width it was last laid out at, clipped to the panel, and its transcript reflows to the panel's width when the drag ends.
+    # case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, the Changes sidebar, and the no-repository-selected banner. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn that ran close-turn gets no nudge, and a Codex chat turn that skipped it gets exactly one nudge through the shared recovery loop, asking for close-turn on its reply and never for a task outcome, because the chat has no board status; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer. Opening a board task while the chat sidebar is showing replaces it with that task's conversation view instead of showing both at once, and returning to the board reveals the chat sidebar again, with the chat's own model left untouched by the unrelated task. The visible chat panel opens at full board-content height, overlaps the logo header and narrow board sidebar, and hides the covered branding and sidebar controls from accessibility navigation while open; it raises the board's minimum width by the chat panel width, so the window grows to keep the shifted columns visible; it pushes the columns to the panel’s right edge; closing chat reveals the sidebar and moves the columns back beside it while the window keeps its grown width. Dragging the chat sidebar's right border resizes it, between a 320-point minimum and the larger of its default width and the screen width the board's minimum width leaves free, and reopening the sidebar, even after an app relaunch, keeps the dragged width. The border's grab strip extends only out over the board, never over the transcript's scroller along its inner side, so pressing and dragging just inside the border leaves the width unchanged. While the edge moves, the chat keeps the width it was last laid out at, clipped to the panel, and its transcript reflows to the panel's width when the drag ends.
     def test_standalone_chat_separate_model_and_pages_round_trip(self):
         opened = self.assert_success(self.call_cli("chat", "open")[0])
         self.assertEqual(opened["title"], "Chat")
@@ -1700,16 +1700,14 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assert_success(self.call_cli("task", "list")[0])["tasks"], [],
             "The standalone chat must stay absent from task/board listing in every turn state.",
         )
-        # The chat is told never to report a task outcome, so chasing one with private
-        # reminders can only spend extra provider turns and bury the user's next message in
-        # a reminder turn that answers nobody.
+        # A chat turn that ran close-turn is settled, so no nudge follows it.
         chat_fixture_history = json.loads(
             Path(str(self.data_directory / "codex-fixture-chat-unique-turns-hold-release") + ".history").read_text(encoding="utf-8")
         )
         self.assertTrue(chat_fixture_history.get("turns"), "The chat fixture should have recorded its turns.")
         self.assertFalse(
-            any("outcome reminder" in (turn.get("userMessage") or "").lower() for turn in chat_fixture_history["turns"]),
-            "A standalone chat turn must not trigger the private task-outcome reminders.",
+            any("playhouse internal outcome nudge:" in (turn.get("userMessage") or "").lower() for turn in chat_fixture_history["turns"]),
+            "A standalone chat turn that ran close-turn must not get a nudge.",
         )
         # The chat must know it is Playhouse's own chat and own the board through the CLI,
         # instead of reaching for an unrelated task tool that the user can never see.
@@ -1761,6 +1759,23 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Tell me about Saturn's rings",
             skip_close_turn=True,
             executable_name="codex-fixture-chat-unique-turns-hold-release",
+        )
+        # The same shared recovery loop nudges a Codex chat turn that skipped close-turn: once,
+        # for the page signal, never for a task outcome.
+        codex_nudges = [
+            turn for turn in json.loads(Path(str(classifier_executable) + ".history").read_text(encoding="utf-8")).get("turns", [])
+            if "playhouse internal outcome nudge:" in (turn.get("userMessage") or "").lower()
+        ]
+        self.assertEqual(len(codex_nudges), 1, "A Codex chat turn that skipped close-turn gets exactly one nudge.")
+        self.assertIn(f"chat page close-turn {chat_task_id}", codex_nudges[0]["userMessage"])
+        self.assertNotIn("task outcome", codex_nudges[0]["userMessage"])
+        codex_visible = self.assert_success(self.call_cli(
+            "conversation", "history", chat_task_id,
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )[0])["messages"]
+        self.assertTrue(
+            any(message["role"] == "user" and "This is the only reminder for that reply." in message["text"] for message in codex_visible),
+            "The Codex chat nudge stays in the chat transcript.",
         )
         classifier_command = ("chat", "status")
         classifier_process = self.start_cli(
@@ -1822,6 +1837,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(unchanged_provider["id"], chat_task_id)
         self.assertEqual(unchanged_provider["conversationProvider"], "codex")
         followup_turn_release.write_text("Release follow-up turn.\n", encoding="utf-8")
+        # The follow-up skips close-turn too, so its one nudge turn is held the same way.
+        deadline = time.monotonic() + 60
+        while followup_process.poll() is None and time.monotonic() < deadline:
+            if followup_turn_active.exists() and not followup_turn_release.exists():
+                followup_turn_release.write_text("Release the follow-up's nudge turn.\n", encoding="utf-8")
+            time.sleep(0.02)
         followup_response, _ = self.finish_cli(followup_process, followup_command)
         followup_turn_hold.unlink(missing_ok=True)
         followup_turn_active.unlink(missing_ok=True)
@@ -2074,7 +2095,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(text.endswith("Tell me about volcanoes") for text in texts))
         self.assertTrue(any(text.endswith("One more thought about Saturn") for text in texts))
 
-    # case-contract: test_standalone_chat_answer_stays_final_around_close_turn | A standalone chat reports no task outcome, so it ends every turn with Playhouse's own chat page close-turn signal, which Claude runs after its answer and before its closing line. That answer and closing line form one final answer, not commentary, in the streamed final answer, fresh CLI/XPC history, and the visible transcript, so the response is never left buried inside the collapsed Worked for disclosure; text written before an ordinary tool earlier in the same turn still stays commentary there, and the close-turn command really runs and succeeds. This classification is Claude-specific because Playhouse derives each message's phase from Claude's tool stream, while Codex reports the phase in its own protocol and so cannot mis-file an answer on the same turn shape.
+    # case-contract: test_standalone_chat_answer_stays_final_around_close_turn | A standalone chat reports no task outcome, so it ends every turn with Playhouse's own chat page close-turn signal. When Claude runs that signal after its answer and before its closing line, the answer and closing line form one final answer, not commentary, in the streamed final answer, fresh CLI/XPC history, and the visible transcript, so the response is never left buried inside the collapsed Worked for disclosure; text written before an ordinary tool earlier in the same turn still stays commentary there, and the close-turn command really runs and succeeds. The chat instructions ask for close-turn before the final reply, which must end the turn, keep exactly one real close-turn per turn and no page bookkeeping in the answer, and carry no hidden escalation. A turn that runs close-turn first and answers after it shows exactly one final answer, filed onto the active page, with no nudge. When the turn ends on close-turn and Claude Code adds its own no-visible-output notice to the same turn, the notice streams once as a user-side message and stays in fresh history between the answer and what Claude writes after it, rendering as an automatic message from Claude Code rather than the user's bubble; that later text is a separate final message, so no bubble holds the answer twice, and the notice is never filed into a chat page. This classification is Claude-specific because Playhouse derives each message's phase from Claude's tool stream and only Claude Code adds such a notice inside a turn, while Codex reports the phase in its own protocol and never injects a hidden message into a turn.
     def test_standalone_chat_answer_stays_final_around_close_turn(self):
         self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
         self.assert_success(self.call_cli("settings", "clear-parent")[0])
@@ -2121,6 +2142,173 @@ class PlayhouseBridgeTests(unittest.TestCase):
         status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
         self.assertFalse(status["missedPreviousPageSignal"],
                          "A close-turn signal that really ran must satisfy the page signal instead of falling back to the classifier.")
+
+        def chat_turns():
+            return [
+                turn for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+                if not (turn.get("userText") or "").startswith("Classify the latest user message")
+            ]
+
+        # The order the instructions now ask for: close-turn first, then the final reply. With no
+        # answer pending when the signal runs, the reply after it is the turn's one final answer.
+        arguments = chat_turns()[-1]["arguments"]
+        instructions = arguments[arguments.index("--append-system-prompt") + 1]
+        close_turn_at = instructions.find("chat page close-turn")
+        self.assertGreater(close_turn_at, -1, "The chat instructions must still teach close-turn.")
+        self.assertIn("before you write your final reply", instructions,
+                      "The instructions must put close-turn before the final reply.")
+        self.assertIn("never end a turn on a tool call", instructions)
+        self.assertIn("Run exactly one close-turn per turn", instructions)
+        self.assertIn("never just write it as text in your reply", instructions)
+        self.assertIn("never write the page name", instructions)
+        self.assertIn("previous response had no visible output but you already answered in this turn, do not repeat the answer", instructions)
+        self.assertNotIn("At the end of every single turn", instructions)
+        self.assertNotIn("CRITICAL, READ FIRST", instructions, "No hidden escalation is prepended to the chat instructions.")
+        close_first_prompt = "Name the largest moon of Jupiter."
+        close_first_answer = "Ganymede is the largest moon of Jupiter."
+        sent, events = self.call_cli("conversation", "send", chat_id, "--message", close_first_prompt, extra_environment=environment)
+        self.assert_success(sent)
+        self.assertEqual([event["payload"]["text"] for event in events if event["type"] == "assistant_final"], [close_first_answer],
+                         "The reply written after close-turn is the turn's single final answer.")
+        self.assertIn('"ok":true', chat_turns()[-1]["reportCommands"][0]["output"], chat_turns()[-1]["reportCommands"])
+        self.assertFalse(any("playhouse internal outcome nudge:" in (turn.get("userText") or "").lower() for turn in chat_turns()),
+                         "A turn whose close-turn ran is settled, so Playhouse sends it no nudge.")
+        history = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        close_first_turn = next(message["turnID"] for message in history["messages"] if message["role"] == "user" and message["text"] == close_first_prompt)
+        self.assertEqual(
+            [(message["role"], message.get("phase"), message["text"]) for message in history["messages"] if message.get("turnID") == close_first_turn],
+            [("user", None, close_first_prompt), ("assistant", "final_answer", close_first_answer)],
+            "Fresh history shows the prompt and exactly one final answer for the close-turn-first turn.",
+        )
+        active_page = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])["activePage"]
+        page_messages = self.assert_success(self.call_cli("chat", "page", "read", active_page["id"], extra_environment=environment)[0])["messages"]
+        self.assertEqual([message["text"] for message in page_messages if message["turnID"] == close_first_turn],
+                         [close_first_prompt, close_first_answer], "The close-turn-first turn is filed onto the active page.")
+
+        # Claude Code's own "no visible output" notice, after a turn that ended on close-turn:
+        # it is recorded as an automatic message from Claude Code, and the text Claude writes
+        # after it is a separate final message rather than appended to the answer.
+        notice_prompt = "Name the largest moon of Saturn."
+        notice_answer = "Titan is the largest moon of Saturn."
+        notice_reply = "I already answered above."
+        notice_text = "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
+        sent, events = self.call_cli("conversation", "send", chat_id, "--message", notice_prompt, extra_environment=environment)
+        self.assert_success(sent)
+        self.assertEqual([event["payload"]["text"] for event in events if event["type"] == "assistant_final"], [notice_answer, notice_reply],
+                         "The answer and the text after Claude Code's notice stream as two finals, never merged.")
+        steered = [event["payload"].get("message") for event in events if event["type"] == "steered_message"]
+        self.assertEqual(steered, ["Claude Code automatic notice:\n" + notice_text], "The notice streams once, as a user-side message.")
+        self.assertFalse(any(notice_text in (event["payload"].get("text") or "") for event in events if event["type"] == "assistant_progress"),
+                         "The notice never streams as assistant progress.")
+        history = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        notice_turn = next(message["turnID"] for message in history["messages"] if message["role"] == "user" and message["text"] == notice_prompt)
+        self.assertEqual(
+            [(message["role"], message.get("phase"), message["text"]) for message in history["messages"] if message.get("turnID") == notice_turn],
+            [
+                ("user", None, notice_prompt),
+                ("assistant", "final_answer", notice_answer),
+                ("user", None, "Claude Code automatic notice:\n" + notice_text),
+                ("assistant", "final_answer", notice_reply),
+            ],
+            "Fresh history keeps the answer, Claude Code's notice and the reply as separate messages in turn order.",
+        )
+        self.assertFalse(any(notice_answer in message["text"] and notice_reply in message["text"] for message in history["messages"]),
+                         "No bubble may hold the answer together with what Claude wrote after the notice.")
+        page_messages = self.assert_success(self.call_cli("chat", "page", "read", active_page["id"], extra_environment=environment)[0])["messages"]
+        self.assertEqual([message["text"] for message in page_messages if message["turnID"] == notice_turn],
+                         [notice_prompt, notice_answer, notice_reply], "Claude Code's notice is never filed into a chat page.")
+        self.assertFalse(any("playhouse internal outcome nudge:" in (turn.get("userText") or "").lower() for turn in chat_turns()),
+                         "The notice turn ran close-turn, so it is settled and gets no Playhouse nudge.")
+
+    # case-contract: test_standalone_chat_missed_close_turn_gets_visible_nudge | When a standalone chat turn ends without its chat page close-turn signal, Playhouse sends exactly one follow-up turn through the same unsettled-turn recovery loop task conversations use. Its prompt starts with the Playhouse nudge marker, asks for close-turn on the previous reply and never for a task outcome, and stays in the chat transcript as an automatic message from Playhouse, followed by the agent's reply. A close-turn run in that nudge settles the turn and classifies the user's turn, which moves to the new titled page without the fallback classifier; the nudge turn and its reply are never filed into a chat page or replayed into a page's seeded context. A nudge that goes unanswered is not retried, the background classifier then decides the page, the chat never gets a board status such as Blocked, and task outcome is rejected for the chat. The nudge loop, the close-turn CLI and the turn outcome store are shared by Claude and Codex, so one representative provider (Claude) covers this case, and the round-trip case shows a Codex chat turn reaching the same nudge.
+    def test_standalone_chat_missed_close_turn_gets_visible_nudge(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-close-turn-nudge"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+        prompt = "Plan a weekend hiking trip."
+        answer = "Pick a loop trail under 15 km and start early."
+
+        def chat_turns():
+            return [
+                turn for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+                if not (turn.get("userText") or "").startswith("Classify the latest user message")
+            ]
+
+        def nudge_turns():
+            return [turn for turn in chat_turns() if "playhouse internal outcome nudge:" in (turn.get("userText") or "").lower()]
+
+        # The turn answers but never runs close-turn, so Playhouse sends one visible nudge,
+        # which the agent answers by running close-turn for that reply.
+        sent, events = self.call_cli("conversation", "send", chat_id, "--message", prompt, extra_environment=environment)
+        self.assert_success(sent)
+        self.assertEqual([event["payload"]["text"] for event in events if event["type"] == "assistant_final"], [answer, "Filed."],
+                         "The answer streams first, then the nudge's one-line reply.")
+        self.assertEqual(len(nudge_turns()), 1, "A chat turn that skipped close-turn gets exactly one nudge.")
+        nudge = nudge_turns()[0]
+        self.assertIn(f"chat page close-turn {chat_id}", nudge["userText"], "The chat nudge asks for close-turn on the previous reply.")
+        self.assertNotIn("task outcome", nudge["userText"], "A chat is never asked for a task outcome.")
+        self.assertIn('"ok":true', nudge["reportCommands"][0]["output"], nudge["reportCommands"])
+
+        history = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        visible = [(message["role"], message["text"]) for message in history["messages"]]
+        nudge_messages = [text for role, text in visible if role == "user" and "Playhouse internal outcome nudge:" in text]
+        self.assertEqual(len(nudge_messages), 1, "The nudge is kept in the chat transcript, where it renders as an automatic message.")
+        self.assertIn("This is the only reminder for that reply.", nudge_messages[0])
+        self.assertEqual(
+            [(role, text) for role, text in visible if text in (prompt, answer, "Filed.") or text == nudge_messages[0]],
+            [("user", prompt), ("assistant", answer), ("user", nudge_messages[0]), ("assistant", "Filed.")],
+            "The transcript shows the turn, then the nudge and its reply.",
+        )
+
+        # The nudge's close-turn classifies the user's turn: it moves to the new titled page,
+        # and the nudge turn itself is never filed into a page.
+        status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        self.assertFalse(status["missedPreviousPageSignal"], "The nudge's close-turn settles the page decision without the fallback classifier.")
+        self.assertEqual(status["activePage"]["title"], "Hiking trip")
+        hiking_page = status["activePage"]
+        page_messages = self.assert_success(self.call_cli("chat", "page", "read", hiking_page["id"], extra_environment=environment)[0])["messages"]
+        self.assertEqual([message["text"] for message in page_messages], [prompt, answer],
+                         "Only the user's turn is filed on its page, never the nudge or its reply.")
+        self.assertFalse(any("Classify the latest user message" in (turn.get("userText") or "")
+                             for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]),
+                         "A nudge that got close-turn run leaves nothing for the fallback classifier.")
+        chat_state = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["status"]
+        self.assertIn(chat_state, ["In Progress", "Waiting Response"], "A chat nudge never sets a board status such as Blocked.")
+        self.assert_failure(
+            self.call_cli("task", "outcome", chat_id, "completed", expected_status=2, extra_environment=environment)[0],
+            "invalid_argument",
+        )
+
+        # A second missed turn whose nudge goes unanswered: still only one nudge, still no
+        # Blocked, and the background classifier decides the page as before. The new page's
+        # fresh session is seeded with its own turn, never with the nudge or its reply.
+        sent, _ = self.call_cli("conversation", "send", chat_id, "--message", "Tell me about volcanoes", extra_environment=environment)
+        self.assert_success(sent)
+        seeded = next(turn for turn in chat_turns() if (turn.get("userText") or "").endswith("Tell me about volcanoes"))
+        self.assertIn(prompt, seeded["userText"], "The new page's session is seeded with its own turn.")
+        self.assertIn(answer, seeded["userText"])
+        self.assertNotIn("Playhouse internal outcome nudge:", seeded["userText"], "A nudge is never replayed into page context.")
+        self.assertNotIn("Filed.", seeded["userText"], "A nudge's reply is never replayed into page context.")
+        self.assertEqual(len(nudge_turns()), 2, "The second missed turn gets its own single nudge.")
+        self.assertEqual(nudge_turns()[-1]["reportCommands"], [], "This nudge goes unanswered.")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+            if not status["missedPreviousPageSignal"] and status["activePage"]["title"] == "Volcanoes":
+                break
+            time.sleep(0.1)
+        self.assertEqual(status["activePage"]["title"], "Volcanoes", "An unanswered nudge leaves the page to the fallback classifier.")
+        self.assertFalse(status["missedPreviousPageSignal"])
+        self.assertEqual(len(nudge_turns()), 2, "An unanswered chat nudge is not retried.")
+        chat_state = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["status"]
+        self.assertIn(chat_state, ["In Progress", "Waiting Response"], "An unanswered chat nudge never marks the chat Blocked.")
 
     # case-contract: test_standalone_chat_recalls_loaded_pages | When a standalone chat's agent loads an earlier page into its context with `chat page read`, the conversation renders one deterministic "Recalling <page title>" line per loaded page, titled from the page archive rather than from anything the agent wrote, in the order the pages were read. The lines are visible in the turn that read them without opening the Worked for disclosure, stay once the turn settles and after a later turn and a reopen, and the read commands really run and succeed so the history carries each call and the page's own title. The line is derived from Playhouse's own provider-neutral command activity (a shell call titled "Running <command>" for both Claude and Codex) and the page store, so provider selection cannot change it; one representative provider (Claude) covers the shared path.
     def test_standalone_chat_recalls_loaded_pages(self):
@@ -4449,7 +4637,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         done = self.assert_success(self.call_cli("task", "move", task["id"], "Done", "--allow-unmerged")[0])
         self.assertEqual(done["status"], "Done")
 
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A status nudge Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while showing the nudge replies.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. They place the outcome call, still the final CLI action, before the user-visible final reply, which ends the turn so it never ends on a tool call, and they tell the agent not to repeat an answer after a no-visible-output notice. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A status nudge Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while showing the nudge replies.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -4711,6 +4899,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assertIn("<completed|in-progress|waiting-response>", instructions)
             self.assertIn("Never end a turn mid-work without an outcome", instructions)
             self.assertIn("privately nudges you to report your current status", instructions)
+            self.assertIn("before you write your final reply, make exactly one definitive outcome call", instructions)
+            self.assertIn("Write your user-visible final reply after the outcome call returns", instructions)
+            self.assertIn("never end a turn on a tool call", instructions)
+            self.assertIn("The outcome call must be your final CLI action for the turn.", instructions)
+            self.assertIn("previous response had no visible output but you already answered in this turn, do not repeat the answer", instructions)
             self.assertIn("waiting-response", instructions)
             self.assertIn("final CLI action", instructions)
             self.assertIn("Active task worktrees for edits", instructions)

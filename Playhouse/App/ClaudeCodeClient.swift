@@ -1209,6 +1209,7 @@ final class ClaudeSessionRunner {
         case "assistant":
             handleAssistant(message)
         case "user":
+            if handleSyntheticUserMessage(message) { return }
             handleToolResults(message)
         case "system":
             handleSystem(message)
@@ -1389,6 +1390,31 @@ final class ClaudeSessionRunner {
         activity.detail = [activity.agentPath, "Using \(toolName)"].compactMap { $0 }.joined(separator: "\n")
         toolActivities[parentToolID] = activity
         activityHandler?(activity)
+    }
+
+    /// Claude Code adds a user message of its own inside a turn, for example when the turn ended
+    /// on a tool call with no visible text after it. It is not the user's, so it is recorded as an
+    /// automatic notice. The answer written before it is closed as its own final message, so
+    /// whatever Claude writes in response is a separate message rather than appended to it.
+    private func handleSyntheticUserMessage(_ message: [String: Any]) -> Bool {
+        guard message["isSynthetic"] as? Bool == true,
+              message["parent_tool_use_id"] is NSNull || message["parent_tool_use_id"] == nil,
+              let body = message["message"] as? [String: Any],
+              let content = body["content"] as? [[String: Any]] else { return false }
+        let text = content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+            .joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return false }
+        if let pending = pendingAssistantText {
+            pendingAssistantText = nil
+            pendingTextSpansOutcomeReport = false
+            finalMessageHandler?(pending.text)
+        }
+        // The event's own ID keeps a replayed run from recording the notice twice.
+        let id = "claude-notice-\((message["uuid"] as? String) ?? UUID().uuidString.lowercased())"
+        progressMessageHandler?(ConversationMessage(
+            id: id, role: .user, text: ProviderAutomaticNotice.claudeCode(text), turnID: activeTurnID, provider: .claude
+        ))
+        return true
     }
 
     private func handleToolResults(_ message: [String: Any]) {

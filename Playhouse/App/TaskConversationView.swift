@@ -4319,7 +4319,7 @@ struct TaskConversationView: View {
                 }
                 let visibleText = accessibleText
                 if isPlayhouseSent {
-                    Label("Automatic message from Playhouse", systemImage: "gearshape.2")
+                    Label(PlayhouseSentMessage.senderLabel(message.text), systemImage: "gearshape.2")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("playhouse-message-label-\(message.id)")
