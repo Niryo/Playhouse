@@ -63,13 +63,14 @@ private struct PluginCommitReadout: View {
 }
 
 /// The Plugins menu's catalog: every atom rendered by its JavaScript page, and
-/// the native composites (the task item, the Agents info section) composed in
-/// JavaScript beside the native ones.
+/// the native composites (the task item, the Agents info section, the Token
+/// Stats modal) composed in JavaScript beside the native ones.
 struct PluginCatalogView: View {
     private enum Page: Hashable {
         case atom(AtomType)
         case taskItem
         case agentsInfo
+        case tokenStats
     }
 
     @State private var selection: Page? = .atom(.stack)
@@ -91,6 +92,9 @@ struct PluginCatalogView: View {
                     Text("Agents Info")
                         .tag(Page.agentsInfo)
                         .accessibilityIdentifier("plugin-catalog-agents-info")
+                    Text("Token Stats")
+                        .tag(Page.tokenStats)
+                        .accessibilityIdentifier("plugin-catalog-token-stats")
                 }
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190)
@@ -103,6 +107,8 @@ struct PluginCatalogView: View {
                     TaskItemComparison()
                 case .agentsInfo?:
                     AgentsInfoComparison()
+                case .tokenStats?:
+                    TokenStatsComparison()
                 case nil:
                     EmptyView()
                 }
@@ -142,7 +148,7 @@ private struct AtomPage: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text("Props").font(.headline)
-                Text(atom.propKeys.sorted().joined(separator: ", "))
+                Text(atom.propKeys.isEmpty ? "none of its own" : atom.propKeys.sorted().joined(separator: ", "))
                     .font(.system(size: 11, design: .monospaced))
                     .accessibilityIdentifier("plugin-catalog-props")
                 if !atom.events.isEmpty {
@@ -315,6 +321,83 @@ private struct NativeAgentsInfoDemo: View {
                     AtomText(props: TextProps(text: signedOut ? "Sign in Claude" : "Sign out Claude", size: 11, weight: "medium", color: "accent"))
                 }
                 AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
+            }
+        }
+    }
+}
+
+/// The JavaScript Token Stats modal above the native one (each is 720 points
+/// wide), from the same sample model, each opened by the task item's token
+/// counter. Each side keeps its own section and open state; the native modal
+/// uses a "native-token-stats" id so the two never share accessibility
+/// identifiers.
+private struct TokenStatsComparison: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Token Stats")
+                .font(.title2.weight(.semibold))
+                .accessibilityIdentifier("plugin-catalog-title")
+            if let page = catalogPage("TokenStats"),
+               let sample = try? Self.sample(page.props) {
+                comparisonColumn("JavaScript (React → atoms)", width: 740) {
+                    PluginSurface(source: page.source, name: "TokenStats.js", props: page.props)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("plugin-catalog-js-token-stats")
+                comparisonColumn("Native SwiftUI (atoms)", width: 740) {
+                    NativeTokenStatsDemo(sample: sample)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("plugin-catalog-native-token-stats")
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    struct Sample: Decodable {
+        var tokenCounter: TaskItemModel.Tokens
+        var tokenStats: TokenStatsModel
+    }
+
+    static func sample(_ props: [String: PluginValue]) throws -> Sample {
+        try PluginValueDecoder.decode(Sample.self, from: .object(props))
+    }
+}
+
+/// The native Token Stats modal with the same demo controls as TokenStats.js, built from the same atoms.
+private struct NativeTokenStatsDemo: View {
+    let sample: TokenStatsComparison.Sample
+    @State private var section = "overview"
+    @State private var open = true
+    @State private var lastAction = "none"
+
+    private var model: TokenStatsModel {
+        var model = sample.tokenStats
+        model.id = "native-\(model.id)"
+        return model
+    }
+
+    var body: some View {
+        AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
+            AtomStack(props: StackProps(axis: "h", spacing: 8)) {
+                AtomText(props: TextProps(text: "Task item counter", size: 11, color: "secondary"))
+                TokenCounterButton(tokens: sample.tokenCounter, testID: "native-token-stats-counter") {
+                    open = true
+                    lastAction = "open"
+                }
+                AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
+            }
+            if open {
+                AtomPanel(props: PanelProps(fillOpacity: 0.03, cornerRadius: 10), common: AtomCommon(testID: "native-token-stats-modal")) {
+                    TokenStatsView(model: model, section: section, actions: TokenStatsActions(
+                        selectSection: { section = $0; lastAction = "section \($0)" },
+                        showRawInput: { target in
+                            lastAction = "raw input " + (target.agent.map { "\($0) #\(target.item ?? 0)" } ?? "final transcript")
+                        },
+                        done: { open = false; lastAction = "done" }
+                    ))
+                }
             }
         }
     }

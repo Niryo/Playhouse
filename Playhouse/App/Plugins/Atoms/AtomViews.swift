@@ -1,7 +1,8 @@
 import SwiftUI
 
 // The atoms' SwiftUI views. Plugins reach them through `AtomRegistry`, and
-// native composites (the task item) build them directly with the same props
+// native composites (the task item, the Agents info section, the Token
+// Stats modal) build them directly with the same props
 // structs, so both share one implementation.
 
 /// Colors a prop may name: primary, secondary, tertiary, accent, text (the
@@ -42,8 +43,16 @@ enum AtomColor {
 enum AtomFont {
     static func font(size: Double?, weight: String?, design: String? = nil, monospacedDigits: Bool = false) -> Font? {
         guard size != nil || weight != nil || design != nil || monospacedDigits else { return nil }
-        let font = Font.system(size: size ?? NSFont.systemFontSize, weight: self.weight(weight), design: design == "monospaced" ? .monospaced : .default)
+        let font = Font.system(size: size ?? NSFont.systemFontSize, weight: self.weight(weight), design: self.design(design))
         return monospacedDigits ? font.monospacedDigit() : font
+    }
+
+    private static func design(_ name: String?) -> Font.Design {
+        switch name {
+        case "monospaced": .monospaced
+        case "rounded": .rounded
+        default: .default
+        }
     }
 
     private static func weight(_ name: String?) -> Font.Weight {
@@ -198,6 +207,7 @@ struct AtomStack<Content: View>: View {
         switch props.align {
         case "top": .top
         case "bottom": .bottom
+        case "baseline": .firstTextBaseline
         default: .center
         }
     }
@@ -282,6 +292,8 @@ struct AtomButton<Content: View>: View {
 
     var body: some View {
         styled
+            .modifier(Applied(when: props.controlSize == "small") { $0.controlSize(.small) })
+            .modifier(Applied(when: props.shortcut == "default") { $0.keyboardShortcut(.defaultAction) })
             .padding(.horizontal, overhangs ? -CGFloat((props.emphasis ?? 0) + (common.paddingX ?? 0)) : 0)
             .padding(.vertical, overhangs ? -CGFloat(props.emphasis ?? 0) : 0)
             .disabled(props.disabled == true)
@@ -309,11 +321,20 @@ struct AtomButton<Content: View>: View {
 
     @ViewBuilder
     private var styled: some View {
-        if props.style == "borderless" {
+        switch props.style {
+        case "borderless":
             Button(action: action) { label }
                 .buttonStyle(.borderless)
                 .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
-        } else {
+        case "bordered":
+            Button(action: action) { label }
+                .buttonStyle(.bordered)
+                .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
+        case "prominent":
+            Button(action: action) { label }
+                .buttonStyle(.borderedProminent)
+                .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
+        default:
             Button(action: action) { label }
                 .buttonStyle(.plain)
                 .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
@@ -600,16 +621,79 @@ struct AtomMeter: View {
     var body: some View {
         let fraction = min(1, max(0, props.fraction))
         Capsule()
-            .fill(Color.primary.opacity(0.12))
+            .fill(Color.primary.opacity(props.trackOpacity ?? 0.12))
             .frame(height: CGFloat(props.thickness ?? 3))
             .overlay(alignment: .leading) {
                 GeometryReader { proxy in
                     Capsule()
                         .fill(AtomColor.style(props.color) ?? AnyShapeStyle(Color.accentColor))
-                        .frame(width: proxy.size.width * fraction)
+                        .frame(width: min(proxy.size.width, max(CGFloat(props.minFill ?? 0), proxy.size.width * fraction)))
                 }
             }
             .accessibilityHidden(common.label == nil)
             .atomCommon(common)
+    }
+}
+
+/// A vertical scroll view around a leading column that fills its width.
+/// `maxHeight` caps it while letting it shrink to its content; the common
+/// `height` fixes it.
+struct AtomScroll<Content: View>: View {
+    var props = ScrollProps()
+    var common = AtomCommon()
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .modifier(Applied(when: props.maxHeight != nil) { $0.frame(maxHeight: CGFloat(props.maxHeight ?? 0)) })
+        .atomCommon(common)
+    }
+}
+
+struct AtomDivider: View {
+    var common = AtomCommon()
+
+    var body: some View {
+        Divider()
+            .atomCommon(common)
+    }
+}
+
+/// A row of mutually exclusive choices, each its own button so it can be
+/// found by its option's `testID`. The selected one is highlighted and
+/// carries the selected trait; choosing another calls `onChange` with its
+/// value, and the owner moves `selected`.
+struct AtomChoiceBar: View {
+    var props: ChoiceBarProps
+    var common = AtomCommon()
+    let onChange: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(props.options, id: \.value) { option in
+                let isSelected = option.value == props.selected
+                Button {
+                    if !isSelected { onChange(option.value) }
+                } label: {
+                    Text(verbatim: option.label)
+                        .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(RoundedRectangle(cornerRadius: 5).fill(isSelected ? Color.accentColor.opacity(0.2) : Color.clear))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .buttonHoverPointer()
+                .nativeHelp(option.label)
+                .modifier(Applied(when: option.testID != nil) { $0.accessibilityIdentifier(option.testID ?? "") })
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+            }
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+        .atomCommon(common, group: true)
     }
 }

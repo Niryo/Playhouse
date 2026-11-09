@@ -314,15 +314,7 @@ struct TaskItemView: View {
                 AtomText(props: TextProps(text: model.createdText, size: 10, color: "tertiary"), common: AtomCommon(testID: "task-created-time-\(id)", passThrough: true))
             }
             if let tokens = model.tokens {
-                // The hover capsule pads the hit area well past the small text
-                // and overhangs, so the larger target doesn't grow the row.
-                AtomButton(
-                    props: ButtonProps(emphasis: 6, overhang: true),
-                    common: AtomCommon(testID: "task-token-usage-counter-\(id)", label: tokens.description, hint: "Open Token Stats", help: "\(tokens.description). Click for Token Stats", paddingX: 4),
-                    action: actions.showTokenStats
-                ) {
-                    AtomText(props: TextProps(text: tokens.compact, size: 10, weight: "medium", design: "monospaced", color: tokens.color, numeric: true))
-                }
+                TokenCounterButton(tokens: tokens, testID: "task-token-usage-counter-\(id)", action: actions.showTokenStats)
             }
         }
     }

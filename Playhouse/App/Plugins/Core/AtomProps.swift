@@ -1,7 +1,8 @@
 import Foundation
 
 /// The atoms plugins compose UI from: exactly the pieces the native
-/// composites (the task item and the Agents info section) are built of. Each
+/// composites (the task item, the Agents info section and the Token Stats
+/// modal) are built of. Each
 /// atom's props are a plain Decodable struct, decoded from a create/update
 /// op's payload here and built directly by native SwiftUI code, so both reach
 /// the same view (see `AtomRegistry` in Plugins/Atoms).
@@ -19,6 +20,9 @@ enum AtomType: String, CaseIterable, Sendable {
     case disclosure = "Disclosure"
     case panel = "Panel"
     case meter = "Meter"
+    case scroll = "Scroll"
+    case divider = "Divider"
+    case choiceBar = "ChoiceBar"
 
     /// The events each atom raises; a plugin's handler for any other name is never called.
     var events: Set<String> {
@@ -27,15 +31,16 @@ enum AtomType: String, CaseIterable, Sendable {
         case .pillPicker: ["onChange"]
         case .card: ["onPress", "onMenu"]
         case .disclosure: ["onToggle"]
-        case .stack, .text, .icon, .label, .link, .spinner, .spacer, .panel, .meter: []
+        case .choiceBar: ["onChange"]
+        case .stack, .text, .icon, .label, .link, .spinner, .spacer, .panel, .meter, .scroll, .divider: []
         }
     }
 
     /// Whether the atom shows atom children. A Text holds only raw strings.
     var takesAtomChildren: Bool {
         switch self {
-        case .stack, .button, .link, .card, .disclosure, .panel: true
-        case .text, .icon, .label, .spinner, .spacer, .pillPicker, .meter: false
+        case .stack, .button, .link, .card, .disclosure, .panel, .scroll: true
+        case .text, .icon, .label, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar: false
         }
     }
 
@@ -66,6 +71,9 @@ enum AtomType: String, CaseIterable, Sendable {
         case .disclosure: Self.keys(DisclosureProps.CodingKeys.self)
         case .panel: Self.keys(PanelProps.CodingKeys.self)
         case .meter: Self.keys(MeterProps.CodingKeys.self)
+        case .scroll: Self.keys(ScrollProps.CodingKeys.self)
+        case .divider: []
+        case .choiceBar: Self.keys(ChoiceBarProps.CodingKeys.self)
         }
     }
 
@@ -102,6 +110,9 @@ enum AtomType: String, CaseIterable, Sendable {
             case .disclosure: _ = try DisclosureProps.decode(props)
             case .panel: _ = try PanelProps.decode(props)
             case .meter: _ = try MeterProps.decode(props)
+            case .scroll: _ = try ScrollProps.decode(props)
+            case .divider: _ = try DividerProps.decode(props)
+            case .choiceBar: _ = try ChoiceBarProps.decode(props)
             }
         } catch let error as DecodingError {
             throw PluginTreeError(message: "<\(type)> has an invalid prop: \(Self.describe(error))")
@@ -159,7 +170,8 @@ struct AtomCommon: AtomPropsDecodable, Equatable {
 }
 
 /// A row or column. `axis` is "h" or "v" (default); `align` is leading,
-/// center or trailing for a column and top, center or bottom for a row.
+/// center or trailing for a column and top, center, bottom or baseline (the
+/// first line of text) for a row.
 /// `group` makes it one accessibility container for its children; `combine`
 /// makes it one accessibility element whose label joins theirs.
 struct StackProps: AtomPropsDecodable, Equatable {
@@ -173,7 +185,7 @@ struct StackProps: AtomPropsDecodable, Equatable {
 }
 
 /// A string, from `text` or the atom's raw string children. Weights: regular,
-/// medium, semibold, bold; designs: default, monospaced.
+/// medium, semibold, bold; designs: default, monospaced, rounded.
 struct TextProps: AtomPropsDecodable, Equatable {
     var text: String?
     var size: Double?
@@ -219,16 +231,22 @@ struct LabelProps: AtomPropsDecodable, Equatable {
     enum CodingKeys: String, CodingKey, CaseIterable { case text, icon, size, weight, color }
 }
 
-/// A button whose label is its children. `style` is plain (default) or
-/// borderless; `emphasis` is the padding of the hover capsule, if any, and
+/// A button whose label is its children. `style` is plain (default),
+/// borderless, bordered (a push button) or prominent (the accent-filled
+/// push button); `emphasis` is the padding of the hover capsule, if any, and
 /// `overhang` lets that capsule spill past the button's layout size.
+/// `controlSize` "small" makes it a small control (it inherits the size
+/// otherwise); `shortcut` "default" makes Return press it, window-wide, so
+/// only a window's primary action should set it.
 struct ButtonProps: AtomPropsDecodable, Equatable {
     var style: String?
     var emphasis: Double?
     var overhang: Bool?
     var disabled: Bool?
+    var controlSize: String?
+    var shortcut: String?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case style, emphasis, overhang, disabled }
+    enum CodingKeys: String, CodingKey, CaseIterable { case style, emphasis, overhang, disabled, controlSize, shortcut }
 }
 
 /// Opens `url` in the browser; its label is its children.
@@ -318,11 +336,45 @@ struct PanelProps: AtomPropsDecodable, Equatable {
 
 /// A horizontal usage bar: a capsule track filled to `fraction` (0...1) in
 /// `color` (accent by default), `thickness` points tall (3 by default).
-/// Decorative unless it has an accessibility `label`.
+/// The track is primary at `trackOpacity` (0.12 by default), and the fill is
+/// never shorter than `minFill` points (0 by default). Decorative unless it
+/// has an accessibility `label`.
 struct MeterProps: AtomPropsDecodable, Equatable {
     var fraction: Double
     var color: String?
     var thickness: Double?
+    var trackOpacity: Double?
+    var minFill: Double?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case fraction, color, thickness }
+    enum CodingKeys: String, CodingKey, CaseIterable { case fraction, color, thickness, trackOpacity, minFill }
+}
+
+/// A vertical scroll view around a leading column of its children (the
+/// Token Stats sections), stretched to the available width. `height` (a
+/// common prop) fixes its height; `maxHeight` lets it shrink to its content.
+struct ScrollProps: AtomPropsDecodable, Equatable {
+    var spacing: Double?
+    var maxHeight: Double?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case spacing, maxHeight }
+}
+
+/// A thin separator line across the stack it sits in.
+/// It has no props of its own.
+struct DividerProps: AtomPropsDecodable, Equatable {}
+
+/// A row of mutually exclusive choices (the Token Stats sections), each its
+/// own button with its option's `testID`, the selected one highlighted and
+/// marked selected. It is controlled: `onChange` receives the chosen value.
+struct ChoiceBarProps: AtomPropsDecodable, Equatable {
+    struct Option: Codable, Equatable {
+        var value: String
+        var label: String
+        var testID: String?
+    }
+
+    var options: [Option]
+    var selected: String
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case options, selected }
 }

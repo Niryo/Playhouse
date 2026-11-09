@@ -74,6 +74,19 @@ enum AtomRegistry {
         register(.meter) { node, _ in
             AnyView(AtomMeter(props: try .decode(node.props), common: try .decode(node.props)))
         }
+        register(.scroll) { node, runtime in
+            AnyView(AtomScroll(props: try .decode(node.props), common: try .decode(node.props)) {
+                PluginChildren(node: node, runtime: runtime)
+            })
+        }
+        register(.divider) { node, _ in
+            AnyView(AtomDivider(common: try .decode(node.props)))
+        }
+        register(.choiceBar) { node, runtime in
+            AnyView(AtomChoiceBar(props: try .decode(node.props), common: try .decode(node.props)) { value in
+                runtime.dispatch(nodeID: node.id, event: "onChange", value: .string(value))
+            })
+        }
         assert(Set(builders.keys) == Set(AtomType.allCases.map(\.rawValue)), "Every atom needs exactly one registry entry.")
         return builders
     }()

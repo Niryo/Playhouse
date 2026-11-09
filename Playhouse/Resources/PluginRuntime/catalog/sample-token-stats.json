@@ -1,0 +1,253 @@
+{
+  "tokenCounter": {
+    "compact": "3.7K",
+    "color": "#89CC5F",
+    "description": "3.7K tokens sent · 8 calls · 650 final transcript"
+  },
+  "tokenStats": {
+    "id": "token-stats",
+    "title": "Token stats",
+    "taskTitle": "Refactor the login flow",
+    "sections": [
+      {
+        "value": "overview",
+        "label": "Overview"
+      },
+      {
+        "value": "wasters",
+        "label": "Wasters"
+      },
+      {
+        "value": "tools",
+        "label": "Tools & MCP"
+      },
+      {
+        "value": "overhead",
+        "label": "Overhead"
+      }
+    ],
+    "loaded": true,
+    "rawInputAvailable": true,
+    "overview": {
+      "calls": {
+        "headlines": [
+          {
+            "key": "final-transcript",
+            "label": "Final transcript size",
+            "value": "650"
+          },
+          {
+            "key": "total-sent",
+            "label": "Total sent (incl. subagents)",
+            "value": "3,680"
+          },
+          {
+            "key": "excluding-cache",
+            "label": "Excluding cache reads (incl. subagents)",
+            "value": "1,710"
+          }
+        ],
+        "excludingCacheSplit": "Excluding cache reads: 720 main agent · 990 subagents",
+        "calls": "8 model calls · 4 main, 4 across 2 subagents",
+        "output": "Output 170"
+      },
+      "total": "3,200",
+      "turnsCaption": "tokens across 2 turns",
+      "hiddenTurnsNote": false,
+      "buckets": [
+        {
+          "label": "Input",
+          "value": "240"
+        },
+        {
+          "label": "Output",
+          "value": "170"
+        },
+        {
+          "label": "Cache read",
+          "value": "2,400"
+        },
+        {
+          "label": "Cache write",
+          "value": "390"
+        }
+      ],
+      "tools": [
+        {
+          "id": "Bash",
+          "turns": "2 turns",
+          "total": "3,200"
+        },
+        {
+          "id": "Read",
+          "turns": "1 turn",
+          "total": "1,600"
+        }
+      ],
+      "turns": [
+        {
+          "id": "turn-1",
+          "recordedAt": "Nov 9, 2026 at 10:42 AM",
+          "provider": "Claude",
+          "total": "1,600",
+          "tools": "Bash · Read"
+        },
+        {
+          "id": "turn-2",
+          "recordedAt": "Nov 9, 2026 at 10:47 AM",
+          "provider": "Claude",
+          "total": "1,600",
+          "tools": "Bash"
+        }
+      ]
+    },
+    "map": {
+      "wasters": [
+        {
+          "label": "fixturelogs/query_logs",
+          "kind": "Tool result",
+          "removed": true,
+          "preview": "2026-11-03T10:00:01Z INFO fixture log line 0001 request ok path=/api/orc/builds/0001",
+          "requests": "×63",
+          "tokens": "18,000",
+          "bar": {
+            "fraction": 1,
+            "color": "#CC1414"
+          },
+          "target": {
+            "agent": "claude",
+            "item": 14,
+            "inFinalTranscript": false
+          }
+        },
+        {
+          "label": "Read README.md",
+          "kind": "Tool result",
+          "removed": false,
+          "preview": "# Playhouse — a kanban board for coding agents",
+          "requests": "×41",
+          "tokens": "2,400",
+          "bar": {
+            "fraction": 0.1333,
+            "color": "#82CC64"
+          },
+          "target": {
+            "agent": "claude",
+            "item": 6,
+            "inFinalTranscript": true
+          }
+        },
+        {
+          "label": "Bash: swift build",
+          "kind": "Tool result",
+          "removed": false,
+          "preview": "Building for debugging... Compiling Playhouse TaskItemView.swift",
+          "requests": "×28",
+          "tokens": "1,350",
+          "bar": {
+            "fraction": 0.075,
+            "color": "#7ACC69"
+          },
+          "target": {
+            "agent": "claude/fxw",
+            "item": 3,
+            "inFinalTranscript": true
+          }
+        }
+      ],
+      "duplicates": [
+        {
+          "label": "Read README.md",
+          "copies": "2 copies of 2,400",
+          "wasted": "2,400"
+        }
+      ],
+      "cacheMisses": [
+        {
+          "request": "Request 34",
+          "detail": "Main agent · 21,300 in context",
+          "rewritten": "19,800"
+        }
+      ],
+      "tools": [
+        {
+          "id": "fixturelogs/query_logs",
+          "detail": "1 call · largest 18,000 · average 18,000",
+          "total": "18,000",
+          "bar": {
+            "fraction": 1,
+            "color": "#CC1414"
+          }
+        },
+        {
+          "id": "Read",
+          "detail": "2 calls · largest 2,400 · average 2,400",
+          "total": "4,900",
+          "bar": {
+            "fraction": 0.2722,
+            "color": "#98CC57"
+          }
+        },
+        {
+          "id": "Bash",
+          "detail": "3 calls · largest 1,350 · average 700",
+          "total": "2,100",
+          "bar": {
+            "fraction": 0.1167,
+            "color": "#7FCC65"
+          }
+        }
+      ],
+      "servers": [
+        {
+          "id": "fixturelogs",
+          "detail": "2 tools · 1 calls · definitions 1,200",
+          "total": "18,000"
+        }
+      ],
+      "overhead": [
+        {
+          "label": "System prompt (part 1)",
+          "requests": "× every request",
+          "tokens": "3,100",
+          "bar": {
+            "fraction": 1,
+            "color": "#CC1414"
+          }
+        },
+        {
+          "label": "MCP server fixturelogs · 2 tool definitions",
+          "requests": "× every request",
+          "tokens": "1,200",
+          "bar": {
+            "fraction": 0.3871,
+            "color": "#B1CC4D"
+          }
+        },
+        {
+          "label": "Tool definition: Bash",
+          "requests": "×63",
+          "tokens": "640",
+          "bar": {
+            "fraction": 0.2065,
+            "color": "#8DCC5D"
+          }
+        }
+      ],
+      "agents": [
+        {
+          "id": "claude",
+          "label": "Main agent",
+          "detail": "63 requests · final 21,300 · 1 compacted",
+          "sent": "1,204,000"
+        },
+        {
+          "id": "claude/fxw",
+          "label": "Subagent fxw",
+          "detail": "9 requests · final 4,100",
+          "sent": "31,200"
+        }
+      ]
+    }
+  }
+}

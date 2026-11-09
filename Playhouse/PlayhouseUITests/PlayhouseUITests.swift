@@ -16383,7 +16383,9 @@ final class PlayhouseUITests: XCTestCase {
         assertText("token-stats-total-sent", equals: "1,500")
         XCTAssertFalse(element("token-stats-excluding-cache").exists, "A pre-split task hides the Excluding cache reads headline.")
         attachScreenshot(named: "Token Stats modal for a task saved before the cache split")
-        element("close-token-stats-button").click()
+        // Done is the modal's default button, so Return closes it.
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(element("token-stats-total-sent")), "Return pressed Done and closed Token Stats.")
         XCTAssertEqual(calls["finalTranscriptTokens"] as? Int, 650)
         XCTAssertEqual((calls["subagents"] as? [String: Any])?["count"] as? Int, 2)
     }
@@ -19423,17 +19425,18 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(switched["conversationProvider"] as? String, liveProvider)
     }
 
-    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter) and the Task Item and Agents Info examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
+    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar) and the Task Item, Agents Info and Token Stats examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
     func test_plugin_renderer_commits_minimal_ops_and_runs_handlers() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
         XCTAssertTrue(element("plugin-catalog-atom-Stack").waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog opens the catalog.")
         XCTAssertTrue(element("plugin-catalog-task-item").exists, "The sidebar lists the Task Item example.")
         XCTAssertTrue(element("plugin-catalog-agents-info").exists, "The sidebar lists the Agents Info example.")
+        XCTAssertTrue(element("plugin-catalog-token-stats").exists, "The sidebar lists the Token Stats example.")
 
         let rendered = try XCTUnwrap(try runCLI(["plugin", "render", "--page", "Stack"])["result"] as? [String: Any])
         let atoms = try XCTUnwrap(rendered["atoms"] as? [String])
-        XCTAssertEqual(atoms, ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter"])
+        XCTAssertEqual(atoms, ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter", "Scroll", "Divider", "ChoiceBar"])
         try assertPluginValuesCrossWithJSONRules()
         for atom in atoms {
             let row = element("plugin-catalog-atom-\(atom)")
@@ -19485,6 +19488,38 @@ final class PlayhouseUITests: XCTestCase {
         disclosureToggle.click()
         XCTAssertTrue(element("disclosure-first").waitToExist(timeout: 5), "Expanding brings the children back.")
         XCTAssertEqual(disclosureToggle.value as? String, "Expanded")
+
+        element("plugin-catalog-atom-ChoiceBar").click()
+        let overviewChoice = element("choice-overview"), wastersChoice = element("choice-wasters")
+        XCTAssertTrue(wastersChoice.waitToExist(timeout: 10))
+        XCTAssertTrue(overviewChoice.isSelected, "The selected option carries the selected trait.")
+        XCTAssertFalse(wastersChoice.isSelected)
+        wastersChoice.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("choice-selected")) == "Selected: wasters" }, timeout: 5), "Clicking an option ran onChange with its value.")
+        XCTAssertTrue(waitUntil({ wastersChoice.isSelected && !overviewChoice.isSelected }, timeout: 5), "The chosen option is now the selected one.")
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 2: update, text → nodes ") }, timeout: 5),
+                      "Choosing changed only the ChoiceBar's props and the readout: \(pluginText(commit))")
+        attachScreenshot(named: "ChoiceBar atom after choosing Wasters")
+        wastersChoice.click()
+        XCTAssertFalse(waitUntil({ !self.pluginText(commit).hasPrefix("Commit 2: ") }, timeout: 2), "Clicking the selected option commits nothing: \(pluginText(commit))")
+
+        element("plugin-catalog-atom-Scroll").click()
+        let scroll = element("scroll-demo")
+        XCTAssertTrue(scroll.waitToExist(timeout: 10))
+        XCTAssertTrue(element("scroll-row-4").waitToExist(timeout: 5))
+        XCTAssertLessThan(scroll.frame.height, 119, "Four rows fit, so the Scroll shrinks to them.")
+        element("scroll-add").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("scroll-count")) == "8 rows" }, timeout: 5))
+        let lastRow = element("scroll-row-8")
+        XCTAssertTrue(lastRow.waitToExist(timeout: 5))
+        XCTAssertTrue(waitUntil({ abs(scroll.frame.height - 120) <= 1 }, timeout: 5), "Past its maxHeight the Scroll stays 120 points tall: \(scroll.frame.height)")
+        // A row clipped by a scroll view still reports itself hittable, so its frame says where it is.
+        XCTAssertGreaterThan(lastRow.frame.maxY, scroll.frame.maxY + 1, "The last row starts below the Scroll's visible area.")
+        for _ in 0..<10 where lastRow.frame.maxY > scroll.frame.maxY + 1 {
+            scroll.scroll(byDeltaX: 0, deltaY: -60)
+        }
+        XCTAssertLessThanOrEqual(lastRow.frame.maxY, scroll.frame.maxY + 1, "Scrolling inside the Scroll brings its last row into view.")
+        attachScreenshot(named: "Scroll atom capped at 120 points and scrolled to its last row")
     }
 
     /// Commits, props and event values cross as JavaScript values, not JSON
@@ -19750,6 +19785,155 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 6: text → node ") }, timeout: 5),
                       "Switching changed only the readout: \(pluginText(commit))")
         XCTAssertEqual(pluginText(native("native-last-action")), "Last: expand", "The native section keeps its own state.")
+    }
+
+    // case-contract: test_plugin_token_stats_renders_from_atoms_like_native | The Plugin Catalog's Token Stats page shows the Token Stats modal composed in JavaScript from atoms above the native SwiftUI modal the board presents, built from the same atoms and sample data, each opened by the task item's token counter (the same overhanging Button atom, labelled with its description and hinted Open Token Stats). Both show the title and the task's title, the View raw input… button, a section bar of Overview, Wasters, Tools & MCP and Overhead with Overview selected, the call headlines (Final transcript size, Total sent (incl. subagents), Excluding cache reads (incl. subagents)), the main-agent and subagent split, the call and output lines, the total, the four buckets, the per-tool rollup and the per-turn rows, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Label, Button, Spacer, ChoiceBar, Divider, Scroll, Meter) with the board modal's identifiers. Choosing Wasters in the JavaScript section bar runs onChange with its value (Last: section wasters) and shows the largest items, each with a 72-point share bar, its kind, the removed-by-compaction flag, its request count and a small Show button, then the repeated result and the cache miss, while the native modal stays on Overview until its own bar moves it, after which both show the same rows at the same size. Show runs its JavaScript handler with the item's raw input target (Last: raw input claude #14) and View raw input… with the final transcript (Last: raw input final transcript), without re-rendering any row. Tools & MCP lists each tool's bar, calls and total and the MCP server, and Overhead lists what every request carries and each agent. The overview scrolls within at most 320 points and each map section within a fixed 420. Done closes the JavaScript modal (Last: done) and leaves the native one open, and the counter opens it again (Last: open). The section bar raises no onPress, so pressing it is refused as invalid_argument.
+    func test_plugin_token_stats_renders_from_atoms_like_native() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Plugin Catalog")
+        let example = element("plugin-catalog-token-stats")
+        XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Token Stats example.")
+        example.click()
+        let jsSide = element("plugin-catalog-js-token-stats")
+        let nativeSide = element("plugin-catalog-native-token-stats")
+        XCTAssertTrue(jsSide.waitToExist(timeout: 10), "The page shows the JavaScript Token Stats modal.")
+        XCTAssertTrue(nativeSide.waitToExist(timeout: 10), "The page shows the native Token Stats modal.")
+        XCTAssertFalse(element("plugin-error").exists, "The JavaScript modal renders without errors.")
+
+        func js(_ identifier: String) -> XCUIElement {
+            jsSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func native(_ identifier: String) -> XCUIElement {
+            nativeSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func pair(_ suffix: String) -> (js: XCUIElement, native: XCUIElement) {
+            (js("token-stats\(suffix)"), native("native-token-stats\(suffix)"))
+        }
+        func assertSameSize(_ js: XCUIElement, _ native: XCUIElement, _ name: String) {
+            XCTAssertTrue(js.waitToExist(timeout: 10), "The JavaScript modal has \(name).")
+            XCTAssertTrue(native.waitToExist(timeout: 10), "The native modal has \(name).")
+            XCTAssertEqual(js.frame.width, native.frame.width, accuracy: 1, "\(name) has the same width in both.")
+            XCTAssertEqual(js.frame.height, native.frame.height, accuracy: 1, "\(name) has the same height in both.")
+        }
+        func assertSameSize(_ suffix: String) {
+            let (js, native) = pair(suffix)
+            assertSameSize(js, native, "token-stats\(suffix)")
+        }
+        // The modals are 720 points wide, so the native one sits below the
+        // JavaScript one and the catalog page scrolls to reach either.
+        let page = app.scrollViews.containing(.any, identifier: "plugin-catalog-js-token-stats").firstMatch
+        @discardableResult func reveal(_ element: XCUIElement) -> XCUIElement {
+            XCTAssertTrue(element.waitToExist(timeout: 10), "\(element) should exist before scrolling to it.")
+            for _ in 0..<15 where !element.isHittable {
+                page.scroll(byDeltaX: 0, deltaY: element.frame.midY > page.frame.midY ? -250 : 250)
+            }
+            XCTAssertTrue(element.isHittable, "\(element) should be on screen after scrolling the catalog page.")
+            return element
+        }
+        let commit = jsSide.descendants(matching: .any).matching(identifier: "plugin-last-commit").firstMatch
+        let lastAction = js("js-last-action")
+
+        // The task item's token counter opens the modal: the same Button atom as on the card.
+        let jsCounter = js("token-stats-counter"), nativeCounter = native("native-token-stats-counter")
+        assertSameSize(jsCounter, nativeCounter, "the token counter")
+        XCTAssertEqual(jsCounter.label, "3.7K tokens sent · 8 calls · 650 final transcript", "The counter is labelled with its description.")
+        XCTAssertEqual(jsCounter.label, nativeCounter.label)
+        XCTAssertGreaterThanOrEqual(jsCounter.frame.height, 20, "The counter's hit area is taller than its small text.")
+        assertHoverEmphasis(for: jsCounter)
+
+        // The catalog frames each modal in a Panel; SwiftUI merges the modal's
+        // root container into it, so the frame carries the modal's size.
+        for suffix in ["-modal", "-title", "-task-title", "-raw-input-button", "-sections", "-section-overview", "-section-wasters", "-section-tools",
+                       "-section-overhead", "-final-transcript", "-total-sent", "-excluding-cache", "-excluding-cache-split", "-total-calls",
+                       "-output", "-total", "-overview", "-tool-Bash", "-tool-Read", "-turn-turn-1", "-turn-turn-2"] {
+            assertSameSize(suffix)
+        }
+        assertSameSize(js("close-token-stats-button"), native("close-native-token-stats-button"), "Done")
+        for (suffix, text) in [("-title", "Token stats"), ("-task-title", "Refactor the login flow"), ("-final-transcript", "650"), ("-total-sent", "3,680"),
+                               ("-excluding-cache", "1,710"), ("-excluding-cache-split", "Excluding cache reads: 720 main agent · 990 subagents"),
+                               ("-total-calls", "8 model calls · 4 main, 4 across 2 subagents"), ("-output", "Output 170"), ("-total", "3,200")] {
+            XCTAssertEqual(pluginText(pair(suffix).js), text, "token-stats\(suffix) reads \(text).")
+            XCTAssertEqual(pluginText(pair(suffix).native), text, "native-token-stats\(suffix) reads \(text).")
+        }
+        XCTAssertTrue(pair("-section-overview").js.isSelected, "Token Stats opens on its Overview section.")
+        XCTAssertFalse(pair("-section-wasters").js.isSelected)
+        XCTAssertTrue(pair("-raw-input-button").js.isEnabled, "The sample has a token map, so its raw input opens.")
+        XCTAssertLessThanOrEqual(pair("-modal").js.frame.maxY, pair("-modal").native.frame.minY, "The JavaScript modal sits above the native one.")
+        XCTAssertEqual(pair("-modal").js.frame.width, 720, accuracy: 1, "The modal is 720 points wide, as on the board.")
+        for side in [pair("-overview").js, pair("-overview").native] {
+            XCTAssertGreaterThan(side.frame.height, 80, "The overview's rollups show in its scroll view.")
+            XCTAssertLessThanOrEqual(side.frame.height, 321, "The overview scrolls within at most 320 points.")
+        }
+        attachScreenshot(named: "Token Stats: JavaScript above native, both on Overview")
+
+        // Each side keeps its own section; the ChoiceBar is controlled.
+        reveal(pair("-section-wasters").js).click()
+        XCTAssertTrue(js("token-stats-waster-0").waitToExist(timeout: 5), "Choosing Wasters shows the largest items.")
+        XCTAssertFalse(pair("-total").js.exists, "Wasters replaces the overview.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: section wasters" }, timeout: 5), "The section bar ran onChange with its value.")
+        XCTAssertTrue(waitUntil({ pair("-section-wasters").js.isSelected && !pair("-section-overview").js.isSelected }, timeout: 5))
+        XCTAssertTrue(pair("-total").native.exists, "The native modal stays on Overview.")
+        XCTAssertTrue(pair("-section-overview").native.isSelected)
+        XCTAssertEqual(pluginText(js("token-stats-waster-0-label")), "fixturelogs/query_logs")
+        XCTAssertEqual(pluginText(js("token-stats-waster-0-removed")), "removed by compaction")
+        XCTAssertEqual(pluginText(js("token-stats-waster-0-requests")), "×63")
+        XCTAssertEqual(pluginText(js("token-stats-waster-0-tokens")), "18,000")
+        XCTAssertFalse(js("token-stats-waster-1-removed").exists, "An item still in the final transcript isn't flagged.")
+        XCTAssertEqual(pluginText(js("token-stats-duplicate-0-copies")), "2 copies of 2,400")
+        XCTAssertEqual(pluginText(js("token-stats-cache-miss-0-request")), "Request 34")
+        attachScreenshot(named: "Token Stats: JavaScript on Wasters, native still on Overview")
+        reveal(pair("-section-wasters").native).click()
+        XCTAssertTrue(native("native-token-stats-waster-0").waitToExist(timeout: 5), "The native section bar moves its own modal.")
+        for side in [pair("-map").js, pair("-map").native] {
+            XCTAssertEqual(side.frame.height, 420, accuracy: 1, "Each map section scrolls within a fixed 420 points.")
+        }
+        for suffix in ["-map", "-waster-0", "-waster-1", "-waster-2", "-waster-0-label", "-waster-0-removed", "-waster-0-requests", "-waster-0-tokens",
+                       "-waster-0-show", "-duplicate-0", "-cache-miss-0"] {
+            assertSameSize(suffix)
+        }
+        attachScreenshot(named: "Token Stats: both on Wasters")
+
+        // Show and View raw input… run their JavaScript handlers with their targets.
+        reveal(js("token-stats-waster-0-show")).click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: raw input claude #14" }, timeout: 5), "Show passes the item's raw input target.")
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 3: text → node ") }, timeout: 5),
+                      "Show changed only the readout: \(pluginText(commit))")
+        reveal(pair("-raw-input-button").js).click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: raw input final transcript" }, timeout: 5), "View raw input… opens the final transcript.")
+
+        reveal(pair("-section-tools").js).click()
+        XCTAssertTrue(js("token-stats-measured-tool-Bash").waitToExist(timeout: 5), "Tools & MCP lists each tool.")
+        reveal(pair("-section-tools").native).click()
+        for suffix in ["-measured-tool-fixturelogs/query_logs", "-measured-tool-Read", "-measured-tool-Bash", "-measured-tool-Read-calls", "-server-fixturelogs"] {
+            assertSameSize(suffix)
+        }
+        XCTAssertEqual(pluginText(js("token-stats-measured-tool-fixturelogs/query_logs-total")), "18,000")
+        XCTAssertEqual(pluginText(js("token-stats-server-fixturelogs-detail")), "2 tools · 1 calls · definitions 1,200")
+        reveal(pair("-section-tools").js)
+        attachScreenshot(named: "Token Stats: Tools & MCP")
+
+        reveal(pair("-section-overhead").js).click()
+        XCTAssertTrue(js("token-stats-overhead-0").waitToExist(timeout: 5), "Overhead lists what every request carries.")
+        reveal(pair("-section-overhead").native).click()
+        for suffix in ["-overhead-0", "-overhead-1", "-overhead-2", "-agent-claude", "-agent-claude/fxw"] {
+            assertSameSize(suffix)
+        }
+        XCTAssertEqual(pluginText(js("token-stats-overhead-0-requests")), "× every request")
+        XCTAssertEqual(pluginText(js("token-stats-agent-claude/fxw-sent")), "31,200")
+        reveal(pair("-section-overhead").js)
+        attachScreenshot(named: "Token Stats: Overhead and agents")
+
+        // Done closes the JavaScript modal; the counter opens it again.
+        reveal(js("close-token-stats-button")).click()
+        XCTAssertTrue(waitUntil({ !pair("-modal").js.exists }, timeout: 5), "Done closed the JavaScript modal.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: done" }, timeout: 5))
+        XCTAssertTrue(pair("-modal").native.exists, "The native modal stays open.")
+        attachScreenshot(named: "Token Stats: JavaScript modal closed by Done, native open")
+        reveal(jsCounter).click()
+        XCTAssertTrue(pair("-modal").js.waitToExist(timeout: 5), "The counter opened the modal again.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: open" }, timeout: 5))
+        XCTAssertEqual(pluginText(native("native-last-action")), "Last: section overhead", "The native modal keeps its own state.")
+        attachScreenshot(named: "Token Stats: the counter reopened the JavaScript modal")
     }
 
     private func clickPluginsMenuItem(_ title: String) {
