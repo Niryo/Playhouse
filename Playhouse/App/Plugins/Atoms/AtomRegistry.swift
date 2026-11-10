@@ -121,6 +121,36 @@ enum AtomRegistry {
                 PluginChildren(node: node, runtime: runtime)
             })
         }
+        register(.editor) { node, runtime in
+            AnyView(AtomEditor(props: try .decode(node.props), common: try .decode(node.props), onChange: { text in
+                runtime.dispatch(nodeID: node.id, event: "onChange", value: .string(text))
+            }, onSubmit: {
+                runtime.dispatch(nodeID: node.id, event: "onSubmit")
+            }, onSteerSubmit: {
+                runtime.dispatch(nodeID: node.id, event: "onSteerSubmit")
+            }, onFocusChange: { focused in
+                runtime.dispatch(nodeID: node.id, event: "onFocusChange", value: .bool(focused))
+            }))
+        }
+        register(.popover) { node, runtime in
+            let children = node.children.filter { $0.type != PluginNode.textType }
+            return AnyView(AtomPopover(props: try .decode(node.props), common: try .decode(node.props), onDismiss: {
+                runtime.dispatch(nodeID: node.id, event: "onDismiss")
+            }, anchor: {
+                if let anchor = children.first { PluginNodeView(node: anchor, runtime: runtime) }
+            }, content: {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(children.dropFirst()) { child in
+                        PluginNodeView(node: child, runtime: runtime)
+                    }
+                }
+            }))
+        }
+        register(.stepSlider) { node, runtime in
+            AnyView(AtomStepSlider(props: try .decode(node.props), common: try .decode(node.props)) { value in
+                runtime.dispatch(nodeID: node.id, event: "onChange", value: .string(value))
+            })
+        }
         register(.overlay) { node, runtime in
             let children = node.children.filter { $0.type != PluginNode.textType }
             return AnyView(AtomOverlay(props: try .decode(node.props), common: try .decode(node.props)) {

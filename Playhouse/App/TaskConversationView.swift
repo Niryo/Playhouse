@@ -5111,383 +5111,73 @@ struct TaskConversationView: View {
                 .accessibilityIdentifier("queued-follow-ups")
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                let pendingCommentCount = annotations.filter(\.pending).count
-                if pendingCommentCount > 0 {
-                    Label("\(pendingCommentCount) comment\(pendingCommentCount == 1 ? "" : "s")", systemImage: "text.bubble")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.primary.opacity(0.82))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color.primary.opacity(0.1), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
-                        .accessibilityIdentifier("pending-comment-count")
-                }
+            ComposerView(model: composerModel, actions: composerActions, header: {
+        let pendingCommentCount = annotations.filter(\.pending).count
+        if pendingCommentCount > 0 {
+            Label("\(pendingCommentCount) comment\(pendingCommentCount == 1 ? "" : "s")", systemImage: "text.bubble")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.primary.opacity(0.82))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.primary.opacity(0.1), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
+                .accessibilityIdentifier("pending-comment-count")
+        }
 
-                if let activeGoal, activeGoal.status != "complete", !isReadOnly, provider.supportsGoals {
-                    HStack(spacing: 10) {
-                        Image(systemName: "scope").font(.system(size: 17, weight: .medium)).foregroundStyle(.secondary)
-                        Text("\(activeGoal.status == "paused" ? "Paused goal" : "Pursuing goal") \(activeGoal.objective)")
-                            .lineLimit(1).truncationMode(.tail).font(.system(size: 15))
-                            .accessibilityIdentifier("active-goal-title")
-                        Spacer(minLength: 4)
-                        if let seconds = activeGoal.timeUsedSeconds {
-                            TimelineView(.periodic(from: .now, by: 1)) { context in
-                                Text(Self.goalDuration(goalElapsedTime(for: activeGoal, reportedSeconds: seconds)
-                                    + (activeGoal.status == "active" ? context.date.timeIntervalSince(goalStatusUpdatedAt) : 0)))
-                                    .foregroundStyle(.secondary)
-                                    .accessibilityIdentifier("goal-elapsed-time")
-                            }
-                        }
-                        Button(role: .destructive) { Task { await mutateGoal("clear") } } label: { Image(systemName: "trash") }
-                            .buttonHoverPointer().buttonStyle(.plain).nativeHelp("Clear goal")
-                            .accessibilityLabel("Clear goal").accessibilityIdentifier("goal-clear-button")
-                        Button { Task { await mutateGoal(activeGoal.status == "paused" ? "resume" : "pause") } } label: {
-                            Image(systemName: activeGoal.status == "paused" ? "play.fill" : "pause")
-                        }
-                            .buttonHoverPointer().buttonStyle(.plain).nativeHelp(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
-                            .accessibilityLabel(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
-                            .accessibilityIdentifier("goal-pause-resume-button")
-                        Button { isGoalExpanded.toggle() } label: { Image(systemName: isGoalExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") }
-                            .frame(width: 30, height: 30)
-                            .contentShape(Rectangle())
-                            .buttonHoverPointer().buttonStyle(.plain).nativeHelp(isGoalExpanded ? "Collapse goal" : "Expand goal")
-                            .accessibilityLabel(isGoalExpanded ? "Collapse goal" : "Expand goal")
-                            .accessibilityValue(isGoalExpanded ? "Expanded" : "Collapsed")
-                            .accessibilityIdentifier("goal-expand-button")
-                    }
-                    .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(Color.primary.opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1).allowsHitTesting(false) }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityValue(conversationRuntime.snapshot.goal.turnStartedThreadID == task.codexThreadID ? "Work started" : (conversationRuntime.isTurnActive(threadID: task.codexThreadID ?? "") ? "Working" : "Waiting"))
-                    .accessibilityIdentifier("active-goal-progress-row")
-                    if isGoalExpanded {
-                        Text(activeGoal.objective).font(.system(size: 13)).foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14)
-                            .accessibilityIdentifier("active-goal-details")
+        if let activeGoal, activeGoal.status != "complete", !isReadOnly, provider.supportsGoals {
+            HStack(spacing: 10) {
+                Image(systemName: "scope").font(.system(size: 17, weight: .medium)).foregroundStyle(.secondary)
+                Text("\(activeGoal.status == "paused" ? "Paused goal" : "Pursuing goal") \(activeGoal.objective)")
+                    .lineLimit(1).truncationMode(.tail).font(.system(size: 15))
+                    .accessibilityIdentifier("active-goal-title")
+                Spacer(minLength: 4)
+                if let seconds = activeGoal.timeUsedSeconds {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(Self.goalDuration(goalElapsedTime(for: activeGoal, reportedSeconds: seconds)
+                            + (activeGoal.status == "active" ? context.date.timeIntervalSince(goalStatusUpdatedAt) : 0)))
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("goal-elapsed-time")
                     }
                 }
-                NativeChatEditor(
-                    text: $composerDraft.text,
-                    height: $composerHeight,
-                    isFocused: Binding(get: { isComposerFocused }, set: { isComposerFocused = $0 }),
-                    focusRequest: composerDraft.focusRequest,
-                    isEnabled: !isReadOnly,
-                    autofocusOnAppear: isNewTask,
-                    accessibilityHelp: isReadOnly
-                        ? "Archived conversation, read-only."
-                         : (isResponding ? "Press Return to queue this follow-up. Press Command-Return to steer the active turn, or use a queued row's Steer action."
-                            : (isLoadingHistory ? "Composer unavailable while conversation history loads." : "")),
-                    onSubmit: {
-                        if isResponding {
-                            queueDraftForAfterTurn()
-                        } else {
-                            sendOrSchedule()
-                        }
-                    },
-                    onSteerSubmit: {
-                        if isResponding, isConversationTurnActive {
-                            steerCurrentTurn()
-                        }
-                    },
-                    onPasteImage: { image in
-                        do { try addImageData(image) }
-                        catch { errorMessage = error.localizedDescription }
-                    }
-                )
-                    .frame(height: composerHeight)
-                    .overlay(alignment: .topLeading) {
-                        if draft.isEmpty {
-                            Text(isEnteringGoal ? "Set a goal to keep pursuing" : (isResponding || activeGoal != nil ? "Ask for follow-up changes" : "Message…"))
-                                .font(.system(size: 15))
-                                .foregroundStyle(.tertiary)
-                                .padding(.horizontal, 5)
-                                .padding(.top, 4)
-                                .allowsHitTesting(false)
-                                .accessibilityIdentifier("composer-placeholder")
-                        }
-                    }
-                    .onChange(of: draft) { _, newValue in
-                        if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {
-                            activatePlanMode()
-                        } else if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/goal", provider.supportsGoals {
-                            isEnteringGoal = true
-                            draft = ""
-                        }
-                        scheduleDraftAutosave(newValue)
-                    }
-                    .disabled(isReadOnly || isPreparingSubmittedMessage)
-                    .accessibilityIdentifier("message-composer-scroll-view")
-
-                HStack(spacing: 12) {
-                    SkillsButton(testID: "open-skills-button") { isShowingSkills = true }
-                    Menu {
-                        if provider.supportsGoals {
-                            Button {
-                                isEnteringGoal = true
-                                draft = ""
-                            } label: {
-                                Label("Goal", systemImage: "scope")
-                            }
-                            .buttonHoverPointer()
-                            .help("Set a goal to keep pursuing")
-                            .accessibilityIdentifier("conversation-mode-goal")
-                        }
-                        ForEach(ConversationMode.allCases, id: \.self) { mode in
-                            Button {
-                                isEnteringGoal = false
-                                setConversationMode(mode)
-                            } label: {
-                                if conversationMode == mode {
-                                    Label(mode.title, systemImage: "checkmark")
-                                } else {
-                                    Text(mode.title)
-                                }
-                            }
-                            .buttonHoverPointer()
-                            .help("Switch to \(mode.title) mode")
-                            .accessibilityIdentifier("conversation-mode-\(mode.rawValue)")
-                        }
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "plus")
-                                .font(.system(size: 14, weight: .semibold))
-                            if isEnteringGoal {
-                                Image(systemName: "scope")
-                                Text("Goal")
-                                    .font(.system(size: 11, weight: .semibold))
-                            } else if conversationMode == .plan {
-                                Text("Plan")
-                                    .font(.system(size: 11, weight: .semibold))
-                            }
-                        }
-                        .foregroundStyle(isEnteringGoal || conversationMode == .plan ? Color.accentColor : Color.secondary)
-                        .frame(minWidth: 30, minHeight: 31)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonHoverPointer()
-                    .menuStyle(.borderlessButton)
-                    .nativeHelp("Change conversation mode or add context")
-                    .accessibilityLabel(isEnteringGoal ? "Goal" : "Conversation mode: \(conversationMode.title)")
-                    .accessibilityIdentifier("conversation-mode-menu")
-
-                    if canShowStartImplementing {
-                        Button(action: startImplementingPlan) {
-                            Text("Start Implementing")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 11)
-                                .frame(height: 31)
-                                .background(Color.accentColor, in: Capsule())
-                        }
-                        .buttonHoverPointer()
-                        .buttonStyle(.plain)
-                        .disabled(workspaceRootURLs.isEmpty || isLoadingHistory || isPreparingSubmittedMessage)
-                        .nativeHelp(startImplementingUnavailableReason ?? "Switch to Code mode and start implementing this plan")
-                        .accessibilityValue(startImplementingUnavailableReason ?? (workspaceRootURLs.isEmpty ? "Unavailable" : "Available"))
-                        .accessibilityHint("Switches to Code mode and starts implementing this plan")
-                        .accessibilityIdentifier("start-implementing-button")
-
-                        // The reason is shown, not only hovered, and opens the header's repository picker.
-                        if let reason = startImplementingUnavailableReason {
-                            Button(action: showRepositoryPicker) {
-                                Label("No repository", systemImage: "exclamationmark.triangle.fill")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(emptyConversationRepositoryTitleColor)
-                                    .lineLimit(1)
-                                    .fixedSize()
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonHoverPointer()
-                            .buttonStyle(.plain)
-                            .disabled(isReadOnly)
-                            .nativeHelp(reason)
-                            .accessibilityLabel("No repository")
-                            .accessibilityValue(reason)
-                            .accessibilityHint("Opens the repository picker")
-                            .accessibilityIdentifier("start-implementing-unavailable-reason")
-                        }
-                    }
-
-                    Spacer(minLength: 0)
-
-                    providerMenu
-
-                    Button {
-                        if isModelPickerPresented {
-                            commitModelPickerSelection()
-                            isModelPickerPresented = false
-                        } else {
-                            pickerModelID = selectedModelID
-                            pickerEffort = selectedEffort
-                            isModelPickerPresented = true
-                        }
-                    } label: {
-                        HStack(spacing: 7) {
-                            Text(selectedModelName)
-                            Text(selectedEffort.title).foregroundStyle(.secondary)
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(.tertiary)
-                        }
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.primary.opacity(0.82))
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .buttonHoverPointer()
-                    .nativeHelp("Choose a model and reasoning effort")
-                    .accessibilityLabel("Model: \(selectedModelName), effort: \(selectedEffort.title)")
-                    .accessibilityValue(selectedModelName)
-                    .accessibilityIdentifier("model-picker-menu")
-                    .popover(isPresented: Binding(
-                        get: { isModelPickerPresented },
-                        set: { isPresented in
-                            if !isPresented && isModelPickerPresented {
-                                commitModelPickerSelection()
-                            }
-                            isModelPickerPresented = isPresented
-                        }
-                    ), arrowEdge: .top) {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ForEach(modelOptions) { model in
-                                Button {
-                                    selectPickerModel(model)
-                                } label: {
-                                    HStack {
-                                        Text(model.name)
-                                        Spacer()
-                                        if pickerModelID == model.id || (pickerModelID.isEmpty && model.isDefault) {
-                                            Image(systemName: "checkmark")
-                                                .font(.system(size: 12, weight: .semibold))
-                                        }
-                                    }
-                                    .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .buttonHoverPointer()
-                                .nativeHelp("Select \(model.name)")
-                                .accessibilityIdentifier("model-option-\(model.id)")
-                            }
-                            Divider().padding(.vertical, 8)
-                            Text(pickerEffort.title)
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundStyle(Color.accentColor)
-                                .accessibilityIdentifier("selected-model-effort")
-                            if pickerEffortChoices.count > 1 {
-                                // The native slider knob is translucent on macOS 26, so it is drawn by
-                                // EffortStepSlider; an undrawn native slider laid over it takes the
-                                // pointer and keyboard, and a SwiftUI Slider represents it to accessibility.
-                                EffortStepSlider(selection: $pickerEffort, choices: pickerEffortChoices)
-                                    .overlay {
-                                        EffortAccessibilitySlider(selection: $pickerEffort, choices: pickerEffortChoices)
-                                    }
-                                    .accessibilityRepresentation {
-                                        Slider(value: Binding(
-                                            get: { Double(pickerEffortChoices.firstIndex(of: pickerEffort) ?? 0) },
-                                            set: { pickerEffort = pickerEffortChoices[min(max(Int($0.rounded()), 0), pickerEffortChoices.count - 1)] }
-                                        ), in: 0...Double(pickerEffortChoices.count - 1), step: 1)
-                                        .accessibilityLabel("Model effort")
-                                        .accessibilityValue(pickerEffort.title)
-                                        .accessibilityIdentifier("model-effort-slider")
-                                    }
-                            } else {
-                                EffortStepSlider(selection: $pickerEffort, choices: pickerEffortChoices)
-                                    .accessibilityRepresentation {
-                                        Text(pickerEffort.title)
-                                            .accessibilityElement()
-                                            .accessibilityLabel("Model effort")
-                                            .accessibilityValue(pickerEffort.title)
-                                            .accessibilityIdentifier("model-effort-slider")
-                                    }
-                            }
-                        }
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 13)
-                        .frame(width: 320)
-                    }
-
-                    if canSchedule {
-                        scheduleButton
-                    }
-
-                    // A turn still finishing after its final answer can still be stopped; one
-                    // that is only waiting on a question keeps the composer's send control.
-                    if isDisplayingActiveResponse
-                        || (isResponding && providerTurnIsActive && userInputRequest == nil && providerPendingUserInputRequest == nil) {
-                        Button(action: pauseResponse) {
-                            Image(systemName: "stop.fill")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(.white)
-                                .frame(width: 31, height: 31)
-                                .background(Color.primary.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
-                        }
-                        .buttonHoverPointer()
-                        .nativeHelp("Pause \(provider.displayName) response")
-                        .buttonStyle(.plain)
-                        .disabled(isPausingResponse || !canPauseResponse)
-                        .accessibilityLabel("Stop response")
-                        .accessibilityIdentifier("pause-response-button")
-                    } else if hasPausedResponse {
-                        Button(action: continueResponse) {
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(.white)
-                                .frame(width: 31, height: 31)
-                                .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 9))
-                        }
-                        .buttonHoverPointer()
-                        .nativeHelp("Continue \(provider.displayName) response")
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Continue response")
-                        .accessibilityIdentifier("continue-response-button")
-                    } else if composerSchedule != nil, canSchedule {
-                        Button { confirmSchedule() } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: "clock")
-                                Text("Schedule")
-                            }
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 12)
-                            .frame(height: 31)
-                            .background(Color.accentColor, in: Capsule())
-                        }
-                        .buttonHoverPointer()
-                        .nativeHelp(composerSchedule.map { "Schedule: \($0.summary())" } ?? "Schedule task")
-                        .buttonStyle(.plain)
-                        .disabled(isScheduleSendDisabled)
-                        .opacity(isScheduleSendDisabled ? 0.45 : 1)
-                        .accessibilityLabel("Schedule task")
-                        .accessibilityValue(composerSchedule?.summary() ?? "")
-                        .accessibilityIdentifier("send-message-button")
-                    } else {
-                        Button { sendOrSchedule() } label: {
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: 13, weight: .bold))
-                                .foregroundStyle(.white)
-                                .frame(width: 31, height: 31)
-                                .background(Color.accentColor, in: Circle())
-                        }
-                        .buttonHoverPointer()
-                        .nativeHelp("Send message")
-                        .buttonStyle(.plain)
-                        .disabled(isSendDisabled)
-                        .opacity(isSendDisabled ? 0.45 : 1)
-                        .accessibilityLabel("Send message")
-                        .accessibilityIdentifier("send-message-button")
-                    }
+                Button(role: .destructive) { Task { await mutateGoal("clear") } } label: { Image(systemName: "trash") }
+                    .buttonHoverPointer().buttonStyle(.plain).nativeHelp("Clear goal")
+                    .accessibilityLabel("Clear goal").accessibilityIdentifier("goal-clear-button")
+                Button { Task { await mutateGoal(activeGoal.status == "paused" ? "resume" : "pause") } } label: {
+                    Image(systemName: activeGoal.status == "paused" ? "play.fill" : "pause")
                 }
+                    .buttonHoverPointer().buttonStyle(.plain).nativeHelp(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
+                    .accessibilityLabel(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
+                    .accessibilityIdentifier("goal-pause-resume-button")
+                Button { isGoalExpanded.toggle() } label: { Image(systemName: isGoalExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") }
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+                    .buttonHoverPointer().buttonStyle(.plain).nativeHelp(isGoalExpanded ? "Collapse goal" : "Expand goal")
+                    .accessibilityLabel(isGoalExpanded ? "Collapse goal" : "Expand goal")
+                    .accessibilityValue(isGoalExpanded ? "Expanded" : "Collapsed")
+                    .accessibilityIdentifier("goal-expand-button")
             }
-            .padding(13)
-            .background(WorkspaceTheme.panelBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 21, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(Color.primary.opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1).allowsHitTesting(false) }
+            .accessibilityElement(children: .contain)
+            .accessibilityValue(conversationRuntime.snapshot.goal.turnStartedThreadID == task.codexThreadID ? "Work started" : (conversationRuntime.isTurnActive(threadID: task.codexThreadID ?? "") ? "Working" : "Waiting"))
+            .accessibilityIdentifier("active-goal-progress-row")
+            if isGoalExpanded {
+                Text(activeGoal.objective).font(.system(size: 13)).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14)
+                    .accessibilityIdentifier("active-goal-details")
             }
+        }
+            }, scheduleContent: { scheduleHint })
+                .onChange(of: draft) { _, newValue in
+                    if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {
+                        activatePlanMode()
+                    } else if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/goal", provider.supportsGoals {
+                        isEnteringGoal = true
+                        draft = ""
+                    }
+                    scheduleDraftAutosave(newValue)
+                }
         }
         .padding(.horizontal, 28)
         .padding(.top, 14)
@@ -5496,6 +5186,159 @@ struct TaskConversationView: View {
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-composer")
+    }
+
+    /// The composer box's display model, derived from this conversation's state.
+    private var composerModel: ComposerModel {
+        let reason = startImplementingUnavailableReason
+        let primary: ComposerModel.Primary
+        if isDisplayingActiveResponse
+            || (isResponding && providerTurnIsActive && userInputRequest == nil && providerPendingUserInputRequest == nil) {
+            primary = .init(kind: "stop", disabled: isPausingResponse || !canPauseResponse, help: "Pause \(provider.displayName) response", label: "Stop response", value: "", testID: "pause-response-button")
+        } else if hasPausedResponse {
+            primary = .init(kind: "continue", disabled: false, help: "Continue \(provider.displayName) response", label: "Continue response", value: "", testID: "continue-response-button")
+        } else if composerSchedule != nil, canSchedule {
+            primary = .init(kind: "schedule", disabled: isScheduleSendDisabled, help: composerSchedule.map { "Schedule: \($0.summary())" } ?? "Schedule task", label: "Schedule task", value: composerSchedule?.summary() ?? "", testID: "send-message-button")
+        } else {
+            primary = .init(kind: "send", disabled: isSendDisabled, help: "Send message", label: "Send message", value: "", testID: "send-message-button")
+        }
+        var modeItems: [ComposerModel.Item] = []
+        if provider.supportsGoals {
+            modeItems.append(.init(id: "goal", title: "Goal", checked: false, icon: "scope", help: "Set a goal to keep pursuing", testID: "conversation-mode-goal"))
+        }
+        modeItems += ConversationMode.allCases.map { mode in
+            .init(id: "mode:\(mode.rawValue)", title: mode.title, checked: conversationMode == mode, icon: nil, help: "Switch to \(mode.title) mode", testID: "conversation-mode-\(mode.rawValue)")
+        }
+        return ComposerModel(
+            prefix: "",
+            draft: draft,
+            placeholder: isEnteringGoal ? "Set a goal to keep pursuing" : (isResponding || activeGoal != nil ? "Ask for follow-up changes" : "Message…"),
+            enabled: !isReadOnly && !isPreparingSubmittedMessage,
+            autofocus: isNewTask,
+            focused: isComposerFocused,
+            focusRequest: composerDraft.focusRequest,
+            editorHelp: isReadOnly
+                ? "Archived conversation, read-only."
+                : (isResponding ? "Press Return to queue this follow-up. Press Command-Return to steer the active turn, or use a queued row's Steer action."
+                    : (isLoadingHistory ? "Composer unavailable while conversation history loads." : "")),
+            modeMenu: .init(
+                text: isEnteringGoal ? "Goal" : (conversationMode == .plan ? "Plan" : nil),
+                badgeIcon: isEnteringGoal ? "scope" : nil,
+                active: isEnteringGoal || conversationMode == .plan,
+                label: isEnteringGoal ? "Goal" : "Conversation mode: \(conversationMode.title)",
+                items: modeItems
+            ),
+            startImplementing: canShowStartImplementing ? .init(
+                disabled: workspaceRootURLs.isEmpty || isLoadingHistory || isPreparingSubmittedMessage,
+                help: reason ?? "Switch to Code mode and start implementing this plan",
+                value: reason ?? (workspaceRootURLs.isEmpty ? "Unavailable" : "Available"),
+                unavailableReason: reason,
+                reasonColor: colorScheme == .dark ? "orange" : "#2E4FAD",
+                reasonDisabled: isReadOnly
+            ) : nil,
+            provider: .init(
+                title: provider.displayName,
+                value: provider.rawValue,
+                label: "Provider: \(provider.displayName)",
+                help: providerMenuHelp,
+                enabled: canSwitchProvider,
+                items: ConversationProvider.allCases.map { option in
+                    .init(id: option.rawValue, title: option.displayName, checked: option == provider, icon: nil, help: "Run this task's next turns with \(option.displayName)", testID: "conversation-provider-\(option.rawValue)")
+                }
+            ),
+            model: .init(
+                name: selectedModelName,
+                effort: selectedEffort.title,
+                label: "Model: \(selectedModelName), effort: \(selectedEffort.title)",
+                open: isModelPickerPresented,
+                models: modelOptions.map { option in
+                    .init(id: option.id, title: option.name, checked: pickerModelID == option.id || (pickerModelID.isEmpty && option.isDefault), icon: nil, help: "Select \(option.name)", testID: "model-option-\(option.id)")
+                },
+                effortChoices: pickerEffortChoices.map { .init(value: $0.rawValue, label: $0.title) },
+                selectedEffort: pickerEffort.rawValue
+            ),
+            schedule: canSchedule ? .init(
+                on: composerSchedule != nil,
+                help: composerSchedule != nil ? "Change the schedule" : "Schedule this task",
+                open: isSchedulePopoverPresented
+            ) : nil,
+            primary: primary
+        )
+    }
+
+    private var composerActions: ComposerActions {
+        ComposerActions(
+            change: { draft = $0 },
+            submit: {
+                if isResponding {
+                    queueDraftForAfterTurn()
+                } else {
+                    sendOrSchedule()
+                }
+            },
+            steer: {
+                if isResponding, isConversationTurnActive {
+                    steerCurrentTurn()
+                }
+            },
+            focusChange: { isComposerFocused = $0 },
+            pasteImage: { image in
+                do { try addImageData(image) }
+                catch { errorMessage = error.localizedDescription }
+            },
+            openSkills: { isShowingSkills = true },
+            modeMenu: { id in
+                if id == "goal" {
+                    isEnteringGoal = true
+                    draft = ""
+                } else if let mode = ConversationMode(rawValue: String(id.dropFirst("mode:".count))) {
+                    isEnteringGoal = false
+                    setConversationMode(mode)
+                }
+            },
+            startImplementing: startImplementingPlan,
+            showRepositoryPicker: showRepositoryPicker,
+            provider: { id in
+                if let option = ConversationProvider(rawValue: id) { switchProvider(to: option) }
+            },
+            toggleModelPicker: {
+                if isModelPickerPresented {
+                    commitModelPickerSelection()
+                    isModelPickerPresented = false
+                } else {
+                    pickerModelID = selectedModelID
+                    pickerEffort = selectedEffort
+                    isModelPickerPresented = true
+                }
+            },
+            dismissModelPicker: {
+                if isModelPickerPresented { commitModelPickerSelection() }
+                isModelPickerPresented = false
+            },
+            selectModel: { id in
+                if let option = modelOptions.first(where: { $0.id == id }) { selectPickerModel(option) }
+            },
+            selectEffort: { value in
+                if let effort = ConversationEffort(rawValue: value) { pickerEffort = effort }
+            },
+            toggleSchedule: {
+                if isSchedulePopoverPresented {
+                    isSchedulePopoverPresented = false
+                } else {
+                    scheduleDraft = composerSchedule ?? defaultScheduleDraft(kind: .once)
+                    isSchedulePopoverPresented = true
+                }
+            },
+            dismissSchedule: { isSchedulePopoverPresented = false },
+            primary: {
+                switch composerModel.primary.kind {
+                case "stop": pauseResponse()
+                case "continue": continueResponse()
+                case "schedule": confirmSchedule()
+                default: sendOrSchedule()
+                }
+            }
+        )
     }
 
     private func userInputForm(_ request: ConversationUserInputRequest) -> some View {
@@ -5943,32 +5786,6 @@ struct TaskConversationView: View {
     }
 
     // MARK: Scheduling
-
-    private var scheduleButton: some View {
-        let isOn = composerSchedule != nil
-        return Button {
-            if isSchedulePopoverPresented {
-                isSchedulePopoverPresented = false
-            } else {
-                scheduleDraft = composerSchedule ?? defaultScheduleDraft(kind: .once)
-                isSchedulePopoverPresented = true
-            }
-        } label: {
-            Image(systemName: isOn ? "clock.fill" : "clock")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
-                .frame(width: 26, height: 26)
-                .background(isOn ? Color.accentColor.opacity(0.14) : Color.clear, in: Circle())
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .buttonHoverPointer()
-        .nativeHelp(isOn ? "Change the schedule" : "Schedule this task")
-        .accessibilityLabel("Schedule")
-        .accessibilityValue(isOn ? "On" : "Off")
-        .accessibilityIdentifier("schedule-task-button")
-        .popover(isPresented: $isSchedulePopoverPresented, arrowEdge: .top) { scheduleHint }
-    }
 
     /// The hint for choosing when the task runs. Done only arms Send's schedule mode; the
     /// schedule is saved when Send is pressed.
@@ -7129,37 +6946,6 @@ struct TaskConversationView: View {
         await conversationManager.generateTitle(taskID: task.id, prompt: prompt)
     }
 
-    private var providerMenu: some View {
-        Menu {
-            ForEach(ConversationProvider.allCases) { option in
-                Button {
-                    switchProvider(to: option)
-                } label: {
-                    if option == provider {
-                        Label(option.displayName, systemImage: "checkmark")
-                    } else {
-                        Text(option.displayName)
-                    }
-                }
-                .buttonHoverPointer()
-                .help("Run this task's next turns with \(option.displayName)")
-                .accessibilityIdentifier("conversation-provider-\(option.rawValue)")
-            }
-        } label: {
-            Text(provider.displayName)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .buttonHoverPointer()
-        .disabled(!canSwitchProvider)
-        .nativeHelp(providerMenuHelp)
-        .accessibilityLabel("Provider: \(provider.displayName)")
-        .accessibilityValue(provider.rawValue)
-        .accessibilityIdentifier("conversation-provider-menu")
-    }
-
     private var providerMenuHelp: String {
         canSwitchProvider
             ? "Choose which assistant runs this task"
@@ -7771,251 +7557,6 @@ private struct ConversationTranscriptLayout: Layout {
 }
 
 
-// The native text view owns wrapping and document sizing. SwiftUI only receives
-// a bounded viewport height; it never asks a multiline TextField for its ideal size.
-private struct NativeChatEditor: NSViewRepresentable {
-    @Binding var text: String
-    @Binding var height: CGFloat
-    @Binding var isFocused: Bool
-    /// Each new value moves the keyboard into the editor once, with the caret at the end.
-    let focusRequest: Int
-    let isEnabled: Bool
-    let autofocusOnAppear: Bool
-    let accessibilityHelp: String
-    let onSubmit: () -> Void
-    let onSteerSubmit: () -> Void
-    let onPasteImage: (Data) -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    func makeNSView(context: Context) -> ChatEditorScrollView {
-        let scroll = ChatEditorScrollView()
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.scrollerStyle = .overlay
-        let editor = ChatEditorTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 28))
-        editor.isRichText = false
-        // Prompts carry code and commands; send exactly the quotes and dashes the user typed.
-        editor.isAutomaticQuoteSubstitutionEnabled = false
-        editor.isAutomaticDashSubstitutionEnabled = false
-        editor.allowsUndo = true
-        editor.drawsBackground = false
-        editor.font = .systemFont(ofSize: 14)
-        editor.textColor = .textColor
-        editor.textContainerInset = NSSize(width: 0, height: 4)
-        editor.isVerticallyResizable = true
-        editor.isHorizontallyResizable = false
-        editor.minSize = NSSize(width: 0, height: 28)
-        editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        editor.autoresizingMask = [.width]
-        editor.textContainer?.widthTracksTextView = true
-        editor.textContainer?.heightTracksTextView = false
-        editor.textContainer?.containerSize = NSSize(width: 100, height: CGFloat.greatestFiniteMagnitude)
-        editor.setAccessibilityIdentifier("message-composer")
-        editor.setAccessibilityLabel("Message")
-        editor.delegate = context.coordinator
-        scroll.documentView = editor
-        scroll.onHeightChange = { [weak coordinator = context.coordinator] height in
-            // AppKit layout must finish before updating SwiftUI state.
-            DispatchQueue.main.async { [weak scroll] in
-                guard let scroll, scroll.viewportHeight == height else { return }
-                if coordinator?.parent.height != height { coordinator?.parent.height = height }
-            }
-        }
-        return scroll
-    }
-
-    func updateNSView(_ scroll: ChatEditorScrollView, context: Context) {
-        context.coordinator.parent = self
-        guard let editor = scroll.documentView as? ChatEditorTextView else { return }
-        editor.onSubmit = onSubmit
-        editor.onSteerSubmit = onSteerSubmit
-        editor.onPasteImage = onPasteImage
-        editor.isEditable = isEnabled
-        editor.isSelectable = isEnabled
-        editor.setAccessibilityHelp(accessibilityHelp)
-        scroll.shouldFocusEditor = isFocused && isEnabled
-        scroll.shouldAutofocusEditor = autofocusOnAppear && isEnabled
-        let editorOwnsEditing = isFocused && editor.window?.firstResponder === editor
-        if editor.string != text, !editorOwnsEditing {
-            editor.string = text
-            editor.undoManager?.removeAllActions()
-            scroll.requestTextLayout()
-        }
-        if isFocused, isEnabled, editor.window?.firstResponder !== editor {
-            if let window = editor.window {
-                window.makeFirstResponder(editor)
-            } else {
-                DispatchQueue.main.async { [weak editor, weak coordinator = context.coordinator] in
-                    guard let editor,
-                          let coordinator,
-                          coordinator.parent.isFocused,
-                          coordinator.parent.isEnabled else { return }
-                    editor.window?.makeFirstResponder(editor)
-                }
-            }
-        }
-        scroll.focusEditorIfNeeded()
-        if focusRequest != context.coordinator.handledFocusRequest, isEnabled {
-            context.coordinator.handledFocusRequest = focusRequest
-            // After this update, so a view that covered the editor has gone.
-            DispatchQueue.main.async { [weak editor] in
-                guard let editor, editor.window?.makeFirstResponder(editor) == true else { return }
-                editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
-            }
-        }
-    }
-
-    final class Coordinator: NSObject, NSTextViewDelegate {
-        var parent: NativeChatEditor
-        var handledFocusRequest: Int
-        init(_ parent: NativeChatEditor) {
-            self.parent = parent
-            handledFocusRequest = parent.focusRequest
-        }
-
-        func textDidChange(_ notification: Notification) {
-            guard let editor = notification.object as? ChatEditorTextView else { return }
-            parent.text = editor.string
-            (editor.enclosingScrollView as? ChatEditorScrollView)?.requestTextLayout()
-        }
-
-        func textDidBeginEditing(_ notification: Notification) { parent.isFocused = true }
-        func textDidEndEditing(_ notification: Notification) { parent.isFocused = false }
-    }
-}
-
-private final class ChatEditorScrollView: NSScrollView {
-    var onHeightChange: ((CGFloat) -> Void)?
-    var shouldFocusEditor = false
-    var shouldAutofocusEditor = false
-    private var didAutofocusEditor = false
-    private(set) var viewportHeight: CGFloat = 28
-    private var previousWidth: CGFloat = 0
-    private var textLayoutNeeded = true
-    private var layoutRequestGeneration = 0
-
-    func requestTextLayout() {
-        textLayoutNeeded = true
-        layoutRequestGeneration += 1
-        let generation = layoutRequestGeneration
-        // Let NSTextView finish its edit/layout pass, then update the viewport
-        // before another typing burst can reach the next wrapped line.
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.layoutRequestGeneration == generation else { return }
-            self.needsLayout = true
-            self.layoutSubtreeIfNeeded()
-        }
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        guard window != nil else { return }
-        DispatchQueue.main.async { [weak self] in
-            self?.focusEditorIfNeeded()
-        }
-    }
-
-    func focusEditorIfNeeded() {
-        guard let window,
-              let editor = documentView as? NSTextView,
-              shouldFocusEditor || (shouldAutofocusEditor && !didAutofocusEditor) else { return }
-        if window.makeFirstResponder(editor), shouldAutofocusEditor {
-            didAutofocusEditor = true
-        }
-    }
-
-    override func layout() {
-        super.layout()
-        guard let editor = documentView as? NSTextView else { return }
-        let width = contentSize.width
-        guard width > 0, textLayoutNeeded || width != previousWidth else { return }
-        textLayoutNeeded = false
-        previousWidth = width
-        editor.setFrameSize(NSSize(width: width, height: editor.frame.height))
-        let font = editor.font ?? NSFont.systemFont(ofSize: 14)
-        let inset = editor.textContainerInset
-        let laidOutTextHeight: CGFloat
-        if let layoutManager = editor.layoutManager, let textContainer = editor.textContainer {
-            // Measure with the same TextKit container that wraps the live editor.
-            // A separate boundingRect calculation ignores line-fragment padding,
-            // so it can report one fewer line exactly as text crosses a wrap.
-            layoutManager.ensureLayout(for: textContainer)
-            let usedRect = layoutManager.usedRect(for: textContainer)
-            laidOutTextHeight = max(usedRect.maxY, layoutManager.extraLineFragmentRect.maxY)
-        } else {
-            laidOutTextHeight = 0
-        }
-        let lineHeight = editor.layoutManager?.defaultLineHeight(for: font) ?? font.pointSize * 1.2
-        let contentHeight = ceil(max(lineHeight, laidOutTextHeight) + inset.height * 2)
-        let documentHeight = max(28, contentHeight)
-        editor.setFrameSize(NSSize(width: width, height: documentHeight))
-        documentHeightDidChange(documentHeight)
-    }
-
-    func documentHeightDidChange(_ documentHeight: CGFloat) {
-        let editor = documentView as? NSTextView
-        let font = editor?.font ?? NSFont.systemFont(ofSize: 14)
-        let lineHeight = editor?.layoutManager?.defaultLineHeight(for: font) ?? 17
-        let verticalInset = editor?.textContainerInset.height ?? 4
-        let maximumHeight = ceil(lineHeight * 12 + verticalInset * 2)
-        let newHeight = min(maximumHeight, max(28, ceil(documentHeight)))
-        if viewportHeight != newHeight {
-            viewportHeight = newHeight
-            onHeightChange?(newHeight)
-        }
-    }
-}
-
-private final class ChatEditorTextView: NSTextView {
-    var onSubmit: (() -> Void)?
-    var onSteerSubmit: (() -> Void)?
-    var onPasteImage: ((Data) -> Void)?
-
-    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
-        if item.action == #selector(paste(_:)),
-           NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil) {
-            return isEditable
-        }
-        return super.validateUserInterfaceItem(item)
-    }
-
-    override func keyDown(with event: NSEvent) {
-        if (event.keyCode == 36 || event.keyCode == 76), !hasMarkedText(), isEditable {
-            if event.modifierFlags.contains(.shift) {
-                insertNewlineIgnoringFieldEditor(nil)
-            } else if event.modifierFlags.contains(.command) {
-                onSteerSubmit?()
-            } else {
-                onSubmit?()
-            }
-            return
-        }
-        super.keyDown(with: event)
-    }
-
-    override func paste(_ sender: Any?) {
-        guard isEditable else { return }
-        let pasteboard = NSPasteboard.general
-        // Prefer the original image bytes. AppKit's NSImage object reader can
-        // reject large clipboard representations before the composer gets a
-        // chance to resize them for the 10 MB payload limit.
-        if let data = pasteboard.data(forType: .png)
-                    ?? pasteboard.data(forType: .tiff) {
-            onPasteImage?(data)
-        } else if let image = pasteboard.readObjects(forClasses: [NSImage.self])?.first as? NSImage {
-            if let data = image.tiffRepresentation {
-                onPasteImage?(data)
-            } else {
-                super.paste(sender)
-            }
-        } else {
-            super.paste(sender)
-        }
-    }
-}
-
 private struct SelectableAnnotationText: NSViewRepresentable {
     let text: String
     /// Commented ranges of `text`, rendered orange.
@@ -8374,108 +7915,6 @@ private struct SelectableAnnotationText: NSViewRepresentable {
             }
             onSelection(range, text, bounds)
         }
-    }
-}
-
-/// A discrete effort slider whose knob is an opaque white disc, so it stays solid over any track or popover background.
-/// An undrawn native slider over the drawn effort track, so pointer clicks,
-/// drags, and arrow keys behave exactly as a macOS slider's do.
-private struct EffortAccessibilitySlider: NSViewRepresentable {
-    @Binding var selection: ConversationEffort
-    let choices: [ConversationEffort]
-
-    final class InputSlider: NSSlider {
-        // EffortStepSlider draws the control; this one only takes input.
-        override func draw(_ dirtyRect: NSRect) {}
-        // Clicking the effort track lets the arrow keys step it, as with the
-        // visible slider, regardless of the Full Keyboard Access setting.
-        override var acceptsFirstResponder: Bool { true }
-        override func mouseDown(with event: NSEvent) {
-            window?.makeFirstResponder(self)
-            super.mouseDown(with: event)
-        }
-    }
-
-    final class Coordinator: NSObject {
-        var parent: EffortAccessibilitySlider
-        init(_ parent: EffortAccessibilitySlider) { self.parent = parent }
-        @objc func changed(_ sender: NSSlider) {
-            let index = min(max(Int(sender.doubleValue.rounded()), 0), parent.choices.count - 1)
-            parent.selection = parent.choices[index]
-        }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    func makeNSView(context: Context) -> InputSlider {
-        let slider = InputSlider(value: 0, minValue: 0, maxValue: 1, target: context.coordinator, action: #selector(Coordinator.changed(_:)))
-        slider.allowsTickMarkValuesOnly = true
-        slider.focusRingType = .none
-        // The SwiftUI representation around it is what accessibility reads.
-        slider.setAccessibilityElement(false)
-        return slider
-    }
-
-    func updateNSView(_ slider: InputSlider, context: Context) {
-        context.coordinator.parent = self
-        slider.maxValue = Double(choices.count - 1)
-        slider.numberOfTickMarks = choices.count
-        slider.doubleValue = Double(choices.firstIndex(of: selection) ?? 0)
-    }
-}
-
-private struct EffortStepSlider: View {
-    @Binding var selection: ConversationEffort
-    let choices: [ConversationEffort]
-
-    private let knobDiameter: CGFloat = 20
-    private let trackHeight: CGFloat = 6
-
-    private var selectedIndex: Int { choices.firstIndex(of: selection) ?? 0 }
-    private var stepCount: Int { max(choices.count - 1, 1) }
-
-    var body: some View {
-        GeometryReader { proxy in
-            let travel = max(proxy.size.width - knobDiameter, 1)
-            let knobX = travel * CGFloat(selectedIndex) / CGFloat(stepCount)
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.primary.opacity(0.2))
-                    .frame(height: trackHeight)
-                Capsule()
-                    .fill(Color.accentColor)
-                    .frame(width: knobX + knobDiameter / 2, height: trackHeight)
-                ForEach(choices.indices, id: \.self) { index in
-                    Circle()
-                        .fill(Color.primary.opacity(0.35))
-                        .frame(width: 4, height: 4)
-                        .offset(x: travel * CGFloat(index) / CGFloat(stepCount) + knobDiameter / 2 - 2)
-                }
-                Circle()
-                    .fill(Color.white)
-                    .frame(width: knobDiameter, height: knobDiameter)
-                    .offset(x: knobX)
-            }
-            .frame(width: proxy.size.width, height: knobDiameter, alignment: .leading)
-            .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                guard !choices.isEmpty else { return }
-                let fraction = (value.location.x - knobDiameter / 2) / travel
-                let index = min(Int((min(max(fraction, 0), 1) * CGFloat(stepCount)).rounded()), choices.count - 1)
-                selection = choices[index]
-            })
-        }
-        .frame(height: knobDiameter)
-        .focusable()
-        .focusEffectDisabled()
-        .onKeyPress(.leftArrow) { moveSelection(by: -1) }
-        .onKeyPress(.rightArrow) { moveSelection(by: 1) }
-    }
-
-    private func moveSelection(by delta: Int) -> KeyPress.Result {
-        guard !choices.isEmpty else { return .ignored }
-        selection = choices[min(max(selectedIndex + delta, 0), choices.count - 1)]
-        return .handled
     }
 }
 

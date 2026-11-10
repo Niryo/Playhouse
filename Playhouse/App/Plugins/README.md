@@ -5,9 +5,10 @@ renderer running in JavaScriptCore turns each commit into mutation ops. Swift
 applies them to an observable node tree, and SwiftUI draws that tree from
 native **atoms**. Plugins compose only atoms. Composites such as the task
 item, the board's Agents info section, the Token Stats modal, the Skills
-page's header and gallery, and the task header's repository chips and Add
-repository picker exist only as native SwiftUI built from the same atoms
-(`Playhouse/App/TaskItemView.swift`, `AgentsInfoSection` in
+page's header and gallery, the task header's repository chips and Add
+repository picker, and the conversation composer's box exist only as native
+SwiftUI built from the same atoms (`Playhouse/App/TaskItemView.swift`,
+`ComposerView` in `Playhouse/App/ComposerView.swift`, `AgentsInfoSection` in
 `Playhouse/App/AgentsInfoView.swift`, `TokenStatsView` in
 `Playhouse/App/TokenStatsView.swift`, `SkillsPageHeader` and
 `SkillGalleryView` in `Playhouse/App/SkillGalleryView.swift`,
@@ -19,7 +20,7 @@ repository picker exist only as native SwiftUI built from the same atoms
 | `Core/` | Foundation + JavaScriptCore only: `PluginRuntime` (the JS context), `PluginNodeTree` (ops → nodes), `AtomProps` (atom names and props), `PluginRenderCommand` (`playhouse plugin render`). Also compiled into the bridge daemon. |
 | `Atoms/` | The atoms' SwiftUI views and `AtomRegistry`, which maps each atom name to a builder that decodes the node's props. |
 | `Renderer/` | `PluginSurface` (runs one script and renders its tree) and the Plugin Catalog window. |
-| `Playhouse/Resources/PluginRuntime/` | `prelude.js` (the React host config), `vendor/` (prebuilt react 18.3.1, react-reconciler 0.29.2, scheduler 0.23.2), `catalog/` (one page per atom, `TaskItem.js`, `AgentsInfo.js`, `TokenStats.js`, `SkillsPage.js`, `RepositoryChips.js`, and their `sample-*.json` data). |
+| `Playhouse/Resources/PluginRuntime/` | `prelude.js` (the React host config), `vendor/` (prebuilt react 18.3.1, react-reconciler 0.29.2, scheduler 0.23.2), `catalog/` (one page per atom, `TaskItem.js`, `AgentsInfo.js`, `TokenStats.js`, `SkillsPage.js`, `RepositoryChips.js`, `Composer.js`, and their `sample-*.json` data). |
 
 `catalog/TaskItem.js` is a demo that copies `TaskItemView` atom for atom, so the
 catalog can show the two side by side. It is not a composite exposed to
@@ -45,9 +46,18 @@ picker their + button opens (`RepositoryPickerView`); the header presents
 the picker and each chip's settings as popovers, and the settings stay
 native. Change it whenever the chips or the picker change;
 `test_plugin_repository_chips_renders_from_atoms_like_native` compares those
-two. Each composite reads a display model that is already derived
+two. `catalog/Composer.js` does the same for `ComposerView`, the conversation
+composer's box: the editor, the Skills button, the + mode menu, Start
+Implementing, the provider menu, the model button with its popover, the
+schedule button and the send, stop, continue or schedule control. The
+conversation (`TaskConversationView.composer`) derives a `ComposerModel` and
+`ComposerActions` and passes the notices, images, queued follow-ups and goal
+row above the box as the view's native `header`, and the schedule popover's
+content as its native `scheduleContent`. Change `ComposerView` and
+`Composer.js` together; `test_plugin_composer_renders_from_atoms_like_native`
+compares them. Each composite reads a display model that is already derived
 (`TaskItemModel`, `AgentsInfoModel`, `TokenStatsModel`, `SkillsPageModel`,
-`RepositoryChipsModel`, `RepositoryPickerModel`), so the JavaScript copy
+`RepositoryChipsModel`, `RepositoryPickerModel`, `ComposerModel`), so the JavaScript copy
 formats nothing the native one doesn't.
 
 The app build does not run npm. `scripts/vendor-react.sh` is the one-time
@@ -105,7 +115,7 @@ exits 1 when the plugin reported errors.
 ## Atoms
 
 These are exactly the atoms the task item, the Agents info section, the
-Token Stats modal, the Skills page and the repository chips and picker are built from. Every atom also takes these common props:
+Token Stats modal, the Skills page and the repository chips and picker and the composer are built from. Every atom also takes these common props:
 
 | Common prop | |
 | --- | --- |
@@ -115,10 +125,12 @@ Token Stats modal, the Skills page and the repository chips and picker are built
 | `width`, `height`, `minWidth`, `minHeight` | Frame, in points (a Button's is its label's slot, and its hover capsule spills past it without growing the layout; a Link's surrounds the capsule) |
 | `fillWidth` | Stretch to the available width, content leading |
 | `padding` | Uniform padding |
+| `paddingY` | Extra vertical padding (inside `padding`) |
+| `opacity` | Dims the atom and everything in it (0…1) |
 | `paddingX` | Extra horizontal padding (a Button's sits inside its hover capsule) |
 | `passThrough` | Let clicks through to what is behind it (the card) |
 
-Colors are `primary`, `secondary`, `tertiary`, `accent`, `text`, `panel`
+Colors are `white`, `primary`, `secondary`, `tertiary`, `accent`, `text`, `panel`
 and `window` (the workspace's panel and window backgrounds), `red`,
 `green`, `orange`, `blue`, `purple`, or `#RRGGBB`. Weights are `regular`,
 `medium`, `semibold` and `bold`.
@@ -144,9 +156,12 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | `Toggle` | `isOn` (required; the atom shows what it is given), `size` (`mini`, `small`, `regular` default), `disabled`; a switch with no visible label, so give it a `label` | `onToggle()`; the owner flips `isOn` | |
 | `TextField` | `text` (required), `placeholder`, `autoFocus` (takes the keyboard focus when it appears); a rounded one-line field that edits its own copy and takes `text` whenever the owner changes it | `onChange(text)` on every edit; `onSubmit()` for Return and `onArrow(direction)` (`up`, `down`) for the arrows, which keep their usual behavior when there is no handler | |
 | `Segmented` | `options` (`[{value, label}]`), `selected`, `disabled`; a segmented control, as wide as its segments unless it has a `width` | `onChange(value)`, not raised for the segment already selected | |
-| `Menu` | `icon` (SF Symbol, required), `size`, `weight`, `color` (`secondary` default), `items` (groups `[[{id, title, destructive?, help?, testID?}]]`, a separator between non-empty groups); a borderless pull-down whose common `width` and `height` frame its symbol | `onMenu(id)` | |
+| `Menu` | `icon` (SF Symbol), `text` (beside or instead of the symbol), `size`, `weight` (the symbol's), `textSize`, `textWeight`, `badgeIcon` (a second symbol before the text), `color` (`secondary` default), `indicator` (the pull-down chevron, hidden by default), `disabled`, `items` (groups `[[{id, title, destructive?, help?, testID?, checked?, icon?}]]`, a separator between non-empty groups; a checked item shows a checkmark); a borderless pull-down whose common `width` and `height` frame its label | `onMenu(id)` | |
 | `PressArea` | `spacing`, `pointer` (the pointing hand); a leading column that takes every click on its children, one accessibility container | `onPress()` for a click, `onLongPress()` for a press and hold | atoms |
 | `Overlay` | `align` (`center` default, `top`, `bottom`, `leading`, `trailing`, `topLeading`, `topTrailing`, `bottomLeading`, `bottomTrailing`), `offsetX`, `offsetY`; its first child laid out as usual and the rest drawn over it at `align`, moved by the offsets without changing its size; one accessibility container | | atoms |
+| `Editor` | `text` (required), `placeholder`, `placeholderTestID`, `enabled`, `autofocus`, `focused`, `focusRequest` (each new value moves the keyboard in once), `inputTestID` and `inputLabel` (the text view's own accessibility identifier and label); a multiline message editor that grows with its text; the common `hint` is its accessibility help; a pasted image reaches native owners only | `onChange(text)`, `onSubmit()` (Return), `onSteerSubmit()` (Command-Return), `onFocusChange(isFocused)` | |
+| `Popover` | `isPresented` (required), `arrowEdge` (`top` default, `bottom`, `leading`, `trailing`), `width`; shows the children after its first in a popover (a leading column) anchored to its first; its `testID` only names it to events | `onDismiss()` (a click outside or Escape; the owner sets `isPresented` false) | atoms: the anchor, then the content |
+| `StepSlider` | `options` (`[{value, label}]`), `selected`; a discrete slider as wide as its container, driven by click, drag or arrow keys; its common `label` and `testID` name it | `onChange(value)` | |
 
 To add an atom, add its case and props struct to `Core/AtomProps.swift`, its
 view to `Atoms/AtomViews.swift`, its registry entry to
