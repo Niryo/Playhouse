@@ -955,9 +955,10 @@ struct KanbanBoardView: View {
     @ViewBuilder
     private func archivedTaskPullRequestControl(_ task: BoardTask) -> some View {
         let linked = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
-        let missingPullRequests = task.repositoryWorktrees.contains { !$0.isPending && ($0.pullRequestNumber == nil || $0.pullRequestURL == nil) }
+        let awaiting = task.repositoryWorktrees.filter(\.awaitsPullRequest)
+        let started = task.repositoryWorktrees.filter { !$0.isPending }
+        let hasMultipleRepositories = (awaiting.isEmpty ? started : awaiting).count > 1
         if linked.isEmpty {
-            let hasMultipleRepositories = task.repositoryWorktrees.filter { !$0.isPending }.count > 1
             Button {
                 createPullRequests(for: task)
             } label: {
@@ -978,14 +979,14 @@ struct KanbanBoardView: View {
             .accessibilityIdentifier("done-archive-create-pr-\(task.id.uuidString)")
         } else {
             HStack(spacing: 5) {
-                if missingPullRequests {
+                if !awaiting.isEmpty {
                     Button {
                         createPullRequests(for: task)
                     } label: {
                         if taskCreatingPullRequests.contains(task.id) {
                             ProgressView().controlSize(.mini)
                         } else {
-                            Text(task.repositoryWorktrees.filter { !$0.isPending }.count > 1 ? "PRs" : "PR")
+                            Text(hasMultipleRepositories ? "PRs" : "PR")
                                 .font(.system(size: 10, weight: .semibold))
                         }
                     }
@@ -995,7 +996,7 @@ struct KanbanBoardView: View {
                     .disabled(taskCreatingPullRequests.contains(task.id))
                     .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
-                    .accessibilityLabel(task.repositoryWorktrees.filter { !$0.isPending }.count > 1 ? "PRs. Create pull requests for repositories without a linked pull request" : "PR. Create a pull request for the repository without a linked pull request")
+                    .accessibilityLabel(hasMultipleRepositories ? "PRs. Create pull requests for repositories without a linked pull request" : "PR. Create a pull request for the repository without a linked pull request")
                     .accessibilityIdentifier("done-archive-create-pr-\(task.id.uuidString)")
                 }
                 ForEach(linked, id: \.repositoryPath) { record in
@@ -1178,7 +1179,7 @@ struct KanbanBoardView: View {
                     repositories: [],
                     contextFolders: [],
                     provider: settings.defaultConversationProvider,
-                    pullRequestMode: settings.pullRequestModeDefault
+                    pullRequestMode: .pullRequest
                 )
                 let newTask = try manager.taskModel(created.id)
                 presentScheduleOnOpen = presentingSchedule

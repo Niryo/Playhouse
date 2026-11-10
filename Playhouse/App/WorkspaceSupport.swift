@@ -107,8 +107,6 @@ enum WorkspaceSettings {
     /// Whether the Agents info section at the bottom of the board sidebar is minimized.
     static let agentsInfoSectionCollapsedKey = "agentsInfoSectionCollapsed"
     static let defaultConversationProviderKey = "defaultConversationProvider"
-    static let autoCreatePullRequestDefaultKey = "autoCreatePullRequestDefault"
-    static let pullRequestModeDefaultKey = "pullRequestModeDefault"
     static let tokenUsageColorMaxKey = "tokenUsageColorMax"
     static let defaultTokenUsageColorMax = TokenUsageHeatmap.defaultColorMax
     static let cpuUsageColorMaxKey = "cpuUsageColorMax"
@@ -837,11 +835,6 @@ enum PlayhouseWorktreeManager {
             .standardizedFileURL.path
     }
 
-    static func defaultBranchFrom(repositoryPath: String) throws -> String {
-        let repository = try repositoryRoot(repositoryPath)
-        return try defaultBranches(repository: repository).branchFrom
-    }
-
     static func defaultLocalBranch(repositoryPath: String) throws -> String {
         let repository = try repositoryRoot(repositoryPath)
         let current = try defaultBranches(repository: repository).mergeTarget
@@ -892,6 +885,7 @@ enum PlayhouseWorktreeManager {
         if branchExists {
             _ = try git(repository, ["worktree", "add", destination.path, branch])
         } else {
+            try refreshOriginBase(repository: repository, base: branchFrom)
             // A remote branch-from must not become the task branch's upstream.
             _ = try git(repository, ["worktree", "add", "--no-track", "-b", branch, destination.path, branchFrom])
         }
@@ -1033,6 +1027,10 @@ enum PlayhouseWorktreeManager {
         let targetRef = try mergeTargetRef(record)
         let count = try git(record.worktreePath, ["rev-list", "--count", "\(targetRef)..HEAD"]).output
         return (Int(count.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 1) > 0
+    }
+
+    static func headOid(_ record: RepositoryWorktreeRecord) throws -> String {
+        try git(record.worktreePath, ["rev-parse", "HEAD"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func hasMergeConflicts(_ record: RepositoryWorktreeRecord) throws -> Bool {
@@ -1182,7 +1180,43 @@ enum PlayhouseWorktreeManager {
             if let remoteBase = try remoteBase(repository: repository, branch: base) { return remoteBase }
             throw BridgeCommandError(code: "invalid_argument", message: "Branch-from '\(base)' doesn't exist in \(repository) or on its remotes.")
         }
-        return try (defaults ?? defaultBranches(repository: repository)).branchFrom
+        // New tasks start from the remote's copy of the default branch rather than a
+        // possibly stale local one; the worktree refreshes it when it's created.
+        let local = try (defaults ?? defaultBranches(repository: repository)).branchFrom
+        guard !local.isEmpty, try isCommit(repository: repository, "refs/remotes/origin/\(local)") else { return local }
+        return "origin/\(local)"
+    }
+
+    /// Brings an `origin/<branch>` base up to date before a worktree starts from it.
+    /// A failed fetch (offline, auth) keeps the last fetched commit, so the task still starts.
+    private static func refreshOriginBase(repository: String, base: String) throws {
+        let prefix = "origin/"
+        guard base.hasPrefix(prefix), base.count > prefix.count else { return }
+        let branch = String(base.dropFirst(prefix.count))
+        guard try isCommit(repository: repository, "refs/remotes/origin/\(branch)") else { return }
+        _ = try fetchTrackingRef(repository: repository, remote: "origin", branch: branch)
+    }
+
+    /// Fetches one branch into its remote-tracking ref without ever waiting on a person or
+    /// a dead connection: no credential or SSH prompts, and stalled transfers give up, so a
+    /// caller holding task or repository locks sees an ordinary fetch failure instead of a hang.
+    private static func fetchTrackingRef(repository: String, remote: String, branch: String) throws -> GitResult {
+        var environment = ["GIT_TERMINAL_PROMPT": "0"]
+        let configuredSSH = try git(repository, ["config", "--get", "core.sshCommand"], allowFailure: true).output
+        let environmentSSH = ["GIT_SSH_COMMAND", "GIT_SSH"].contains { PlayhouseProcessEnvironment.current[$0] != nil }
+        if !environmentSSH,
+           configuredSSH.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            environment["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=15"
+        }
+        return try git(
+            repository,
+            [
+                "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=20",
+                "fetch", "--quiet", "--no-tags", remote, "+refs/heads/\(branch):refs/remotes/\(remote)/\(branch)",
+            ],
+            allowFailure: true,
+            environment: environment
+        )
     }
 
     private static func isCommit(repository: String, _ ref: String) throws -> Bool {
@@ -1204,11 +1238,7 @@ enum PlayhouseWorktreeManager {
             guard try git(repository, ["check-ref-format", "--branch", candidate.branch], allowFailure: true).status == 0 else { continue }
             let trackingRef = "refs/remotes/\(candidate.remote)/\(candidate.branch)"
             if try isCommit(repository: repository, trackingRef) { return "\(candidate.remote)/\(candidate.branch)" }
-            let fetch = try git(
-                repository,
-                ["fetch", "--quiet", "--no-tags", candidate.remote, "+refs/heads/\(candidate.branch):\(trackingRef)"],
-                allowFailure: true
-            )
+            let fetch = try fetchTrackingRef(repository: repository, remote: candidate.remote, branch: candidate.branch)
             if fetch.status == 0, try isCommit(repository: repository, trackingRef) {
                 return "\(candidate.remote)/\(candidate.branch)"
             }
@@ -1263,7 +1293,12 @@ enum PlayhouseWorktreeManager {
 
     private struct GitResult { let status: Int32; let output: String; var error: String = "" }
 
-    private static func git(_ path: String, _ arguments: [String], allowFailure: Bool = false) throws -> GitResult {
+    private static func git(
+        _ path: String,
+        _ arguments: [String],
+        allowFailure: Bool = false,
+        environment: [String: String]? = nil
+    ) throws -> GitResult {
         let candidates = (PlayhouseProcessEnvironment.current["PATH"] ?? "").split(separator: ":").map {
             URL(fileURLWithPath: String($0)).appendingPathComponent("git").path
         } + ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"]
@@ -1272,7 +1307,8 @@ enum PlayhouseWorktreeManager {
         }
         let result = try PlayhouseProcessRunner.run(
             executable: executable,
-            arguments: ["-C", path] + arguments
+            arguments: ["-C", path] + arguments,
+            environment: environment
         )
         let text = String(data: result.stdout, encoding: .utf8) ?? ""
         let detail = String(data: result.stderr, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -1317,12 +1353,17 @@ enum PlayhouseProcessRunner {
     static func run(
         executable: String,
         arguments: [String],
-        directory: String? = nil
+        directory: String? = nil,
+        environment overrides: [String: String]? = nil
     ) throws -> PlayhouseProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
-        process.environment = PlayhouseProcessEnvironment.current
+        process.environment = PlayhouseProcessEnvironment.current.merging(overrides ?? [:]) { _, override in override }
+        if overrides != nil {
+            // A caller asking for a non-interactive environment also gets no terminal to read from.
+            process.standardInput = FileHandle.nullDevice
+        }
         if let directory {
             process.currentDirectoryURL = URL(fileURLWithPath: directory, isDirectory: true)
         }
@@ -1499,6 +1540,14 @@ struct PlayhouseWorktreeService {
         try await perform("git.has_commits_ahead", record: record) {
             try await PlayhouseBackgroundOperation.run {
                 try PlayhouseWorktreeManager.hasCommitsAheadOfMergeTarget(record)
+            }
+        }
+    }
+
+    func headOid(_ record: RepositoryWorktreeRecord) async throws -> String {
+        try await perform("git.head_oid", record: record) {
+            try await PlayhouseBackgroundOperation.run {
+                try PlayhouseWorktreeManager.headOid(record)
             }
         }
     }

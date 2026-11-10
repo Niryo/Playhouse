@@ -20,7 +20,9 @@ enum PrivateOutcomeNudgeMarker {
 /// from an outcome to the board status, so both providers reach the same
 /// lifecycle through the same shared CLI vocabulary.
 enum TurnOutcome: String, CaseIterable {
-    /// All requested work is finished; nothing is waiting on the user.
+    /// All requested work is finished; nothing is waiting on the user. A standalone chat's
+    /// close-turn writes this too, only as its turn's settlement marker: a chat's outcome never
+    /// decides a status (`settleFinishedTurn`).
     case completed
     /// The turn ended but work remains and no user decision is needed.
     /// Playhouse keeps the task In Progress and sends a continuation turn.
@@ -1897,6 +1899,7 @@ final class BoardTaskManager {
         guard !normalizedTitle.isEmpty else { throw PlayhouseManagerError.invalidTitle }
         let normalizedRoots = try Self.normalizeRoots(workspaceRoots)
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: normalizedRoots, conversationProvider: provider)
+        task.autoCreatePullRequestOnReview = true
         modelContext.insert(task)
         try await saveTaskContext(taskID: task.id)
         PlayhouseDiagnostics.record("task.create.succeeded", fields: [
@@ -1910,7 +1913,7 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, pullRequestMode: PullRequestMode = .manual, prompt: String? = nil) async throws -> BoardTaskRecord {
+    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, pullRequestMode: PullRequestMode = .pullRequest, prompt: String? = nil) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw PlayhouseManagerError.invalidTitle }
         let folders = try Self.normalizeOptionalRoots(contextFolders)
@@ -2509,7 +2512,7 @@ final class BoardTaskManager {
         settingsManager: WorkspaceSettingsManager?
     ) async {
         guard record.autoCreatePullRequestOnReview,
-              record.repositoryWorktrees.contains(where: { !$0.isPending && ($0.pullRequestNumber == nil || $0.pullRequestURL == nil) }) else {
+              record.repositoryWorktrees.contains(where: \.awaitsPullRequest) else {
             return
         }
         do {
@@ -2705,7 +2708,6 @@ final class BoardTaskManager {
                 throw BridgeCommandError(code: "invalid_transition", message: "Start the task conversation before creating a pull request so its repository worktree is ready.")
             }
             var records = originalRecords
-            var unchangedPaths: Set<String> = []
             for index in records.indices where records[index].pullRequestNumber == nil || records[index].pullRequestURL == nil {
                 do {
                     // `--head` skips gh's push flow, and `gh pr list` also needs a
@@ -2715,12 +2717,14 @@ final class BoardTaskManager {
                 } catch {
                     throw BridgeCommandError(code: "operation_failed", message: "GitHub CLI couldn't publish the task branch. \(error.localizedDescription)")
                 }
+                records[index].pullRequestSkippedHead = nil
                 if let existing = try await pullRequestService.findOpen(records[index], executable: gh) {
                     records[index].pullRequestNumber = existing.number
                     records[index].pullRequestURL = existing.url
                 } else if try await !worktreeService.hasCommitsAheadOfMergeTarget(records[index]) {
-                    // A repository the task never changed has nothing to propose.
-                    unchangedPaths.insert(records[index].repositoryPath)
+                    // A repository the task never changed has nothing to propose;
+                    // the card stops offering it one until the task changes it.
+                    records[index].pullRequestSkippedHead = try await worktreeService.headOid(records[index])
                 }
             }
             let taskAfterLookup = try requireTask(id)
@@ -2729,13 +2733,10 @@ final class BoardTaskManager {
             }
             taskAfterLookup.repositoryWorktrees = records
             try await saveTaskContext(taskID: id)
-            return (gh, records, unchangedPaths, BoardTaskRecord(task: taskAfterLookup))
+            return (gh, records, BoardTaskRecord(task: taskAfterLookup))
         }
-        let (gh, records, unchangedPaths, lookedUpRecords) = lookup
-        func needsPullRequest(_ record: RepositoryWorktreeRecord) -> Bool {
-            (record.pullRequestNumber == nil || record.pullRequestURL == nil) && !unchangedPaths.contains(record.repositoryPath)
-        }
-        guard records.contains(where: needsPullRequest) else {
+        let (gh, records, lookedUpRecords) = lookup
+        guard records.contains(where: \.awaitsPullRequest) else {
             if records.allSatisfy({ $0.pullRequestNumber == nil }) {
                 throw BridgeCommandError(code: "invalid_transition", message: "No repository in this task has changes to open a pull request for.")
             }
@@ -2791,7 +2792,7 @@ final class BoardTaskManager {
             }
             var updatedRecords = records
             var expectedRecords = records
-            for index in updatedRecords.indices where needsPullRequest(updatedRecords[index]) {
+            for index in updatedRecords.indices where updatedRecords[index].awaitsPullRequest {
                 let record = updatedRecords[index]
                 let pullRequest: GitHubPullRequestManager.PullRequest
                 if let existing = try await pullRequestService.findOpen(record, executable: gh) {
@@ -3015,12 +3016,34 @@ final class BoardTaskManager {
                     results.append(TaskBranchSyncResult(repositoryPath: record.repositoryPath, action: "up-to-date"))
                 }
             }
+            try await reopenChangedSkippedRepositories(task)
             PlayhouseDiagnostics.record("task.review.sync.completed", fields: [
                 "taskID": id.uuidString,
                 "actions": results.map { "\($0.repositoryPath)=\($0.action)" }.joined(separator: ",")
             ])
             return results
         }
+    }
+
+    /// A repository pull request creation skipped as unchanged is offered a
+    /// pull request again once its branch moved or it holds local changes. A
+    /// repository Git can't read counts as changed, so the offer comes back.
+    private func reopenChangedSkippedRepositories(_ task: BoardTask) async throws {
+        var worktrees = task.repositoryWorktrees
+        var reopened = false
+        for index in worktrees.indices where worktrees[index].pullRequestNumber == nil {
+            guard let skippedHead = worktrees[index].pullRequestSkippedHead else { continue }
+            let record = worktrees[index]
+            let isClean = (try? await worktreeService.hasChanges(record)) == false
+            let head = try? await worktreeService.headOid(record)
+            if !isClean || head != skippedHead {
+                worktrees[index].pullRequestSkippedHead = nil
+                reopened = true
+            }
+        }
+        guard reopened else { return }
+        task.repositoryWorktrees = worktrees
+        try await saveTaskContext(taskID: task.id)
     }
 
     /// The review guarantee for a task already on the board: after this call the
@@ -3133,6 +3156,11 @@ final class BoardTaskManager {
                     + TurnOutcome.allCases.map(\.rawValue).joined(separator: ", ") + "."
             )
         }
+        // A chat settles its turn with `chat page close-turn` (`settleStandaloneChatTurn`);
+        // it has no board status for an outcome to decide.
+        guard try standaloneChatModel(id) == nil else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Standalone chat has no task outcome. End its turn with chat page close-turn.")
+        }
         let outcomeURL = try conversationTurnOutcomeURL(id)
         let activeURL = try conversationTurnActiveURL(id)
         let lockURL = outcomeURL.appendingPathExtension("lock")
@@ -3152,6 +3180,20 @@ final class BoardTaskManager {
             }
             try Data(outcome.utf8).write(to: outcomeURL, options: .atomic)
             return outcome
+        }
+    }
+
+    /// Records a standalone chat's `chat page close-turn` as its running turn's settled outcome,
+    /// in the same per-turn store a task's outcome uses. A signal sent outside a turn (or naming
+    /// no chat) only files the page, as before.
+    func settleStandaloneChatTurn(_ chatID: String) async throws {
+        guard let id = UUID(uuidString: chatID), try standaloneChatModel(id) != nil else { return }
+        let outcomeURL = try conversationTurnOutcomeURL(id)
+        let activeURL = try conversationTurnActiveURL(id)
+        let lockURL = outcomeURL.appendingPathExtension("lock")
+        try await withExclusiveFileLocks(at: [lockURL], purpose: "conversation-outcome") {
+            guard try self.hasConversationTurnReservation(id), FileManager.default.fileExists(atPath: activeURL.path) else { return }
+            try Data(TurnOutcome.completed.rawValue.utf8).write(to: outcomeURL, options: .atomic)
         }
     }
 
@@ -4642,21 +4684,6 @@ final class WorkspaceSettingsManager {
         PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "defaultConversationProvider", "value": provider.rawValue])
     }
 
-    /// The PR mode new tasks start with: whatever the user last chose on any task.
-    /// Before the mode existed, the on/off Auto PR choice was stored as a Bool.
-    var pullRequestModeDefault: PullRequestMode {
-        if let stored = defaults.string(forKey: WorkspaceSettings.pullRequestModeDefaultKey),
-           let mode = PullRequestMode(rawValue: stored) {
-            return mode
-        }
-        return defaults.bool(forKey: WorkspaceSettings.autoCreatePullRequestDefaultKey) ? .pullRequest : .manual
-    }
-
-    func setPullRequestModeDefault(_ mode: PullRequestMode) {
-        defaults.set(mode.rawValue, forKey: WorkspaceSettings.pullRequestModeDefaultKey)
-        PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "pullRequestModeDefault", "value": mode.rawValue])
-    }
-
     var defaultParentFolderURL: URL? {
         WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath)
     }
@@ -5795,8 +5822,7 @@ final class ConversationManager {
                     repositories: task.repositoryWorktrees,
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: repositoryRoot?.path,
-                    isStandaloneChat: task.isStandaloneChat,
-                    missedPreviousPageSignal: task.isStandaloneChat ? ((try? tasks.standaloneChatManager().lastTurnMissedSignal()) ?? false) : false
+                    isStandaloneChat: task.isStandaloneChat
                 ),
                 sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
                 sensitiveConversation: hasSensitiveRecoveryState,
@@ -6455,9 +6481,7 @@ final class ConversationManager {
                     repositories: task.repositoryWorktrees,
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: task.isStandaloneChat ? nil : settingsManager.defaultParentFolderURL?.path,
-                    isStandaloneChat: task.isStandaloneChat,
-
-                    missedPreviousPageSignal: task.isStandaloneChat ? ((try? tasks.standaloneChatManager().lastTurnMissedSignal()) ?? false) : false
+                    isStandaloneChat: task.isStandaloneChat
                 )
             )
             _ = try await tasks.persistConversationID(taskID, provider: .codex, id: id)
@@ -7085,11 +7109,15 @@ final class ConversationManager {
             taskID: taskID, client: client, threadID: threadID, recording: recording,
             deferMissingOutcomeStatus: true, phase: &phase
         )
-        let isStandaloneChat = (try? tasks.conversationSubject(taskID))?.isStandaloneChat ?? false
-        try await driveUnsettledTurns(
-            taskID: taskID, isStandaloneChat: isStandaloneChat, mode: .code, modelID: nil,
-            client: client, onUpdate: onUpdate, onUserInput: { _ in }
-        )
+        // A chat's nudge exists to classify its turn's page, which only a sent turn files
+        // (`recordStandaloneChatTurn`); a reattached chat turn leaves a missed page decision to
+        // the background classifier, as it did before the chat joined this loop.
+        if (try? tasks.conversationSubject(taskID))?.isStandaloneChat != true {
+            try await driveUnsettledTurns(
+                taskID: taskID, isStandaloneChat: false, mode: .code, modelID: nil,
+                client: client, onUpdate: onUpdate, onUserInput: { _ in }
+            )
+        }
         lastReportedTurnOutcomeByTaskID.removeValue(forKey: taskID)
         try? await tasks.clearPendingSubmittedPrompt(taskID)
         let finalHistory = try await history(taskID: taskID, includesImageData: true)
@@ -7116,11 +7144,11 @@ final class ConversationManager {
         var continuations = 0
         var stoppedForUser = false
         var continuationFailed = false
-        // A standalone chat is told never to report a task outcome, so it can
-        // never settle one: driving it would spend provider turns and bury the
-        // user's next message under private turns that answer nobody.
-        let drivesUnsettledTurns = !isStandaloneChat
-        while drivesUnsettledTurns, continuations < TurnOutcome.maxContinuations {
+        // A standalone chat settles a turn with its close-turn page signal. It gets one
+        // visible reminder to send that signal; a chat has nothing to continue, and a page
+        // decision still missing after the reminder falls to the background classifier.
+        let maxAttempts = isStandaloneChat ? 1 : TurnOutcome.maxContinuations
+        while continuations < maxAttempts {
             // A question the model raised settles the turn on the
             // user; nudging past it would talk over them.
             guard (try? self.transcripts.readState(taskID).pendingUserInputRequest) == nil else { break }
@@ -7133,11 +7161,13 @@ final class ConversationManager {
                 break
             }
             let reported = self.lastReportedTurnOutcomeByTaskID[taskID].flatMap(TurnOutcome.init(rawValue:))
-            guard reported == nil || reported == .inProgress else { break }
+            guard reported == nil || (reported == .inProgress && !isStandaloneChat) else { break }
             continuations += 1
-            let prompt = reported == .inProgress
-                ? Self.outcomeContinuationPrompt(attempt: continuations)
-                : Self.outcomeNudgePrompt(attempt: continuations)
+            let prompt = isStandaloneChat
+                ? Self.chatPageCloseTurnNudgePrompt(chatID: taskID)
+                : reported == .inProgress
+                    ? Self.outcomeContinuationPrompt(attempt: continuations)
+                    : Self.outcomeNudgePrompt(attempt: continuations)
             do {
                 _ = try await self.sendReserved(
                     taskID: taskID,
@@ -7171,7 +7201,7 @@ final class ConversationManager {
         }
         let settled = self.lastReportedTurnOutcomeByTaskID[taskID].flatMap(TurnOutcome.init(rawValue:))
         let waitingOnUser = (try? self.transcripts.readState(taskID).pendingUserInputRequest) != nil
-        if drivesUnsettledTurns, !stoppedForUser, !waitingOnUser, settled == nil || settled == .inProgress {
+        if !isStandaloneChat, !stoppedForUser, !waitingOnUser, settled == nil || settled == .inProgress {
             // The work is unsettled and the user was never asked
             // anything, so Waiting Response would misreport this.
             // Blocked says Playhouse stopped driving, and the reason
@@ -7263,7 +7293,9 @@ final class ConversationManager {
             )
         }()
         if let page {
-            for message in history.messages where message.turnID == latestTurnID {
+            // Only the turn's own conversation is filed: a provider's automatic notice stays in
+            // the transcript but never in a page or the context a page replays.
+            for message in Self.withoutNudgeTurns(history.messages) where message.turnID == latestTurnID {
                 _ = try? chatManager.appendMessage(pageID: page.id, turnID: latestTurnID, role: message.role.rawValue, text: message.text)
             }
         }
@@ -7293,7 +7325,8 @@ final class ConversationManager {
         // Make the pending classification visible immediately. The resolver emits the
         // matching update after it has persisted its page/title result.
         onUpdate(ConversationUpdate(type: "chat_page_updated"))
-        let currentQuestion = history.messages.last(where: { $0.role == .user && $0.turnID == latestTurnID })?.text
+        let currentQuestion = Self.withoutNudgeTurns(history.messages)
+            .last(where: { $0.role == .user && $0.turnID == latestTurnID })?.text
         let workspace = try? ConversationWorkspaceContext(roots: [])
         guard let currentQuestion, let workspace else {
             PlayhouseDiagnostics.record("chat.page.fallback.not_scheduled", fields: [
@@ -7905,10 +7938,13 @@ final class ConversationManager {
             },
             onUserInput: { request async in
                 if isPlayhouseNudge {
+                    let isStandaloneChat = (try? self.tasks.conversationSubject(taskID))?.isStandaloneChat == true
                     client.rejectUserInput(
                         requestID: request.id,
                         threadID: request.threadID,
-                        message: "This is a private Playhouse status nudge. Do not ask the user here; report `waiting-response` if you need an answer, `in-progress` if work remains, or `completed` if the work is finished."
+                        message: isStandaloneChat
+                            ? "This is a Playhouse page reminder. Do not ask the user here; run the chat page close-turn command for your previous reply."
+                            : "This is a private Playhouse status nudge. Do not ask the user here; report `waiting-response` if you need an answer, `in-progress` if work remains, or `completed` if the work is finished."
                     )
                     return
                 }
@@ -7967,6 +8003,12 @@ final class ConversationManager {
                 }
                 if let claudeTurnID {
                     self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, safeMessage)
+                }
+                // A notice the provider's runtime added to the turn streams as the user-side
+                // message it is recorded as, not as the assistant's progress.
+                if safeMessage.role == .user {
+                    streamTurnUpdate(ConversationUpdate(type: "steered_message", message: safeMessage.text))
+                    return
                 }
                 streamTurnUpdate(ConversationUpdate(
                     type: "assistant_progress",
@@ -8032,7 +8074,10 @@ final class ConversationManager {
         phase = "review-status-persistence"
         let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID) ?? recording.leakedOutcome
         lastReportedTurnOutcomeByTaskID[taskID] = reportedOutcome
-        if reportedOutcome == nil, deferMissingOutcomeStatus, let revision = recording.pendingQuestionLifecycleRevision,
+        // A chat's settled turn (its close-turn) only stops the recovery loop: a chat has no
+        // board status for an outcome to decide.
+        let statusOutcome = (try? tasks.conversationSubject(taskID))?.isStandaloneChat == true ? nil : reportedOutcome
+        if statusOutcome == nil, deferMissingOutcomeStatus, let revision = recording.pendingQuestionLifecycleRevision,
            let stillPending = try? transcripts.readState(taskID).pendingUserInputRequest {
             // The turn completed without reporting an outcome while a structured
             // question it raised is still unanswered. Undo the immediate
@@ -8052,7 +8097,7 @@ final class ConversationManager {
                     )
                 }
             }
-        } else if let outcome = reportedOutcome.flatMap(TurnOutcome.init(rawValue:)) {
+        } else if let outcome = statusOutcome.flatMap(TurnOutcome.init(rawValue:)) {
             switch outcome {
             case .inProgress:
                 // `in-progress` settles on no status: the task stays In
@@ -8284,8 +8329,7 @@ final class ConversationManager {
                     repositories: task.repositoryWorktrees,
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: repositoryRoot?.path,
-                    isStandaloneChat: task.isStandaloneChat,
-                    missedPreviousPageSignal: task.isStandaloneChat ? ((try? tasks.standaloneChatManager().lastTurnMissedSignal()) ?? false) : false
+                    isStandaloneChat: task.isStandaloneChat
                 )
             }
             let threadID: String
@@ -8404,9 +8448,7 @@ final class ConversationManager {
                     repositories: task.repositoryWorktrees,
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: repositoryRoot?.path,
-                    isStandaloneChat: task.isStandaloneChat,
-
-                    missedPreviousPageSignal: task.isStandaloneChat ? ((try? tasks.standaloneChatManager().lastTurnMissedSignal()) ?? false) : false
+                    isStandaloneChat: task.isStandaloneChat
                 ),
                 onDelta: callbacks.onDelta,
                 onFinalMessage: callbacks.onFinalMessage,
@@ -8635,6 +8677,16 @@ final class ConversationManager {
         """
     }
 
+    /// Sent once when a standalone chat turn ended without its close-turn page signal. It is
+    /// shown as an automatic message, and its turn is never filed into a chat page.
+    static func chatPageCloseTurnNudgePrompt(chatID: UUID) -> String {
+        """
+        \(privateOutcomeReminderMarker)
+
+        Your previous reply didn't run `chat page close-turn \(chatID.uuidString)`, so Playhouse couldn't file it under a chat page. Run it now for that reply, with `--continues true` unless that reply started a new, unrelated topic (then `--continues false --new-title "<short title>"`). Don't repeat or redo the previous reply; after the command, say at most one short line. This is the only reminder for that reply.
+        """
+    }
+
     /// Probes an autopilot task's pull requests in Review and, when they're red
     /// (failing checks, conflicts, or unresolved review threads), sends the task's
     /// provider a visible fix turn through the normal send path. The loop stops on
@@ -8756,10 +8808,12 @@ final class ConversationManager {
 
     /// A status nudge, and the agent's reply to it, only mean something in the session they were sent to,
     /// so neither is replayed to another provider or into a fresh session. A message the user steered
-    /// into a nudge turn is theirs and stays.
+    /// into a nudge turn is theirs and stays. A notice the provider's runtime added inside a turn is
+    /// dropped the same way, while the rest of its turn stays.
     static func withoutNudgeTurns(_ messages: [ConversationMessage]) -> [ConversationMessage] {
         let nudgeTurnIDs = Set(messages.filter { $0.role == .user && PrivateOutcomeNudgeMarker.matches($0.text) }.compactMap(\.turnID))
         return messages.filter { message in
+            if message.role == .user, ProviderAutomaticNotice.matches(message.text) { return false }
             guard let turnID = message.turnID, nudgeTurnIDs.contains(turnID) else { return true }
             return message.role == .user && !PrivateOutcomeNudgeMarker.matches(message.text)
         }
@@ -9171,7 +9225,7 @@ final class PlayhouseBridgeRuntime {
                 let prompt = try request.requiredString("prompt")
                 result = try Self.value(await taskManager.create(
                     title: title, repositories: repositories, contextFolders: roots, provider: provider,
-                    pullRequestMode: settings.pullRequestModeDefault,
+                    pullRequestMode: .pullRequest,
                     prompt: prompt
                 ))
             case "schedule.list":
@@ -9270,11 +9324,9 @@ final class PlayhouseBridgeRuntime {
             case "task.pr.auto":
                 let mode: PullRequestMode = request.arguments["enabled"]?.bool == true ? .pullRequest : .manual
                 result = try Self.value(await taskManager.setPullRequestMode(request.requiredUUID("taskID"), mode: mode))
-                settings.setPullRequestModeDefault(mode)
             case "task.pr.mode":
                 let mode = try PullRequestMode.parse(request.requiredString("mode"))
                 result = try Self.value(await taskManager.setPullRequestMode(request.requiredUUID("taskID"), mode: mode))
-                settings.setPullRequestModeDefault(mode)
             case "task.pr.autopilot":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = try Self.value(await conversations.runPullRequestAutopilot(
@@ -9389,7 +9441,7 @@ final class PlayhouseBridgeRuntime {
                 // The chat-id argument identifies which hidden task's turn this is (for logs/future
                 // multi-chat support); v1 has a single page store, so pages are always scoped to
                 // StandaloneChatManager.defaultChatID regardless of which task passed this signal.
-                _ = try request.requiredString("chatID")
+                let chatID = try request.requiredString("chatID")
                 let continues = request.arguments["continues"]?.bool ?? true
                 if !continues, (request.arguments["newTitle"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     throw BridgeCommandError(code: "invalid_argument", message: "A new page requires --new-title when --continues is false.")
@@ -9402,6 +9454,17 @@ final class PlayhouseBridgeRuntime {
                 try chatManager.recordSignal()
                 if let summaryHint = request.arguments["summaryHint"]?.string, !summaryHint.isEmpty {
                     try chatManager.setSummary(pageID: page.id, summary: summaryHint)
+                }
+                // close-turn is the chat's end-of-turn report: it settles the running turn the
+                // way `task outcome` settles a task's, so the shared recovery loop sees it. The
+                // page is already filed, so a failure here must not fail the command and invite a
+                // retry that files the turn twice; the loop's one nudge covers a lost settlement.
+                do {
+                    try await taskManager.settleStandaloneChatTurn(chatID)
+                } catch {
+                    var fields = PlayhouseDiagnostics.errorFields(error)
+                    fields["chatID"] = chatID
+                    PlayhouseDiagnostics.record("chat.page.close_turn.settle_failed", fields: fields)
                 }
                 result = try Self.value(["page": page])
             case "task.rename":
@@ -9710,7 +9773,7 @@ final class PlayhouseBridgeRuntime {
                     repositories: plan.repositoryPaths.map { RepositoryWorktreeSpec(repositoryPath: $0, branch: nil, branchFrom: nil) },
                     contextFolders: plan.contextFolders,
                     provider: source.conversationProvider,
-                    pullRequestMode: settings.pullRequestModeDefault,
+                    pullRequestMode: .pullRequest,
                     prompt: plan.prompt
                 )
                 result = .object(["task": try Self.value(created), "prompt": .string(plan.prompt)])
@@ -9788,7 +9851,7 @@ final class PlayhouseBridgeRuntime {
                     repositories: plan.repositoryPaths.map { RepositoryWorktreeSpec(repositoryPath: $0, branch: nil, branchFrom: nil) },
                     contextFolders: plan.contextFolders,
                     provider: source.conversationProvider,
-                    pullRequestMode: settings.pullRequestModeDefault,
+                    pullRequestMode: .pullRequest,
                     prompt: plan.prompt
                 )
                 result = .object(["task": try Self.value(created), "prompt": .string(plan.prompt)])
@@ -9837,7 +9900,7 @@ final class PlayhouseBridgeRuntime {
                     repositories: plan.repositoryPaths.map { RepositoryWorktreeSpec(repositoryPath: $0, branch: nil, branchFrom: nil) },
                     contextFolders: plan.contextFolders,
                     provider: source.conversationProvider,
-                    pullRequestMode: settings.pullRequestModeDefault,
+                    pullRequestMode: .pullRequest,
                     prompt: plan.prompt
                 )
                 result = .object(["task": try Self.value(created), "prompt": .string(plan.prompt)])

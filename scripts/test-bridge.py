@@ -1579,7 +1579,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         reopened = self.assert_success(self.call_cli("chat", "open")[0])
         self.assertEqual(reopened["id"], legacy_id, "Migration must run once, not create a second chat.")
 
-    # case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, the Changes sidebar, and the no-repository-selected banner. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn never triggers the private task-outcome reminders, because the chat is told not to report an outcome; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer. Opening a board task while the chat sidebar is showing replaces it with that task's conversation view instead of showing both at once, and returning to the board reveals the chat sidebar again, with the chat's own model left untouched by the unrelated task. The visible chat panel opens at full board-content height, overlaps the logo header and narrow board sidebar, and hides the covered branding and sidebar controls from accessibility navigation while open; it raises the board's minimum width by the chat panel width, so the window grows to keep the shifted columns visible; it pushes the columns to the panel’s right edge; closing chat reveals the sidebar and moves the columns back beside it while the window keeps its grown width. Dragging the chat sidebar's right border resizes it, between a 320-point minimum and the larger of its default width and the screen width the board's minimum width leaves free, and reopening the sidebar, even after an app relaunch, keeps the dragged width. The border's grab strip extends only out over the board, never over the transcript's scroller along its inner side, so pressing and dragging just inside the border leaves the width unchanged. While the edge moves, the chat keeps the width it was last laid out at, clipped to the panel, and its transcript reflows to the panel's width when the drag ends.
+    # case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, the Changes sidebar, and the no-repository-selected banner. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn that ran close-turn gets no nudge, and a Codex chat turn that skipped it gets exactly one nudge through the shared recovery loop, asking for close-turn on its reply and never for a task outcome, because the chat has no board status; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer. Opening a board task while the chat sidebar is showing replaces it with that task's conversation view instead of showing both at once, and returning to the board reveals the chat sidebar again, with the chat's own model left untouched by the unrelated task. The visible chat panel opens at full board-content height, overlaps the logo header and narrow board sidebar, and hides the covered branding and sidebar controls from accessibility navigation while open; it raises the board's minimum width by the chat panel width, so the window grows to keep the shifted columns visible; it pushes the columns to the panel’s right edge; closing chat reveals the sidebar and moves the columns back beside it while the window keeps its grown width. Dragging the chat sidebar's right border resizes it, between a 320-point minimum and the larger of its default width and the screen width the board's minimum width leaves free, and reopening the sidebar, even after an app relaunch, keeps the dragged width. The border's grab strip extends only out over the board, never over the transcript's scroller along its inner side, so pressing and dragging just inside the border leaves the width unchanged. While the edge moves, the chat keeps the width it was last laid out at, clipped to the panel, and its transcript reflows to the panel's width when the drag ends.
     def test_standalone_chat_separate_model_and_pages_round_trip(self):
         opened = self.assert_success(self.call_cli("chat", "open")[0])
         self.assertEqual(opened["title"], "Chat")
@@ -1700,16 +1700,14 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assert_success(self.call_cli("task", "list")[0])["tasks"], [],
             "The standalone chat must stay absent from task/board listing in every turn state.",
         )
-        # The chat is told never to report a task outcome, so chasing one with private
-        # reminders can only spend extra provider turns and bury the user's next message in
-        # a reminder turn that answers nobody.
+        # A chat turn that ran close-turn is settled, so no nudge follows it.
         chat_fixture_history = json.loads(
             Path(str(self.data_directory / "codex-fixture-chat-unique-turns-hold-release") + ".history").read_text(encoding="utf-8")
         )
         self.assertTrue(chat_fixture_history.get("turns"), "The chat fixture should have recorded its turns.")
         self.assertFalse(
-            any("outcome reminder" in (turn.get("userMessage") or "").lower() for turn in chat_fixture_history["turns"]),
-            "A standalone chat turn must not trigger the private task-outcome reminders.",
+            any("playhouse internal outcome nudge:" in (turn.get("userMessage") or "").lower() for turn in chat_fixture_history["turns"]),
+            "A standalone chat turn that ran close-turn must not get a nudge.",
         )
         # The chat must know it is Playhouse's own chat and own the board through the CLI,
         # instead of reaching for an unrelated task tool that the user can never see.
@@ -1761,6 +1759,23 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Tell me about Saturn's rings",
             skip_close_turn=True,
             executable_name="codex-fixture-chat-unique-turns-hold-release",
+        )
+        # The same shared recovery loop nudges a Codex chat turn that skipped close-turn: once,
+        # for the page signal, never for a task outcome.
+        codex_nudges = [
+            turn for turn in json.loads(Path(str(classifier_executable) + ".history").read_text(encoding="utf-8")).get("turns", [])
+            if "playhouse internal outcome nudge:" in (turn.get("userMessage") or "").lower()
+        ]
+        self.assertEqual(len(codex_nudges), 1, "A Codex chat turn that skipped close-turn gets exactly one nudge.")
+        self.assertIn(f"chat page close-turn {chat_task_id}", codex_nudges[0]["userMessage"])
+        self.assertNotIn("task outcome", codex_nudges[0]["userMessage"])
+        codex_visible = self.assert_success(self.call_cli(
+            "conversation", "history", chat_task_id,
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )[0])["messages"]
+        self.assertTrue(
+            any(message["role"] == "user" and "This is the only reminder for that reply." in message["text"] for message in codex_visible),
+            "The Codex chat nudge stays in the chat transcript.",
         )
         classifier_command = ("chat", "status")
         classifier_process = self.start_cli(
@@ -1822,6 +1837,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(unchanged_provider["id"], chat_task_id)
         self.assertEqual(unchanged_provider["conversationProvider"], "codex")
         followup_turn_release.write_text("Release follow-up turn.\n", encoding="utf-8")
+        # The follow-up skips close-turn too, so its one nudge turn is held the same way.
+        deadline = time.monotonic() + 60
+        while followup_process.poll() is None and time.monotonic() < deadline:
+            if followup_turn_active.exists() and not followup_turn_release.exists():
+                followup_turn_release.write_text("Release the follow-up's nudge turn.\n", encoding="utf-8")
+            time.sleep(0.02)
         followup_response, _ = self.finish_cli(followup_process, followup_command)
         followup_turn_hold.unlink(missing_ok=True)
         followup_turn_active.unlink(missing_ok=True)
@@ -2074,7 +2095,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(text.endswith("Tell me about volcanoes") for text in texts))
         self.assertTrue(any(text.endswith("One more thought about Saturn") for text in texts))
 
-    # case-contract: test_standalone_chat_answer_stays_final_around_close_turn | A standalone chat reports no task outcome, so it ends every turn with Playhouse's own chat page close-turn signal, which Claude runs after its answer and before its closing line. That answer and closing line form one final answer, not commentary, in the streamed final answer, fresh CLI/XPC history, and the visible transcript, so the response is never left buried inside the collapsed Worked for disclosure; text written before an ordinary tool earlier in the same turn still stays commentary there, and the close-turn command really runs and succeeds. This classification is Claude-specific because Playhouse derives each message's phase from Claude's tool stream, while Codex reports the phase in its own protocol and so cannot mis-file an answer on the same turn shape.
+    # case-contract: test_standalone_chat_answer_stays_final_around_close_turn | A standalone chat reports no task outcome, so it ends every turn with Playhouse's own chat page close-turn signal. When Claude runs that signal after its answer and before its closing line, the answer and closing line form one final answer, not commentary, in the streamed final answer, fresh CLI/XPC history, and the visible transcript, so the response is never left buried inside the collapsed Worked for disclosure; text written before an ordinary tool earlier in the same turn still stays commentary there, and the close-turn command really runs and succeeds. The chat instructions ask for close-turn before the final reply, which must end the turn, keep exactly one real close-turn per turn and no page bookkeeping in the answer, and carry no hidden escalation. A turn that runs close-turn first and answers after it shows exactly one final answer, filed onto the active page, with no nudge. When the turn ends on close-turn and Claude Code adds its own no-visible-output notice to the same turn, the notice streams once as a user-side message and stays in fresh history between the answer and what Claude writes after it, rendering as an automatic message from Claude Code rather than the user's bubble; that later text is a separate final message, so no bubble holds the answer twice, and the notice is never filed into a chat page. This classification is Claude-specific because Playhouse derives each message's phase from Claude's tool stream and only Claude Code adds such a notice inside a turn, while Codex reports the phase in its own protocol and never injects a hidden message into a turn.
     def test_standalone_chat_answer_stays_final_around_close_turn(self):
         self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
         self.assert_success(self.call_cli("settings", "clear-parent")[0])
@@ -2121,6 +2142,173 @@ class PlayhouseBridgeTests(unittest.TestCase):
         status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
         self.assertFalse(status["missedPreviousPageSignal"],
                          "A close-turn signal that really ran must satisfy the page signal instead of falling back to the classifier.")
+
+        def chat_turns():
+            return [
+                turn for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+                if not (turn.get("userText") or "").startswith("Classify the latest user message")
+            ]
+
+        # The order the instructions now ask for: close-turn first, then the final reply. With no
+        # answer pending when the signal runs, the reply after it is the turn's one final answer.
+        arguments = chat_turns()[-1]["arguments"]
+        instructions = arguments[arguments.index("--append-system-prompt") + 1]
+        close_turn_at = instructions.find("chat page close-turn")
+        self.assertGreater(close_turn_at, -1, "The chat instructions must still teach close-turn.")
+        self.assertIn("before you write your final reply", instructions,
+                      "The instructions must put close-turn before the final reply.")
+        self.assertIn("never end a turn on a tool call", instructions)
+        self.assertIn("Run exactly one close-turn per turn", instructions)
+        self.assertIn("never just write it as text in your reply", instructions)
+        self.assertIn("never write the page name", instructions)
+        self.assertIn("previous response had no visible output but you already answered in this turn, do not repeat the answer", instructions)
+        self.assertNotIn("At the end of every single turn", instructions)
+        self.assertNotIn("CRITICAL, READ FIRST", instructions, "No hidden escalation is prepended to the chat instructions.")
+        close_first_prompt = "Name the largest moon of Jupiter."
+        close_first_answer = "Ganymede is the largest moon of Jupiter."
+        sent, events = self.call_cli("conversation", "send", chat_id, "--message", close_first_prompt, extra_environment=environment)
+        self.assert_success(sent)
+        self.assertEqual([event["payload"]["text"] for event in events if event["type"] == "assistant_final"], [close_first_answer],
+                         "The reply written after close-turn is the turn's single final answer.")
+        self.assertIn('"ok":true', chat_turns()[-1]["reportCommands"][0]["output"], chat_turns()[-1]["reportCommands"])
+        self.assertFalse(any("playhouse internal outcome nudge:" in (turn.get("userText") or "").lower() for turn in chat_turns()),
+                         "A turn whose close-turn ran is settled, so Playhouse sends it no nudge.")
+        history = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        close_first_turn = next(message["turnID"] for message in history["messages"] if message["role"] == "user" and message["text"] == close_first_prompt)
+        self.assertEqual(
+            [(message["role"], message.get("phase"), message["text"]) for message in history["messages"] if message.get("turnID") == close_first_turn],
+            [("user", None, close_first_prompt), ("assistant", "final_answer", close_first_answer)],
+            "Fresh history shows the prompt and exactly one final answer for the close-turn-first turn.",
+        )
+        active_page = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])["activePage"]
+        page_messages = self.assert_success(self.call_cli("chat", "page", "read", active_page["id"], extra_environment=environment)[0])["messages"]
+        self.assertEqual([message["text"] for message in page_messages if message["turnID"] == close_first_turn],
+                         [close_first_prompt, close_first_answer], "The close-turn-first turn is filed onto the active page.")
+
+        # Claude Code's own "no visible output" notice, after a turn that ended on close-turn:
+        # it is recorded as an automatic message from Claude Code, and the text Claude writes
+        # after it is a separate final message rather than appended to the answer.
+        notice_prompt = "Name the largest moon of Saturn."
+        notice_answer = "Titan is the largest moon of Saturn."
+        notice_reply = "I already answered above."
+        notice_text = "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
+        sent, events = self.call_cli("conversation", "send", chat_id, "--message", notice_prompt, extra_environment=environment)
+        self.assert_success(sent)
+        self.assertEqual([event["payload"]["text"] for event in events if event["type"] == "assistant_final"], [notice_answer, notice_reply],
+                         "The answer and the text after Claude Code's notice stream as two finals, never merged.")
+        steered = [event["payload"].get("message") for event in events if event["type"] == "steered_message"]
+        self.assertEqual(steered, ["Claude Code automatic notice:\n" + notice_text], "The notice streams once, as a user-side message.")
+        self.assertFalse(any(notice_text in (event["payload"].get("text") or "") for event in events if event["type"] == "assistant_progress"),
+                         "The notice never streams as assistant progress.")
+        history = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        notice_turn = next(message["turnID"] for message in history["messages"] if message["role"] == "user" and message["text"] == notice_prompt)
+        self.assertEqual(
+            [(message["role"], message.get("phase"), message["text"]) for message in history["messages"] if message.get("turnID") == notice_turn],
+            [
+                ("user", None, notice_prompt),
+                ("assistant", "final_answer", notice_answer),
+                ("user", None, "Claude Code automatic notice:\n" + notice_text),
+                ("assistant", "final_answer", notice_reply),
+            ],
+            "Fresh history keeps the answer, Claude Code's notice and the reply as separate messages in turn order.",
+        )
+        self.assertFalse(any(notice_answer in message["text"] and notice_reply in message["text"] for message in history["messages"]),
+                         "No bubble may hold the answer together with what Claude wrote after the notice.")
+        page_messages = self.assert_success(self.call_cli("chat", "page", "read", active_page["id"], extra_environment=environment)[0])["messages"]
+        self.assertEqual([message["text"] for message in page_messages if message["turnID"] == notice_turn],
+                         [notice_prompt, notice_answer, notice_reply], "Claude Code's notice is never filed into a chat page.")
+        self.assertFalse(any("playhouse internal outcome nudge:" in (turn.get("userText") or "").lower() for turn in chat_turns()),
+                         "The notice turn ran close-turn, so it is settled and gets no Playhouse nudge.")
+
+    # case-contract: test_standalone_chat_missed_close_turn_gets_visible_nudge | When a standalone chat turn ends without its chat page close-turn signal, Playhouse sends exactly one follow-up turn through the same unsettled-turn recovery loop task conversations use. Its prompt starts with the Playhouse nudge marker, asks for close-turn on the previous reply and never for a task outcome, and stays in the chat transcript as an automatic message from Playhouse, followed by the agent's reply. A close-turn run in that nudge settles the turn and classifies the user's turn, which moves to the new titled page without the fallback classifier; the nudge turn and its reply are never filed into a chat page or replayed into a page's seeded context. A nudge that goes unanswered is not retried, the background classifier then decides the page, the chat never gets a board status such as Blocked, and task outcome is rejected for the chat. The nudge loop, the close-turn CLI and the turn outcome store are shared by Claude and Codex, so one representative provider (Claude) covers this case, and the round-trip case shows a Codex chat turn reaching the same nudge.
+    def test_standalone_chat_missed_close_turn_gets_visible_nudge(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-close-turn-nudge"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+        prompt = "Plan a weekend hiking trip."
+        answer = "Pick a loop trail under 15 km and start early."
+
+        def chat_turns():
+            return [
+                turn for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+                if not (turn.get("userText") or "").startswith("Classify the latest user message")
+            ]
+
+        def nudge_turns():
+            return [turn for turn in chat_turns() if "playhouse internal outcome nudge:" in (turn.get("userText") or "").lower()]
+
+        # The turn answers but never runs close-turn, so Playhouse sends one visible nudge,
+        # which the agent answers by running close-turn for that reply.
+        sent, events = self.call_cli("conversation", "send", chat_id, "--message", prompt, extra_environment=environment)
+        self.assert_success(sent)
+        self.assertEqual([event["payload"]["text"] for event in events if event["type"] == "assistant_final"], [answer, "Filed."],
+                         "The answer streams first, then the nudge's one-line reply.")
+        self.assertEqual(len(nudge_turns()), 1, "A chat turn that skipped close-turn gets exactly one nudge.")
+        nudge = nudge_turns()[0]
+        self.assertIn(f"chat page close-turn {chat_id}", nudge["userText"], "The chat nudge asks for close-turn on the previous reply.")
+        self.assertNotIn("task outcome", nudge["userText"], "A chat is never asked for a task outcome.")
+        self.assertIn('"ok":true', nudge["reportCommands"][0]["output"], nudge["reportCommands"])
+
+        history = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        visible = [(message["role"], message["text"]) for message in history["messages"]]
+        nudge_messages = [text for role, text in visible if role == "user" and "Playhouse internal outcome nudge:" in text]
+        self.assertEqual(len(nudge_messages), 1, "The nudge is kept in the chat transcript, where it renders as an automatic message.")
+        self.assertIn("This is the only reminder for that reply.", nudge_messages[0])
+        self.assertEqual(
+            [(role, text) for role, text in visible if text in (prompt, answer, "Filed.") or text == nudge_messages[0]],
+            [("user", prompt), ("assistant", answer), ("user", nudge_messages[0]), ("assistant", "Filed.")],
+            "The transcript shows the turn, then the nudge and its reply.",
+        )
+
+        # The nudge's close-turn classifies the user's turn: it moves to the new titled page,
+        # and the nudge turn itself is never filed into a page.
+        status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        self.assertFalse(status["missedPreviousPageSignal"], "The nudge's close-turn settles the page decision without the fallback classifier.")
+        self.assertEqual(status["activePage"]["title"], "Hiking trip")
+        hiking_page = status["activePage"]
+        page_messages = self.assert_success(self.call_cli("chat", "page", "read", hiking_page["id"], extra_environment=environment)[0])["messages"]
+        self.assertEqual([message["text"] for message in page_messages], [prompt, answer],
+                         "Only the user's turn is filed on its page, never the nudge or its reply.")
+        self.assertFalse(any("Classify the latest user message" in (turn.get("userText") or "")
+                             for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]),
+                         "A nudge that got close-turn run leaves nothing for the fallback classifier.")
+        chat_state = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["status"]
+        self.assertIn(chat_state, ["In Progress", "Waiting Response"], "A chat nudge never sets a board status such as Blocked.")
+        self.assert_failure(
+            self.call_cli("task", "outcome", chat_id, "completed", expected_status=2, extra_environment=environment)[0],
+            "invalid_argument",
+        )
+
+        # A second missed turn whose nudge goes unanswered: still only one nudge, still no
+        # Blocked, and the background classifier decides the page as before. The new page's
+        # fresh session is seeded with its own turn, never with the nudge or its reply.
+        sent, _ = self.call_cli("conversation", "send", chat_id, "--message", "Tell me about volcanoes", extra_environment=environment)
+        self.assert_success(sent)
+        seeded = next(turn for turn in chat_turns() if (turn.get("userText") or "").endswith("Tell me about volcanoes"))
+        self.assertIn(prompt, seeded["userText"], "The new page's session is seeded with its own turn.")
+        self.assertIn(answer, seeded["userText"])
+        self.assertNotIn("Playhouse internal outcome nudge:", seeded["userText"], "A nudge is never replayed into page context.")
+        self.assertNotIn("Filed.", seeded["userText"], "A nudge's reply is never replayed into page context.")
+        self.assertEqual(len(nudge_turns()), 2, "The second missed turn gets its own single nudge.")
+        self.assertEqual(nudge_turns()[-1]["reportCommands"], [], "This nudge goes unanswered.")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+            if not status["missedPreviousPageSignal"] and status["activePage"]["title"] == "Volcanoes":
+                break
+            time.sleep(0.1)
+        self.assertEqual(status["activePage"]["title"], "Volcanoes", "An unanswered nudge leaves the page to the fallback classifier.")
+        self.assertFalse(status["missedPreviousPageSignal"])
+        self.assertEqual(len(nudge_turns()), 2, "An unanswered chat nudge is not retried.")
+        chat_state = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["status"]
+        self.assertIn(chat_state, ["In Progress", "Waiting Response"], "An unanswered chat nudge never marks the chat Blocked.")
 
     # case-contract: test_standalone_chat_recalls_loaded_pages | When a standalone chat's agent loads an earlier page into its context with `chat page read`, the conversation renders one deterministic "Recalling <page title>" line per loaded page, titled from the page archive rather than from anything the agent wrote, in the order the pages were read. The lines are visible in the turn that read them without opening the Worked for disclosure, stay once the turn settles and after a later turn and a reopen, and the read commands really run and succeed so the history carries each call and the page's own title. The line is derived from Playhouse's own provider-neutral command activity (a shell call titled "Running <command>" for both Claude and Codex) and the page store, so provider selection cannot change it; one representative provider (Claude) covers the shared path.
     def test_standalone_chat_recalls_loaded_pages(self):
@@ -3360,7 +3548,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
                          {"style": "borderless", "emphasis": 10, "overhang": None, "width": 30, "height": 30})
         self.assertEqual([(child["type"], self.plugin_text(child)) for child in create["children"]], [("Text", "PR")])
 
-    # case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to Manual; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. The last switch choice is remembered: tasks created after turning it on start on, and tasks created after turning it off start off. Toggling Auto PR for an unknown task is rejected.
+    # case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to PR; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. Every new task starts in PR mode, whatever mode the previous task was left in; changing one task's mode never changes the default for later tasks. Toggling Auto PR for an unknown task is rejected.
     def test_task_auto_pr_toggle_creates_pull_request_on_review(self):
         missing, _ = self.call_cli("task", "pr", "auto", str(uuid.uuid4()), "on", expected_status=3)
         self.assert_failure(missing, "not_found")
@@ -3377,8 +3565,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
                 self.run_git(repository, "remote", "remove", "origin")
 
         task = self.create_repo_task("Auto PR toggle", [self.primary], merge_targets={self.primary: "main"})
-        self.assertFalse(task["autoCreatePullRequestOnReview"], "Auto PR must default to off so existing tasks are unaffected.")
-        self.assertEqual(task["pullRequestMode"], "manual")
+        self.assertTrue(task["autoCreatePullRequestOnReview"], "A new task must start in PR mode.")
+        self.assertEqual(task["pullRequestMode"], "pr")
         autopilot = self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "autopilot")[0])
         self.assertEqual(autopilot["pullRequestMode"], "autopilot")
         self.assertTrue(autopilot["autoCreatePullRequestOnReview"], "Autopilot opens the pull request too.")
@@ -3490,14 +3678,18 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Auto PR should create the pull request exactly once without the user clicking anything.",
         )
 
-        sticky_on = self.create_task("Sticky Auto PR on")
-        self.assertTrue(sticky_on["autoCreatePullRequestOnReview"], "A task created after turning Auto PR on should start on.")
-        turned_off = self.assert_success(self.call_cli("task", "pr", "auto", sticky_on["id"], "off")[0])
+        default_task = self.create_task("Default PR mode")
+        self.assertTrue(default_task["autoCreatePullRequestOnReview"], "A new task should start in PR mode.")
+        self.assertEqual(default_task["pullRequestMode"], "pr")
+        turned_off = self.assert_success(self.call_cli("task", "pr", "auto", default_task["id"], "off")[0])
         self.assertFalse(turned_off["autoCreatePullRequestOnReview"])
-        sticky_off = self.create_task("Sticky Auto PR off")
-        self.assertFalse(sticky_off["autoCreatePullRequestOnReview"], "A task created after turning Auto PR off should start off.")
+        after_off = self.create_task("Default PR mode after switching off")
+        self.assertTrue(after_off["autoCreatePullRequestOnReview"], "A new task should still start in PR mode after another task was switched off.")
+        self.assertEqual(after_off["pullRequestMode"], "pr")
 
-        manual_task = self.create_repo_task("Manual PR toggle default", [self.secondary], merge_targets={self.secondary: "main"})
+        manual_task = self.create_repo_task("Manual PR toggle", [self.secondary], merge_targets={self.secondary: "main"})
+        self.assertTrue(manual_task["autoCreatePullRequestOnReview"])
+        manual_task = self.assert_success(self.call_cli("task", "pr", "mode", manual_task["id"], "manual")[0])
         self.assertFalse(manual_task["autoCreatePullRequestOnReview"])
         self.complete_fixture_turn(manual_task["id"], executable_name="codex-fixture-manual-pr")
         manual_reviewed = self.assert_success(self.call_cli("task", "get", manual_task["id"])[0])
@@ -4193,7 +4385,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         fresh = self.assert_success(self.call_cli("task", "get", creating["id"])[0])
         self.assertEqual([record["pullRequestNumber"] for record in fresh["repositoryWorktrees"]], [501, 502])
 
-    # case-contract: test_task_pr_create_skips_unchanged_repositories | PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error. A task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert.
+    # case-contract: test_task_pr_create_skips_unchanged_repositories | PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error and is remembered as skipped at its branch head, so the card offers no further create action; a review sync with no change keeps the skip, and once the primary's pull request merges and the task moves to Done, the Done archive shows the primary's PR link and no create action either. A two-repository task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved, and both repositories are remembered as skipped. After the task changes one of them, the review sync clears only that repository's skip, the card's create action counts it alone as a single PR, and creating it opens exactly one more pull request, for that repository. A later change to the still-skipped repository beside that linked PR brings back a single create action for the repository without a linked pull request, and creating it links that repository too. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert.
     def test_task_pr_create_skips_unchanged_repositories(self):
         def remove_fixture_origin(repository, expected_url):
             current = subprocess.run(
@@ -4244,10 +4436,34 @@ class PlayhouseBridgeTests(unittest.TestCase):
         fresh = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(fresh["repositoryWorktrees"][0]["pullRequestNumber"], 501)
         self.assertIsNone(fresh["repositoryWorktrees"][1].get("pullRequestNumber"))
+        secondary_worktree = Path(task["repositoryWorktrees"][1]["worktreePath"])
+        secondary_head = self.run_git(secondary_worktree, "rev-parse", "HEAD").strip()
+        self.assertEqual(
+            fresh["repositoryWorktrees"][1].get("pullRequestSkippedHead"), secondary_head,
+            "The unchanged repository must be remembered as skipped so the card stops offering it a pull request.",
+        )
+        self.assertIsNone(fresh["repositoryWorktrees"][0].get("pullRequestSkippedHead"))
 
-        # The secondary source repository keeps the origin its first task worktree added.
+        # The review gate keeps the skip while the repository stays unchanged, and so does Done.
+        self.assert_success(self.call_cli("task", "pr", "sync", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(
+            self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][1].get("pullRequestSkippedHead"),
+            secondary_head,
+        )
+        gh_state.write_text("501=merged\n", encoding="utf-8")
+        self.assert_success(self.call_cli("task", "move", task["id"], "Done", extra_environment=gh_environment)[0])
+        archived = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(archived["status"], "Done")
+        self.assertEqual(archived["repositoryWorktrees"][0]["pullRequestNumber"], 501)
+        self.assertEqual(
+            archived["repositoryWorktrees"][1].get("pullRequestSkippedHead"), secondary_head,
+            "The Done archive reads the same skip, so it offers no create action either.",
+        )
+
+        # The source repositories keep the origins the first task's worktrees added.
         unchanged = self.create_repo_task(
-            "Nothing to propose", [self.secondary], merge_targets={self.secondary: "main"}, materialize=True,
+            "Nothing to propose", [self.primary, self.secondary],
+            merge_targets={self.primary: "main", self.secondary: "main"}, materialize=True,
         )
         self.clear_task_provider_session(unchanged["id"])
         rejected, _ = self.call_cli("task", "pr", "create", unchanged["id"], expected_status=1, extra_environment=gh_environment)
@@ -4257,7 +4473,36 @@ class PlayhouseBridgeTests(unittest.TestCase):
             sum(line.startswith("create\t") for line in create_log.read_text(encoding="utf-8").splitlines()), 1,
             "An all-unchanged task must not call gh create.",
         )
-        self.assertIsNone(self.assert_success(self.call_cli("task", "get", unchanged["id"])[0])["repositoryWorktrees"][0].get("pullRequestNumber"))
+        skipped = self.assert_success(self.call_cli("task", "get", unchanged["id"])[0])["repositoryWorktrees"]
+        self.assertTrue(all(record.get("pullRequestNumber") is None for record in skipped))
+        self.assertTrue(all(record.get("pullRequestSkippedHead") for record in skipped), "Both unchanged repositories must be remembered as skipped.")
+
+        # Once the task changes one repository, the review sync offers that one a pull request again.
+        later_worktree = Path(skipped[1]["worktreePath"])
+        (later_worktree / "later-change.txt").write_text("The secondary repository changed later.\n", encoding="utf-8")
+        self.assert_success(self.call_cli("task", "pr", "sync", unchanged["id"], extra_environment=gh_environment)[0])
+        reopened = self.assert_success(self.call_cli("task", "get", unchanged["id"])[0])["repositoryWorktrees"]
+        self.assertEqual(reopened[0].get("pullRequestSkippedHead"), skipped[0]["pullRequestSkippedHead"], "The still-unchanged repository stays skipped.")
+        self.assertIsNone(reopened[1].get("pullRequestSkippedHead"), "A changed repository must await a pull request again.")
+        created_later = self.assert_success(self.call_cli("task", "pr", "create", unchanged["id"], extra_environment=gh_environment)[0])
+        self.assertIsNone(created_later["repositoryWorktrees"][0].get("pullRequestNumber"))
+        self.assertEqual(created_later["repositoryWorktrees"][1]["pullRequestNumber"], 502)
+        create_targets = [line.split("\t", 2)[1] for line in create_log.read_text(encoding="utf-8").splitlines() if line.startswith("create\t")]
+        self.assertEqual(
+            create_targets, [str(primary_worktree.resolve()), str(later_worktree.resolve())],
+            "The later change must open exactly one more pull request, for the changed repository.",
+        )
+
+        # Beside a linked PR, a later change to the still-skipped repository offers it a pull request too.
+        later_primary_worktree = Path(skipped[0]["worktreePath"])
+        (later_primary_worktree / "later-change.txt").write_text("The primary repository changed later.\n", encoding="utf-8")
+        self.assert_success(self.call_cli("task", "pr", "sync", unchanged["id"], extra_environment=gh_environment)[0])
+        self.assertIsNone(self.assert_success(self.call_cli("task", "get", unchanged["id"])[0])["repositoryWorktrees"][0].get("pullRequestSkippedHead"))
+        both = self.assert_success(self.call_cli("task", "pr", "create", unchanged["id"], extra_environment=gh_environment)[0])
+        self.assertEqual([record.get("pullRequestNumber") for record in both["repositoryWorktrees"]], [503, 502])
+        create_targets = [line.split("\t", 2)[1] for line in create_log.read_text(encoding="utf-8").splitlines() if line.startswith("create\t")]
+        self.assertEqual(create_targets[-1], str(later_primary_worktree.resolve()))
+        self.assertEqual(len(create_targets), 3)
 
     # case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
     def test_task_lifecycle_rollout_clears_records_and_clean_worktrees(self):
@@ -4445,7 +4690,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         done = self.assert_success(self.call_cli("task", "move", task["id"], "Done", "--allow-unmerged")[0])
         self.assertEqual(done["status"], "Done")
 
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A status nudge Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while showing the nudge replies.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. They place the outcome call, still the final CLI action, before the user-visible final reply, which ends the turn so it never ends on a tool call, and they tell the agent not to repeat an answer after a no-visible-output notice. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A status nudge Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while showing the nudge replies.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -4707,6 +4952,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assertIn("<completed|in-progress|waiting-response>", instructions)
             self.assertIn("Never end a turn mid-work without an outcome", instructions)
             self.assertIn("privately nudges you to report your current status", instructions)
+            self.assertIn("before you write your final reply, make exactly one definitive outcome call", instructions)
+            self.assertIn("Write your user-visible final reply after the outcome call returns", instructions)
+            self.assertIn("never end a turn on a tool call", instructions)
+            self.assertIn("The outcome call must be your final CLI action for the turn.", instructions)
+            self.assertIn("previous response had no visible output but you already answered in this turn, do not repeat the answer", instructions)
             self.assertIn("waiting-response", instructions)
             self.assertIn("final CLI action", instructions)
             self.assertIn("Active task worktrees for edits", instructions)
@@ -4990,6 +5240,16 @@ class PlayhouseBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(response)["title"], "Renamed through XPC")
 
+    # The pasteboard, checkmark, and 'Title copied' label clauses are verified only by the paired UI case; this case covers the persisted-title round trip.
+    # case-contract: test_task_title_copy_button_copies_persisted_title | The conversation title's copy button places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename; the button confirms the copy with a checkmark and its 'Title copied' label, and fresh CLI/XPC reads report the same title the copy produced.
+    def test_task_title_copy_button_copies_persisted_title(self):
+        task_id = self.create_task()["id"]
+        title = "Café & tea: ready ✓"
+        response, _ = self.call_cli("task", "rename", task_id, "--title", title)
+        self.assertEqual(self.assert_success(response)["title"], title)
+        response, _ = self.call_cli("task", "get", task_id)
+        self.assertEqual(self.assert_success(response)["title"], title)
+
     # case-contract: test_task_roots_set_get_order_deduplication_and_validation | Root editing preserves order, removes duplicates, rejects an empty list, and waits for an active conversation turn; a stale Git-folder validation is rejected after a newer folder edit, and the newer roots remain saved.
     def test_task_roots_set_get_order_deduplication_and_validation(self):
         task_id = self.create_task()["id"]
@@ -5200,7 +5460,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(final_record["branchFrom"], "branch-source")
         self.assertEqual(final_record["mergeTarget"], "branch-source")
 
-    # case-contract: test_task_repository_branch_from_fetches_remote_branch | A branch-from that exists only on a Git remote and was never fetched is fetched when repository settings are saved, and the pending record stores its remote-tracking branch; a branch-from missing locally and on every remote is rejected without changing the saved settings; a remote that can't be reached reports the fetch failure instead of a missing branch and also keeps the saved settings; starting the task creates its worktree from the fetched remote commit without making the remote branch the task branch's upstream.
+    # case-contract: test_task_repository_branch_from_fetches_remote_branch | A branch-from that exists only on a Git remote and was never fetched is fetched when repository settings are saved, and the pending record stores its remote-tracking branch; a branch-from missing locally and on every remote is rejected without changing the saved settings; a remote that can't be reached reports the fetch failure instead of a missing branch and also keeps the saved settings; starting the task fetches the remote branch again, so its worktree starts from the remote's latest commit even after the remote branch moved ahead, without making the remote branch the task branch's upstream.
     def test_task_repository_branch_from_fetches_remote_branch(self):
         remote = self.data_directory / "branch-from-origin.git"
         remote_branch = "remote-only/branch-from"
@@ -5223,6 +5483,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
             task = self.create_repo_task("Remote branch-from", [self.primary])
             task_id = task["id"]
+            # PR mode would publish the branch on Review, and publishing sets the upstream this case checks.
+            self.assert_success(self.call_cli("task", "pr", "mode", task_id, "manual")[0])
             changed, _ = self.call_cli(
                 "task", "repository", "edit", task_id,
                 "--repo", self.primary,
@@ -5264,6 +5526,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
             fresh, _ = self.call_cli("task", "get", task_id)
             self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"][0]["branchFrom"], f"origin/{remote_branch}")
 
+            # The remote branch moves ahead after it was fetched; starting must use the newer commit.
+            newer_commit = self.run_git(
+                self.primary, "commit-tree", "main^{tree}", "-p", remote_commit, "-m", "Advance remote-only branch-from fixture",
+            ).strip()
+            self.run_git(self.primary, "push", "--quiet", "origin", f"{newer_commit}:refs/heads/{remote_branch}")
+            self.run_git(self.primary, "update-ref", tracking_ref, remote_commit)
+
             self.complete_fixture_turn(task_id)
             started, _ = self.call_cli("task", "get", task_id)
             started_record = self.assert_success(started)["repositoryWorktrees"][0]
@@ -5271,12 +5540,75 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assertEqual(started_record["branchFrom"], f"origin/{remote_branch}")
             worktree = Path(started_record["worktreePath"])
             self.assertTrue(worktree.is_dir())
-            self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), remote_commit)
+            self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), newer_commit)
             upstream = subprocess.run(
                 ["git", "-C", str(worktree), "config", "--get", "branch.remote-branch-from-task.remote"],
                 check=False, capture_output=True, text=True,
             )
             self.assertEqual(upstream.stdout.strip(), "", "The remote branch-from must not become the task branch's upstream.")
+        finally:
+            self.run_git(self.primary, "remote", "remove", "origin")
+
+    # case-contract: test_task_repository_default_branch_from_uses_fresh_origin | With no branch-from given, a repository without an origin remote keeps its local default branch, while a repository whose origin has the default branch stores origin's remote-tracking branch as the pending branch-from. Starting the task fetches origin first, so the worktree starts from origin's latest commit even when the local default branch and its remote-tracking ref are stale and the local branch holds unpushed commits, without making the remote branch the task branch's upstream. When origin can't be reached at start, the task still starts from the last fetched origin commit.
+    def test_task_repository_default_branch_from_uses_fresh_origin(self):
+        without_origin = self.create_repo_task("Default branch-from without origin", [self.primary])
+        self.assertEqual(without_origin["repositoryWorktrees"][0]["branchFrom"], "main")
+
+        remote = self.data_directory / "default-branch-from-origin.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+        self.run_git(self.primary, "remote", "add", "origin", str(remote))
+        try:
+            self.run_git(self.primary, "push", "--quiet", "origin", "main")
+            stale_tracking = self.run_git(self.primary, "rev-parse", "refs/remotes/origin/main").strip()
+            task = self.create_repo_task("Default branch-from from origin", [self.primary])
+            task_id = task["id"]
+            pending = task["repositoryWorktrees"][0]
+            self.assertTrue(pending["isPending"])
+            self.assertEqual(pending["branchFrom"], "origin/main")
+            fresh, _ = self.call_cli("task", "get", task_id)
+            self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"][0]["branchFrom"], "origin/main")
+
+            # Origin moves ahead without this repository fetching, and local main gains an unpushed commit.
+            clone = self.data_directory / "default-branch-from-clone"
+            subprocess.run(["git", "clone", "--quiet", "--branch", "main", str(remote), str(clone)], check=True, capture_output=True, text=True)
+            self.run_git(clone, "config", "user.name", "Playhouse Bridge Test")
+            self.run_git(clone, "config", "user.email", "playhouse-bridge-test@example.invalid")
+            (clone / "origin-only.txt").write_text("Landed on origin after the task was created.\n", encoding="utf-8")
+            self.run_git(clone, "add", "origin-only.txt")
+            self.run_git(clone, "commit", "-m", "Origin-only commit")
+            self.run_git(clone, "push", "--quiet", "origin", "main")
+            origin_head = self.run_git(clone, "rev-parse", "HEAD").strip()
+            (self.primary / "local-only.txt").write_text("Unpushed local commit.\n", encoding="utf-8")
+            self.run_git(self.primary, "add", "local-only.txt")
+            self.run_git(self.primary, "commit", "-m", "Local-only commit")
+            local_head = self.run_git(self.primary, "rev-parse", "main").strip()
+            self.assertEqual(self.run_git(self.primary, "rev-parse", "refs/remotes/origin/main").strip(), stale_tracking)
+
+            self.complete_fixture_turn(task_id)
+            started = self.assert_success(self.call_cli("task", "get", task_id)[0])["repositoryWorktrees"][0]
+            self.assertFalse(started["isPending"])
+            self.assertEqual(started["branchFrom"], "origin/main")
+            worktree = Path(started["worktreePath"])
+            self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), origin_head)
+            self.assertTrue((worktree / "origin-only.txt").is_file())
+            self.assertFalse((worktree / "local-only.txt").exists(), "The local-only commit must not be the task's base.")
+            self.assertEqual(self.run_git(self.primary, "rev-parse", "refs/remotes/origin/main").strip(), origin_head)
+            self.assertEqual(self.run_git(self.primary, "rev-parse", "main").strip(), local_head, "Starting must not move local main.")
+            upstream = subprocess.run(
+                ["git", "-C", str(worktree), "config", "--get", f"branch.{started['branch']}.remote"],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(upstream.stdout.strip(), "", "The origin base must not become the task branch's upstream.")
+
+            offline = self.create_repo_task("Default branch-from while offline", [self.primary])
+            offline_id = offline["id"]
+            self.assertEqual(offline["repositoryWorktrees"][0]["branchFrom"], "origin/main")
+            self.run_git(self.primary, "remote", "set-url", "origin", str(self.data_directory / "unreachable-origin.git"))
+            self.complete_fixture_turn(offline_id)
+            offline_started = self.assert_success(self.call_cli("task", "get", offline_id)[0])["repositoryWorktrees"][0]
+            self.assertFalse(offline_started["isPending"])
+            self.assertEqual(offline_started["branchFrom"], "origin/main")
+            self.assertEqual(self.run_git(Path(offline_started["worktreePath"]), "rev-parse", "HEAD").strip(), origin_head)
         finally:
             self.run_git(self.primary, "remote", "remove", "origin")
 
@@ -9422,7 +9754,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(saved)["status"], "Blocked")
         self.assertEqual(self.assert_success(saved)["savedPrompt"], "A follow-up draft.")
 
-    # case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the UI renders the question inline, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
+    # case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the question's Markdown, header, and option descriptions reach the client, and the UI renders the question inline with its Markdown formatted at the reply text size, its header, and each option's description, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
     def test_claude_questions_can_be_answered_after_switching_conversations(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-question"
@@ -9442,7 +9774,17 @@ class PlayhouseBridgeTests(unittest.TestCase):
         result = self.assert_success(response)
         user_input = next(event for event in events if event.get("type") == "user_input")
         request = user_input["payload"]["userInputRequest"]
-        self.assertEqual(request["questions"][0]["question"], "Which color should I use?")
+        question = request["questions"][0]
+        self.assertEqual(
+            question["question"], "Which color should I use for **the primary button**?\n\nIt also tints `LinkText`.",
+            "The question's Markdown must reach the client unchanged so the form can render it.",
+        )
+        self.assertEqual(question["header"], "Color")
+        self.assertEqual(
+            [(option["label"], option.get("description")) for option in question["options"]],
+            [("Blue", "Use blue."), ("Green", "Use green.")],
+            "Each option's description must reach the client so the form can show it.",
+        )
         self.assertEqual(user_input["payload"].get("taskStatus"), "Waiting Response")
         self.assertTrue(any(
             event.get("type") == "task_status" and event.get("payload", {}).get("taskStatus") == "In Progress"
@@ -13857,7 +14199,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         path.write_text(source, encoding="utf-8")
         return self.call_cli("plugin", "render", "--file", path, *options, expected_status=expected_status)[0]
 
-    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar) and the Task Item, Agents Info and Token Stats examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
+    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea) and the Task Item, Agents Info, Token Stats and Skills Page examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
     def test_plugin_renderer_commits_minimal_ops_and_runs_handlers(self):
         plugin = """
 function App() {
@@ -13876,7 +14218,8 @@ function App() {
 Playhouse.render(h(App));
 """
         rendered = self.assert_success(self.render_plugin(plugin))
-        self.assertEqual(rendered["atoms"], ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter", "Scroll", "Divider", "ChoiceBar"],
+        self.assertEqual(rendered["atoms"], ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter",
+                                             "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea"],
                          "Plugins compose exactly the native composites' atoms.")
         self.assertEqual(rendered["errors"], [])
         self.assertEqual(len(rendered["commits"]), 1, "The first render is one commit.")
@@ -13951,12 +14294,12 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertTrue(any("Invalid commit" in error and "integer" in error for error in out_of_range["result"]["errors"]),
                         f"An op whose node id is out of range is reported, not a crash: {out_of_range['result']['errors']}")
 
-        for page in ["AgentsInfo", "Button", "Card", "ChoiceBar", "Disclosure", "Divider", "Icon", "Label", "Link", "Meter", "Panel", "PillPicker",
-                     "Scroll", "Spacer", "Spinner", "Stack", "TaskItem", "Text", "TokenStats"]:
+        for page in ["AgentsInfo", "Button", "Card", "ChoiceBar", "Disclosure", "Divider", "Icon", "Label", "Link", "Menu", "Meter", "Panel", "PillPicker",
+                     "PressArea", "Scroll", "Segmented", "SkillsPage", "Spacer", "Spinner", "Stack", "TaskItem", "Text", "TextField", "Toggle", "TokenStats"]:
             page_render = self.assert_success(self.call_cli("plugin", "render", "--page", page)[0])
             self.assertEqual(page_render["errors"], [], f"The {page} catalog page renders without errors.")
             used = {node["type"] for node in self.plugin_nodes(page_render["tree"])}
-            if page not in ("TaskItem", "AgentsInfo", "TokenStats"):
+            if page not in ("TaskItem", "AgentsInfo", "TokenStats", "SkillsPage"):
                 self.assertIn(page, used, f"The {page} page shows its atom.")
         disclosure = self.assert_success(self.call_cli("plugin", "render", "--page", "Disclosure", "--event", "disclosure-demo:onToggle")[0])
         section = self.plugin_node(disclosure["tree"], "disclosure-demo")
@@ -13982,6 +14325,33 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual((scroll["type"], scroll["props"]["maxHeight"]), ("Scroll", 120))
         self.assertEqual(len([child for child in scroll["children"] if child["type"] == "Text"]), 8, "Adding rows puts them inside the Scroll.")
         self.assertEqual(self.plugin_text(self.plugin_node(scrolled["tree"], "scroll-count")), "8 rows")
+        toggled = self.assert_success(self.call_cli("plugin", "render", "--page", "Toggle", "--event", "toggle-demo:onToggle")[0])
+        switch = self.plugin_node(toggled["tree"], "toggle-demo")
+        state = self.plugin_node(toggled["tree"], "toggle-state")
+        self.assertEqual((switch["events"], switch["props"]["isOn"], switch["props"]["size"]), (["onToggle"], False, "mini"), "onToggle flipped the switch off.")
+        self.assertEqual(self.plugin_text(state), "Off")
+        self.assertEqual(sorted(toggled["commits"][-1]["ops"]), ["text", "update"], "Toggling updates only the Toggle's props and the readout.")
+        self.assertEqual(set(toggled["commits"][-1]["touchedNodes"]), {switch["id"], state["children"][0]["id"]})
+        typed = self.assert_success(self.call_cli("plugin", "render", "--page", "TextField", "--event", "text-field-demo:onChange:release")[0])
+        field = self.plugin_node(typed["tree"], "text-field-demo")
+        self.assertEqual((field["events"], field["props"]["text"], field["props"]["placeholder"]), (["onChange"], "release", "Search skills"))
+        self.assertEqual(self.plugin_text(self.plugin_node(typed["tree"], "text-field-value")), "Text: release", "onChange received the new text.")
+        segmented = self.assert_success(self.call_cli("plugin", "render", "--page", "Segmented", "--event", "segmented-demo:onChange:global")[0])
+        picker = self.plugin_node(segmented["tree"], "segmented-demo")
+        self.assertEqual((picker["events"], picker["props"]["selected"]), (["onChange"], "global"))
+        self.assertEqual([option["label"] for option in picker["props"]["options"]], ["Repo", "Global", "Built-in"])
+        self.assertEqual(self.plugin_text(self.plugin_node(segmented["tree"], "segmented-selected")), "Selected: global")
+        menu = self.assert_success(self.call_cli("plugin", "render", "--page", "Menu", "--event", "menu-demo:onMenu:delete")[0])
+        demo_menu = self.plugin_node(menu["tree"], "menu-demo")
+        self.assertEqual((demo_menu["events"], demo_menu["props"]["icon"]), (["onMenu"], "ellipsis"))
+        self.assertEqual([[item["id"] for item in group] for group in demo_menu["props"]["items"]], [["edit", "reveal"], [], ["delete"]])
+        self.assertEqual(self.plugin_text(self.plugin_node(menu["tree"], "menu-chosen")), "Chosen: delete", "onMenu received the item's id.")
+        pressed_area = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "PressArea", "--event", "press-area-demo:onPress", "--event", "press-area-demo:onLongPress", "--event", "press-area-demo:onLongPress")[0])
+        area = self.plugin_node(pressed_area["tree"], "press-area-demo")
+        self.assertEqual((sorted(area["events"]), area["props"]["pointer"]), (["onLongPress", "onPress"], True))
+        self.assertEqual(self.plugin_text(self.plugin_node(pressed_area["tree"], "press-area-count")), "Clicked 1 · held 2",
+                         "A click and a press and hold reach different handlers.")
         pressed = self.assert_success(self.call_cli("plugin", "render", "--page", "Button", "--event", "button-plain:onPress")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(pressed["tree"], "button-press-count")), "Pressed 1 times")
         self.assertEqual(pressed["commits"][-1]["ops"], ["text"], "The Button page's press is one text op.")
@@ -14002,6 +14372,11 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
             ('Playhouse.render(h(Scroll, { maxHeight: "tall" }));', "<Scroll> has an invalid prop: maxHeight: expected a number, found a string"),
             ('Playhouse.render(h(Divider, { axis: "v" }));', '<Divider> has no prop "axis"'),
             ('Playhouse.render(h(Divider, null, h(Text, null, "x")));', "<Divider> can't hold <Text>"),
+            ('Playhouse.render(h(Toggle, { size: "mini" }));', "<Toggle> has an invalid prop: isOn: missing"),
+            ('Playhouse.render(h(TextField, { text: 3 }));', "<TextField> has an invalid prop: text: expected a string, found 3"),
+            ('Playhouse.render(h(Segmented, { options: [{ value: "a", label: "A" }], selected: "a", onToggle: function () {} }));', '<Segmented> has no event "onToggle"'),
+            ('Playhouse.render(h(Menu, { icon: "ellipsis", items: [{ id: "a", title: "A" }] }));', "<Menu> has an invalid prop: items.0"),
+            ('Playhouse.render(h(Toggle, { isOn: true }, h(Text, null, "x")));', "<Toggle> can't hold <Text>"),
             ('Playhouse.render(h(Stack, { onTap: function () {} }));', '<Stack> has no event "onTap"'),
             ('Playhouse.render(h(Icon, { name: "clock" }, h(Text, null, "x")));', "<Icon> can't hold <Text>"),
         ]:
@@ -14265,6 +14640,187 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(self.plugin_text(self.plugin_node(reopened["tree"], "js-last-action")), "Last: open", "The counter opened it again.")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "TokenStats", "--event", "token-stats-sections:onPress", expected_status=2)[0], "invalid_argument")
 
+    # case-contract: test_plugin_skills_page_renders_from_atoms_like_native | The Plugin Catalog's Skills Page shows the Skills page's header and skill gallery composed in JavaScript from atoms above the native SwiftUI header and gallery the Skills page uses, built from the same atoms and sample data, each opened by the composer's Skills button (the same plain Button atom with the sparkles icon, labelled Skills). Both show the back button, the Skills, Rules & MCP title, the Skills | Rules | MCP and Repo | Global | Built-in segmented pickers, the search field and New Skill, the hint, a repository section whose skill rows show their name, provider, Conflict and Invalid badges, description, issue and location, a small Fix with Agent button on a broken skill, the mini switch, a small Use button that is disabled for a skill no provider can use, and the actions menu, and an empty repository's empty state, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer, Divider, Scroll, Segmented, TextField, Toggle, Menu, PressArea) with the Skills page's identifiers. Choosing Global in the JavaScript source picker runs onChange (Last: tab global) and shows the Linked and switched-off global skills while the native page stays on Repo. Clicking a JavaScript switch runs onToggle (Last: toggle release-notes off), which turns it off and disables its Use button, and Use runs its handler (Last: use release-notes) without re-rendering any row. Clicking a skill's text runs onPress (Last: open release-notes); pressing and holding it runs onLongPress, which starts selecting (Last: select release-notes): its row shows a checked checkbox and the accent highlight, the rows' own controls hide, built-in skills show no checkbox, and the header shows 1 selected with Fix with Agent, Delete and Done; a click on another row adds it (2 selected), and Done ends selecting (Last: done selecting). The actions menu runs onMenu with the chosen item's id (Last: menu release-notes edit), typing in the search runs onChange with the text, choosing Rules hides the source picker and the search, and the back button closes the JavaScript page (Last: back) while the native one stays open, until the Skills button opens it again (Last: open). The search field raises no onPress, so pressing it is refused as invalid_argument.
+    def test_plugin_skills_page_renders_from_atoms_like_native(self):
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage")[0])
+        self.assertEqual(rendered["errors"], [])
+        tree = rendered["tree"]
+        # The same identifiers the Skills page's native header and gallery give their atoms.
+        for test_id in ["skills-page", "skills-back-button", "skills-title", "skills-kind-picker", "skills-tab-picker", "skills-search", "new-skill-button",
+                        "skills-provider-timing", "skills-list", "skills-repo-section-login-app", "skills-repo-section-docs-site", "skills-empty-docs-site",
+                        "skill-row-release-notes", "skill-text-release-notes", "skill-name-release-notes", "skill-provider-release-notes-claude",
+                        "skill-provider-release-notes-codex", "skill-description-release-notes", "skill-location-release-notes", "skill-toggle-release-notes",
+                        "skill-use-release-notes", "skill-actions-release-notes", "skill-conflict-review-login", "skill-issue-review-login",
+                        "skill-fix-review-login", "skill-invalid-broken-skill", "skill-fix-broken-skill"]:
+            self.plugin_node(tree, test_id)
+        types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
+        self.assertEqual(types, {"Panel", "Stack", "Text", "Icon", "Label", "Button", "Spacer", "Divider", "Scroll", "Segmented", "TextField", "Toggle", "Menu", "PressArea"},
+                         "The page is atoms only.")
+
+        # The composer's Skills button opens it: a plain Button atom with the sparkles icon.
+        opener = self.plugin_node(tree, "open-skills-button")
+        self.assertEqual((opener["type"], opener["events"], opener["props"].get("style")), ("Button", ["onPress"], None))
+        self.assertEqual((opener["props"]["label"], opener["props"]["help"]), ("Skills", "Skills"))
+        self.assertEqual((opener["children"][0]["type"], opener["children"][0]["props"]["name"]), ("Icon", "sparkles"))
+
+        back = self.plugin_node(tree, "skills-back-button")
+        self.assertEqual((back["props"]["shortcut"], back["props"]["label"]), ("cancel", "Back to the conversation"), "Escape goes back while nothing is open.")
+        circle = back["children"][0]
+        self.assertEqual((circle["type"], circle["props"]["width"], circle["props"]["height"], circle["props"]["cornerRadius"]), ("Panel", 26, 26, 13))
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "skills-title")), "Skills, Rules & MCP")
+        kinds = self.plugin_node(tree, "skills-kind-picker")
+        self.assertEqual(([option["label"] for option in kinds["props"]["options"]], kinds["props"]["selected"], kinds["props"]["disabled"]),
+                         (["Skills", "Rules", "MCP"], "skills", False))
+        tabs = self.plugin_node(tree, "skills-tab-picker")
+        self.assertEqual(([option["label"] for option in tabs["props"]["options"]], tabs["props"]["selected"], tabs["props"]["width"]),
+                         (["Repo", "Global", "Built-in"], "repo", 260))
+        search = self.plugin_node(tree, "skills-search")
+        self.assertEqual((search["props"]["text"], search["props"]["placeholder"], search["props"]["width"]), ("", "Search skills", 200))
+        new_skill = self.plugin_node(tree, "new-skill-button")
+        self.assertEqual((new_skill["props"]["style"], new_skill["children"][0]["props"]["text"]), ("bordered", "New Skill"))
+        self.assertTrue(self.plugin_text(self.plugin_node(tree, "skills-provider-timing")).startswith("Click a skill to open it, or press and hold one"))
+        scroll = self.plugin_node(tree, "skills-list")
+        self.assertEqual((scroll["props"]["lazy"], scroll["props"]["inset"], scroll["props"]["spacing"]), (True, 20, 10))
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "skills-empty-docs-site")), "No skills in docs-site.")
+
+        row = self.plugin_node(tree, "skill-row-release-notes")
+        self.assertEqual((row["type"], row["props"]["fill"], row["props"]["fillOpacity"], row["props"]["cornerRadius"], row["props"].get("stroke")),
+                         ("Panel", "panel", 1, 10, None), "An unselected row is a panel-colored rounded card.")
+        self.assertEqual([child["type"] for child in row["children"][0]["children"]], ["PressArea", "Toggle", "Button", "Menu"], "The skill's text, then its switch, Use and its menu.")
+        self.assertEqual(self.plugin_node(tree, "skill-text-release-notes")["props"]["pointer"], True, "A skill with a folder opens on click.")
+        badge = self.plugin_node(tree, "skill-provider-release-notes-claude")
+        self.assertEqual((badge["type"], badge["props"]["fill"], badge["props"]["fillOpacity"]), ("Panel", "green", 0.12))
+        self.assertEqual((badge["children"][0]["props"]["text"], badge["children"][0]["props"]["icon"]), ("Claude", "checkmark"))
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "skill-location-release-notes")), ".agents/skills")
+        toggle = self.plugin_node(tree, "skill-toggle-release-notes")
+        self.assertEqual((toggle["props"]["isOn"], toggle["props"]["size"], toggle["props"]["label"]), (True, "mini", "release-notes enabled"))
+        use = self.plugin_node(tree, "skill-use-release-notes")
+        self.assertEqual((use["props"]["style"], use["props"]["controlSize"], use["props"]["disabled"], use["props"]["help"]),
+                         ("bordered", "small", False, "Insert /release-notes into the message"))
+        actions = self.plugin_node(tree, "skill-actions-release-notes")
+        self.assertEqual((actions["props"]["icon"], actions["props"]["width"], actions["props"]["height"], actions["props"]["label"]),
+                         ("ellipsis", 24, 24, "Actions for release-notes"))
+        self.assertEqual([[item["testID"] for item in group] for group in actions["props"]["items"]], [
+            ["skill-edit-release-notes", "skill-reveal-release-notes"],
+            ["skill-move-global-release-notes", "skill-move-repo-release-notes-docs-site"],
+            ["skill-link-release-notes"], ["skill-delete-release-notes"]])
+        self.assertEqual(actions["props"]["items"][3][0]["destructive"], True)
+        conflict = self.plugin_node(tree, "skill-row-review-login")
+        self.assertEqual([child["type"] for child in conflict["children"][0]["children"]], ["PressArea", "Button", "Toggle", "Button", "Menu"],
+                         "A conflicting skill offers Fix with Agent before its switch.")
+        fix = self.plugin_node(tree, "skill-fix-review-login")
+        self.assertEqual((fix["props"]["controlSize"], fix["children"][0]["props"]["text"]), ("small", "Fix with Agent"))
+        self.assertEqual(self.plugin_node(tree, "skill-conflict-review-login")["props"]["fill"], "orange")
+        self.assertEqual(self.plugin_node(tree, "skill-invalid-broken-skill")["props"]["fill"], "red")
+        self.assertEqual(self.plugin_node(tree, "skill-use-broken-skill")["props"]["disabled"], True, "No provider can use an invalid skill.")
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(tree)}
+        self.assertNotIn("skill-provider-broken-skill-claude", test_ids)
+        self.assertNotIn("skill-select-release-notes", test_ids, "Rows show no checkbox until selecting.")
+
+        switched = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skills-tab-picker:onChange:global",
+            "--event", "skill-toggle-shared-notes:onToggle", "--event", "skill-use-shared-notes:onPress")[0])
+        self.assertEqual(switched["errors"], [])
+        tree = switched["tree"]
+        commits = {commit["step"]: commit for commit in switched["commits"]}
+        last_action = self.plugin_node(tree, "js-last-action")
+        self.assertEqual(self.plugin_node(tree, "skills-tab-picker")["props"]["selected"], "global")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "js-last-action")), "Last: use shared-notes")
+        tab_only = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skills-tab-picker:onChange:global")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(tab_only["tree"], "js-last-action")), "Last: tab global", "The source picker ran onChange with its value.")
+        self.plugin_node(tree, "skill-linked-shared-notes")
+        self.assertEqual(self.plugin_node(tree, "skill-toggle-quiet-skill")["props"]["isOn"], False, "A switched-off skill shows its switch off.")
+        self.assertEqual(self.plugin_node(tree, "skill-use-quiet-skill")["props"]["disabled"], True, "A switched-off skill can't be used.")
+        self.assertEqual(self.plugin_node(tree, "skill-toggle-shared-notes")["props"]["isOn"], False, "onToggle turned the switch off.")
+        self.assertEqual(self.plugin_node(tree, "skill-use-shared-notes")["props"]["disabled"], True, "Turning a skill off disables Use.")
+        self.assertEqual([[item["id"] for item in group] for group in self.plugin_node(tree, "skill-actions-shared-notes")["props"]["items"]][2], ["unlink"],
+                         "A linked skill offers Remove Outside Link.")
+        toggled = commits["skill-toggle-shared-notes:onToggle"]
+        self.assertEqual(sorted(toggled["ops"]), ["text", "update", "update"], "The switch and Use update, and the readout's text; no row re-renders.")
+        used = commits["skill-use-shared-notes:onPress"]
+        self.assertEqual((used["ops"], used["touchedNodes"]), (["text"], [last_action["children"][1]["id"]]), "Use runs its handler without re-rendering any row.")
+        self.assertEqual(self.plugin_text(last_action), "Last: use shared-notes")
+
+        toggled_off = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skill-toggle-release-notes:onToggle")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(toggled_off["tree"], "js-last-action")), "Last: toggle release-notes off")
+        self.assertEqual(self.plugin_node(toggled_off["tree"], "skill-use-release-notes")["props"]["disabled"], True)
+
+        opened = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skill-text-release-notes:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(opened["tree"], "js-last-action")), "Last: open release-notes")
+
+        selecting = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skill-text-release-notes:onLongPress")[0])
+        tree = selecting["tree"]
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(tree)}
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "js-last-action")), "Last: select release-notes")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "skills-selection-count")), "1 selected")
+        checked = self.plugin_node(tree, "skill-select-release-notes")
+        self.assertEqual((checked["props"]["name"], checked["props"]["label"], checked["props"]["color"]), ("checkmark.circle.fill", "Selected", "accent"))
+        self.assertEqual(self.plugin_node(tree, "skill-select-review-login")["props"]["label"], "Not selected")
+        selected_row = self.plugin_node(tree, "skill-row-release-notes")["props"]
+        self.assertEqual((selected_row["fill"], selected_row["fillOpacity"], selected_row["stroke"], selected_row["strokeOpacity"]), ("accent", 0.12, "accent", 0.6),
+                         "A selected row is highlighted with the accent.")
+        for hidden in ["skill-toggle-release-notes", "skill-use-release-notes", "skill-actions-release-notes", "skill-fix-review-login", "skills-search", "new-skill-button"]:
+            self.assertNotIn(hidden, test_ids, f"Selecting hides {hidden}.")
+        self.assertEqual(self.plugin_node(tree, "skills-kind-picker")["props"]["disabled"], True, "The kind picker is locked while selecting.")
+        self.assertNotIn("shortcut", self.plugin_node(tree, "skills-back-button")["props"], "Escape ends selecting instead of going back.")
+        self.assertEqual(self.plugin_node(tree, "skills-selection-done")["props"]["shortcut"], "cancel")
+        self.assertEqual(self.plugin_node(tree, "skills-fix-selected")["props"]["disabled"], True, "Nothing selected is broken, so nothing can be fixed.")
+        delete = self.plugin_node(tree, "skills-delete-selected")["props"]
+        self.assertEqual((delete["disabled"], delete["destructive"]), (False, True))
+        self.assertTrue(self.plugin_text(self.plugin_node(tree, "skills-provider-timing")).startswith("Click skills to select them."))
+
+        built_in = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skill-text-release-notes:onLongPress",
+            "--event", "skills-tab-picker:onChange:builtin")[0])
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(built_in["tree"])}
+        self.assertIn("skill-row-simplify", test_ids)
+        self.assertNotIn("skill-select-simplify", test_ids, "A built-in skill shows no checkbox.")
+
+        added = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skill-text-release-notes:onLongPress",
+            "--event", "skill-text-review-login:onPress", "--event", "skills-fix-selected:onPress", "--event", "skills-selection-done:onPress")[0])
+        commits = {commit["step"]: commit for commit in added["commits"]}
+        fixed = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skill-text-release-notes:onLongPress",
+            "--event", "skill-text-review-login:onPress", "--event", "skills-fix-selected:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(fixed["tree"], "js-last-action")), "Last: fix 2 selected", "Fix with Agent ran with the selection.")
+        self.assertEqual(self.plugin_text(self.plugin_node(added["tree"], "js-last-action")), "Last: done selecting")
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(added["tree"])}
+        self.assertNotIn("skills-selection-count", test_ids, "Done ends selecting.")
+        self.assertIn("skill-toggle-release-notes", test_ids, "Rows show their controls again.")
+        two = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skill-text-release-notes:onLongPress", "--event", "skill-text-review-login:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(two["tree"], "skills-selection-count")), "2 selected", "A click on another row adds it.")
+        self.assertEqual(self.plugin_node(two["tree"], "skills-fix-selected")["props"]["disabled"], False, "A selected conflict can be fixed.")
+        self.assertIn("skills-fix-selected:onPress", commits)
+
+        menu = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skill-actions-release-notes:onMenu:edit",
+            "--event", "skills-search:onChange:release")[0])
+        tree = menu["tree"]
+        self.assertEqual(self.plugin_node(tree, "skills-search")["props"]["text"], "release", "onChange received the search text.")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "js-last-action")), "Last: search release")
+        menu_only = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skill-actions-release-notes:onMenu:edit")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(menu_only["tree"], "js-last-action")), "Last: menu release-notes edit")
+
+        rules = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skills-kind-picker:onChange:rules")[0])
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(rules["tree"])}
+        self.assertEqual(self.plugin_node(rules["tree"], "skills-kind-picker")["props"]["selected"], "rules")
+        self.assertEqual(self.plugin_text(self.plugin_node(rules["tree"], "js-last-action")), "Last: kind rules")
+        for hidden in ["skills-tab-picker", "skills-search", "new-skill-button", "skills-list"]:
+            self.assertNotIn(hidden, test_ids, f"Rules hides {hidden}.")
+
+        closed = self.assert_success(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skills-back-button:onPress")[0])
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(closed["tree"])}
+        self.assertNotIn("skills-page", test_ids, "Back closed the page.")
+        self.assertEqual(self.plugin_text(self.plugin_node(closed["tree"], "js-last-action")), "Last: back")
+        reopened = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "SkillsPage", "--event", "skills-back-button:onPress", "--event", "open-skills-button:onPress")[0])
+        self.plugin_node(reopened["tree"], "skill-row-release-notes")
+        self.assertEqual(self.plugin_text(self.plugin_node(reopened["tree"], "js-last-action")), "Last: open", "The Skills button opened it again.")
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skills-search:onPress", expected_status=2)[0], "invalid_argument")
+
     # Scheduled tasks. Firing goes through ConversationManager.send, the same path the
     # composer's Send and `conversation send` use for both providers, so the schedule
     # behavior is provider-agnostic and Claude's fixture represents both.
@@ -14301,7 +14857,7 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(set(containers), {"Stack", "Panel", "Card", "Scroll", "Disclosure"},
                          "Only the atoms that lay out a composite's structure are containers.")
         leaves = [atom for atom in rendered["atoms"] if atom not in containers]
-        self.assertEqual(leaves, ["Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Meter", "Divider", "ChoiceBar"],
+        self.assertEqual(leaves, ["Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Meter", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea"],
                          "Every other atom, including a Button or Link that holds children, is a leaf.")
 
     # case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again, and a task that has started can't be scheduled. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
@@ -14491,7 +15047,7 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertIn(template_id, [task["id"] for task in self.assert_success(self.call_cli("task", "list")[0])["tasks"]], "Clearing the schedule puts the task on the board.")
         self.assertEqual(self.assert_success(self.call_cli("schedule", "list")[0])["tasks"], [])
 
-    # case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
+    # case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task (header, or the button on the empty page) opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
     def test_scheduled_task_edit_and_page_management(self):
         environment = self.install_claude_fixture("claude-fixture-schedule-edit")
         executable = environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]

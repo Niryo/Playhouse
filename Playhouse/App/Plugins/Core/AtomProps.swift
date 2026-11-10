@@ -1,8 +1,8 @@
 import Foundation
 
 /// The atoms plugins compose UI from: exactly the pieces the native
-/// composites (the task item, the Agents info section and the Token Stats
-/// modal) are built of. Each
+/// composites (the task item, the Agents info section, the Token Stats
+/// modal and the Skills page) are built of. Each
 /// atom's props are a plain Decodable struct, decoded from a create/update
 /// op's payload here and built directly by native SwiftUI code, so both reach
 /// the same view (see `AtomRegistry` in Plugins/Atoms).
@@ -23,6 +23,11 @@ enum AtomType: String, CaseIterable, Sendable {
     case scroll = "Scroll"
     case divider = "Divider"
     case choiceBar = "ChoiceBar"
+    case toggle = "Toggle"
+    case textField = "TextField"
+    case segmented = "Segmented"
+    case menu = "Menu"
+    case pressArea = "PressArea"
 
     /// The events each atom raises; a plugin's handler for any other name is never called.
     var events: Set<String> {
@@ -31,7 +36,10 @@ enum AtomType: String, CaseIterable, Sendable {
         case .pillPicker: ["onChange"]
         case .card: ["onPress", "onMenu"]
         case .disclosure: ["onToggle"]
-        case .choiceBar: ["onChange"]
+        case .choiceBar, .textField, .segmented: ["onChange"]
+        case .toggle: ["onToggle"]
+        case .menu: ["onMenu"]
+        case .pressArea: ["onPress", "onLongPress"]
         case .stack, .text, .icon, .label, .link, .spinner, .spacer, .panel, .meter, .scroll, .divider: []
         }
     }
@@ -39,8 +47,8 @@ enum AtomType: String, CaseIterable, Sendable {
     /// Whether the atom shows atom children. A Text holds only raw strings.
     var takesAtomChildren: Bool {
         switch self {
-        case .stack, .button, .link, .card, .disclosure, .panel, .scroll: true
-        case .text, .icon, .label, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar: false
+        case .stack, .button, .link, .card, .disclosure, .panel, .scroll, .pressArea: true
+        case .text, .icon, .label, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar, .toggle, .textField, .segmented, .menu: false
         }
     }
 
@@ -50,7 +58,8 @@ enum AtomType: String, CaseIterable, Sendable {
     var isContainer: Bool {
         switch self {
         case .stack, .panel, .card, .scroll, .disclosure: true
-        case .text, .icon, .label, .button, .link, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar: false
+        case .text, .icon, .label, .button, .link, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar,
+             .toggle, .textField, .segmented, .menu, .pressArea: false
         }
     }
 
@@ -84,6 +93,11 @@ enum AtomType: String, CaseIterable, Sendable {
         case .scroll: Self.keys(ScrollProps.CodingKeys.self)
         case .divider: []
         case .choiceBar: Self.keys(ChoiceBarProps.CodingKeys.self)
+        case .toggle: Self.keys(ToggleProps.CodingKeys.self)
+        case .textField: Self.keys(TextFieldProps.CodingKeys.self)
+        case .segmented: Self.keys(SegmentedProps.CodingKeys.self)
+        case .menu: Self.keys(MenuProps.CodingKeys.self)
+        case .pressArea: Self.keys(PressAreaProps.CodingKeys.self)
         }
     }
 
@@ -123,6 +137,11 @@ enum AtomType: String, CaseIterable, Sendable {
             case .scroll: _ = try ScrollProps.decode(props)
             case .divider: _ = try DividerProps.decode(props)
             case .choiceBar: _ = try ChoiceBarProps.decode(props)
+            case .toggle: _ = try ToggleProps.decode(props)
+            case .textField: _ = try TextFieldProps.decode(props)
+            case .segmented: _ = try SegmentedProps.decode(props)
+            case .menu: _ = try MenuProps.decode(props)
+            case .pressArea: _ = try PressAreaProps.decode(props)
             }
         } catch let error as DecodingError {
             throw PluginTreeError(message: "<\(type)> has an invalid prop: \(Self.describe(error))")
@@ -246,8 +265,10 @@ struct LabelProps: AtomPropsDecodable, Equatable {
 /// push button); `emphasis` is the padding of the hover capsule, if any, and
 /// `overhang` lets that capsule spill past the button's layout size.
 /// `controlSize` "small" makes it a small control (it inherits the size
-/// otherwise); `shortcut` "default" makes Return press it, window-wide, so
-/// only a window's primary action should set it.
+/// otherwise); `shortcut` "default" makes Return press it and "cancel"
+/// makes Escape press it, window-wide, so only a window's primary or
+/// dismissing action should set one. `destructive` gives it the destructive
+/// role (a push button draws its title red).
 struct ButtonProps: AtomPropsDecodable, Equatable {
     var style: String?
     var emphasis: Double?
@@ -255,8 +276,9 @@ struct ButtonProps: AtomPropsDecodable, Equatable {
     var disabled: Bool?
     var controlSize: String?
     var shortcut: String?
+    var destructive: Bool?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case style, emphasis, overhang, disabled, controlSize, shortcut }
+    enum CodingKeys: String, CodingKey, CaseIterable { case style, emphasis, overhang, disabled, controlSize, shortcut, destructive }
 }
 
 /// Opens `url` in the browser; its label is its children.
@@ -267,7 +289,8 @@ struct LinkProps: AtomPropsDecodable, Equatable {
     enum CodingKeys: String, CodingKey, CaseIterable { case url, emphasis }
 }
 
-/// An indeterminate progress spinner; `size` is small (default) or mini.
+/// An indeterminate progress spinner; `size` is small (default), mini or
+/// regular.
 struct SpinnerProps: AtomPropsDecodable, Equatable {
     var size: String?
 
@@ -333,15 +356,18 @@ struct DisclosureProps: AtomPropsDecodable, Equatable {
 
 /// A rounded, filled background behind its children, which it lays out as a
 /// leading column (an agent's block in Agents info). `fill` is a color name
-/// (primary by default) drawn at `fillOpacity` (0.05 by default). It is one
-/// accessibility container.
+/// (primary by default) drawn at `fillOpacity` (0.05 by default); `stroke`
+/// is a color name for a border inside its edge, drawn at `strokeOpacity`
+/// (1 by default). It is one accessibility container.
 struct PanelProps: AtomPropsDecodable, Equatable {
     var spacing: Double?
     var fill: String?
     var fillOpacity: Double?
     var cornerRadius: Double?
+    var stroke: String?
+    var strokeOpacity: Double?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case spacing, fill, fillOpacity, cornerRadius }
+    enum CodingKeys: String, CodingKey, CaseIterable { case spacing, fill, fillOpacity, cornerRadius, stroke, strokeOpacity }
 }
 
 /// A horizontal usage bar: a capsule track filled to `fraction` (0...1) in
@@ -362,11 +388,15 @@ struct MeterProps: AtomPropsDecodable, Equatable {
 /// A vertical scroll view around a leading column of its children (the
 /// Token Stats sections), stretched to the available width. `height` (a
 /// common prop) fixes its height; `maxHeight` lets it shrink to its content.
+/// `inset` pads the column inside the scroll view, and `lazy` builds only
+/// the children in view (the Skills page's gallery).
 struct ScrollProps: AtomPropsDecodable, Equatable {
     var spacing: Double?
     var maxHeight: Double?
+    var inset: Double?
+    var lazy: Bool?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case spacing, maxHeight }
+    enum CodingKeys: String, CodingKey, CaseIterable { case spacing, maxHeight, inset, lazy }
 }
 
 /// A thin separator line across the stack it sits in.
@@ -387,4 +417,78 @@ struct ChoiceBarProps: AtomPropsDecodable, Equatable {
     var selected: String
 
     enum CodingKeys: String, CodingKey, CaseIterable { case options, selected }
+}
+
+/// A switch (a skill's on/off). It is controlled: `isOn` is what it shows,
+/// and a click calls `onToggle` (no value; the owner flips the state it
+/// holds). `size` is mini, small or regular (the default); it has no visible
+/// label, so give it an accessibility `label`.
+struct ToggleProps: AtomPropsDecodable, Equatable {
+    var isOn: Bool
+    var size: String?
+    var disabled: Bool?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case isOn, size, disabled }
+}
+
+/// A one-line rounded text field (the Skills page's search). It is
+/// controlled: `text` is what it shows, and every edit calls `onChange` with
+/// the new text. `placeholder` shows while it is empty.
+struct TextFieldProps: AtomPropsDecodable, Equatable {
+    var text: String
+    var placeholder: String?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case text, placeholder }
+}
+
+/// A segmented control (the Skills page's Skills | Rules | MCP and source
+/// pickers). It is controlled: `selected` is what it shows, and choosing a
+/// segment calls `onChange` with its value. Without a `width` it is as wide
+/// as its segments.
+struct SegmentedProps: AtomPropsDecodable, Equatable {
+    struct Option: Codable, Equatable {
+        var value: String
+        var label: String
+    }
+
+    var options: [Option]
+    var selected: String
+    var disabled: Bool?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case options, selected, disabled }
+}
+
+/// A borderless pull-down menu whose label is an SF Symbol (`icon`, at
+/// `size` and `weight`, in `color`, secondary by default), framed by the
+/// common `width` and `height`. `items` are its groups, each a list of
+/// items, with a separator between groups; choosing one calls `onMenu` with
+/// its id.
+struct MenuProps: AtomPropsDecodable, Equatable {
+    struct Item: Codable, Equatable {
+        var id: String
+        var title: String
+        var destructive: Bool?
+        var help: String?
+        var testID: String?
+    }
+
+    var icon: String
+    var size: Double?
+    var weight: String?
+    var color: String?
+    var items: [[Item]]
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case icon, size, weight, color, items }
+}
+
+/// A leading column of its children that tells a click (`onPress`) from a
+/// press and hold (`onLongPress`), the way a skill row opens or starts
+/// selecting. It takes every click on its children, so it holds only what
+/// the press is for (a row's text, not its controls); `pointer` shows the
+/// pointing hand over it. It is one accessibility container.
+struct PressAreaProps: AtomPropsDecodable, Equatable {
+    var spacing: Double?
+    var pointer: Bool?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case spacing, pointer }
 }
