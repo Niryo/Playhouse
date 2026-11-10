@@ -409,30 +409,7 @@ struct KanbanBoardView: View {
 
                     VStack(spacing: 0) {
                         if let lifecycleResetNotice {
-                            HStack(alignment: .top, spacing: 12) {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundStyle(.orange)
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Some task worktrees were kept")
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .accessibilityIdentifier("task-lifecycle-reset-title")
-                                    Text(lifecycleResetNotice)
-                                        .font(.system(size: 11))
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .accessibilityIdentifier("task-lifecycle-reset-details")
-                                }
-                                Spacer(minLength: 8)
-                                Button("OK") { self.lifecycleResetNotice = nil }
-                                    .buttonHoverPointer()
-                                    .nativeHelp("Dismiss worktree notice")
-                                    .accessibilityIdentifier("dismiss-task-lifecycle-reset-notice")
-                            }
-                            .padding(.horizontal, 18)
-                            .padding(.vertical, 12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(WorkspaceTheme.panelBackground)
-                            .accessibilityElement(children: .contain)
-                            .accessibilityIdentifier("task-lifecycle-reset-notice")
+                            lifecycleResetBanner(lifecycleResetNotice)
                         }
 
                         HStack(spacing: 0) {
@@ -766,24 +743,17 @@ struct KanbanBoardView: View {
 
     private var boardSidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Button {
-                isShowingScheduledTasks.toggle()
-            } label: {
-                Label("Scheduled Tasks", systemImage: "clock")
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(isShowingScheduledTasks ? Color.accentColor.opacity(0.14) : Color.clear)
-                    )
-                    .contentShape(Rectangle())
+            AtomButton(
+                common: AtomCommon(testID: "scheduled-tasks-button", help: "Scheduled tasks", fillWidth: true),
+                action: { isShowingScheduledTasks.toggle() }
+            ) {
+                AtomPanel(
+                    props: PanelProps(fill: "accent", fillOpacity: isShowingScheduledTasks ? 0.14 : 0, cornerRadius: 8),
+                    common: AtomCommon(fillWidth: true, paddingX: 12, paddingY: 9)
+                ) {
+                    AtomLabel(props: LabelProps(text: "Scheduled Tasks", icon: "clock", size: 12, weight: "medium"))
+                }
             }
-            .buttonStyle(.plain)
-            .buttonHoverPointer()
-            .nativeHelp("Scheduled tasks")
-            .accessibilityIdentifier("scheduled-tasks-button")
 
             Spacer(minLength: 0)
 
@@ -798,77 +768,73 @@ struct KanbanBoardView: View {
         .accessibilityHidden(isChatOverlayVisible)
     }
 
+    /// The board's header, composed only of plugin atoms (Plugins/Atoms). The
+    /// New Task button takes the window's tint (`WorkspaceTheme.accent`).
     private var boardHeader: some View {
-        HStack(alignment: .center, spacing: 24) {
-            HStack(spacing: 14) {
-                Image("PlayhouseLogo")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 50, height: 50)
-                    .accessibilityLabel("Playhouse logo")
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Playhouse")
-                        .font(.system(size: 21, weight: .semibold, design: .rounded))
-                        .accessibilityIdentifier("board-title")
-                    Text("Let the show begin.")
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(.secondary)
+        AtomStack(props: StackProps(axis: "h", spacing: 24), common: AtomCommon(paddingX: 30)) {
+            AtomStack(props: StackProps(axis: "h", spacing: 14)) {
+                AtomIcon(props: IconProps(asset: "PlayhouseLogo", original: true), common: AtomCommon(label: "Playhouse logo", width: 50, height: 50))
+                AtomStack(props: StackProps(spacing: 3, align: "leading")) {
+                    AtomText(props: TextProps(text: "Playhouse", size: 21, weight: "semibold", design: "rounded"), common: AtomCommon(testID: "board-title"))
+                    AtomText(props: TextProps(text: "Let the show begin.", size: 12.5, color: "secondary"))
                 }
             }
             .accessibilityHidden(isChatOverlayVisible)
 
-            Spacer(minLength: 20)
+            AtomSpacer(props: SpacerProps(minLength: 20))
 
-            HStack(spacing: 14) {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.24)) { isShowingDoneArchive.toggle() }
-                } label: {
-                    Image(systemName: "archivebox")
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 30, height: 30)
+            AtomStack(props: StackProps(axis: "h", spacing: 14)) {
+                AtomButton(
+                    props: ButtonProps(style: "bordered"),
+                    common: AtomCommon(testID: "done-archive-button", label: "Done tasks", help: "Browse completed tasks"),
+                    action: { withAnimation(.easeInOut(duration: 0.24)) { isShowingDoneArchive.toggle() } }
+                ) {
+                    AtomIcon(props: IconProps(name: "archivebox", size: 14, weight: "semibold"), common: AtomCommon(width: 30, height: 30))
                 }
-                .buttonHoverPointer()
-                .buttonStyle(.bordered)
-                .nativeHelp("Browse completed tasks")
-                .accessibilityLabel("Done tasks")
-                .accessibilityIdentifier("done-archive-button")
-
-                Button {
-                    openChatSidebar()
-                } label: {
-                    Label("Chat", systemImage: "bubble.left.and.bubble.right")
-                        .font(.system(size: 13, weight: .semibold))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
+                AtomButton(
+                    props: ButtonProps(style: "bordered", disabled: isOpeningChatSidebar),
+                    common: AtomCommon(testID: "chat-sidebar-button", help: "Open the standalone chat", paddingX: 7, paddingY: 3),
+                    action: openChatSidebar
+                ) {
+                    AtomLabel(props: LabelProps(text: "Chat", icon: "bubble.left.and.bubble.right", size: 13, weight: "semibold"))
                 }
-                .buttonHoverPointer()
-                .nativeHelp("Open the standalone chat")
-                .buttonStyle(.bordered)
-                .disabled(isOpeningChatSidebar)
-                .accessibilityIdentifier("chat-sidebar-button")
-
-                Button {
-                    openNewTask()
-                } label: {
-                    Label("New Task", systemImage: "plus")
-                        .font(.system(size: 13, weight: .semibold))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
+                AtomButton(
+                    props: ButtonProps(style: "prominent", disabled: isCreatingNewTask),
+                    common: AtomCommon(testID: "new-task-button", help: "Create a new task", paddingX: 7, paddingY: 3),
+                    action: openNewTask
+                ) {
+                    AtomLabel(props: LabelProps(text: "New Task", icon: "plus", size: 13, weight: "semibold"))
                 }
-                .buttonHoverPointer()
-                .nativeHelp("Create a new task")
-                .buttonStyle(.borderedProminent)
-                .tint(WorkspaceTheme.accent)
-                .disabled(isCreatingNewTask)
-                .accessibilityIdentifier("new-task-button")
             }
         }
-        .padding(.horizontal, 30)
         .padding(.top, 24)
         .padding(.bottom, 21)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Kanban header")
+    }
+
+    /// The notice that some task worktrees were kept, composed only of plugin atoms (Plugins/Atoms).
+    private func lifecycleResetBanner(_ notice: String) -> some View {
+        AtomPanel(
+            props: PanelProps(fill: "panel", fillOpacity: 1, cornerRadius: 0),
+            common: AtomCommon(testID: "task-lifecycle-reset-notice", fillWidth: true, padding: 12, paddingX: 6)
+        ) {
+            AtomStack(props: StackProps(axis: "h", spacing: 12, align: "top")) {
+                AtomIcon(props: IconProps(name: "exclamationmark.triangle.fill", color: "orange"))
+                AtomStack(props: StackProps(spacing: 4, align: "leading")) {
+                    AtomText(props: TextProps(text: "Some task worktrees were kept", size: 12, weight: "semibold"), common: AtomCommon(testID: "task-lifecycle-reset-title"))
+                    AtomText(props: TextProps(text: notice, size: 11, wrap: true), common: AtomCommon(testID: "task-lifecycle-reset-details"))
+                }
+                AtomSpacer(props: SpacerProps(minLength: 8))
+                AtomButton(
+                    props: ButtonProps(style: "automatic"),
+                    common: AtomCommon(testID: "dismiss-task-lifecycle-reset-notice", help: "Dismiss worktree notice"),
+                    action: { lifecycleResetNotice = nil }
+                ) {
+                    AtomText(props: TextProps(text: "OK"))
+                }
+            }
+        }
     }
 
     private var doneArchivePanel: some View {
@@ -930,7 +896,6 @@ struct KanbanBoardView: View {
                                 .accessibilityIdentifier("done-archive-task-\(task.id.uuidString)")
                                 if !task.repositoryWorktrees.isEmpty {
                                     archivedTaskPullRequestControl(task)
-                                        .buttonStyle(.borderless)
                                         .padding(.trailing, 10)
                                 }
                             }
@@ -951,69 +916,60 @@ struct KanbanBoardView: View {
         }
     }
 
+    /// The archive row's pull request actions, composed only of plugin atoms
+    /// (Plugins/Atoms) like the task item's.
     @ViewBuilder
     private func archivedTaskPullRequestControl(_ task: BoardTask) -> some View {
         let linked = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
         let awaiting = task.repositoryWorktrees.filter(\.awaitsPullRequest)
         let started = task.repositoryWorktrees.filter { !$0.isPending }
         let hasMultipleRepositories = (awaiting.isEmpty ? started : awaiting).count > 1
+        let isCreating = taskCreatingPullRequests.contains(task.id)
+        let title = hasMultipleRepositories ? "PRs" : "PR"
         if linked.isEmpty {
-            Button {
-                createPullRequests(for: task)
-            } label: {
-                if taskCreatingPullRequests.contains(task.id) {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Text(hasMultipleRepositories ? "PRs" : "PR").font(.system(size: 10, weight: .semibold))
-                            .frame(minWidth: 30, minHeight: 30)
-                }
-            }
-            .actionButtonHoverEmphasis()
-            .buttonHoverPointer()
-            .nativeHelp("Create a pull request for each repository linked to this completed task")
-            .disabled(taskCreatingPullRequests.contains(task.id))
-            .frame(width: 30, height: 30)
-            .contentShape(Rectangle())
-            .accessibilityLabel(hasMultipleRepositories ? "PRs. Create pull requests for each repository linked to this completed task" : "PR. Create a pull request for each repository linked to this completed task")
-            .accessibilityIdentifier("done-archive-create-pr-\(task.id.uuidString)")
+            archivedTaskCreatePullRequestButton(
+                task, title: title, busy: isCreating,
+                label: hasMultipleRepositories ? "PRs. Create pull requests for each repository linked to this completed task" : "PR. Create a pull request for each repository linked to this completed task",
+                help: "Create a pull request for each repository linked to this completed task"
+            )
         } else {
-            HStack(spacing: 5) {
+            AtomStack(props: StackProps(axis: "h", spacing: 5)) {
                 if !awaiting.isEmpty {
-                    Button {
-                        createPullRequests(for: task)
-                    } label: {
-                        if taskCreatingPullRequests.contains(task.id) {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Text(hasMultipleRepositories ? "PRs" : "PR")
-                                .font(.system(size: 10, weight: .semibold))
-                        }
-                    }
-                    .actionButtonHoverEmphasis()
-                    .buttonHoverPointer()
-                    .nativeHelp("Create pull requests for repositories without a linked pull request")
-                    .disabled(taskCreatingPullRequests.contains(task.id))
-                    .frame(width: 30, height: 30)
-                    .contentShape(Rectangle())
-                    .accessibilityLabel(hasMultipleRepositories ? "PRs. Create pull requests for repositories without a linked pull request" : "PR. Create a pull request for the repository without a linked pull request")
-                    .accessibilityIdentifier("done-archive-create-pr-\(task.id.uuidString)")
+                    archivedTaskCreatePullRequestButton(
+                        task, title: title, busy: isCreating,
+                        label: hasMultipleRepositories ? "PRs. Create pull requests for repositories without a linked pull request" : "PR. Create a pull request for the repository without a linked pull request",
+                        help: "Create pull requests for repositories without a linked pull request"
+                    )
                 }
                 // Pull requests merged before a renewed worktree stay listed ahead of the current ones.
                 ForEach(task.pastRepositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil } + linked, id: \.pullRequestURL) { record in
-                    if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
-                        Link(destination: url) {
-                            Text(verbatim: "#\(number)")
+                    if let number = record.pullRequestNumber, let url = record.pullRequestURL {
+                        // The chip stays compact; the click target keeps the 30 pt minimum of its sibling actions.
+                        AtomLink(
+                            props: LinkProps(url: url, emphasis: 5),
+                            common: AtomCommon(
+                                testID: "done-archive-pr-link-\(task.id.uuidString)-\(number)",
+                                help: URL(fileURLWithPath: record.repositoryPath).lastPathComponent, minWidth: 30, minHeight: 30
+                            )
+                        ) {
+                            AtomText(props: TextProps(text: "#\(number)", size: 10, weight: "semibold", design: "monospaced"))
                         }
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .actionButtonHoverEmphasis(padding: 5)
-                            .buttonHoverPointer()
-                            .nativeHelp(URL(fileURLWithPath: record.repositoryPath).lastPathComponent)
-                            // The chip stays compact; the click target keeps the 30 pt minimum of its sibling actions.
-                            .frame(minWidth: 30, minHeight: 30)
-                            .contentShape(Rectangle())
-                            .accessibilityIdentifier("done-archive-pr-link-\(task.id.uuidString)-\(number)")
                     }
                 }
+            }
+        }
+    }
+
+    private func archivedTaskCreatePullRequestButton(_ task: BoardTask, title: String, busy: Bool, label: String, help: String) -> some View {
+        AtomButton(
+            props: ButtonProps(style: "borderless", emphasis: 4, disabled: busy),
+            common: AtomCommon(testID: "done-archive-create-pr-\(task.id.uuidString)", label: label, help: help, width: 30, height: 30),
+            action: { createPullRequests(for: task) }
+        ) {
+            if busy {
+                AtomSpinner(props: SpinnerProps(size: "mini"))
+            } else {
+                AtomText(props: TextProps(text: title, size: 10, weight: "semibold"))
             }
         }
     }
@@ -2617,31 +2573,31 @@ private struct RenameTaskSheet: View {
         title.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Composed only of plugin atoms (Plugins/Atoms).
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Rename task")
-                .font(.system(size: 19, weight: .semibold, design: .rounded))
-            TextField("Task title", text: $title)
-                .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier("rename-task-title-field")
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                .buttonHoverPointer()
-                .nativeHelp("Cancel")
-                    .keyboardShortcut(.cancelAction)
-                Button("Save") {
-                    onSave(normalizedTitle)
-                    dismiss()
+        AtomStack(props: StackProps(spacing: 16, align: "leading"), common: AtomCommon(width: 420, paddingX: 24, paddingY: 24)) {
+            AtomText(props: TextProps(text: "Rename task", size: 19, weight: "semibold", design: "rounded"))
+            AtomTextField(
+                props: TextFieldProps(text: title, placeholder: "Task title"),
+                common: AtomCommon(testID: "rename-task-title-field", fillWidth: true),
+                onChange: { title = $0 }
+            )
+            AtomStack(props: StackProps(axis: "h")) {
+                AtomSpacer()
+                AtomButton(props: ButtonProps(style: "automatic", shortcut: "cancel"), common: AtomCommon(help: "Cancel"), action: { dismiss() }) {
+                    AtomText(props: TextProps(text: "Cancel"))
                 }
-                .buttonHoverPointer()
-                .nativeHelp("Save")
-                .buttonStyle(.borderedProminent)
-                .disabled(normalizedTitle.isEmpty)
-                .accessibilityIdentifier("save-task-rename-button")
+                AtomButton(
+                    props: ButtonProps(style: "prominent", disabled: normalizedTitle.isEmpty),
+                    common: AtomCommon(testID: "save-task-rename-button", help: "Save"),
+                    action: {
+                        onSave(normalizedTitle)
+                        dismiss()
+                    }
+                ) {
+                    AtomText(props: TextProps(text: "Save"))
+                }
             }
         }
-        .padding(24)
-        .frame(width: 420)
     }
 }

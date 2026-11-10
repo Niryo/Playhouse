@@ -511,23 +511,12 @@ private struct ChatPageRecallRow: View {
 
     var body: some View {
         let label = "Recalling \(title ?? "an earlier page")"
-        HStack(spacing: 8) {
-            Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            Text(label)
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Spacer(minLength: 0)
+        AtomStack(props: StackProps(axis: "h", spacing: 8), common: AtomCommon(fillWidth: true, paddingY: 2)) {
+            AtomIcon(props: IconProps(name: "clock.arrow.circlepath", size: 12, color: "secondary"))
+            AtomText(props: TextProps(text: label, size: 14, color: "secondary", lineLimit: 1))
+            AtomSpacer(props: SpacerProps(minLength: 0))
         }
-        .padding(.vertical, 2)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(label)
-        .accessibilityIdentifier("conversation-chat-page-recall-\(activityID)")
+        .accessibilitySummary(label, id: "conversation-chat-page-recall-\(activityID)")
         .task(id: pageID) {
             let directory = ProcessInfo.processInfo.environment["PLAYHOUSE_DATA_DIRECTORY"]
             title = (try? StandaloneChatManager(dataDirectory: directory).page(id: pageID))?.title
@@ -758,43 +747,31 @@ private struct ResponseCommentHoverCard: View {
     let comment: String
     @State private var isVisible = false
 
+    /// Composed only of plugin atoms (Plugins/Atoms); it fades in.
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Highlighted text")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Text(selectedText)
-                    .font(.system(size: 12))
-                    .lineLimit(3)
-                    .truncationMode(.tail)
-                    .accessibilityIdentifier("response-comment-highlighted-text")
-                    .accessibilityLabel(selectedText)
-            }
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Comment")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Text(comment)
-                    .font(.system(size: 12))
-                    .lineLimit(3)
-                    .truncationMode(.tail)
-                    .accessibilityIdentifier("response-comment-content")
-                    .accessibilityLabel(comment)
-            }
+        AtomPanel(
+            props: PanelProps(spacing: 8, fill: "window", fillOpacity: 1, cornerRadius: 12),
+            common: AtomCommon(
+                testID: "response-comment-hover-card", label: "Highlighted text: \(selectedText). Comment: \(comment)",
+                width: 320, paddingX: 12, paddingY: 12
+            )
+        ) {
+            entry("Highlighted text", selectedText, testID: "response-comment-highlighted-text")
+            entry("Comment", comment, testID: "response-comment-content")
         }
-        .padding(12)
-        .frame(width: 320, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .opacity(isVisible ? 1 : 0)
         .onAppear {
             withAnimation(.easeIn(duration: 0.12)) {
                 isVisible = true
             }
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("response-comment-hover-card")
-        .accessibilityLabel("Highlighted text: \(selectedText). Comment: \(comment)")
+    }
+
+    private func entry(_ caption: String, _ text: String, testID: String) -> some View {
+        AtomStack(props: StackProps(spacing: 3, align: "leading")) {
+            AtomText(props: TextProps(text: caption, size: 10, weight: "semibold", color: "secondary"))
+            AtomText(props: TextProps(text: text, size: 12, lineLimit: 3), common: AtomCommon(testID: testID, label: text))
+        }
     }
 }
 
@@ -2383,23 +2360,16 @@ struct TaskConversationView: View {
 
     /// Shown in place of a repository's files while it has a merge open, since the merge stages
     /// everything the merged branch brought in.
+    /// Composed only of plugin atoms (Plugins/Atoms).
     private var mergeInProgressNotice: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "arrow.triangle.merge")
-                .font(.system(size: 20))
-                .foregroundStyle(.secondary)
-            Text("Merge in progress")
-                .font(.system(size: 12, weight: .medium))
-            Text(mergeInProgressMessage)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
         // An explicit label: a combined element of these texts reads back with an empty label.
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Merge in progress. \(mergeInProgressMessage)")
-        .accessibilityIdentifier("workspace-changes-merge-in-progress")
+        AtomPanel(props: PanelProps(spacing: 8, fillOpacity: 0, align: "center"), common: AtomCommon(fillWidth: true)) {
+            AtomIcon(props: IconProps(name: "arrow.triangle.merge", size: 20, color: "secondary"))
+            AtomText(props: TextProps(text: "Merge in progress", size: 12, weight: "medium"))
+            AtomText(props: TextProps(text: mergeInProgressMessage, size: 10, color: "secondary"))
+        }
+        .multilineTextAlignment(.center)
+        .accessibilitySummary("Merge in progress. \(mergeInProgressMessage)", id: "workspace-changes-merge-in-progress")
     }
 
     private func changeSection(title: String, entries: [WorkspaceChangeEntry]) -> some View {
@@ -3845,21 +3815,13 @@ struct TaskConversationView: View {
         }
     }
 
+    /// Composed only of plugin atoms (Plugins/Atoms).
     private func goalAchievementTimelineRow(_ entry: GoalAchievementTimelineEntry) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: "checkmark.circle")
-                .font(.system(size: 18, weight: .regular))
-                .foregroundStyle(.secondary)
-            Text(entry.summary)
-                .font(.system(size: 15))
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("goal-achieved-banner")
-            Spacer(minLength: 0)
+        AtomStack(props: StackProps(axis: "h", spacing: 12, group: true), common: AtomCommon(testID: "goal-achievement-timeline-row", fillWidth: true, paddingY: 4)) {
+            AtomIcon(props: IconProps(name: "checkmark.circle", size: 18, weight: "regular", color: "secondary"))
+            AtomText(props: TextProps(text: entry.summary, size: 15, color: "secondary"), common: AtomCommon(testID: "goal-achieved-banner"))
+            AtomSpacer(props: SpacerProps(minLength: 0))
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 4)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("goal-achievement-timeline-row")
     }
 
     /// A message as the transcript shows it. A background agent's report is the agent's work, not
@@ -4055,27 +4017,26 @@ struct TaskConversationView: View {
         }
     }
 
+    /// Composed only of plugin atoms (Plugins/Atoms).
     private func contextCompactionTimelineRow(_ activity: ConversationActivity) -> some View {
-        HStack(alignment: .top, spacing: 9) {
-            Image(systemName: "arrow.triangle.2.circlepath")
-                .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(activity.status == "inProgress" ? "Compacting context…" : "Context compacted")
-                    .font(.system(size: 12, weight: .medium))
+        AtomStack(
+            props: StackProps(axis: "h", spacing: 9, align: "top", group: true),
+            common: AtomCommon(
+                testID: "context-compaction-row-\(activity.id)", label: "Context compaction, \(activity.statusLabel)",
+                value: activity.statusLabel, paddingY: 5
+            )
+        ) {
+            AtomIcon(props: IconProps(name: "arrow.triangle.2.circlepath", color: "secondary"))
+            AtomStack(props: StackProps(spacing: 3, align: "leading")) {
+                AtomText(props: TextProps(text: activity.status == "inProgress" ? "Compacting context…" : "Context compacted", size: 12, weight: "medium"))
                 if !activity.detail.isEmpty {
-                    Text(activity.detail)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(4)
-                        .accessibilityIdentifier("context-compaction-summary-\(activity.id)")
+                    AtomText(
+                        props: TextProps(text: activity.detail, size: 11, color: "secondary", lineLimit: 4),
+                        common: AtomCommon(testID: "context-compaction-summary-\(activity.id)")
+                    )
                 }
             }
         }
-        .padding(.vertical, 5)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Context compaction, \(activity.statusLabel)")
-        .accessibilityValue(activity.statusLabel)
-        .accessibilityIdentifier("context-compaction-row-\(activity.id)")
     }
 
     /// A boundary after a message that later folded into the activity list
@@ -4088,20 +4049,22 @@ struct TaskConversationView: View {
         return messages[...index].last(where: { visible.contains($0.id) })?.id
     }
 
+    /// Composed only of plugin atoms (Plugins/Atoms).
     private func providerBoundaryRow(_ boundary: ConversationProviderBoundary) -> some View {
-        HStack(spacing: 10) {
-            Rectangle().fill(Color.primary.opacity(0.12)).frame(height: 1)
-            Text("Conversation switched to \(boundary.provider.displayName)")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
+        let title = "Conversation switched to \(boundary.provider.displayName)"
+        return AtomStack(props: StackProps(axis: "h", spacing: 10), common: AtomCommon(paddingY: 4)) {
+            transcriptRule(opacity: 0.12)
+            AtomText(props: TextProps(text: title, size: 11, weight: "semibold", color: "secondary", lineLimit: 1))
                 .fixedSize()
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Conversation switched to \(boundary.provider.displayName)")
-                .accessibilityIdentifier("provider-boundary-\(boundary.provider.rawValue)")
-            Rectangle().fill(Color.primary.opacity(0.12)).frame(height: 1)
+                .accessibilitySummary(title, id: "provider-boundary-\(boundary.provider.rawValue)")
+            transcriptRule(opacity: 0.12)
         }
-        .padding(.vertical, 4)
         .id(boundary.id)
+    }
+
+    /// A hairline that takes the row's remaining width, beside a separator's title.
+    private func transcriptRule(opacity: Double) -> some View {
+        AtomPanel(props: PanelProps(fill: "primary", fillOpacity: opacity, cornerRadius: 0), common: AtomCommon(height: 1, fillWidth: true)) {}
     }
 
     private func openSubagent(_ activity: ConversationActivity) {
@@ -5002,6 +4965,149 @@ struct TaskConversationView: View {
         return blocks
     }
 
+    /// The notices above the composer, composed only of plugin atoms (Plugins/Atoms).
+    @ViewBuilder
+    private var composerNotices: some View {
+        if let actionNotice {
+            AtomLabel(props: LabelProps(text: actionNotice, icon: "hand.raised.fill", size: 11, weight: "medium", color: "orange"), common: AtomCommon(testID: "codex-action-notice"))
+        }
+        if let providerNotice {
+            AtomLabel(props: LabelProps(text: providerNotice, icon: "arrow.triangle.swap", size: 11, weight: "medium", color: "secondary"), common: AtomCommon(testID: "provider-capabilities-notice"))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if !isRepositoryRootConfigured {
+            AtomStack(props: StackProps(axis: "h", spacing: 8)) {
+                AtomLabel(
+                    props: LabelProps(text: "Set the repository root folder before sending.", icon: "folder.badge.questionmark", size: 11, weight: "medium", color: "orange"),
+                    common: AtomCommon(testID: "repository-root-required-notice")
+                )
+                AtomSpacer(props: SpacerProps(minLength: 0))
+                AtomButton(
+                    props: ButtonProps(style: "bordered"),
+                    common: AtomCommon(testID: "set-conversation-repository-root-button", help: "Choose the folder that contains your repositories."),
+                    action: { chooseRepositoryParentFolder(showRepositoryPickerWhenFinished: false) }
+                ) {
+                    AtomText(props: TextProps(text: "Set root folder…"))
+                }
+            }
+        }
+        if let errorMessage {
+            AtomLabel(props: LabelProps(text: errorMessage, icon: "exclamationmark.triangle.fill", size: 11, weight: "medium", color: "red"))
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilitySummary(errorMessage, id: "codex-chat-error")
+        }
+    }
+
+    /// Follow-ups waiting for the active turn, composed only of plugin atoms (Plugins/Atoms).
+    private var queuedFollowUpList: some View {
+        AtomPanel(
+            props: PanelProps(spacing: 0, fill: "primary", fillOpacity: 0.08, cornerRadius: 18, stroke: "primary", strokeOpacity: 0.08),
+            common: AtomCommon(testID: "queued-follow-ups")
+        ) {
+            ForEach(waitingFollowUps) { queued in
+                queuedFollowUpRow(queued)
+            }
+        }
+    }
+
+    private func queuedFollowUpRow(_ queued: QueuedConversationMessage) -> some View {
+        let id = queued.id.uuidString
+        return AtomStack(props: StackProps(axis: "h", spacing: 12, group: true), common: AtomCommon(testID: "queued-message-\(id)", paddingX: 14, paddingY: 11)) {
+            AtomIcon(props: IconProps(name: "text.line.first.and.arrowtriangle.forward", size: 14, weight: "medium", color: "secondary"))
+            AtomText(props: TextProps(text: queued.text, size: 14, lineLimit: 1), common: AtomCommon(testID: "queued-message-text-\(id)", fillWidth: true))
+            if let imageCount = queued.imageDataURLs?.count, imageCount > 0 {
+                let description = imageCount == 1 ? "1 attached image" : "\(imageCount) attached images"
+                AtomLabel(props: LabelProps(text: "\(imageCount)", icon: "photo", size: 12, color: "secondary"), common: AtomCommon(help: description))
+                    .accessibilitySummary(description, id: "queued-message-images-\(id)")
+            }
+            if queued.state == .needsAction {
+                AtomText(props: TextProps(text: "Needs action", size: 12, color: "secondary"), common: AtomCommon(testID: "queued-message-needs-action-\(id)", label: "Follow-up needs your action"))
+                AtomButton(
+                    props: ButtonProps(style: "automatic"),
+                    common: AtomCommon(testID: "retry-queued-message-\(id)", label: "Retry follow-up", help: "Retry this follow-up"),
+                    action: { retryQueuedMessage(queued) }
+                ) {
+                    AtomIcon(props: IconProps(name: "arrow.clockwise", size: 13, weight: "medium"))
+                }
+            } else {
+                AtomButton(
+                    props: ButtonProps(style: "automatic", disabled: isSubmittingLiveMessage),
+                    common: AtomCommon(testID: "steer-queued-message-\(id)", help: "Send this follow-up to the active turn now"),
+                    action: { steerQueuedMessage(queued) }
+                ) {
+                    AtomText(props: TextProps(text: "Steer"))
+                }
+            }
+            AtomButton(
+                props: ButtonProps(style: "automatic"),
+                common: AtomCommon(testID: "remove-queued-message-\(id)", label: "Remove follow-up", help: "Remove this follow-up"),
+                action: { removeQueuedMessage(queued) }
+            ) {
+                AtomIcon(props: IconProps(name: "trash", size: 13, weight: "medium"))
+            }
+            AtomMenu(
+                props: MenuProps(icon: "ellipsis", size: 13, weight: "semibold", color: "primary", indicator: true, items: [[
+                    MenuProps.Item(id: "copy", title: "Copy text", help: "Copy this follow-up"),
+                    MenuProps.Item(id: "remove", title: "Remove follow-up", destructive: true, help: "Remove this follow-up"),
+                ]]),
+                common: AtomCommon(testID: "queued-message-more-\(id)", label: "More follow-up actions", help: "More follow-up actions", width: 24, height: 24),
+                onMenu: { choice in
+                    if choice == "copy" {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(queued.text, forType: .string)
+                    } else {
+                        removeQueuedMessage(queued)
+                    }
+                }
+            )
+        }
+    }
+
+    /// The active goal above the composer box, composed only of plugin atoms
+    /// (Plugins/Atoms); a native timeline ticks its elapsed time.
+    private func activeGoalRow(_ activeGoal: CodexThreadGoal) -> some View {
+        let isPaused = activeGoal.status == "paused"
+        let progress = conversationRuntime.snapshot.goal.turnStartedThreadID == task.codexThreadID
+            ? "Work started" : (conversationRuntime.isTurnActive(threadID: task.codexThreadID ?? "") ? "Working" : "Waiting")
+        return AtomPanel(
+            props: PanelProps(fill: "primary", fillOpacity: 0.10, cornerRadius: 18, stroke: "primary", strokeOpacity: 0.08),
+            common: AtomCommon(testID: "active-goal-progress-row", value: progress, paddingX: 14, paddingY: 10)
+        ) {
+            AtomStack(props: StackProps(axis: "h", spacing: 10)) {
+                AtomIcon(props: IconProps(name: "scope", size: 17, weight: "medium", color: "secondary"))
+                AtomText(props: TextProps(text: "\(isPaused ? "Paused goal" : "Pursuing goal") \(activeGoal.objective)", size: 15, lineLimit: 1), common: AtomCommon(testID: "active-goal-title"))
+                AtomSpacer(props: SpacerProps(minLength: 4))
+                if let seconds = activeGoal.timeUsedSeconds {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        AtomText(
+                            props: TextProps(text: Self.goalDuration(goalElapsedTime(for: activeGoal, reportedSeconds: seconds)
+                                + (activeGoal.status == "active" ? context.date.timeIntervalSince(goalStatusUpdatedAt) : 0)), color: "secondary"),
+                            common: AtomCommon(testID: "goal-elapsed-time")
+                        )
+                    }
+                }
+                AtomButton(props: ButtonProps(destructive: true), common: AtomCommon(testID: "goal-clear-button", label: "Clear goal", help: "Clear goal"), action: { Task { await mutateGoal("clear") } }) {
+                    AtomIcon(props: IconProps(name: "trash"))
+                }
+                AtomButton(
+                    common: AtomCommon(testID: "goal-pause-resume-button", label: isPaused ? "Resume goal" : "Pause goal", help: isPaused ? "Resume goal" : "Pause goal"),
+                    action: { Task { await mutateGoal(isPaused ? "resume" : "pause") } }
+                ) {
+                    AtomIcon(props: IconProps(name: isPaused ? "play.fill" : "pause"))
+                }
+                AtomButton(
+                    common: AtomCommon(
+                        testID: "goal-expand-button", label: isGoalExpanded ? "Collapse goal" : "Expand goal", value: isGoalExpanded ? "Expanded" : "Collapsed",
+                        help: isGoalExpanded ? "Collapse goal" : "Expand goal", width: 30, height: 30
+                    ),
+                    action: { isGoalExpanded.toggle() }
+                ) {
+                    AtomIcon(props: IconProps(name: isGoalExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right"))
+                }
+            }
+        }
+    }
+
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
             if !pendingImages.isEmpty {
@@ -5035,190 +5141,33 @@ struct TaskConversationView: View {
                     }
                 }.accessibilityIdentifier("pending-chat-images")
             }
-            if let actionNotice {
-                Label(actionNotice, systemImage: "hand.raised.fill")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.orange)
-                    .accessibilityIdentifier("codex-action-notice")
-            }
-            if let providerNotice {
-                Label(providerNotice, systemImage: "arrow.triangle.swap")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("provider-capabilities-notice")
-            }
-
-            if !isRepositoryRootConfigured {
-                HStack(spacing: 8) {
-                    Label("Set the repository root folder before sending.", systemImage: "folder.badge.questionmark")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.orange)
-                        .accessibilityIdentifier("repository-root-required-notice")
-                    Spacer(minLength: 0)
-                    Button("Set root folder…") {
-                        chooseRepositoryParentFolder(showRepositoryPickerWhenFinished: false)
-                    }
-                    .buttonHoverPointer()
-                    .buttonStyle(.bordered)
-                    .nativeHelp("Choose the folder that contains your repositories.")
-                    .accessibilityIdentifier("set-conversation-repository-root-button")
-                }
-            }
-
-            if let errorMessage {
-                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(errorMessage)
-                    .accessibilityIdentifier("codex-chat-error")
-            }
+            composerNotices
 
             if !waitingFollowUps.isEmpty {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(waitingFollowUps) { queued in
-                        HStack(spacing: 12) {
-                            Image(systemName: "text.line.first.and.arrowtriangle.forward")
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundStyle(.secondary)
-                            Text(queued.text)
-                                .font(.system(size: 14))
-                                .lineLimit(1)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .accessibilityIdentifier("queued-message-text-\(queued.id.uuidString)")
-                            if let imageCount = queued.imageDataURLs?.count, imageCount > 0 {
-                                Label("\(imageCount)", systemImage: "photo")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                                    .nativeHelp(imageCount == 1 ? "1 attached image" : "\(imageCount) attached images")
-                                    .accessibilityElement(children: .ignore)
-                                    .accessibilityLabel(imageCount == 1 ? "1 attached image" : "\(imageCount) attached images")
-                                    .accessibilityIdentifier("queued-message-images-\(queued.id.uuidString)")
-                            }
-                            if queued.state == .needsAction {
-                                Text("Needs action")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                                    .accessibilityLabel("Follow-up needs your action")
-                                    .accessibilityIdentifier("queued-message-needs-action-\(queued.id.uuidString)")
-                                Button { retryQueuedMessage(queued) } label: {
-                                    Image(systemName: "arrow.clockwise")
-                                        .font(.system(size: 13, weight: .medium))
-                                }
-                                .buttonHoverPointer()
-                                .nativeHelp("Retry this follow-up")
-                                .accessibilityLabel("Retry follow-up")
-                                .accessibilityIdentifier("retry-queued-message-\(queued.id.uuidString)")
-                            } else {
-                                Button("Steer") { steerQueuedMessage(queued) }
-                                    .disabled(isSubmittingLiveMessage)
-                                    .buttonHoverPointer()
-                                    .nativeHelp("Send this follow-up to the active turn now")
-                                    .accessibilityIdentifier("steer-queued-message-\(queued.id.uuidString)")
-                            }
-                            Button { removeQueuedMessage(queued) } label: {
-                                Image(systemName: "trash")
-                                    .font(.system(size: 13, weight: .medium))
-                            }
-                            .buttonHoverPointer()
-                            .nativeHelp("Remove this follow-up")
-                            .accessibilityLabel("Remove follow-up")
-                            .accessibilityIdentifier("remove-queued-message-\(queued.id.uuidString)")
-                            Menu {
-                                Button("Copy text") {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(queued.text, forType: .string)
-                                }
-                                .buttonHoverPointer()
-                                .help("Copy this follow-up")
-                                Button("Remove follow-up", role: .destructive) { removeQueuedMessage(queued) }
-                                    .buttonHoverPointer()
-                                    .help("Remove this follow-up")
-                            } label: {
-                                Image(systemName: "ellipsis")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .frame(width: 24, height: 24)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonHoverPointer()
-                            .nativeHelp("More follow-up actions")
-                            .menuStyle(.borderlessButton)
-                            .accessibilityLabel("More follow-up actions")
-                            .accessibilityIdentifier("queued-message-more-\(queued.id.uuidString)")
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 11)
-                        .contentShape(Rectangle())
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("queued-message-\(queued.id.uuidString)")
-                    }
-                }
-                .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("queued-follow-ups")
+                queuedFollowUpList
             }
 
             ComposerView(model: composerModel, actions: composerActions, header: {
         let pendingCommentCount = annotations.filter(\.pending).count
         if pendingCommentCount > 0 {
-            Label("\(pendingCommentCount) comment\(pendingCommentCount == 1 ? "" : "s")", systemImage: "text.bubble")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.primary.opacity(0.82))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color.primary.opacity(0.1), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
-                .accessibilityIdentifier("pending-comment-count")
+            AtomPanel(
+                props: PanelProps(fill: "primary", fillOpacity: 0.1, cornerRadius: 13, stroke: "primary", strokeOpacity: 0.08),
+                common: AtomCommon(paddingX: 12, paddingY: 8)
+            ) {
+                AtomLabel(
+                    props: LabelProps(text: "\(pendingCommentCount) comment\(pendingCommentCount == 1 ? "" : "s")", icon: "text.bubble", size: 13, weight: "medium", color: "primary"),
+                    common: AtomCommon(testID: "pending-comment-count", opacity: 0.82)
+                )
+            }
         }
 
         if let activeGoal, activeGoal.status != "complete", !isReadOnly, provider.supportsGoals {
-            HStack(spacing: 10) {
-                Image(systemName: "scope").font(.system(size: 17, weight: .medium)).foregroundStyle(.secondary)
-                Text("\(activeGoal.status == "paused" ? "Paused goal" : "Pursuing goal") \(activeGoal.objective)")
-                    .lineLimit(1).truncationMode(.tail).font(.system(size: 15))
-                    .accessibilityIdentifier("active-goal-title")
-                Spacer(minLength: 4)
-                if let seconds = activeGoal.timeUsedSeconds {
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        Text(Self.goalDuration(goalElapsedTime(for: activeGoal, reportedSeconds: seconds)
-                            + (activeGoal.status == "active" ? context.date.timeIntervalSince(goalStatusUpdatedAt) : 0)))
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("goal-elapsed-time")
-                    }
-                }
-                Button(role: .destructive) { Task { await mutateGoal("clear") } } label: { Image(systemName: "trash") }
-                    .buttonHoverPointer().buttonStyle(.plain).nativeHelp("Clear goal")
-                    .accessibilityLabel("Clear goal").accessibilityIdentifier("goal-clear-button")
-                Button { Task { await mutateGoal(activeGoal.status == "paused" ? "resume" : "pause") } } label: {
-                    Image(systemName: activeGoal.status == "paused" ? "play.fill" : "pause")
-                }
-                    .buttonHoverPointer().buttonStyle(.plain).nativeHelp(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
-                    .accessibilityLabel(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
-                    .accessibilityIdentifier("goal-pause-resume-button")
-                Button { isGoalExpanded.toggle() } label: { Image(systemName: isGoalExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") }
-                    .frame(width: 30, height: 30)
-                    .contentShape(Rectangle())
-                    .buttonHoverPointer().buttonStyle(.plain).nativeHelp(isGoalExpanded ? "Collapse goal" : "Expand goal")
-                    .accessibilityLabel(isGoalExpanded ? "Collapse goal" : "Expand goal")
-                    .accessibilityValue(isGoalExpanded ? "Expanded" : "Collapsed")
-                    .accessibilityIdentifier("goal-expand-button")
-            }
-            .padding(.horizontal, 14).padding(.vertical, 10)
-            .background(Color.primary.opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1).allowsHitTesting(false) }
-            .accessibilityElement(children: .contain)
-            .accessibilityValue(conversationRuntime.snapshot.goal.turnStartedThreadID == task.codexThreadID ? "Work started" : (conversationRuntime.isTurnActive(threadID: task.codexThreadID ?? "") ? "Working" : "Waiting"))
-            .accessibilityIdentifier("active-goal-progress-row")
+            activeGoalRow(activeGoal)
             if isGoalExpanded {
-                Text(activeGoal.objective).font(.system(size: 13)).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14)
-                    .accessibilityIdentifier("active-goal-details")
+                AtomText(
+                    props: TextProps(text: activeGoal.objective, size: 13, color: "secondary"),
+                    common: AtomCommon(testID: "active-goal-details", fillWidth: true, paddingX: 14)
+                )
             }
         }
             }, scheduleContent: { scheduleHint })
@@ -6578,19 +6527,14 @@ struct TaskConversationView: View {
         return pageIDs
     }
 
+    /// Composed only of plugin atoms (Plugins/Atoms).
     private func standaloneChatPageSeparator(_ page: StandaloneChatPage) -> some View {
-        HStack(spacing: 12) {
-            Rectangle().fill(Color.primary.opacity(0.13)).frame(height: 1)
-            Text(page.title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+        AtomStack(props: StackProps(axis: "h", spacing: 12, group: true), common: AtomCommon(paddingY: 5)) {
+            transcriptRule(opacity: 0.13)
+            AtomText(props: TextProps(text: page.title, size: 11, weight: "semibold", color: "secondary", lineLimit: 1), common: AtomCommon(testID: "chat-page-separator"))
                 .fixedSize(horizontal: true, vertical: false)
-                .accessibilityIdentifier("chat-page-separator")
-            Rectangle().fill(Color.primary.opacity(0.13)).frame(height: 1)
+            transcriptRule(opacity: 0.13)
         }
-        .padding(.vertical, 5)
-        .accessibilityElement(children: .contain)
     }
 
     private func queueDraftForAfterTurn() {
@@ -8104,5 +8048,16 @@ struct ComposerSchedule: Equatable {
             mode: mode,
             modelID: modelID
         )
+    }
+}
+
+private extension View {
+    /// One accessibility element that reads as `label`. On macOS an atom Text,
+    /// Label or combined stack reports its text as a value, which hides an
+    /// explicit label, so these rows replace their children instead.
+    func accessibilitySummary(_ label: String, id: String) -> some View {
+        accessibilityElement(children: .ignore)
+            .accessibilityLabel(label)
+            .accessibilityIdentifier(id)
     }
 }

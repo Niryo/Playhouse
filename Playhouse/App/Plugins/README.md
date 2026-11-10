@@ -61,6 +61,16 @@ column's header (status dot, title, count, the Backlog's Add button), Blocked
 notice and empty state; the column's cards stay native `TaskCardView`s passed in
 as content. Change it whenever the column's frame changes;
 `test_plugin_kanban_column_renders_from_atoms_like_native` compares the two.
+Smaller native views are also built straight from atoms, with no catalog
+copy because they have no state or layout a plugin would need to match: the
+board's header, sidebar button, worktree notice, Done archive pull request
+actions and Rename Task sheet (`KanbanBoardView.swift`), the Scheduled Tasks
+page apart from its delete alert (`ScheduledTasksPageView.swift`), and in the
+conversation the notices above the composer, the queued follow-ups, the
+pending comment count, the active goal row, the comment hover card, the
+recall, goal, compaction, provider-switch and chat page rows, and the
+changes sidebar's merge notice (`TaskConversationView.swift`).
+
 Each composite reads a display model that is already derived
 (`TaskItemModel`, `AgentsInfoModel`, `TokenStatsModel`, `SkillsPageModel`,
 `RepositoryChipsModel`, `RepositoryPickerModel`, `ComposerModel`, `KanbanColumnModel`), so the JavaScript copy
@@ -145,9 +155,9 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | --- | --- | --- | --- |
 | `Stack` | `axis` (`"v"` default, `"h"`), `spacing`, `align` (column: leading/center/trailing; row: top/center/bottom/baseline), `group` (one accessibility container), `combine` (one accessibility element joining its children's labels) | | atoms |
 | `Text` | `text` (or string children), `size`, `weight`, `design` (`monospaced`, `rounded`), `color`, `lineLimit`, `tracking`, `lineSpacing`, `wrap` (grow vertically), `numeric` (animate digits), `truncation` (`head`, `middle`, `tail` default), `monospacedDigits` | | strings |
-| `Icon` | `name` (SF Symbol) or `asset` (template image), `size`, `weight`, `color` | | |
+| `Icon` | `name` (SF Symbol) or `asset` (template image), `size`, `weight`, `color`, `original` (draw the asset in its own colors, as the board's logo) | | |
 | `Label` | `text`, `icon` (SF Symbol), `size`, `weight`, `color` | | |
-| `Button` | `style` (`plain` default, `borderless`, `bordered` push button, `prominent` accent push button, `automatic` the platform default), `emphasis` (hover capsule padding), `overhang` (capsule spills past the layout of a Button without a fixed size), `disabled`, `controlSize` (`small`; inherited otherwise), `shortcut` (`default`: Return presses it; `cancel`: Escape presses it; window-wide, so only a window's primary or dismissing action sets one), `destructive` (the destructive role) | `onPress()` | atoms (its label) |
+| `Button` | `style` (`plain` default, `borderless`, `bordered` push button, `prominent` accent push button, `link` accent text like a hyperlink, `automatic` the platform default), `emphasis` (hover capsule padding), `overhang` (capsule spills past the layout of a Button without a fixed size), `disabled`, `controlSize` (`small` or `large`; inherited otherwise), `shortcut` (`default`: Return presses it; `cancel`: Escape presses it; window-wide, so only a window's primary or dismissing action sets one), `destructive` (the destructive role) | `onPress()` | atoms (its label) |
 | `Link` | `url`, `emphasis` | | atoms (its label) |
 | `Spinner` | `size` (`small` default, `mini`, `regular`) | | |
 | `Spacer` | `minLength` | | |
@@ -162,7 +172,7 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | `Toggle` | `isOn` (required; the atom shows what it is given), `size` (`mini`, `small`, `regular` default), `disabled`; a switch with no visible label, so give it a `label` | `onToggle()`; the owner flips `isOn` | |
 | `TextField` | `text` (required), `placeholder`, `autoFocus` (takes the keyboard focus when it appears); a rounded one-line field that edits its own copy and takes `text` whenever the owner changes it | `onChange(text)` on every edit; `onSubmit()` for Return and `onArrow(direction)` (`up`, `down`) for the arrows, which keep their usual behavior when there is no handler | |
 | `Segmented` | `options` (`[{value, label}]`), `selected`, `disabled`; a segmented control, as wide as its segments unless it has a `width` | `onChange(value)`, not raised for the segment already selected | |
-| `Menu` | `icon` (SF Symbol), `text` (beside or instead of the symbol), `size`, `weight` (the symbol's), `textSize`, `textWeight`, `badgeIcon` (a second symbol before the text), `color` (`secondary` default), `indicator` (the pull-down chevron, hidden by default), `disabled`, `items` (groups `[[{id, title, destructive?, help?, testID?, checked?, icon?}]]`, a separator between non-empty groups; a checked item shows a checkmark); a borderless pull-down whose common `width` and `height` frame its label | `onMenu(id)` | |
+| `Menu` | `icon` (SF Symbol), `text` (beside or instead of the symbol), `size`, `weight` (the symbol's), `textSize`, `textWeight`, `badgeIcon` (a second symbol before the text), `color` (`secondary` default), `indicator` (the pull-down chevron, hidden by default), `disabled`, `items` (groups `[[{id, title, destructive?, help?, testID?, checked?, icon?, disabled?}]]`, a separator between non-empty groups; a checked item shows a checkmark and a disabled one is dimmed and can't be chosen); a borderless pull-down whose common `width` and `height` frame its label | `onMenu(id)` | |
 | `PressArea` | `spacing`, `pointer` (the pointing hand); a leading column that takes every click on its children, one accessibility container | `onPress()` for a click, `onLongPress()` for a press and hold | atoms |
 | `Overlay` | `align` (`center` default, `top`, `bottom`, `leading`, `trailing`, `topLeading`, `topTrailing`, `bottomLeading`, `bottomTrailing`), `offsetX`, `offsetY`; its first child laid out as usual and the rest drawn over it at `align`, moved by the offsets without changing its size; one accessibility container | | atoms |
 | `Editor` | `text` (required), `placeholder`, `placeholderTestID`, `enabled`, `autofocus`, `focused`, `focusRequest` (each new value moves the keyboard in once), `inputTestID` and `inputLabel` (the text view's own accessibility identifier and label); a multiline message editor that grows with its text; the common `hint` is its accessibility help; a pasted image reaches native owners only | `onChange(text)`, `onSubmit()` (Return), `onSteerSubmit()` (Command-Return), `onFocusChange(isFocused)` | |
