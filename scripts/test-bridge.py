@@ -15408,11 +15408,13 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         row = next(node for node in scroll["children"] if first in node["children"])
         self.assertEqual((row["props"]["align"], row["props"]["revealOnHover"]), ("trailing", True), "A row's buttons show only while hovering it.")
         hint = {"replace": "Replace the selected repositories with mre", "add": "Add mre alongside the selected repositories"}
-        icon = {"replace": "arrow.triangle.swap", "add": "plus"}
+        icon = {"replace": "repeat", "add": "plus"}
         for action in ["replace", "add"]:
             button = self.plugin_node(tree, f"conversation-repository-recent-mre-{action}")
             self.assertEqual((button["props"]["help"], button["children"][0]["props"]["name"]), (hint[action], icon[action]))
-        self.assertEqual([self.plugin_text(text) for text in first["children"][0]["children"]], ["mre", "/Users/demo/git/mre"])
+        self.assertEqual([self.plugin_text(text) for text in self.plugin_nodes(first) if text["type"] == "Text"], ["mre", "/Users/demo/git/mre"])
+        reserved = [node for node in self.plugin_nodes(first) if node["type"] == "Spacer"]
+        self.assertEqual([node["props"]["minLength"] for node in reserved], [44], "The row text leaves room for the hover buttons.")
         self.assertEqual((row_fill(tree, "mre"), row_fill(tree, "wix-one-app")), (0.16, 0), "The first row is highlighted.")
 
         searched = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-search:onChange:pla")[0])

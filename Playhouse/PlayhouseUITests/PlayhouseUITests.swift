@@ -4995,6 +4995,8 @@ final class PlayhouseUITests: XCTestCase {
         let primaryAdd = element("conversation-repository-suggestion-primary-add")
         XCTAssertTrue(primaryAdd.waitToExist(timeout: 5))
         XCTAssertTrue(primaryAdd.isHittable, "Hovering the row should reveal its plus button.")
+        // The row's text stops 44 points (plus its 7-point padding) before its trailing edge, where the hover buttons sit.
+        XCTAssertLessThanOrEqual(primaryRow.frame.maxX - primaryAdd.frame.minX, 51, "The plus button should sit in the space the row's text leaves clear.")
         attachScreenshot(named: "Hovered repository row shows its plus button")
         XCTAssertFalse(element("conversation-repository-suggestion-primary-replace").exists, "Replace is offered only once the task has repositories.")
         primaryAdd.click()
@@ -5019,6 +5021,7 @@ final class PlayhouseUITests: XCTestCase {
         alternateRow.hover()
         let alternateReplace = element("conversation-repository-suggestion-alternate-replace")
         XCTAssertTrue(alternateReplace.waitToExist(timeout: 5))
+        XCTAssertLessThanOrEqual(alternateRow.frame.maxX - alternateReplace.frame.minX, 51, "Replace and plus should both sit in the space the row's text leaves clear.")
         alternateReplace.hover()
         attachScreenshot(named: "Hovering Replace on alternate")
         alternateReplace.click()

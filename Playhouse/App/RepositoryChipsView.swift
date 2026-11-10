@@ -257,11 +257,17 @@ struct RepositoryPickerView: View {
                 action: { actions.select(repository.path) }
             ) {
                 AtomPanel(
-                    props: PanelProps(spacing: 2, fill: "accent", fillOpacity: highlighted ? 0.16 : 0, cornerRadius: 5),
+                    props: PanelProps(fill: "accent", fillOpacity: highlighted ? 0.16 : 0, cornerRadius: 5),
                     common: AtomCommon(fillWidth: true, padding: 7)
                 ) {
-                    AtomText(props: TextProps(text: repository.name, size: 11, weight: "medium"))
-                    AtomText(props: TextProps(text: repository.path, size: 9, color: "secondary", lineLimit: 1))
+                    // The spacer keeps the text clear of the buttons the hover reveals.
+                    AtomStack(props: StackProps(axis: "h", spacing: 0)) {
+                        AtomStack(props: StackProps(axis: "v", spacing: 2, align: "leading")) {
+                            AtomText(props: TextProps(text: repository.name, size: 11, weight: "medium"))
+                            AtomText(props: TextProps(text: repository.path, size: 9, color: "secondary", lineLimit: 1))
+                        }
+                        AtomSpacer(props: SpacerProps(minLength: 44))
+                    }
                 }
             }
         } overlay: {
@@ -271,7 +277,7 @@ struct RepositoryPickerView: View {
                         common: AtomCommon(testID: "\(id)-replace", label: "Replace with \(repository.name)", help: "Replace the selected repositories with \(repository.name)"),
                         action: { actions.replace(repository.path) }
                     ) {
-                        AtomIcon(props: IconProps(name: "arrow.triangle.swap", size: 11, weight: "semibold", color: "secondary"))
+                        AtomIcon(props: IconProps(name: "repeat", size: 11, weight: "semibold", color: "secondary"))
                     }
                 }
                 AtomButton(
