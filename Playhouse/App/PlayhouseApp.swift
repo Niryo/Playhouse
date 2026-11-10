@@ -72,11 +72,18 @@ struct PlayhouseApp: App {
                 .keyboardShortcut("f", modifiers: .command)
             }
             CommandMenu("Plugins") { PluginsMenuContent() }
-            CommandMenu("Debug") { DebugConversationImportMenu(modelContainer: modelContainer) } // DEBUG-IMPORT:
+            CommandMenu("Debug") {
+                DebugConversationImportMenu(modelContainer: modelContainer) // DEBUG-IMPORT:
+                #if DEBUG
+                AtomHighlightMenuItem()
+                    .defaultAppStorage(appPreferences)
+                #endif
+            }
         }
 
         Window("Plugin Catalog", id: "plugin-catalog") {
             PluginCatalogView()
+                .atomHighlightRoot()
                 .defaultAppStorage(appPreferences)
         }
         .defaultSize(width: 1000, height: 760)
@@ -94,6 +101,7 @@ struct PlayhouseApp: App {
             .environment(\.conversationRuntimeModel, conversationRuntime)
             .environmentObject(cpuUsageModel)
             .environmentObject(agentUsageModel)
+            .atomHighlightRoot()
             .defaultAppStorage(appPreferences)
     }
 }

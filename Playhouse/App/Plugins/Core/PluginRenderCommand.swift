@@ -116,6 +116,7 @@ struct PluginRenderCommand: Sendable {
         }
         return .object([
             "atoms": .array(AtomType.allCases.map { .string($0.rawValue) }),
+            "containerAtoms": .array(AtomType.allCases.filter(\.isContainer).map { .string($0.rawValue) }),
             "commits": .array(commits),
             "tree": runtime.tree.snapshot(),
             "errors": .array(runtime.errors.map(PluginValue.string)),

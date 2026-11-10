@@ -20779,6 +20779,123 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Token Stats: the counter reopened the JavaScript modal")
     }
 
+    // case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
+    func test_debug_highlight_native_atoms_outlines_atoms() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        let rendered = try XCTUnwrap(try runCLI(["plugin", "render", "--page", "Card"])["result"] as? [String: Any])
+        let atoms = try XCTUnwrap(rendered["atoms"] as? [String])
+        let containers = Set(try XCTUnwrap(rendered["containerAtoms"] as? [String]))
+        XCTAssertEqual(containers, ["Stack", "Panel", "Card", "Scroll", "Disclosure"], "Only the structural atoms are containers.")
+        XCTAssertTrue(containers.isSubset(of: Set(atoms)), "Every container is a known atom.")
+        let highlight = NSPredicate(format: "identifier IN %@", ["atom-highlight-container", "atom-highlight-leaf"])
+        func outlines(in root: XCUIElement, _ atom: String? = nil) -> XCUIElementQuery {
+            let all = root.descendants(matching: .any).matching(highlight)
+            return atom.map { all.matching(NSPredicate(format: "label == %@", $0)) } ?? all
+        }
+
+        // The board's task card is the native task item, built from atoms.
+        let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Highlighted card", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String).uppercased()
+        let boardCard = element("task-card-\(taskID)")
+        XCTAssertTrue(boardCard.waitToExist(timeout: 15), "The board shows the task card.")
+        XCTAssertEqual(outlines(in: app).count, 0, "With the item off no atom carries an outline.")
+        let boardCardFrame = boardCard.frame
+        attachScreenshot(named: "Highlight Native Atoms off: board")
+        clickDebugHighlightNativeAtoms()
+        XCTAssertTrue(waitUntil({ outlines(in: self.app, "Card").count > 0 }, timeout: 5), "Turning the item on outlines the board's task card live.")
+        XCTAssertEqual(outlines(in: app, "Card").firstMatch.identifier, "atom-highlight-container", "The task card's Card is outlined as a container.")
+        XCTAssertTrue(outlines(in: app, "Text").count > 0, "The task card's Text atoms are outlined.")
+        XCTAssertEqual(outlines(in: app, "Text").firstMatch.identifier, "atom-highlight-leaf", "A Text atom is outlined as a leaf.")
+        XCTAssertEqual(boardCard.frame, boardCardFrame, "The outline doesn't move or resize the task card.")
+        attachScreenshot(named: "Highlight Native Atoms on: board task card")
+        clickDebugHighlightNativeAtoms()
+        XCTAssertTrue(waitUntil({ outlines(in: self.app).count == 0 }, timeout: 5), "Turning the item off removes the board's outlines.")
+
+        clickPluginsMenuItem("Plugin Catalog")
+        XCTAssertTrue(element("plugin-catalog-atom-Card").waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog opens the catalog.")
+        let catalog = app.windows.matching(NSPredicate(format: "title == 'Plugin Catalog'")).firstMatch
+        XCTAssertTrue(catalog.waitToExist(timeout: 5), "The catalog has its own window.")
+        catalogSidebarRow("plugin-catalog-atom-Card").click()
+        let card = element("card-demo")
+        XCTAssertTrue(card.waitToExist(timeout: 10))
+        XCTAssertEqual(outlines(in: catalog).count, 0, "With the item off the catalog's atoms carry no outline.")
+        let cardFrame = card.frame
+        catalogSidebarRow("plugin-catalog-atom-PillPicker").click()
+        let picker = element("pill-picker")
+        XCTAssertTrue(picker.waitToExist(timeout: 10))
+        XCTAssertEqual(outlines(in: catalog).count, 0)
+        let pickerFrame = picker.frame
+        attachScreenshot(named: "Highlight Native Atoms off: PillPicker page")
+
+        clickDebugHighlightNativeAtoms()
+        XCTAssertTrue(waitUntil({ outlines(in: catalog).count > 0 }, timeout: 5), "Turning the item on outlines the catalog's atoms live.")
+        XCTAssertEqual(picker.frame, pickerFrame, "The outline doesn't move or resize the PillPicker.")
+        attachScreenshot(named: "Highlight Native Atoms on: PillPicker page")
+
+        var roles: [String: String] = [:]
+        for atom in atoms {
+            catalogSidebarRow("plugin-catalog-atom-\(atom)").click()
+            let title = element("plugin-catalog-title")
+            XCTAssertTrue(waitUntil({ title.exists && self.pluginText(title) == atom }, timeout: 10), "Selecting \(atom) shows its page.")
+            XCTAssertTrue(element("plugin-last-commit").waitToExist(timeout: 10), "The \(atom) page rendered.")
+            XCTAssertTrue(waitUntil({ outlines(in: catalog, atom).count > 0 }, timeout: 5), "The \(atom) page outlines its \(atom) atom.")
+            for outline in outlines(in: catalog).allElementsBoundByIndex {
+                let role = outline.identifier.replacingOccurrences(of: "atom-highlight-", with: "")
+                if let earlier = roles[outline.label] {
+                    XCTAssertEqual(role, earlier, "Every \(outline.label) outline has one role.")
+                }
+                roles[outline.label] = role
+            }
+            if atom == "Card" {
+                XCTAssertTrue(card.waitToExist(timeout: 5))
+                XCTAssertEqual(card.frame, cardFrame, "The outline doesn't move or resize the Card.")
+                attachScreenshot(named: "Highlight Native Atoms on: Card page")
+            }
+            if atom == "Spacer" {
+                attachScreenshot(named: "Highlight Native Atoms on: Spacer page")
+            }
+        }
+        for atom in atoms {
+            XCTAssertEqual(roles[atom], containers.contains(atom) ? "container" : "leaf", "\(atom) is outlined as a \(containers.contains(atom) ? "container" : "leaf").")
+        }
+
+        catalogSidebarRow("plugin-catalog-atom-Card").click()
+        let pressed = element("card-pressed")
+        XCTAssertTrue(pressed.waitToExist(timeout: 10))
+        let hoverLabels = app.descendants(matching: .any).matching(identifier: "atom-hover-label")
+        let catalogTitle = element("plugin-catalog-title")
+        catalogTitle.hover()
+        XCTAssertTrue(waitUntil({ hoverLabels.count == 0 }, timeout: 5), "No type label shows while the pointer is off the atoms.")
+        // The Text's outline covers it for XCUITest's hittability check (not for
+        // the pointer: the outline doesn't hit-test), so hover by coordinate.
+        pressed.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).hover()
+        XCTAssertTrue(waitUntil({ hoverLabels.allElementsBoundByIndex.contains { self.pluginText($0) == "Text" } }, timeout: 5),
+                      "Hovering a Text atom shows a label naming its type.")
+        attachScreenshot(named: "Highlight Native Atoms on: hovering a Text atom")
+        catalogTitle.hover()
+        XCTAssertTrue(waitUntil({ hoverLabels.count == 0 }, timeout: 5), "The type label goes away when the pointer leaves the atom.")
+
+        relaunchApp()
+        clickPluginsMenuItem("Plugin Catalog")
+        XCTAssertTrue(element("plugin-catalog-atom-Card").waitToExist(timeout: 15))
+        catalogSidebarRow("plugin-catalog-atom-Card").click()
+        XCTAssertTrue(element("card-demo").waitToExist(timeout: 10))
+        let relaunchedCatalog = app.windows.matching(NSPredicate(format: "title == 'Plugin Catalog'")).firstMatch
+        XCTAssertTrue(waitUntil({ outlines(in: relaunchedCatalog).count > 0 }, timeout: 5), "After a relaunch the catalog is still outlined.")
+        attachScreenshot(named: "Highlight Native Atoms still on after relaunch")
+        clickDebugHighlightNativeAtoms()
+        XCTAssertTrue(waitUntil({ outlines(in: self.app).count == 0 }, timeout: 5), "Turning the item off removes every outline.")
+    }
+
+    private func clickDebugHighlightNativeAtoms() {
+        let menu = app.menuBars.menuBarItems["Debug"]
+        XCTAssertTrue(menu.waitToExist(timeout: 10), "The app menu has a Debug menu.")
+        menu.click()
+        let item = menu.menuItems["Highlight Native Atoms"]
+        XCTAssertTrue(item.waitToExist(timeout: 5), "The Debug menu has Highlight Native Atoms.")
+        item.click()
+    }
+
     // case-contract: test_plugin_skills_page_renders_from_atoms_like_native | The Plugin Catalog's Skills Page shows the Skills page's header and skill gallery composed in JavaScript from atoms above the native SwiftUI header and gallery the Skills page uses, built from the same atoms and sample data, each opened by the composer's Skills button (the same plain Button atom with the sparkles icon, labelled Skills). Both show the back button, the Skills, Rules & MCP title, the Skills | Rules | MCP and Repo | Global | Built-in segmented pickers, the search field and New Skill, the hint, a repository section whose skill rows show their name, provider, Conflict and Invalid badges, description, issue and location, a small Fix with Agent button on a broken skill, the mini switch, a small Use button that is disabled for a skill no provider can use, and the actions menu, and an empty repository's empty state, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer, Divider, Scroll, Segmented, TextField, Toggle, Menu, PressArea) with the Skills page's identifiers. Choosing Global in the JavaScript source picker runs onChange (Last: tab global) and shows the Linked and switched-off global skills while the native page stays on Repo. Clicking a JavaScript switch runs onToggle (Last: toggle release-notes off), which turns it off and disables its Use button, and Use runs its handler (Last: use release-notes) without re-rendering any row. Clicking a skill's text runs onPress (Last: open release-notes); pressing and holding it runs onLongPress, which starts selecting (Last: select release-notes): its row shows a checked checkbox and the accent highlight, the rows' own controls hide, built-in skills show no checkbox, and the header shows 1 selected with Fix with Agent, Delete and Done; a click on another row adds it (2 selected), and Done ends selecting (Last: done selecting). The actions menu runs onMenu with the chosen item's id (Last: menu release-notes edit), typing in the search runs onChange with the text, choosing Rules hides the source picker and the search, and the back button closes the JavaScript page (Last: back) while the native one stays open, until the Skills button opens it again (Last: open). The search field raises no onPress, so pressing it is refused as invalid_argument.
     func test_plugin_skills_page_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)

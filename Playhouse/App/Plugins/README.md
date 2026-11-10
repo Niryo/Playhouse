@@ -141,7 +141,12 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 To add an atom, add its case and props struct to `Core/AtomProps.swift`, its
 view to `Atoms/AtomViews.swift`, its registry entry to
 `Atoms/AtomRegistry.swift`, and a catalog page `catalog/<Atom>.js`. Add one
-only when a native composite needs it.
+only when a native composite needs it. Its view passes its type to
+`atomCommon` (or applies `atomHighlight` itself) and its case says whether it
+`isContainer`, so Debug ▸ Highlight Native Atoms outlines it: containers in
+orange, leaves in green, with its type name on hover. The overlay is
+debug-only; it shows where atoms are used, so plain SwiftUI left inside a
+composite shows as a gap.
 
 ## Op protocol
 

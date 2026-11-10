@@ -52,6 +52,17 @@ enum AtomType: String, CaseIterable, Sendable {
         }
     }
 
+    /// Whether the atom lays out a composite's structure, rather than being a
+    /// leaf that a native view could hold on its own. A Button or Link takes
+    /// children but is a leaf. The debug atom highlight colors the two apart.
+    var isContainer: Bool {
+        switch self {
+        case .stack, .panel, .card, .scroll, .disclosure: true
+        case .text, .icon, .label, .button, .link, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar,
+             .toggle, .textField, .segmented, .menu, .pressArea: false
+        }
+    }
+
     /// Checks that `parent` shows a `child` node of that type (`PluginNode.textType` for raw strings).
     static func validateChild(parent: String, child: String) throws {
         if parent == "#root" { return }

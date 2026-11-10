@@ -15066,6 +15066,18 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
             return []
         return [turn.get("userText") or "" for turn in json.loads(history.read_text(encoding="utf-8")).get("turns", [])]
 
+    # case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
+    def test_debug_highlight_native_atoms_outlines_atoms(self):
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "Card")[0])
+        self.assertEqual(rendered["errors"], [])
+        containers = rendered["containerAtoms"]
+        self.assertEqual(containers, [atom for atom in rendered["atoms"] if atom in containers], "Every container is a known atom.")
+        self.assertEqual(set(containers), {"Stack", "Panel", "Card", "Scroll", "Disclosure"},
+                         "Only the atoms that lay out a composite's structure are containers.")
+        leaves = [atom for atom in rendered["atoms"] if atom not in containers]
+        self.assertEqual(leaves, ["Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Meter", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea"],
+                         "Every other atom, including a Button or Link that holds children, is a leaf.")
+
     # case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again, and a task that has started can't be scheduled. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.
     def test_schedule_one_time_task_fires_when_due(self):
         environment = self.install_claude_fixture("claude-fixture-schedule-once")
