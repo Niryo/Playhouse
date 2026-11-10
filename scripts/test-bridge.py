@@ -5961,6 +5961,25 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], replaced["repositoryWorktrees"])
 
 
+    # case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, duplicates are rejected, and the saved repository selection follows.
+    def test_conversation_repository_picker_add_and_replace_buttons(self):
+        task = self.create_task("Picker add and replace", [self.primary])
+        task_id = task["id"]
+        response, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.primary)
+        self.assertEqual([item["repositoryPath"] for item in self.assert_success(response)["repositoryWorktrees"]], [str(self.primary)])
+        response, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.secondary)
+        added = self.assert_success(response)
+        self.assertEqual([item["repositoryPath"] for item in added["repositoryWorktrees"]], [str(self.primary), str(self.secondary)])
+        duplicate, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.secondary, expected_status=2)
+        self.assert_failure(duplicate, "invalid_argument")
+        response, _ = self.call_cli("task", "repository", "replace", task_id, "--repo", self.primary)
+        replaced = self.assert_success(response)
+        self.assertEqual([item["repositoryPath"] for item in replaced["repositoryWorktrees"]], [str(self.primary)])
+        fresh, _ = self.call_cli("task", "get", task_id)
+        self.assertEqual([item["repositoryPath"] for item in self.assert_success(fresh)["repositoryWorktrees"]], [str(self.primary)])
+        settings, _ = self.call_cli("settings", "get")
+        self.assertEqual(self.assert_success(settings)["lastSelectedRepositories"], [str(self.primary)])
+
     # case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field or pressing Escape dismisses the edit without saving. The settings popover is wider than before with a larger title, and the repository chip's remove button is a larger target.
     def test_task_repository_settings_validate_persist_and_lock_after_start(self):
         task = self.create_repo_task("Repository settings", [self.primary])
@@ -15753,13 +15772,23 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(self.plugin_text(self.plugin_node(tree, "conversation-repository-recent-header")), "Recent")
         scroll = self.plugin_node(tree, "conversation-repository-list")
         self.assertEqual((scroll["props"]["width"], scroll["props"]["height"], scroll["props"]["lazy"]), (280, 180, True), "Five rows would be 210 points; the list stops at 180.")
-        self.assertIn(self.plugin_node(tree, "conversation-repository-recent-zmk-config"), scroll["children"], "The rows past 180 points stay in the scrolling list.")
+        zmk = self.plugin_node(tree, "conversation-repository-recent-zmk-config")
+        self.assertTrue(any(row["type"] == "Overlay" and zmk in row["children"] for row in scroll["children"]), "The rows past 180 points stay in the scrolling list.")
         self.assertEqual(len(scroll["children"]), 5)
         def row_fill(tree, name):
             return self.plugin_node(tree, f"conversation-repository-recent-{name}")["children"][0]["props"]["fillOpacity"]
         first = self.plugin_node(tree, "conversation-repository-recent-mre")
-        self.assertEqual(first["props"]["help"], "Select repository")
-        self.assertEqual([self.plugin_text(text) for text in first["children"][0]["children"]], ["mre", "/Users/demo/git/mre"])
+        self.assertEqual(first["props"]["help"], "Add mre alongside the selected repositories")
+        row = next(node for node in scroll["children"] if first in node["children"])
+        self.assertEqual((row["props"]["align"], row["props"]["revealOnHover"]), ("trailing", True), "A row's buttons show only while hovering it.")
+        hint = {"replace": "Replace the selected repositories with mre", "add": "Add mre alongside the selected repositories"}
+        icon = {"replace": "repeat", "add": "plus"}
+        for action in ["replace", "add"]:
+            button = self.plugin_node(tree, f"conversation-repository-recent-mre-{action}")
+            self.assertEqual((button["props"]["help"], button["children"][0]["props"]["name"]), (hint[action], icon[action]))
+        self.assertEqual([self.plugin_text(text) for text in self.plugin_nodes(first) if text["type"] == "Text"], ["mre", "/Users/demo/git/mre"])
+        reserved = [node for node in self.plugin_nodes(first) if node["type"] == "Spacer"]
+        self.assertEqual([node["props"]["minLength"] for node in reserved], [44], "The row text leaves room for the hover buttons.")
         self.assertEqual((row_fill(tree, "mre"), row_fill(tree, "wix-one-app")), (0.16, 0), "The first row is highlighted.")
 
         searched = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-search:onChange:pla")[0])

@@ -80,12 +80,27 @@ function Picker(props) {
         spacing: 2, lazy: true, width: 280, height: model.listHeight,
         testID: prefix + "conversation-repository-list"
       }, model.repositories.map(function (repository, index) {
-        return h(Button, {
-          key: repository.path, testID: prefix + "conversation-repository-" + model.listing + "-" + repository.name,
-          help: "Select repository", onPress: function () { on.select(repository.path); }
-        }, h(Panel, { spacing: 2, fill: "accent", fillOpacity: index === model.highlighted ? 0.16 : 0, cornerRadius: 5, fillWidth: true, padding: 7 },
-          h(Text, { size: 11, weight: "medium" }, repository.name),
-          h(Text, { size: 9, color: "secondary", lineLimit: 1 }, repository.path)));
+        var id = prefix + "conversation-repository-" + model.listing + "-" + repository.name;
+        return h(Overlay, { key: repository.path, align: "trailing", offsetX: -6, revealOnHover: true },
+          h(Button, { testID: id, help: "Add " + repository.name + " alongside the selected repositories", onPress: function () { on.select(repository.path); } },
+            h(Panel, { fill: "accent", fillOpacity: index === model.highlighted ? 0.16 : 0, cornerRadius: 5, fillWidth: true, padding: 7 },
+              // The spacer keeps the text clear of the buttons the hover reveals.
+              h(Stack, { axis: "h", spacing: 0 },
+                h(Stack, { axis: "v", spacing: 2, align: "leading" },
+                  h(Text, { size: 11, weight: "medium" }, repository.name),
+                  h(Text, { size: 9, color: "secondary", lineLimit: 1 }, repository.path)),
+                h(Spacer, { minLength: 44 })))),
+          h(Stack, { axis: "h", spacing: 6 },
+            model.canReplace ? h(Button, {
+              testID: id + "-replace", label: "Replace with " + repository.name,
+              help: "Replace the selected repositories with " + repository.name,
+              onPress: function () { on.replace(repository.path); }
+            }, h(Icon, { name: "repeat", size: 11, weight: "semibold", color: "secondary" })) : null,
+            h(Button, {
+              testID: id + "-add", label: "Add " + repository.name,
+              help: "Add " + repository.name + " alongside the selected repositories",
+              onPress: function () { on.select(repository.path); }
+            }, h(Icon, { name: "plus", size: 11, weight: "semibold", color: "secondary" }))));
       })));
     }
   }
@@ -125,7 +140,8 @@ function Demo() {
       open[1](false);
       last[1]("submit " + (repository ? repository.name : "saved"));
     },
-    select: function (path) { open[1](false); last[1]("select " + named(path, pickerModel.repositories)); }
+    select: function (path) { open[1](false); last[1]("select " + named(path, pickerModel.repositories)); },
+    replace: function (path) { open[1](false); last[1]("replace " + named(path, pickerModel.repositories)); }
   };
   return h(Stack, { axis: "v", spacing: 12, align: "leading" },
     h(Text, { size: 11, color: "secondary", testID: "js-last-action" }, "Last: ", last[0]),

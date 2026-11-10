@@ -47,6 +47,7 @@
     "listHeight": 180,
     "highlighted": 0,
     "focusesSearch": false,
-    "canSubmit": true
+    "canSubmit": true,
+    "canReplace": true
   }
 }

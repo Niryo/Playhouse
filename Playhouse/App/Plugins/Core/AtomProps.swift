@@ -553,12 +553,15 @@ struct PressAreaProps: AtomPropsDecodable, Equatable {
 /// topTrailing, bottomLeading or bottomTrailing), moved by `offsetX` and
 /// `offsetY` points without changing its size: a repository chip's remove
 /// badge on its top trailing corner. It is one accessibility container.
+/// `revealOnHover` draws the overlay only while the pointer is over the
+/// atom: a repository row's Replace and Add buttons.
 struct OverlayProps: AtomPropsDecodable, Equatable {
     var align: String?
     var offsetX: Double?
     var offsetY: Double?
+    var revealOnHover: Bool?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case align, offsetX, offsetY }
+    enum CodingKeys: String, CodingKey, CaseIterable { case align, offsetX, offsetY, revealOnHover }
 }
 
 /// A multiline message editor that grows with its text (the composer's).

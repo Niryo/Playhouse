@@ -5053,6 +5053,67 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertLessThan(abs(badgeAfterSend.frame.midY - title.frame.midY), 8, "Repository badges should stay on the fixed title row after the timeline scrolls.")
     }
 
+    // case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, duplicates are rejected, and the saved repository selection follows.
+    func test_conversation_repository_picker_add_and_replace_buttons() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try runCLI(["task", "create", "--title", "Picker add and replace", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any]
+        let taskID = try XCTUnwrap(created?["id"] as? String)
+        openTask(named: "Picker add and replace")
+        func attachedPaths() throws -> [String] {
+            ((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]]) ?? []).compactMap { $0["repositoryPath"] as? String }
+        }
+        func search(_ text: String) {
+            element("add-conversation-repository-button").click()
+            let field = element("conversation-repository-search")
+            XCTAssertTrue(field.waitToExist(timeout: 5))
+            field.click()
+            field.typeText(text)
+        }
+        // The plus button adds the first repository.
+        search("primary")
+        let primaryRow = element("conversation-repository-suggestion-primary")
+        XCTAssertTrue(primaryRow.waitToExist(timeout: 10))
+        XCTAssertFalse(element("conversation-repository-suggestion-primary-add").exists, "The row buttons show only while hovering it.")
+        primaryRow.hover()
+        let primaryAdd = element("conversation-repository-suggestion-primary-add")
+        XCTAssertTrue(primaryAdd.waitToExist(timeout: 5))
+        XCTAssertTrue(primaryAdd.isHittable, "Hovering the row should reveal its plus button.")
+        // The row's text stops 44 points (plus its 7-point padding) before its trailing edge, where the hover buttons sit.
+        XCTAssertLessThanOrEqual(primaryRow.frame.maxX - primaryAdd.frame.minX, 51, "The plus button should sit in the space the row's text leaves clear.")
+        attachScreenshot(named: "Hovered repository row shows its plus button")
+        XCTAssertFalse(element("conversation-repository-suggestion-primary-replace").exists, "Replace is offered only once the task has repositories.")
+        primaryAdd.click()
+        XCTAssertTrue(element("conversation-repository-badge-primary").waitToExist(timeout: 10))
+        // The row itself adds alongside.
+        search("secondary")
+        let secondaryRow = element("conversation-repository-suggestion-secondary")
+        XCTAssertTrue(secondaryRow.waitToExist(timeout: 10))
+        secondaryRow.hover()
+        XCTAssertTrue(element("conversation-repository-suggestion-secondary-replace").waitToExist(timeout: 5))
+        XCTAssertTrue(element("conversation-repository-suggestion-secondary-add").exists)
+        attachScreenshot(named: "Hovered repository row shows Replace and Add once the task has a repository")
+        secondaryRow.click()
+        XCTAssertTrue(element("conversation-repository-badge-secondary").waitToExist(timeout: 10))
+        XCTAssertTrue(element("conversation-repository-badge-primary").exists, "Adding keeps the other selected repositories.")
+        XCTAssertEqual(Set(try attachedPaths()), Set([fixture.primary.path, fixture.secondary.path]))
+        attachScreenshot(named: "Clicking the row added secondary alongside primary")
+        // Replace removes every selected repository.
+        search("alternate")
+        let alternateRow = element("conversation-repository-suggestion-alternate")
+        XCTAssertTrue(alternateRow.waitToExist(timeout: 10))
+        alternateRow.hover()
+        let alternateReplace = element("conversation-repository-suggestion-alternate-replace")
+        XCTAssertTrue(alternateReplace.waitToExist(timeout: 5))
+        XCTAssertLessThanOrEqual(alternateRow.frame.maxX - alternateReplace.frame.minX, 51, "Replace and plus should both sit in the space the row's text leaves clear.")
+        alternateReplace.hover()
+        attachScreenshot(named: "Hovering Replace on alternate")
+        alternateReplace.click()
+        XCTAssertTrue(element("conversation-repository-badge-alternate").waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ !self.element("conversation-repository-badge-primary").exists && !self.element("conversation-repository-badge-secondary").exists }, timeout: 10), "Replace should remove the previous repository badges.")
+        XCTAssertEqual(try attachedPaths().map { URL(fileURLWithPath: $0).lastPathComponent }, ["alternate"])
+        attachScreenshot(named: "Replace left only alternate attached")
+    }
+
     // case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation. Each setting is edited in place: the pencil beside a value opens an inline field with a checkmark that saves only that field and keeps the editor open on the saved value, and clicking outside the field or pressing Escape dismisses the edit without saving. The settings popover is wider than before with a larger title, and the repository chip's remove button is a larger target.
     func test_task_repository_settings_validate_persist_and_lock_after_start() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path

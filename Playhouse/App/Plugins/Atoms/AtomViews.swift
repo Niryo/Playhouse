@@ -1164,13 +1164,17 @@ struct AtomOverlay<Base: View, Over: View>: View {
     var common = AtomCommon()
     @ViewBuilder var base: () -> Base
     @ViewBuilder var overlay: () -> Over
+    @State private var isHovering = false
 
     var body: some View {
         base()
             .overlay(alignment: alignment) {
-                overlay()
-                    .offset(x: CGFloat(props.offsetX ?? 0), y: CGFloat(props.offsetY ?? 0))
+                if isHovering || props.revealOnHover != true {
+                    overlay()
+                        .offset(x: CGFloat(props.offsetX ?? 0), y: CGFloat(props.offsetY ?? 0))
+                }
             }
+            .onHover { isHovering = $0 }
             .atomCommon(common, atom: .overlay, group: true)
     }
 
