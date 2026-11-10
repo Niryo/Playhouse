@@ -1,0 +1,52 @@
+{
+  "repositoryChips": {
+    "prefix": "",
+    "chips": [
+      {
+        "name": "infragod",
+        "path": "/Users/demo/git/infragod"
+      },
+      {
+        "name": "Playhouse",
+        "path": "/Users/demo/git/Playhouse"
+      }
+    ],
+    "accent": "#007ACC",
+    "readOnly": false
+  },
+  "repositoryPicker": {
+    "prefix": "",
+    "parentFolder": "/Users/demo/git",
+    "isChoosingParent": false,
+    "placeholder": "infragod, Playhouse ↵",
+    "search": "",
+    "listing": "recent",
+    "showsList": true,
+    "repositories": [
+      {
+        "name": "mre",
+        "path": "/Users/demo/git/mre"
+      },
+      {
+        "name": "wix-one-app",
+        "path": "/Users/demo/git/wix-one-app"
+      },
+      {
+        "name": "Viband",
+        "path": "/Users/demo/git/Viband"
+      },
+      {
+        "name": "packer",
+        "path": "/Users/demo/git/packer"
+      },
+      {
+        "name": "zmk-config",
+        "path": "/Users/demo/git/zmk-config"
+      }
+    ],
+    "listHeight": 180,
+    "highlighted": 0,
+    "focusesSearch": false,
+    "canSubmit": true
+  }
+}

@@ -65,12 +65,12 @@ function ModelPicker(props) {
     h(Stack, { axis: "v", spacing: 0, align: "leading", padding: 13, paddingX: 5 },
       picker.models.map(function (option) {
         return h(Button, {
-          key: option.id, testID: prefix + option.testID, help: option.help,
+          key: option.id, testID: prefix + option.testID, value: option.checked ? "Selected" : "Not selected", help: option.help,
           onPress: function () { on.selectModel(option.id); }
         }, h(Stack, { axis: "h", minHeight: 32, fillWidth: true },
           h(Text, {}, option.title),
           h(Spacer),
-          option.checked ? h(Icon, { name: "checkmark", size: 12, weight: "semibold" }) : null));
+          option.checked ? h(Icon, { name: "checkmark", size: 12, weight: "semibold", testID: prefix + option.testID + "-checked" }) : null));
       }),
       h(Divider, { paddingY: 8 }),
       h(Text, { size: 14, weight: "medium", color: "accent", testID: prefix + "selected-model-effort" }, effortTitle ? effortTitle.label : picker.selectedEffort),
@@ -126,6 +126,7 @@ function Composer(props) {
     h(Editor, {
       text: model.draft, placeholder: model.placeholder, placeholderTestID: model.prefix + "composer-placeholder",
       enabled: model.enabled, autofocus: model.autofocus, focused: model.focused, focusRequest: model.focusRequest,
+      inputTestID: model.prefix + "message-composer", inputLabel: "Message",
       testID: model.prefix + "message-composer-scroll-view", hint: model.editorHelp,
       onChange: on.change, onSubmit: on.submit, onSteerSubmit: on.steer, onFocusChange: on.focusChange
     }),

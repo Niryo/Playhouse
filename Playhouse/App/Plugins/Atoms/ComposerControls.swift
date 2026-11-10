@@ -12,6 +12,9 @@ struct NativeChatEditor: NSViewRepresentable {
     let isEnabled: Bool
     let autofocusOnAppear: Bool
     let accessibilityHelp: String
+    /// The text view's own accessibility identifier and label.
+    var inputTestID: String?
+    var inputLabel: String?
     let onSubmit: () -> Void
     let onSteerSubmit: () -> Void
     let onPasteImage: (Data) -> Void
@@ -42,8 +45,8 @@ struct NativeChatEditor: NSViewRepresentable {
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.heightTracksTextView = false
         editor.textContainer?.containerSize = NSSize(width: 100, height: CGFloat.greatestFiniteMagnitude)
-        editor.setAccessibilityIdentifier("message-composer")
-        editor.setAccessibilityLabel("Message")
+        editor.setAccessibilityIdentifier(inputTestID)
+        editor.setAccessibilityLabel(inputLabel)
         editor.delegate = context.coordinator
         scroll.documentView = editor
         scroll.onHeightChange = { [weak coordinator = context.coordinator] height in

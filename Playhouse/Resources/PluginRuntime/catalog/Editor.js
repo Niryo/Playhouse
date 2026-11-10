@@ -6,7 +6,7 @@ function Demo() {
   var last = React.useState("none");
   return h(Stack, { axis: "v", spacing: 8, align: "leading" },
     h(Editor, {
-      text: text[0], placeholder: "Message…", placeholderTestID: "editor-placeholder", testID: "editor-demo", width: 360,
+      text: text[0], placeholder: "Message…", placeholderTestID: "editor-placeholder", inputTestID: "editor-input", inputLabel: "Demo message", testID: "editor-demo", width: 360,
       onChange: function (value) { text[1](value); last[1]("change"); },
       onSubmit: function () { last[1]("submit " + text[0]); text[1](""); },
       onSteerSubmit: function () { last[1]("steer"); }

@@ -20516,7 +20516,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(switched["conversationProvider"] as? String, liveProvider)
     }
 
-    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Editor, Popover, StepSlider) and the Task Item, Agents Info, Token Stats, Skills Page and Composer examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
+    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips and Composer examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
     func test_plugin_renderer_commits_minimal_ops_and_runs_handlers() throws {
         executionTimeAllowance = 360 // It opens and checks every atom's catalog page, then exercises each control.
         launchApp(defaultParent: fixture.parent.path)
@@ -20526,12 +20526,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("plugin-catalog-agents-info").exists, "The sidebar lists the Agents Info example.")
         XCTAssertTrue(element("plugin-catalog-token-stats").exists, "The sidebar lists the Token Stats example.")
         XCTAssertTrue(element("plugin-catalog-skills-page").exists, "The sidebar lists the Skills Page example.")
+        XCTAssertTrue(element("plugin-catalog-repository-chips").exists, "The sidebar lists the Repository Chips example.")
         XCTAssertTrue(element("plugin-catalog-composer").exists, "The sidebar lists the Composer example.")
 
         let rendered = try XCTUnwrap(try runCLI(["plugin", "render", "--page", "Stack"])["result"] as? [String: Any])
         let atoms = try XCTUnwrap(rendered["atoms"] as? [String])
         XCTAssertEqual(atoms, ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter",
-                               "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Editor", "Popover", "StepSlider"])
+                               "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Overlay", "Editor", "Popover", "StepSlider"])
         try assertPluginValuesCrossWithJSONRules()
         for atom in atoms {
             let row = catalogSidebarRow("plugin-catalog-atom-\(atom)")
@@ -20633,6 +20634,13 @@ final class PlayhouseUITests: XCTestCase {
         field.click()
         field.typeText("release")
         XCTAssertTrue(waitUntil({ self.pluginText(self.element("text-field-value")) == "Text: release" }, timeout: 5), "onChange received the typed text.")
+        field.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("text-field-key")) == "Key: down" }, timeout: 5), "Down ran onArrow with its direction.")
+        field.typeKey(.upArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("text-field-key")) == "Key: up" }, timeout: 5), "Up ran onArrow with its direction.")
+        field.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("text-field-key")) == "Key: return" }, timeout: 5), "Return ran onSubmit.")
+        XCTAssertEqual(field.value as? String, "release", "The handled keys leave the text alone.")
         attachScreenshot(named: "TextField atom after typing")
         element("text-field-clear").click()
         XCTAssertTrue(waitUntil({ (field.value as? String ?? "") == "" && self.pluginText(self.element("text-field-value")) == "Text: " }, timeout: 5),
@@ -20665,6 +20673,19 @@ final class PlayhouseUITests: XCTestCase {
         area.press(forDuration: 1.0)
         XCTAssertTrue(waitUntil({ self.pluginText(self.element("press-area-count")) == "Clicked 1 · held 1" }, timeout: 5), "A press and hold runs onLongPress, not onPress.")
         attachScreenshot(named: "PressArea atom after a click and a press and hold")
+
+        catalogSidebarRow("plugin-catalog-atom-Overlay").click()
+        let overlaid = element("overlay-base")
+        let overlayBadge = element("overlay-badge")
+        XCTAssertTrue(overlaid.waitToExist(timeout: 10) && overlayBadge.waitToExist(timeout: 10))
+        // The overlay's accessibility frame spans the badge too; its layout is the chip's, so the next row sits 12 points below the chip.
+        XCTAssertEqual(element("overlay-count").frame.minY, overlaid.frame.maxY + 12, accuracy: 1.5, "The badge drawn over the chip leaves it its own size.")
+        XCTAssertEqual(overlayBadge.frame.width, 20, accuracy: 1)
+        XCTAssertEqual(overlayBadge.frame.midX, overlaid.frame.maxX + 6 - 10, accuracy: 1.5, "The badge sits on the chip's trailing edge, moved 6 points out.")
+        XCTAssertEqual(overlayBadge.frame.midY, overlaid.frame.minY - 6 + 10, accuracy: 1.5, "The badge sits on the chip's top edge, moved 6 points up.")
+        overlayBadge.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("overlay-count")) == "Pressed the badge 1 times" }, timeout: 5), "The badge runs its own onPress.")
+        attachScreenshot(named: "Overlay atom: a badge on a chip's top trailing corner")
     }
 
     /// Commits, props and event values cross as JavaScript values, not JSON
@@ -21081,13 +21102,13 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Token Stats: the counter reopened the JavaScript modal")
     }
 
-    // case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
+    // case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
     func test_debug_highlight_native_atoms_outlines_atoms() throws {
         launchApp(defaultParent: fixture.parent.path)
         let rendered = try XCTUnwrap(try runCLI(["plugin", "render", "--page", "Card"])["result"] as? [String: Any])
         let atoms = try XCTUnwrap(rendered["atoms"] as? [String])
         let containers = Set(try XCTUnwrap(rendered["containerAtoms"] as? [String]))
-        XCTAssertEqual(containers, ["Stack", "Panel", "Card", "Scroll", "Disclosure"], "Only the structural atoms are containers.")
+        XCTAssertEqual(containers, ["Stack", "Panel", "Card", "Scroll", "Disclosure", "Overlay", "Popover"], "Only the structural atoms are containers.")
         XCTAssertTrue(containers.isSubset(of: Set(atoms)), "Every container is a known atom.")
         let highlight = NSPredicate(format: "identifier IN %@", ["atom-highlight-container", "atom-highlight-leaf"])
         func outlines(in root: XCUIElement, _ atom: String? = nil) -> XCUIElementQuery {
@@ -21395,9 +21416,173 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Skills page: the Skills button reopened the JavaScript page")
     }
 
-    // case-contract: test_plugin_composer_renders_from_atoms_like_native | The Plugin Catalog's Composer page shows the conversation composer's box composed in JavaScript from atoms above the native SwiftUI box the conversation uses, built from the same atoms and sample data, each as wide as the page's 764-point column and with the composer's identifiers (the native side prefixed native-), and the JavaScript tree uses only atoms (Panel, Stack, Editor, Button, Icon, Menu, Spacer, Popover, Text, Divider, StepSlider). Both show the editor with its message placeholder, the Skills button (the plain Button atom with the sparkles icon, labelled Skills), the plus mode menu, the Claude provider menu, the Sonnet 5.5 model button with its Medium effort, the schedule button and a send button that is disabled while the draft is empty, each at the same size in both. Typing in the JavaScript editor runs onChange (Last: edit) and enables Send, Send runs its handler (Last: send followed by the draft) and clears the editor, and the native editor keeps its own text. The plus menu runs onMenu with the item's id: Plan mode (Last: mode mode:plan) shows Plan beside the plus and the Start Implementing button, and Goal (Last: mode goal) shows Goal with the scope symbol and the goal placeholder; choosing Codex in the provider menu runs onMenu (Last: provider codex) and shows its title. The model button runs onPress and opens its popover (Last: model picker open) listing the models with a checkmark on the current one and the effort slider; choosing a model runs onPress (Last: model claude-opus-5-5) and changes the button's model name, moving the effort slider runs onChange with the effort's value (Last: effort high) and changes the button's effort, and Escape or a click outside the popover runs onDismiss (Last: model picker closed). The schedule button opens its popover (Last: schedule open), whose content stays native. The conversation's own composer is this box: the notices, attached images, queued follow-ups and goal row above it stay native, and every identifier its controls had is unchanged.
+    // case-contract: test_plugin_repository_chips_renders_from_atoms_like_native | The Plugin Catalog's Repository Chips page shows the task header's repository chips and the Add repository picker their + button opens, composed in JavaScript from atoms beside the native SwiftUI chips and picker the task header uses, built from the same atoms and sample models. Both show a capsule chip per repository (the branch icon and its name) carrying a 20-point circular remove badge on its top trailing corner, the 28-point circular + button labelled Add repository, and the picker: Suggestions from the suggestion folder with its Change… button, the search with the saved repositories' placeholder, the Recent header and one row per recent repository (its name and path) with the first highlighted, in a 280-point list that stops growing at 180 points and scrolls, each at the same size in both, and the JavaScript tree uses only atoms (Overlay, Panel, Stack, Text, Icon, Button, Spacer, TextField, Scroll) with the task header's identifiers. Typing in the JavaScript search runs onChange (Last: search pla); Down and Up run onArrow (Last: down, then Last: up) and move the highlight while the native picker's highlight stays put; Return runs onSubmit with the highlighted row (Last: submit wix-one-app) and closes the picker; the + button shows it again (Last: open picker) and hides it (Last: close picker); clicking a row runs its onPress (Last: select Viband); Change… runs its handler (Last: choose folder); clicking a chip runs its onPress (Last: edit infragod) without re-rendering the other chip; and its remove badge removes it (Last: remove infragod) while the native chips keep theirs. A chip raises no onChange, so sending it one is refused as invalid_argument.
+    func test_plugin_repository_chips_renders_from_atoms_like_native() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Plugin Catalog")
+        let example = catalogSidebarRow("plugin-catalog-repository-chips")
+        XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Repository Chips example.")
+        example.click()
+        let jsSide = element("plugin-catalog-js-repository-chips")
+        let nativeSide = element("plugin-catalog-native-repository-chips")
+        XCTAssertTrue(jsSide.waitToExist(timeout: 10), "The page shows the JavaScript chips and picker.")
+        XCTAssertTrue(nativeSide.waitToExist(timeout: 10), "The page shows the native chips and picker.")
+        XCTAssertFalse(element("plugin-error").exists, "The JavaScript page renders without errors.")
+        XCTAssertFalse(element("plugin-node-error").exists, "Every node on the JavaScript page has a registered atom.")
+
+        func js(_ identifier: String) -> XCUIElement {
+            jsSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func native(_ identifier: String) -> XCUIElement {
+            nativeSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func pair(_ identifier: String) -> (js: XCUIElement, native: XCUIElement) {
+            (js(identifier), native("native-\(identifier)"))
+        }
+        func assertSameSize(_ identifier: String) {
+            let (js, native) = pair(identifier)
+            XCTAssertTrue(js.waitToExist(timeout: 10), "The JavaScript side has \(identifier).")
+            XCTAssertTrue(native.waitToExist(timeout: 10), "The native side has \(identifier).")
+            XCTAssertEqual(js.frame.width, native.frame.width, accuracy: 1, "\(identifier) has the same width in both.")
+            XCTAssertEqual(js.frame.height, native.frame.height, accuracy: 1, "\(identifier) has the same height in both.")
+        }
+        let commit = jsSide.descendants(matching: .any).matching(identifier: "plugin-last-commit").firstMatch
+        let lastAction = js("js-last-action")
+        let nativeLastAction = native("native-last-action")
+
+        for identifier in ["conversation-repository-badge-infragod", "remove-conversation-repository-infragod", "conversation-repository-badge-Playhouse",
+                           "remove-conversation-repository-Playhouse", "add-conversation-repository-button",
+                           "conversation-repository-suggestion-parent", "choose-repository-suggestion-parent-button", "conversation-repository-search",
+                           "conversation-repository-recent-header", "conversation-repository-list", "conversation-repository-recent-mre",
+                           "conversation-repository-recent-wix-one-app", "conversation-repository-recent-Viband"] {
+            assertSameSize(identifier)
+        }
+        // The picker is the panel's only child, so the two share one accessibility element: the panel's.
+        let jsPicker = js("js-repository-picker-panel")
+        let nativePicker = native("native-repository-picker-panel")
+        XCTAssertEqual(jsPicker.frame.size, nativePicker.frame.size, "The picker is the same size in both.")
+        XCTAssertEqual(jsPicker.frame.width, 304, accuracy: 1, "The picker is 304 points wide: a 280-point column inside 12 points of padding.")
+        // The chip and its remove badge, as the header's own chips are checked.
+        let chip = js("conversation-repository-badge-infragod")
+        let remove = js("remove-conversation-repository-infragod")
+        XCTAssertGreaterThanOrEqual(chip.frame.height, 28, "A chip is prominent.")
+        XCTAssertEqual(remove.frame.width, 20, accuracy: 1, "The remove badge is a 20-point circle.")
+        XCTAssertEqual(remove.frame.height, 20, accuracy: 1)
+        XCTAssertGreaterThan(remove.frame.midX, chip.frame.midX, "The remove badge sits on the chip's trailing corner.")
+        XCTAssertLessThan(remove.frame.midY, chip.frame.midY, "The remove badge sits on the chip's top corner.")
+        XCTAssertEqual(remove.label, "Remove infragod")
+        let add = pair("add-conversation-repository-button")
+        XCTAssertEqual(add.js.frame.width, 28, accuracy: 1, "The + button is a 28-point circle.")
+        XCTAssertEqual(add.js.frame.height, 28, accuracy: 1)
+        XCTAssertEqual(add.js.label, "Add repository")
+        XCTAssertEqual(add.native.label, "Add repository")
+        XCTAssertEqual(pluginText(js("conversation-repository-suggestion-parent")), "Suggestions from /Users/demo/git")
+        XCTAssertEqual(js("conversation-repository-search").placeholderValue, "infragod, Playhouse ↵", "The search shows the saved repositories.")
+        XCTAssertEqual(pair("conversation-repository-list").js.frame.height, 180, accuracy: 1, "Five rows would be 210 points; the list stops at 180.")
+        XCTAssertEqual(pair("conversation-repository-list").js.frame.width, 280, accuracy: 1)
+        // A row is one button whose label joins its name and the path under it.
+        for row in [js("conversation-repository-recent-wix-one-app"), native("native-conversation-repository-recent-wix-one-app")] {
+            XCTAssertEqual(row.label, "wix-one-app, /Users/demo/git/wix-one-app", "A row shows its path under its name.")
+        }
+        attachScreenshot(named: "Repository chips: JavaScript beside native, the picker on Recent")
+        // Five rows don't fit in 180 points: the last is below the fold until the list scrolls.
+        for (list, last) in [(js("conversation-repository-list"), js("conversation-repository-recent-zmk-config")),
+                             (native("native-conversation-repository-list"), native("native-conversation-repository-recent-zmk-config"))] {
+            XCTAssertTrue(last.waitToExist(timeout: 5))
+            XCTAssertGreaterThan(last.frame.maxY, list.frame.maxY + 1, "The last row starts below the list's bottom edge.")
+            list.scroll(byDeltaX: 0, deltaY: -200)
+            XCTAssertTrue(waitUntil({ last.frame.maxY <= list.frame.maxY + 1 && last.isHittable }, timeout: 5), "Scrolling the list reaches its last row.")
+            XCTAssertEqual(list.frame.height, 180, accuracy: 1, "Scrolling leaves the list 180 points tall.")
+            list.scroll(byDeltaX: 0, deltaY: 200)
+        }
+        attachScreenshot(named: "Repository chips: the picker lists scrolled back to the top")
+
+        // The search: typing runs onChange, the arrows run onArrow, Return runs onSubmit.
+        let search = js("conversation-repository-search")
+        search.click()
+        search.typeText("pla")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: search pla" }, timeout: 5), "Typing in the search ran onChange with the text.")
+        search.typeKey("a", modifierFlags: .command)
+        search.typeKey(XCUIKeyboardKey.delete.rawValue, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (search.value as? String ?? "") == "" }, timeout: 5), "The search is empty again, so the recent rows show.")
+        search.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: down" }, timeout: 5), "Down ran onArrow.")
+        search.typeKey(.downArrow, modifierFlags: [])
+        search.typeKey(.upArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: up" }, timeout: 5), "Up ran onArrow.")
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).contains("update") }, timeout: 5), "Moving the highlight updated the rows' panels: \(pluginText(commit))")
+        attachScreenshot(named: "Repository chips: the JavaScript highlight moved to wix-one-app")
+        search.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: submit wix-one-app" }, timeout: 5), "Return added the highlighted row.")
+        XCTAssertTrue(waitUntil({ !jsPicker.exists }, timeout: 5), "Adding closed the JavaScript picker.")
+        XCTAssertTrue(nativePicker.exists, "The native picker stays open.")
+        // The native highlight never moved: its Return adds the first row.
+        let nativeSearch = native("native-conversation-repository-search")
+        nativeSearch.click()
+        nativeSearch.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ self.pluginText(nativeLastAction) == "Last: submit mre" }, timeout: 5), "The native picker keeps its own highlight.")
+        XCTAssertTrue(waitUntil({ !nativePicker.exists }, timeout: 5))
+
+        // The + button shows and hides the picker.
+        js("add-conversation-repository-button").click()
+        XCTAssertTrue(jsPicker.waitToExist(timeout: 5), "The + button showed the picker again.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: open picker" }, timeout: 5))
+        js("add-conversation-repository-button").click()
+        XCTAssertTrue(waitUntil({ !jsPicker.exists && self.pluginText(lastAction) == "Last: close picker" }, timeout: 5),
+                      "The + button hid the picker.")
+        js("add-conversation-repository-button").click()
+        XCTAssertTrue(js("conversation-repository-recent-Viband").waitToExist(timeout: 5))
+        js("conversation-repository-recent-Viband").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: select Viband" }, timeout: 5), "Clicking a row ran its onPress.")
+        js("add-conversation-repository-button").click()
+        XCTAssertTrue(js("choose-repository-suggestion-parent-button").waitToExist(timeout: 5))
+        js("choose-repository-suggestion-parent-button").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: choose folder" }, timeout: 5), "Change… ran its handler.")
+
+        // A chip opens its settings; its remove badge removes it.
+        chip.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: edit infragod" }, timeout: 5), "Clicking a chip ran its onPress.")
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).contains(": text → node ") }, timeout: 5), "Clicking a chip re-rendered no chip: \(pluginText(commit))")
+        remove.click()
+        XCTAssertTrue(waitUntil({ !js("conversation-repository-badge-infragod").exists }, timeout: 5), "The remove badge removed its chip.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: remove infragod" }, timeout: 5))
+        XCTAssertTrue(js("conversation-repository-badge-Playhouse").exists)
+        XCTAssertTrue(native("native-conversation-repository-badge-infragod").exists, "The native chips keep theirs.")
+        attachScreenshot(named: "Repository chips: the JavaScript infragod chip removed, native kept")
+    }
+
+    // case-contract: test_plugin_composer_renders_from_atoms_like_native | The Plugin Catalog's Composer page shows the conversation composer's box composed in JavaScript from atoms above the native SwiftUI box the conversation uses, built from the same atoms and sample data, each as wide as the page's 764-point column and with the composer's identifiers (the native side prefixed native-), and the JavaScript tree uses only atoms (Panel, Stack, Editor, Button, Icon, Menu, Spacer, Popover, Text, Divider, StepSlider). Both show the editor with its message placeholder, the Skills button (the plain Button atom with the sparkles icon, labelled Skills), the plus mode menu, the Claude provider menu, the Sonnet 5.5 model button with its Medium effort, the schedule button and a send button that is disabled while the draft is empty, each at the same size in both. Typing in the JavaScript editor runs onChange (Last: edit) and enables Send, Send runs its handler (Last: send followed by the draft) and clears the editor, and the native editor keeps its own text. The plus menu runs onMenu with the item's id: Plan mode (Last: mode mode:plan) labels the menu Conversation mode: Plan mode and shows the Start Implementing button, and Goal (Last: mode goal) labels the menu Goal and shows the goal placeholder; choosing Codex in the provider menu runs onMenu (Last: provider codex) and shows its title. The model button runs onPress and opens its popover (Last: model picker open) listing the models with the current one checked and the effort slider; choosing a model runs onPress (Last: model claude-opus-5-5), checks it instead and changes the button's model name, moving the effort slider to its last step runs onChange with that effort's value (Last: effort xhigh) and changes the button's effort to Extra High, and Escape runs onDismiss (Last: model picker closed). The schedule button opens its popover (Last: schedule open), whose content stays native. The conversation's own composer is this box: with Debug ▸ Highlight Native Atoms on, a task's composer shows its editor as an Editor atom, its model button in a Popover atom and its mode and provider menus as Menu atoms, with every identifier its controls had unchanged. A Popover shows the children after its first (its anchor) in the popover, so one with only an anchor is valid.
     func test_plugin_composer_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
+        // A task's conversation composes its composer box from atoms: with Highlight
+        // Native Atoms on, its editor is an Editor atom and its model button sits in a Popover atom.
+        _ = try runCLI(["task", "create", "--title", "Atom composer", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
+        openTask(named: "Atom composer")
+        let conversationEditor = element("message-composer")
+        XCTAssertTrue(conversationEditor.waitToExist(timeout: 15), "The conversation shows its composer.")
+        clickDebugHighlightNativeAtoms()
+        let highlight = NSPredicate(format: "identifier IN %@", ["atom-highlight-container", "atom-highlight-leaf"])
+        func outlines(_ atom: String) -> XCUIElementQuery {
+            element("chat-composer").descendants(matching: .any).matching(highlight).matching(NSPredicate(format: "label == %@", atom))
+        }
+        XCTAssertTrue(waitUntil({ outlines("Editor").count == 1 }, timeout: 5), "The conversation's editor is the Editor atom.")
+        XCTAssertEqual(outlines("Editor").firstMatch.identifier, "atom-highlight-leaf")
+        XCTAssertGreaterThanOrEqual(outlines("Popover").count, 1, "The model button sits in a Popover atom.")
+        XCTAssertEqual(outlines("Popover").firstMatch.identifier, "atom-highlight-container")
+        XCTAssertTrue(outlines("Menu").count >= 2, "The mode and provider menus are Menu atoms.")
+        for identifier in ["message-composer-scroll-view", "open-skills-button", "conversation-mode-menu", "conversation-provider-menu", "model-picker-menu", "send-message-button"] {
+            XCTAssertTrue(element(identifier).exists, "The conversation's composer keeps \(identifier).")
+        }
+        attachScreenshot(named: "Composer: the conversation's composer outlined as atoms")
+        clickDebugHighlightNativeAtoms()
+        XCTAssertTrue(waitUntil({ outlines("Editor").count == 0 }, timeout: 5))
+
+        // A Popover shows the children after its anchor; one with only an anchor is valid.
+        let loneAnchor = dataDirectory.appendingPathComponent("plugin-lone-popover.js")
+        try #"Playhouse.render(h(Popover, { isPresented: false }, h(Text, null, "Anchor")));"#.write(to: loneAnchor, atomically: true, encoding: .utf8)
+        let lone = try XCTUnwrap(try runCLI(["plugin", "render", "--file", loneAnchor.path])["result"] as? [String: Any])
+        XCTAssertEqual((lone["errors"] as? [String])?.count, 0, "A Popover with only an anchor renders without errors: \(lone)")
+
         clickPluginsMenuItem("Plugin Catalog")
         let example = catalogSidebarRow("plugin-catalog-composer")
         XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Composer example.")
@@ -21443,6 +21628,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(native("native-send-message-button").isEnabled)
         XCTAssertLessThanOrEqual(jsSide.frame.maxY, nativeSide.frame.minY + 1, "The JavaScript composer sits above the native one.")
         XCTAssertTrue(jsSide.staticTexts["Message…"].exists && nativeSide.staticTexts["Message…"].exists, "Both editors show their placeholder.")
+        // The box fills the 764-point column: its editor is the column less the box's 13-point padding.
+        XCTAssertEqual(pair("message-composer-scroll-view").js.frame.width, 738, accuracy: 1, "The JavaScript composer is 764 points wide.")
+        XCTAssertEqual(pair("message-composer-scroll-view").native.frame.width, 738, accuracy: 1, "The native composer is 764 points wide.")
         attachScreenshot(named: "Composer: JavaScript above native, both empty")
 
         // Typing runs onChange and enables Send; Send runs its handler and clears the editor. Each side keeps its own text.
@@ -21459,7 +21647,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: send hello" }, timeout: 5), "Send ran its handler with the draft.")
         XCTAssertTrue(waitUntil({ jsSide.staticTexts["Message…"].exists && !js("send-message-button").isEnabled }, timeout: 5), "Send cleared the editor.")
 
-        let nativeEditor = nativeSide.descendants(matching: .textView).matching(identifier: "message-composer").firstMatch
+        let nativeEditor = nativeSide.descendants(matching: .textView).matching(identifier: "native-message-composer").firstMatch
         nativeEditor.click()
         nativeEditor.typeText("hi")
         XCTAssertTrue(waitUntil({ self.pluginText(lastNative) == "Last: edit" && native("native-send-message-button").isEnabled }, timeout: 5), "The native editor ran its action too.")
@@ -21475,6 +21663,8 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(waitUntil({ self.pluginText(last) == "Last: mode mode:plan" }, timeout: 5), "Plan mode ran onMenu with its id.")
             XCTAssertTrue(side.descendants(matching: .any).matching(identifier: "\(prefix)start-implementing-button").firstMatch.waitToExist(timeout: 5),
                           "Plan mode shows Start Implementing.")
+            XCTAssertEqual(side.descendants(matching: .any).matching(identifier: "\(prefix)conversation-mode-menu").firstMatch.label, "Conversation mode: Plan mode",
+                           "Plan mode labels the plus menu.")
         }
         assertSameSize("start-implementing-button")
         assertSameSize("conversation-mode-menu")
@@ -21484,6 +21674,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: mode goal" }, timeout: 5), "Goal ran onMenu with its id.")
         XCTAssertFalse(js("start-implementing-button").exists, "Leaving Plan mode hides Start Implementing.")
         XCTAssertTrue(jsSide.staticTexts["Set a goal to keep pursuing"].exists, "Goal shows its placeholder.")
+        XCTAssertEqual(js("conversation-mode-menu").label, "Goal", "Goal labels the plus menu.")
         js("conversation-provider-menu").click()
         app.menuItems["Codex"].click()
         XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: provider codex" && js("conversation-provider-menu").label == "Provider: Codex" }, timeout: 5),
@@ -21495,13 +21686,18 @@ final class PlayhouseUITests: XCTestCase {
         let option = app.buttons["model-option-claude-opus-5-5"]
         XCTAssertTrue(option.waitToExist(timeout: 5), "The popover lists the models.")
         XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "model-effort-slider").firstMatch.exists, "The popover shows the effort slider.")
+        // A checked model's button reads Selected; its checkmark is part of the button.
+        XCTAssertEqual(app.buttons["model-option-claude-sonnet-5-5"].value as? String, "Selected", "The current model is checked.")
+        XCTAssertEqual(option.value as? String, "Not selected")
         attachScreenshot(named: "Composer: the JavaScript model popover")
         option.click()
         XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: model claude-opus-5-5" && js("model-picker-menu").label.hasPrefix("Model: Opus 5.5") }, timeout: 5),
                       "Choosing a model ran onPress and changed the model button.")
+        XCTAssertTrue(waitUntil({ option.value as? String == "Selected" && self.app.buttons["model-option-claude-sonnet-5-5"].value as? String == "Not selected" }, timeout: 5),
+                      "The chosen model is checked instead.")
         let slider = app.descendants(matching: .any).matching(identifier: "model-effort-slider").firstMatch
         slider.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).click()
-        XCTAssertTrue(waitUntil({ self.pluginText(lastJS).hasPrefix("Last: effort") && js("model-picker-menu").label.hasSuffix("effort: Extra High") }, timeout: 5),
+        XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: effort xhigh" && js("model-picker-menu").label == "Model: Opus 5.5, effort: Extra High" }, timeout: 5),
                       "Moving the slider ran onChange with the effort's value.")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(waitUntil({ self.pluginText(lastJS) == "Last: model picker closed" }, timeout: 5), "Escape ran onDismiss.")

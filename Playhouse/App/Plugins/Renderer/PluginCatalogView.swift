@@ -64,7 +64,8 @@ private struct PluginCommitReadout: View {
 
 /// The Plugins menu's catalog: every atom rendered by its JavaScript page, and
 /// the native composites (the task item, the Agents info section, the Token
-/// Stats modal, the Skills page, the composer) composed in JavaScript beside the native ones.
+/// Stats modal, the Skills page, the repository chips and picker, the
+/// composer) composed in JavaScript beside the native ones.
 struct PluginCatalogView: View {
     private enum Page: Hashable {
         case atom(AtomType)
@@ -72,6 +73,7 @@ struct PluginCatalogView: View {
         case agentsInfo
         case tokenStats
         case skillsPage
+        case repositoryChips
         case composer
     }
 
@@ -100,6 +102,9 @@ struct PluginCatalogView: View {
                     Text("Skills Page")
                         .tag(Page.skillsPage)
                         .accessibilityIdentifier("plugin-catalog-skills-page")
+                    Text("Repository Chips")
+                        .tag(Page.repositoryChips)
+                        .accessibilityIdentifier("plugin-catalog-repository-chips")
                     Text("Composer")
                         .tag(Page.composer)
                         .accessibilityIdentifier("plugin-catalog-composer")
@@ -119,6 +124,8 @@ struct PluginCatalogView: View {
                     TokenStatsComparison()
                 case .skillsPage?:
                     SkillsPageComparison()
+                case .repositoryChips?:
+                    RepositoryChipsComparison()
                 case .composer?:
                     ComposerComparison()
                 case nil:
@@ -558,9 +565,128 @@ private struct NativeSkillsPageDemo: View {
     }
 }
 
+/// The JavaScript repository chips and picker beside the native ones, from the
+/// same sample models. The header presents the picker as a popover from the
+/// + button; here each side shows it in a panel under its chips, and its +
+/// button shows and hides it. Each side keeps its own state; the native side
+/// uses a "native-" prefix so the two never share accessibility identifiers.
+private struct RepositoryChipsComparison: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Repository Chips")
+                .font(.title2.weight(.semibold))
+                .accessibilityIdentifier("plugin-catalog-title")
+            if let page = catalogPage("RepositoryChips"),
+               let sample = try? Self.sample(page.props) {
+                HStack(alignment: .top, spacing: 28) {
+                    comparisonColumn("JavaScript (React → atoms)", width: 360) {
+                        PluginSurface(source: page.source, name: "RepositoryChips.js", props: page.props)
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("plugin-catalog-js-repository-chips")
+                    comparisonColumn("Native SwiftUI (atoms)", width: 360) {
+                        NativeRepositoryChipsDemo(sample: sample)
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("plugin-catalog-native-repository-chips")
+                }
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    struct Sample: Decodable {
+        var repositoryChips: RepositoryChipsModel
+        var repositoryPicker: RepositoryPickerModel
+    }
+
+    static func sample(_ props: [String: PluginValue]) throws -> Sample {
+        try PluginValueDecoder.decode(Sample.self, from: .object(props))
+    }
+}
+
+/// The native chips and picker with the same demo state as RepositoryChips.js, built from the same atoms.
+private struct NativeRepositoryChipsDemo: View {
+    let sample: RepositoryChipsComparison.Sample
+    @State private var chips: [RepositoryChipsModel.Chip]?
+    @State private var open = true
+    @State private var search: String?
+    @State private var highlighted: Int?
+    @State private var lastAction = "none"
+
+    private var chipsModel: RepositoryChipsModel {
+        var model = sample.repositoryChips
+        model.prefix = "native-"
+        model.chips = chips ?? model.chips
+        return model
+    }
+
+    private var pickerModel: RepositoryPickerModel {
+        var model = sample.repositoryPicker
+        model.prefix = "native-"
+        model.search = search ?? model.search
+        model.highlighted = highlighted ?? model.highlighted
+        return model
+    }
+
+    private func name(_ path: String, in names: [(path: String, name: String)]) -> String {
+        names.first { $0.path == path }?.name ?? path
+    }
+
+    var body: some View {
+        let chipsModel = chipsModel
+        let pickerModel = pickerModel
+        let chipNames = chipsModel.chips.map { (path: $0.path, name: $0.name) }
+        let repositoryNames = pickerModel.repositories.map { (path: $0.path, name: $0.name) }
+        AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
+            AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
+            RepositoryChipsView(model: chipsModel, actions: RepositoryChipsActions(
+                edit: { lastAction = "edit \(name($0, in: chipNames))" },
+                remove: { path in
+                    chips = chipsModel.chips.filter { $0.path != path }
+                    lastAction = "remove \(name(path, in: chipNames))"
+                },
+                add: {
+                    lastAction = open ? "close picker" : "open picker"
+                    open.toggle()
+                }
+            ))
+            if open {
+                AtomPanel(
+                    props: PanelProps(fill: "window", fillOpacity: 1, cornerRadius: 10, stroke: "primary", strokeOpacity: 0.12),
+                    common: AtomCommon(testID: "native-repository-picker-panel")
+                ) {
+                    RepositoryPickerView(model: pickerModel, actions: RepositoryPickerActions(
+                        chooseParent: { lastAction = "choose folder" },
+                        search: { text in
+                            search = text
+                            highlighted = 0
+                            lastAction = "search \(text)"
+                        },
+                        arrow: { direction in
+                            let count = pickerModel.repositories.count
+                            highlighted = direction == "down" ? min(pickerModel.highlighted + 1, count - 1) : max(pickerModel.highlighted - 1, 0)
+                            lastAction = direction
+                        },
+                        submit: {
+                            let shown = pickerModel.repositories
+                            open = false
+                            lastAction = "submit \(shown.indices.contains(pickerModel.highlighted) ? shown[pickerModel.highlighted].name : "saved")"
+                        },
+                        select: { path in
+                            open = false
+                            lastAction = "select \(name(path, in: repositoryNames))"
+                        }
+                    ))
+                }
+            }
+        }
+    }
+}
 
 /// The JavaScript composer box above the native one, from the same sample
-/// model, each 640 points wide. Each side keeps its own state; the native one
+/// model, each 764 points wide (the conversation's composer column). Each side keeps its own state; the native one
 /// uses a "native-" prefix so the two never share accessibility identifiers.
 private struct ComposerComparison: View {
     var body: some View {

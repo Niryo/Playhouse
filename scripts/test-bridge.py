@@ -14646,7 +14646,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         path.write_text(source, encoding="utf-8")
         return self.call_cli("plugin", "render", "--file", path, *options, expected_status=expected_status)[0]
 
-    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Editor, Popover, StepSlider) and the Task Item, Agents Info, Token Stats, Skills Page and Composer examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
+    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips and Composer examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
     def test_plugin_renderer_commits_minimal_ops_and_runs_handlers(self):
         plugin = """
 function App() {
@@ -14666,7 +14666,7 @@ Playhouse.render(h(App));
 """
         rendered = self.assert_success(self.render_plugin(plugin))
         self.assertEqual(rendered["atoms"], ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter",
-                                             "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Editor", "Popover", "StepSlider"],
+                                             "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Overlay", "Editor", "Popover", "StepSlider"],
                          "Plugins compose exactly the native composites' atoms.")
         self.assertEqual(rendered["errors"], [])
         self.assertEqual(len(rendered["commits"]), 1, "The first render is one commit.")
@@ -14741,12 +14741,13 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertTrue(any("Invalid commit" in error and "integer" in error for error in out_of_range["result"]["errors"]),
                         f"An op whose node id is out of range is reported, not a crash: {out_of_range['result']['errors']}")
 
-        for page in ["AgentsInfo", "Button", "Card", "ChoiceBar", "Composer", "Disclosure", "Divider", "Editor", "Icon", "Label", "Link", "Menu", "Meter", "Panel", "PillPicker",
-                     "Popover", "PressArea", "Scroll", "Segmented", "SkillsPage", "Spacer", "Spinner", "Stack", "StepSlider", "TaskItem", "Text", "TextField", "Toggle", "TokenStats"]:
+        for page in ["AgentsInfo", "Button", "Card", "ChoiceBar", "Composer", "Disclosure", "Divider", "Editor", "Icon", "Label", "Link", "Menu", "Meter", "Overlay",
+                     "Panel", "PillPicker", "Popover", "PressArea", "RepositoryChips", "Scroll", "Segmented", "SkillsPage", "Spacer", "Spinner", "Stack", "StepSlider",
+                     "TaskItem", "Text", "TextField", "Toggle", "TokenStats"]:
             page_render = self.assert_success(self.call_cli("plugin", "render", "--page", page)[0])
             self.assertEqual(page_render["errors"], [], f"The {page} catalog page renders without errors.")
             used = {node["type"] for node in self.plugin_nodes(page_render["tree"])}
-            if page not in ("TaskItem", "AgentsInfo", "TokenStats", "SkillsPage", "Composer"):
+            if page not in ("TaskItem", "AgentsInfo", "TokenStats", "SkillsPage", "RepositoryChips", "Composer"):
                 self.assertIn(page, used, f"The {page} page shows its atom.")
         disclosure = self.assert_success(self.call_cli("plugin", "render", "--page", "Disclosure", "--event", "disclosure-demo:onToggle")[0])
         section = self.plugin_node(disclosure["tree"], "disclosure-demo")
@@ -14781,8 +14782,19 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(set(toggled["commits"][-1]["touchedNodes"]), {switch["id"], state["children"][0]["id"]})
         typed = self.assert_success(self.call_cli("plugin", "render", "--page", "TextField", "--event", "text-field-demo:onChange:release")[0])
         field = self.plugin_node(typed["tree"], "text-field-demo")
-        self.assertEqual((field["events"], field["props"]["text"], field["props"]["placeholder"]), (["onChange"], "release", "Search skills"))
+        self.assertEqual((sorted(field["events"]), field["props"]["text"], field["props"]["placeholder"]), (["onArrow", "onChange", "onSubmit"], "release", "Search skills"))
         self.assertEqual(self.plugin_text(self.plugin_node(typed["tree"], "text-field-value")), "Text: release", "onChange received the new text.")
+        keyed = self.assert_success(self.call_cli("plugin", "render", "--page", "TextField", "--event", "text-field-demo:onArrow:down")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(keyed["tree"], "text-field-key")), "Key: down", "onArrow received the arrow's direction.")
+        submitted = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "TextField", "--event", "text-field-demo:onArrow:up", "--event", "text-field-demo:onSubmit")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(submitted["tree"], "text-field-key")), "Key: return", "Return ran onSubmit.")
+        overlay = self.assert_success(self.call_cli("plugin", "render", "--page", "Overlay", "--event", "overlay-badge:onPress")[0])
+        stacked = self.plugin_node(overlay["tree"], "overlay-demo")
+        self.assertEqual((stacked["props"]["align"], stacked["props"]["offsetX"], stacked["props"]["offsetY"]), ("topTrailing", 6, -6))
+        self.assertEqual([child["props"].get("testID") for child in stacked["children"]], ["overlay-base", "overlay-badge"], "The base first, then what sits over it.")
+        self.assertEqual(self.plugin_text(self.plugin_node(overlay["tree"], "overlay-count")), "Pressed the badge 1 times", "The badge runs its own onPress.")
+        self.assertEqual(overlay["commits"][-1]["ops"], ["text"], "Pressing the badge changes only the readout.")
         segmented = self.assert_success(self.call_cli("plugin", "render", "--page", "Segmented", "--event", "segmented-demo:onChange:global")[0])
         picker = self.plugin_node(segmented["tree"], "segmented-demo")
         self.assertEqual((picker["events"], picker["props"]["selected"]), (["onChange"], "global"))
@@ -15268,6 +15280,110 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(self.plugin_text(self.plugin_node(reopened["tree"], "js-last-action")), "Last: open", "The Skills button opened it again.")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "SkillsPage", "--event", "skills-search:onPress", expected_status=2)[0], "invalid_argument")
 
+    # case-contract: test_plugin_repository_chips_renders_from_atoms_like_native | The Plugin Catalog's Repository Chips page shows the task header's repository chips and the Add repository picker their + button opens, composed in JavaScript from atoms beside the native SwiftUI chips and picker the task header uses, built from the same atoms and sample models. Both show a capsule chip per repository (the branch icon and its name) carrying a 20-point circular remove badge on its top trailing corner, the 28-point circular + button labelled Add repository, and the picker: Suggestions from the suggestion folder with its Change… button, the search with the saved repositories' placeholder, the Recent header and one row per recent repository (its name and path) with the first highlighted, in a 280-point list that stops growing at 180 points and scrolls, each at the same size in both, and the JavaScript tree uses only atoms (Overlay, Panel, Stack, Text, Icon, Button, Spacer, TextField, Scroll) with the task header's identifiers. Typing in the JavaScript search runs onChange (Last: search pla); Down and Up run onArrow (Last: down, then Last: up) and move the highlight while the native picker's highlight stays put; Return runs onSubmit with the highlighted row (Last: submit wix-one-app) and closes the picker; the + button shows it again (Last: open picker) and hides it (Last: close picker); clicking a row runs its onPress (Last: select Viband); Change… runs its handler (Last: choose folder); clicking a chip runs its onPress (Last: edit infragod) without re-rendering the other chip; and its remove badge removes it (Last: remove infragod) while the native chips keep theirs. A chip raises no onChange, so sending it one is refused as invalid_argument.
+    def test_plugin_repository_chips_renders_from_atoms_like_native(self):
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips")[0])
+        self.assertEqual(rendered["errors"], [])
+        tree = rendered["tree"]
+        # The same identifiers the task header's native chips and picker give their atoms.
+        for test_id in ["conversation-repository-badge-infragod", "remove-conversation-repository-infragod", "conversation-repository-badge-Playhouse",
+                        "remove-conversation-repository-Playhouse", "add-conversation-repository-button", "conversation-repository-picker",
+                        "conversation-repository-suggestion-parent", "choose-repository-suggestion-parent-button", "conversation-repository-search",
+                        "conversation-repository-recent-header", "conversation-repository-list", "conversation-repository-recent-mre",
+                        "conversation-repository-recent-wix-one-app", "conversation-repository-recent-zmk-config"]:
+            self.plugin_node(tree, test_id)
+        types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
+        self.assertEqual(types, {"Overlay", "Panel", "Stack", "Text", "Icon", "Button", "Spacer", "TextField", "Scroll"}, "The chips and the picker are atoms only.")
+
+        # A chip: a capsule button with the branch icon and the name, its remove badge over its top trailing corner.
+        chip = self.plugin_node(tree, "conversation-repository-badge-infragod")
+        overlay = next(node for node in self.plugin_nodes(tree) if node["type"] == "Overlay" and chip in node["children"])
+        self.assertEqual((overlay["props"]["align"], overlay["props"]["offsetX"], overlay["props"]["offsetY"]), ("topTrailing", 6, -6))
+        self.assertEqual([child["props"].get("testID") for child in overlay["children"]],
+                         ["conversation-repository-badge-infragod", "remove-conversation-repository-infragod"], "The chip, then its badge over it.")
+        self.assertEqual((chip["type"], chip["events"], chip["props"]["help"], chip["props"]["disabled"]),
+                         ("Button", ["onPress"], "Edit repository settings for infragod", False))
+        capsule = chip["children"][0]
+        self.assertEqual((capsule["type"], capsule["props"]["capsule"], capsule["props"]["fillOpacity"], capsule["props"]["stroke"], capsule["props"]["strokeOpacity"]),
+                         ("Panel", True, 0.08, "primary", 0.14))
+        label = capsule["children"][0]["children"]
+        self.assertEqual((label[0]["props"]["name"], label[0]["props"]["color"]), ("arrow.triangle.branch", "#007ACC"), "The workspace accent.")
+        self.assertEqual((self.plugin_text(label[1]), label[1]["props"]["size"], label[1]["props"]["weight"]), ("infragod", 13, "semibold"))
+        remove = self.plugin_node(tree, "remove-conversation-repository-infragod")
+        self.assertEqual((remove["props"]["label"], remove["props"]["help"]), ("Remove infragod", "Remove infragod from this task"))
+        badge = remove["children"][0]
+        self.assertEqual((badge["props"]["capsule"], badge["props"]["width"], badge["props"]["height"], badge["props"]["fill"]), (True, 20, 20, "panel"))
+        self.assertEqual(badge["children"][0]["props"]["name"], "xmark")
+        add = self.plugin_node(tree, "add-conversation-repository-button")
+        self.assertEqual((add["props"]["label"], add["props"]["help"], add["props"]["disabled"]), ("Add repository", "Add a repository", False))
+        circle = add["children"][0]
+        self.assertEqual((circle["props"]["capsule"], circle["props"]["width"], circle["props"]["height"], circle["children"][0]["props"]["name"]), (True, 28, 28, "plus"))
+
+        # The picker: where suggestions come from, the search, then the recent repositories.
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "conversation-repository-suggestion-parent")), "Suggestions from /Users/demo/git")
+        change = self.plugin_node(tree, "choose-repository-suggestion-parent-button")
+        self.assertEqual((change["props"]["style"], change["props"]["disabled"], self.plugin_text(change["children"][0])), ("automatic", False, "Change…"))
+        search = self.plugin_node(tree, "conversation-repository-search")
+        self.assertEqual((search["props"]["text"], search["props"]["placeholder"], sorted(search["events"])),
+                         ("", "infragod, Playhouse ↵", ["onArrow", "onChange", "onSubmit"]))
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "conversation-repository-recent-header")), "Recent")
+        scroll = self.plugin_node(tree, "conversation-repository-list")
+        self.assertEqual((scroll["props"]["width"], scroll["props"]["height"], scroll["props"]["lazy"]), (280, 180, True), "Five rows would be 210 points; the list stops at 180.")
+        self.assertIn(self.plugin_node(tree, "conversation-repository-recent-zmk-config"), scroll["children"], "The rows past 180 points stay in the scrolling list.")
+        self.assertEqual(len(scroll["children"]), 5)
+        def row_fill(tree, name):
+            return self.plugin_node(tree, f"conversation-repository-recent-{name}")["children"][0]["props"]["fillOpacity"]
+        first = self.plugin_node(tree, "conversation-repository-recent-mre")
+        self.assertEqual(first["props"]["help"], "Select repository")
+        self.assertEqual([self.plugin_text(text) for text in first["children"][0]["children"]], ["mre", "/Users/demo/git/mre"])
+        self.assertEqual((row_fill(tree, "mre"), row_fill(tree, "wix-one-app")), (0.16, 0), "The first row is highlighted.")
+
+        searched = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-search:onChange:pla")[0])
+        self.assertEqual(self.plugin_node(searched["tree"], "conversation-repository-search")["props"]["text"], "pla", "onChange received the search text.")
+        self.assertEqual(self.plugin_text(self.plugin_node(searched["tree"], "js-last-action")), "Last: search pla")
+
+        moved = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-search:onArrow:down",
+            "--event", "conversation-repository-search:onArrow:down", "--event", "conversation-repository-search:onArrow:up")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(moved["tree"], "js-last-action")), "Last: up")
+        self.assertEqual((row_fill(moved["tree"], "mre"), row_fill(moved["tree"], "wix-one-app"), row_fill(moved["tree"], "Viband")), (0, 0.16, 0),
+                         "Down, Down, Up highlights the second row.")
+        down = next(commit for commit in moved["commits"] if commit["step"] == "conversation-repository-search:onArrow")
+        self.assertEqual(sorted(down["ops"]), ["text", "update", "update"], "Moving the highlight updates only two rows' panels and the readout.")
+
+        submitted = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-search:onArrow:down",
+            "--event", "conversation-repository-search:onSubmit")[0])
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(submitted["tree"])}
+        self.assertEqual(self.plugin_text(self.plugin_node(submitted["tree"], "js-last-action")), "Last: submit wix-one-app", "Return adds the highlighted row.")
+        self.assertNotIn("conversation-repository-picker", test_ids, "Adding closes the picker.")
+        reopened = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-search:onSubmit",
+            "--event", "add-conversation-repository-button:onPress")[0])
+        self.plugin_node(reopened["tree"], "conversation-repository-picker")
+        self.assertEqual(self.plugin_text(self.plugin_node(reopened["tree"], "js-last-action")), "Last: open picker", "The + button shows the picker again.")
+        hidden = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "add-conversation-repository-button:onPress")[0])
+        self.assertNotIn("conversation-repository-picker", {node.get("props", {}).get("testID") for node in self.plugin_nodes(hidden["tree"])})
+        self.assertEqual(self.plugin_text(self.plugin_node(hidden["tree"], "js-last-action")), "Last: close picker")
+
+        selected = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-recent-Viband:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(selected["tree"], "js-last-action")), "Last: select Viband")
+        chosen = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "choose-repository-suggestion-parent-button:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(chosen["tree"], "js-last-action")), "Last: choose folder")
+
+        edited = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-badge-infragod:onPress")[0])
+        last_action = self.plugin_node(edited["tree"], "js-last-action")
+        self.assertEqual(self.plugin_text(last_action), "Last: edit infragod")
+        self.assertEqual((edited["commits"][-1]["ops"], edited["commits"][-1]["touchedNodes"]), (["text"], [last_action["children"][1]["id"]]),
+                         "Opening a chip's settings re-renders no chip.")
+        removed = self.assert_success(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "remove-conversation-repository-infragod:onPress")[0])
+        test_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(removed["tree"])}
+        self.assertNotIn("conversation-repository-badge-infragod", test_ids, "The remove badge removed its chip.")
+        self.assertIn("conversation-repository-badge-Playhouse", test_ids)
+        self.assertEqual(self.plugin_text(self.plugin_node(removed["tree"], "js-last-action")), "Last: remove infragod")
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "RepositoryChips", "--event", "conversation-repository-badge-infragod:onChange", expected_status=2)[0],
+                            "invalid_argument")
+
     # Scheduled tasks. Firing goes through ConversationManager.send, the same path the
     # composer's Send and `conversation send` use for both providers, so the schedule
     # behavior is provider-agnostic and Claude's fixture represents both.
@@ -15295,7 +15411,7 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
             return []
         return [turn.get("userText") or "" for turn in json.loads(history.read_text(encoding="utf-8")).get("turns", [])]
 
-    # case-contract: test_plugin_composer_renders_from_atoms_like_native | The Plugin Catalog's Composer page shows the conversation composer's box composed in JavaScript from atoms above the native SwiftUI box the conversation uses, built from the same atoms and sample data, each as wide as the page's 764-point column and with the composer's identifiers (the native side prefixed native-), and the JavaScript tree uses only atoms (Panel, Stack, Editor, Button, Icon, Menu, Spacer, Popover, Text, Divider, StepSlider). Both show the editor with its message placeholder, the Skills button (the plain Button atom with the sparkles icon, labelled Skills), the plus mode menu, the Claude provider menu, the Sonnet 5.5 model button with its Medium effort, the schedule button and a send button that is disabled while the draft is empty, each at the same size in both. Typing in the JavaScript editor runs onChange (Last: edit) and enables Send, Send runs its handler (Last: send followed by the draft) and clears the editor, and the native editor keeps its own text. The plus menu runs onMenu with the item's id: Plan mode (Last: mode mode:plan) shows Plan beside the plus and the Start Implementing button, and Goal (Last: mode goal) shows Goal with the scope symbol and the goal placeholder; choosing Codex in the provider menu runs onMenu (Last: provider codex) and shows its title. The model button runs onPress and opens its popover (Last: model picker open) listing the models with a checkmark on the current one and the effort slider; choosing a model runs onPress (Last: model claude-opus-5-5) and changes the button's model name, moving the effort slider runs onChange with the effort's value (Last: effort high) and changes the button's effort, and Escape or a click outside the popover runs onDismiss (Last: model picker closed). The schedule button opens its popover (Last: schedule open), whose content stays native. The conversation's own composer is this box: the notices, attached images, queued follow-ups and goal row above it stay native, and every identifier its controls had is unchanged.
+    # case-contract: test_plugin_composer_renders_from_atoms_like_native | The Plugin Catalog's Composer page shows the conversation composer's box composed in JavaScript from atoms above the native SwiftUI box the conversation uses, built from the same atoms and sample data, each as wide as the page's 764-point column and with the composer's identifiers (the native side prefixed native-), and the JavaScript tree uses only atoms (Panel, Stack, Editor, Button, Icon, Menu, Spacer, Popover, Text, Divider, StepSlider). Both show the editor with its message placeholder, the Skills button (the plain Button atom with the sparkles icon, labelled Skills), the plus mode menu, the Claude provider menu, the Sonnet 5.5 model button with its Medium effort, the schedule button and a send button that is disabled while the draft is empty, each at the same size in both. Typing in the JavaScript editor runs onChange (Last: edit) and enables Send, Send runs its handler (Last: send followed by the draft) and clears the editor, and the native editor keeps its own text. The plus menu runs onMenu with the item's id: Plan mode (Last: mode mode:plan) labels the menu Conversation mode: Plan mode and shows the Start Implementing button, and Goal (Last: mode goal) labels the menu Goal and shows the goal placeholder; choosing Codex in the provider menu runs onMenu (Last: provider codex) and shows its title. The model button runs onPress and opens its popover (Last: model picker open) listing the models with the current one checked and the effort slider; choosing a model runs onPress (Last: model claude-opus-5-5), checks it instead and changes the button's model name, moving the effort slider to its last step runs onChange with that effort's value (Last: effort xhigh) and changes the button's effort to Extra High, and Escape runs onDismiss (Last: model picker closed). The schedule button opens its popover (Last: schedule open), whose content stays native. The conversation's own composer is this box: with Debug ▸ Highlight Native Atoms on, a task's composer shows its editor as an Editor atom, its model button in a Popover atom and its mode and provider menus as Menu atoms, with every identifier its controls had unchanged. A Popover shows the children after its first (its anchor) in the popover, so one with only an anchor is valid.
     def test_plugin_composer_renders_from_atoms_like_native(self):
         rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer")[0])
         self.assertEqual(rendered["errors"], [])
@@ -15307,6 +15423,9 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
         self.assertEqual(types, {"Panel", "Stack", "Editor", "Button", "Icon", "Menu", "Spacer", "Popover", "Text", "StepSlider", "Divider"}, "The box is atoms only.")
 
+        self.assertEqual(self.plugin_node(tree, "message-composer-scroll-view")["props"]["inputTestID"], "message-composer")
+        column = [node for node in self.plugin_nodes(tree) if node["type"] == "Stack" and node.get("props", {}).get("width") == 764]
+        self.assertEqual(len(column), 1, "The box sits in the page's 764-point column.")
         editor = self.plugin_node(tree, "message-composer-scroll-view")
         self.assertEqual((editor["type"], editor["events"], editor["props"]["placeholder"], editor["props"]["placeholderTestID"], editor["props"]["text"]),
                          ("Editor", ["onChange", "onFocusChange", "onSteerSubmit", "onSubmit"], "Message…", "composer-placeholder", ""))
@@ -15353,7 +15472,7 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual((start["events"], start["props"]["value"], start["children"][0]["props"]["fill"]), (["onPress"], "Available", "accent"))
         goal = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "conversation-mode-menu:onMenu:goal")[0])
         mode = self.plugin_node(goal["tree"], "conversation-mode-menu")["props"]
-        self.assertEqual((mode["text"], mode["badgeIcon"], mode["label"]), ("Goal", "scope", "Goal"))
+        self.assertEqual((mode["text"], mode["badgeIcon"], mode["label"]), ("Goal", "scope", "Goal"), "Goal labels the plus menu.")
         self.assertEqual(self.plugin_node(goal["tree"], "message-composer-scroll-view")["props"]["placeholder"], "Set a goal to keep pursuing")
         self.assertFalse(self.plugin_node(goal["tree"], "send-message-button")["props"]["disabled"], "A goal can be sent without a draft.")
         codex = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "conversation-provider-menu:onMenu:codex")[0])
@@ -15364,17 +15483,20 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         opened = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "model-picker-menu:onPress")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(opened["tree"], "js-last-action")), "Last: model picker open")
         self.assertTrue(self.plugin_node(opened["tree"], "model-picker-popover")["props"]["isPresented"])
-        self.assertEqual(self.plugin_node(opened["tree"], "model-option-claude-sonnet-5-5")["children"][0]["children"][-1]["props"]["name"], "checkmark",
-                         "The current model is marked.")
+        self.assertEqual(self.plugin_node(opened["tree"], "model-option-claude-sonnet-5-5-checked")["props"]["name"], "checkmark", "The current model is checked.")
+        self.assertEqual((self.plugin_node(opened["tree"], "model-option-claude-sonnet-5-5")["props"]["value"], self.plugin_node(opened["tree"], "model-option-claude-opus-5-5")["props"]["value"]),
+                         ("Selected", "Not selected"), "A checked model's button reads Selected.")
+        self.assertNotIn("model-option-claude-opus-5-5-checked", {node.get("props", {}).get("testID") for node in self.plugin_nodes(opened["tree"])})
         slider = self.plugin_node(opened["tree"], "model-effort-slider")
         self.assertEqual((slider["type"], slider["events"], slider["props"]["selected"], [option["value"] for option in slider["props"]["options"]]),
                          ("StepSlider", ["onChange"], "medium", ["low", "medium", "high", "xhigh"]))
         chosen = self.assert_success(self.call_cli(
             "plugin", "render", "--page", "Composer", "--event", "model-picker-menu:onPress", "--event", "model-option-claude-opus-5-5:onPress",
-            "--event", "model-effort-slider:onChange:high")[0])
-        self.assertEqual(self.plugin_text(self.plugin_node(chosen["tree"], "js-last-action")), "Last: effort high")
-        self.assertEqual(self.plugin_node(chosen["tree"], "model-picker-menu")["props"]["label"], "Model: Opus 5.5, effort: High")
-        self.assertEqual(self.plugin_text(self.plugin_node(chosen["tree"], "selected-model-effort")), "High")
+            "--event", "model-effort-slider:onChange:xhigh")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(chosen["tree"], "js-last-action")), "Last: effort xhigh")
+        self.assertEqual(self.plugin_node(chosen["tree"], "model-picker-menu")["props"]["label"], "Model: Opus 5.5, effort: Extra High")
+        self.assertEqual(self.plugin_text(self.plugin_node(chosen["tree"], "selected-model-effort")), "Extra High")
+        self.assertEqual(self.plugin_node(chosen["tree"], "model-option-claude-opus-5-5-checked")["props"]["name"], "checkmark", "The chosen model is checked instead.")
         model_only = self.assert_success(self.call_cli(
             "plugin", "render", "--page", "Composer", "--event", "model-picker-menu:onPress", "--event", "model-option-claude-opus-5-5:onPress")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(model_only["tree"], "js-last-action")), "Last: model claude-opus-5-5")
@@ -15388,16 +15510,20 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(self.plugin_text(self.plugin_node(schedule["tree"], "js-last-action")), "Last: schedule open")
         self.assertTrue(self.plugin_node(schedule["tree"], "schedule-popover")["props"]["isPresented"])
 
+        # A Popover shows every child after its anchor; one with only an anchor is valid.
+        lone = self.assert_success(self.render_plugin('Playhouse.render(h(Popover, { isPresented: false }, h(Text, null, "Anchor")));'))
+        self.assertEqual(lone["errors"], [])
+
         # The editor raises no onPress, so pressing it is refused.
         self.assert_failure(self.call_cli("plugin", "render", "--page", "Composer", "--event", "message-composer-scroll-view:onPress", expected_status=2)[0], "invalid_argument")
 
-    # case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
+    # case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
     def test_debug_highlight_native_atoms_outlines_atoms(self):
         rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "Card")[0])
         self.assertEqual(rendered["errors"], [])
         containers = rendered["containerAtoms"]
         self.assertEqual(containers, [atom for atom in rendered["atoms"] if atom in containers], "Every container is a known atom.")
-        self.assertEqual(set(containers), {"Stack", "Panel", "Card", "Scroll", "Disclosure", "Popover"},
+        self.assertEqual(set(containers), {"Stack", "Panel", "Card", "Scroll", "Disclosure", "Overlay", "Popover"},
                          "Only the atoms that lay out a composite's structure are containers.")
         leaves = [atom for atom in rendered["atoms"] if atom not in containers]
         self.assertEqual(leaves, ["Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Meter", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Editor", "StepSlider"],

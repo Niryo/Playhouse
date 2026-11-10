@@ -9,5 +9,8 @@ Playhouse.render(h(Stack, { axis: "v", spacing: 12, align: "leading", width: 220
     h(Stack, { axis: "h" },
       h(Spacer, { minLength: 0 }),
       h(Text, { size: 10, weight: "medium" }, "Log in"),
-      h(Spacer, { minLength: 0 })))
+      h(Spacer, { minLength: 0 }))),
+  h(Text, { size: 11, color: "secondary" }, "capsule: true, stroke: \"primary\", strokeOpacity: 0.14"),
+  h(Panel, { fillOpacity: 0.08, capsule: true, stroke: "primary", strokeOpacity: 0.14, padding: 7, paddingX: 5.5, testID: "panel-capsule" },
+    h(Text, { size: 13, weight: "semibold" }, "Capsule"))
 ));

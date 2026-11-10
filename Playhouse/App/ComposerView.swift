@@ -142,7 +142,8 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
             AtomEditor(
                 props: EditorProps(
                     text: model.draft, placeholder: model.placeholder, placeholderTestID: prefix + "composer-placeholder",
-                    enabled: model.enabled, autofocus: model.autofocus, focused: model.focused, focusRequest: model.focusRequest
+                    enabled: model.enabled, autofocus: model.autofocus, focused: model.focused, focusRequest: model.focusRequest,
+                    inputTestID: prefix + "message-composer", inputLabel: "Message"
                 ),
                 common: AtomCommon(testID: prefix + "message-composer-scroll-view", hint: model.editorHelp),
                 onChange: actions.change, onSubmit: actions.submit, onSteerSubmit: actions.steer,
@@ -253,14 +254,14 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
                 AtomStack(props: StackProps(axis: "v", spacing: 0, align: "leading"), common: AtomCommon(padding: 13, paddingX: 5)) {
                     ForEach(picker.models, id: \.id) { option in
                         AtomButton(
-                            common: AtomCommon(testID: prefix + option.testID, help: option.help),
+                            common: AtomCommon(testID: prefix + option.testID, value: option.checked ? "Selected" : "Not selected", help: option.help),
                             action: { actions.selectModel(option.id) }
                         ) {
                             AtomStack(props: StackProps(axis: "h"), common: AtomCommon(minHeight: 32, fillWidth: true)) {
                                 AtomText(props: TextProps(text: option.title))
                                 AtomSpacer(props: SpacerProps())
                                 if option.checked {
-                                    AtomIcon(props: IconProps(name: "checkmark", size: 12, weight: "semibold"))
+                                    AtomIcon(props: IconProps(name: "checkmark", size: 12, weight: "semibold"), common: AtomCommon(testID: prefix + option.testID + "-checked"))
                                 }
                             }
                         }
