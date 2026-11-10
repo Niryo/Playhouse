@@ -116,6 +116,35 @@ enum AtomRegistry {
                 PluginChildren(node: node, runtime: runtime)
             })
         }
+        register(.editor) { node, runtime in
+            AnyView(AtomEditor(props: try .decode(node.props), common: try .decode(node.props), onChange: { text in
+                runtime.dispatch(nodeID: node.id, event: "onChange", value: .string(text))
+            }, onSubmit: {
+                runtime.dispatch(nodeID: node.id, event: "onSubmit")
+            }, onSteerSubmit: {
+                runtime.dispatch(nodeID: node.id, event: "onSteerSubmit")
+            }, onFocusChange: { focused in
+                runtime.dispatch(nodeID: node.id, event: "onFocusChange", value: .bool(focused))
+            }))
+        }
+        register(.popover) { node, runtime in
+            let children = node.children.filter { $0.type != PluginNode.textType }
+            guard children.count == 2 else {
+                throw PluginTreeError(message: "<Popover> takes an anchor and its content: two children, not \(children.count).")
+            }
+            return AnyView(AtomPopover(props: try .decode(node.props), common: try .decode(node.props), onDismiss: {
+                runtime.dispatch(nodeID: node.id, event: "onDismiss")
+            }, anchor: {
+                PluginNodeView(node: children[0], runtime: runtime)
+            }, content: {
+                PluginNodeView(node: children[1], runtime: runtime)
+            }))
+        }
+        register(.stepSlider) { node, runtime in
+            AnyView(AtomStepSlider(props: try .decode(node.props), common: try .decode(node.props)) { value in
+                runtime.dispatch(nodeID: node.id, event: "onChange", value: .string(value))
+            })
+        }
         assert(Set(builders.keys) == Set(AtomType.allCases.map(\.rawValue)), "Every atom needs exactly one registry entry.")
         return builders
     }()

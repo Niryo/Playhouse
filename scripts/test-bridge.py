@@ -14646,7 +14646,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         path.write_text(source, encoding="utf-8")
         return self.call_cli("plugin", "render", "--file", path, *options, expected_status=expected_status)[0]
 
-    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea) and the Task Item, Agents Info, Token Stats and Skills Page examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
+    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Editor, Popover, StepSlider) and the Task Item, Agents Info, Token Stats, Skills Page and Composer examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
     def test_plugin_renderer_commits_minimal_ops_and_runs_handlers(self):
         plugin = """
 function App() {
@@ -14666,7 +14666,7 @@ Playhouse.render(h(App));
 """
         rendered = self.assert_success(self.render_plugin(plugin))
         self.assertEqual(rendered["atoms"], ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter",
-                                             "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea"],
+                                             "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Editor", "Popover", "StepSlider"],
                          "Plugins compose exactly the native composites' atoms.")
         self.assertEqual(rendered["errors"], [])
         self.assertEqual(len(rendered["commits"]), 1, "The first render is one commit.")
@@ -14741,12 +14741,12 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertTrue(any("Invalid commit" in error and "integer" in error for error in out_of_range["result"]["errors"]),
                         f"An op whose node id is out of range is reported, not a crash: {out_of_range['result']['errors']}")
 
-        for page in ["AgentsInfo", "Button", "Card", "ChoiceBar", "Disclosure", "Divider", "Icon", "Label", "Link", "Menu", "Meter", "Panel", "PillPicker",
-                     "PressArea", "Scroll", "Segmented", "SkillsPage", "Spacer", "Spinner", "Stack", "TaskItem", "Text", "TextField", "Toggle", "TokenStats"]:
+        for page in ["AgentsInfo", "Button", "Card", "ChoiceBar", "Composer", "Disclosure", "Divider", "Editor", "Icon", "Label", "Link", "Menu", "Meter", "Panel", "PillPicker",
+                     "Popover", "PressArea", "Scroll", "Segmented", "SkillsPage", "Spacer", "Spinner", "Stack", "StepSlider", "TaskItem", "Text", "TextField", "Toggle", "TokenStats"]:
             page_render = self.assert_success(self.call_cli("plugin", "render", "--page", page)[0])
             self.assertEqual(page_render["errors"], [], f"The {page} catalog page renders without errors.")
             used = {node["type"] for node in self.plugin_nodes(page_render["tree"])}
-            if page not in ("TaskItem", "AgentsInfo", "TokenStats", "SkillsPage"):
+            if page not in ("TaskItem", "AgentsInfo", "TokenStats", "SkillsPage", "Composer"):
                 self.assertIn(page, used, f"The {page} page shows its atom.")
         disclosure = self.assert_success(self.call_cli("plugin", "render", "--page", "Disclosure", "--event", "disclosure-demo:onToggle")[0])
         section = self.plugin_node(disclosure["tree"], "disclosure-demo")
@@ -15295,16 +15295,112 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
             return []
         return [turn.get("userText") or "" for turn in json.loads(history.read_text(encoding="utf-8")).get("turns", [])]
 
+    # case-contract: test_plugin_composer_renders_from_atoms_like_native | The Plugin Catalog's Composer page shows the conversation composer's box composed in JavaScript from atoms above the native SwiftUI box the conversation uses, built from the same atoms and sample data, each as wide as the page's 764-point column and with the composer's identifiers (the native side prefixed native-), and the JavaScript tree uses only atoms (Panel, Stack, Editor, Button, Icon, Menu, Spacer, Popover, Text, Divider, StepSlider). Both show the editor with its message placeholder, the Skills button (the plain Button atom with the sparkles icon, labelled Skills), the plus mode menu, the Claude provider menu, the Sonnet 5.5 model button with its Medium effort, the schedule button and a send button that is disabled while the draft is empty, each at the same size in both. Typing in the JavaScript editor runs onChange (Last: edit) and enables Send, Send runs its handler (Last: send followed by the draft) and clears the editor, and the native editor keeps its own text. The plus menu runs onMenu with the item's id: Plan mode (Last: mode mode:plan) shows Plan beside the plus and the Start Implementing button, and Goal (Last: mode goal) shows Goal with the scope symbol and the goal placeholder; choosing Codex in the provider menu runs onMenu (Last: provider codex) and shows its title. The model button runs onPress and opens its popover (Last: model picker open) listing the models with a checkmark on the current one and the effort slider; choosing a model runs onPress (Last: model claude-opus-5-5) and changes the button's model name, moving the effort slider runs onChange with the effort's value (Last: effort high) and changes the button's effort, and Escape or a click outside the popover runs onDismiss (Last: model picker closed). The schedule button opens its popover (Last: schedule open), whose content stays native. The conversation's own composer is this box: the notices, attached images, queued follow-ups and goal row above it stay native, and every identifier its controls had is unchanged.
+    def test_plugin_composer_renders_from_atoms_like_native(self):
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer")[0])
+        self.assertEqual(rendered["errors"], [])
+        tree = rendered["tree"]
+        # The same identifiers the conversation's composer gives its controls.
+        for test_id in ["message-composer-scroll-view", "open-skills-button", "conversation-mode-menu", "conversation-provider-menu", "model-picker-menu",
+                        "model-picker-popover", "schedule-task-button", "schedule-popover", "send-message-button", "js-last-action"]:
+            self.plugin_node(tree, test_id)
+        types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
+        self.assertEqual(types, {"Panel", "Stack", "Editor", "Button", "Icon", "Menu", "Spacer", "Popover", "Text", "StepSlider", "Divider"}, "The box is atoms only.")
+
+        editor = self.plugin_node(tree, "message-composer-scroll-view")
+        self.assertEqual((editor["type"], editor["events"], editor["props"]["placeholder"], editor["props"]["placeholderTestID"], editor["props"]["text"]),
+                         ("Editor", ["onChange", "onFocusChange", "onSteerSubmit", "onSubmit"], "Message…", "composer-placeholder", ""))
+        opener = self.plugin_node(tree, "open-skills-button")
+        self.assertEqual((opener["type"], opener["events"], opener["props"].get("style"), opener["props"]["label"], opener["props"]["help"]),
+                         ("Button", ["onPress"], None, "Skills", "Skills"))
+        self.assertEqual((opener["children"][0]["type"], opener["children"][0]["props"]["name"]), ("Icon", "sparkles"))
+        mode = self.plugin_node(tree, "conversation-mode-menu")["props"]
+        self.assertEqual((mode["icon"], mode["color"], mode["label"], [item["id"] for item in mode["items"][0]], [item["checked"] for item in mode["items"][0]]),
+                         ("plus", "secondary", "Conversation mode: Code mode", ["goal", "mode:default", "mode:plan"], [False, True, False]))
+        provider = self.plugin_node(tree, "conversation-provider-menu")["props"]
+        self.assertEqual((provider["text"], provider["value"], provider["indicator"], provider["disabled"]), ("Claude", "claude", True, False))
+        model = self.plugin_node(tree, "model-picker-menu")["props"]
+        self.assertEqual((model["label"], model["value"]), ("Model: Sonnet 5.5, effort: Medium", "Sonnet 5.5"))
+        popover = self.plugin_node(tree, "model-picker-popover")
+        self.assertEqual((popover["type"], popover["events"], popover["props"]["isPresented"], popover["props"]["width"], len(popover["children"])), ("Popover", ["onDismiss"], False, 320, 2),
+                         "A popover is its anchor and its content, closed at first.")
+        send = self.plugin_node(tree, "send-message-button")
+        self.assertEqual((send["props"]["disabled"], send["props"]["label"]), (True, "Send message"), "Send is disabled while the draft is empty.")
+        self.assertNotIn("start-implementing-button", {node.get("props", {}).get("testID") for node in self.plugin_nodes(tree)}, "Start Implementing shows in plan mode only.")
+
+        # Typing runs onChange and enables Send; Send runs its handler and clears the editor.
+        typed = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "message-composer-scroll-view:onChange:hello")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(typed["tree"], "js-last-action")), "Last: edit")
+        self.assertEqual(self.plugin_node(typed["tree"], "message-composer-scroll-view")["props"]["text"], "hello")
+        self.assertFalse(self.plugin_node(typed["tree"], "send-message-button")["props"]["disabled"], "A draft enables Send.")
+        sent = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "Composer", "--event", "message-composer-scroll-view:onChange:hello", "--event", "send-message-button:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(sent["tree"], "js-last-action")), "Last: send hello")
+        self.assertEqual(self.plugin_node(sent["tree"], "message-composer-scroll-view")["props"]["text"], "", "Send clears the editor.")
+        submitted = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "Composer", "--event", "message-composer-scroll-view:onChange:again", "--event", "message-composer-scroll-view:onSubmit")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(submitted["tree"], "js-last-action")), "Last: submit again", "Return runs onSubmit.")
+        steered = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "message-composer-scroll-view:onSteerSubmit")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(steered["tree"], "js-last-action")), "Last: steer", "Command-Return runs onSteerSubmit.")
+
+        # The plus menu: Plan mode and Goal.
+        plan = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "conversation-mode-menu:onMenu:mode:plan")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(plan["tree"], "js-last-action")), "Last: mode mode:plan")
+        mode = self.plugin_node(plan["tree"], "conversation-mode-menu")["props"]
+        self.assertEqual((mode["text"], mode["color"], mode["label"], [item["checked"] for item in mode["items"][0]]),
+                         ("Plan", "accent", "Conversation mode: Plan mode", [False, False, True]))
+        start = self.plugin_node(plan["tree"], "start-implementing-button")
+        self.assertEqual((start["events"], start["props"]["value"], start["children"][0]["props"]["fill"]), (["onPress"], "Available", "accent"))
+        goal = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "conversation-mode-menu:onMenu:goal")[0])
+        mode = self.plugin_node(goal["tree"], "conversation-mode-menu")["props"]
+        self.assertEqual((mode["text"], mode["badgeIcon"], mode["label"]), ("Goal", "scope", "Goal"))
+        self.assertEqual(self.plugin_node(goal["tree"], "message-composer-scroll-view")["props"]["placeholder"], "Set a goal to keep pursuing")
+        self.assertFalse(self.plugin_node(goal["tree"], "send-message-button")["props"]["disabled"], "A goal can be sent without a draft.")
+        codex = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "conversation-provider-menu:onMenu:codex")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(codex["tree"], "js-last-action")), "Last: provider codex")
+        self.assertEqual(self.plugin_node(codex["tree"], "conversation-provider-menu")["props"]["text"], "Codex")
+
+        # The model popover: open, choose a model and an effort, dismiss.
+        opened = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "model-picker-menu:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(opened["tree"], "js-last-action")), "Last: model picker open")
+        self.assertTrue(self.plugin_node(opened["tree"], "model-picker-popover")["props"]["isPresented"])
+        self.assertEqual(self.plugin_node(opened["tree"], "model-option-claude-sonnet-5-5")["children"][0]["children"][-1]["props"]["name"], "checkmark",
+                         "The current model is marked.")
+        slider = self.plugin_node(opened["tree"], "model-effort-slider")
+        self.assertEqual((slider["type"], slider["events"], slider["props"]["selected"], [option["value"] for option in slider["props"]["options"]]),
+                         ("StepSlider", ["onChange"], "medium", ["low", "medium", "high", "xhigh"]))
+        chosen = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "Composer", "--event", "model-picker-menu:onPress", "--event", "model-option-claude-opus-5-5:onPress",
+            "--event", "model-effort-slider:onChange:high")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(chosen["tree"], "js-last-action")), "Last: effort high")
+        self.assertEqual(self.plugin_node(chosen["tree"], "model-picker-menu")["props"]["label"], "Model: Opus 5.5, effort: High")
+        self.assertEqual(self.plugin_text(self.plugin_node(chosen["tree"], "selected-model-effort")), "High")
+        model_only = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "Composer", "--event", "model-picker-menu:onPress", "--event", "model-option-claude-opus-5-5:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(model_only["tree"], "js-last-action")), "Last: model claude-opus-5-5")
+        dismissed = self.assert_success(self.call_cli(
+            "plugin", "render", "--page", "Composer", "--event", "model-picker-menu:onPress", "--event", "model-picker-popover:onDismiss")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(dismissed["tree"], "js-last-action")), "Last: model picker closed")
+        self.assertFalse(self.plugin_node(dismissed["tree"], "model-picker-popover")["props"]["isPresented"])
+
+        # The schedule popover opens; its content stays native in the conversation.
+        schedule = self.assert_success(self.call_cli("plugin", "render", "--page", "Composer", "--event", "schedule-task-button:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(schedule["tree"], "js-last-action")), "Last: schedule open")
+        self.assertTrue(self.plugin_node(schedule["tree"], "schedule-popover")["props"]["isPresented"])
+
+        # The editor raises no onPress, so pressing it is refused.
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "Composer", "--event", "message-composer-scroll-view:onPress", expected_status=2)[0], "invalid_argument")
+
     # case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
     def test_debug_highlight_native_atoms_outlines_atoms(self):
         rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "Card")[0])
         self.assertEqual(rendered["errors"], [])
         containers = rendered["containerAtoms"]
         self.assertEqual(containers, [atom for atom in rendered["atoms"] if atom in containers], "Every container is a known atom.")
-        self.assertEqual(set(containers), {"Stack", "Panel", "Card", "Scroll", "Disclosure"},
+        self.assertEqual(set(containers), {"Stack", "Panel", "Card", "Scroll", "Disclosure", "Popover"},
                          "Only the atoms that lay out a composite's structure are containers.")
         leaves = [atom for atom in rendered["atoms"] if atom not in containers]
-        self.assertEqual(leaves, ["Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Meter", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea"],
+        self.assertEqual(leaves, ["Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Meter", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Editor", "StepSlider"],
                          "Every other atom, including a Button or Link that holds children, is a leaf.")
 
     # case-contract: test_schedule_one_time_task_fires_when_due | A task whose conversation hasn't started is scheduled once (the composer's schedule hint, or schedule set --once); scheduling saves the prompt as the schedule's own payload without starting a turn, keeps the task in Backlog with a clock badge, and lists it in schedule list. Removing the schedule in the hint before Send turns the clock button off and returns Send to sending. A time in the past or a blank prompt is rejected with invalid_argument. A tick before the time does nothing; a tick 30 minutes after it, inside the one-hour grace period, sends the scheduled prompt to the provider, clears the schedule, and the task follows the ordinary board lifecycle. A second tick doesn't run it again, and a task that has started can't be scheduled. The app bundle carries the scheduler LaunchAgent (<bundle-id>.scheduler.plist running playhouse-cli schedule tick every 60 seconds), and a plain tick on the real clock fires a schedule that has come due.

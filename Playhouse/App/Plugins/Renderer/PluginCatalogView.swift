@@ -64,7 +64,7 @@ private struct PluginCommitReadout: View {
 
 /// The Plugins menu's catalog: every atom rendered by its JavaScript page, and
 /// the native composites (the task item, the Agents info section, the Token
-/// Stats modal, the Skills page) composed in JavaScript beside the native ones.
+/// Stats modal, the Skills page, the composer) composed in JavaScript beside the native ones.
 struct PluginCatalogView: View {
     private enum Page: Hashable {
         case atom(AtomType)
@@ -72,6 +72,7 @@ struct PluginCatalogView: View {
         case agentsInfo
         case tokenStats
         case skillsPage
+        case composer
     }
 
     @State private var selection: Page? = .atom(.stack)
@@ -99,6 +100,9 @@ struct PluginCatalogView: View {
                     Text("Skills Page")
                         .tag(Page.skillsPage)
                         .accessibilityIdentifier("plugin-catalog-skills-page")
+                    Text("Composer")
+                        .tag(Page.composer)
+                        .accessibilityIdentifier("plugin-catalog-composer")
                 }
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190)
@@ -115,6 +119,8 @@ struct PluginCatalogView: View {
                     TokenStatsComparison()
                 case .skillsPage?:
                     SkillsPageComparison()
+                case .composer?:
+                    ComposerComparison()
                 case nil:
                     EmptyView()
                 }
@@ -547,6 +553,125 @@ private struct NativeSkillsPageDemo: View {
                         AtomText(props: TextProps(text: "The Rules and MCP lists stay native.", size: 12, color: "secondary"), common: AtomCommon(testID: "native-skills-native-list", padding: 20))
                     }
                 }
+            }
+        }
+    }
+}
+
+
+/// The JavaScript composer box above the native one, from the same sample
+/// model, each 640 points wide. Each side keeps its own state; the native one
+/// uses a "native-" prefix so the two never share accessibility identifiers.
+private struct ComposerComparison: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Composer")
+                .font(.title2.weight(.semibold))
+                .accessibilityIdentifier("plugin-catalog-title")
+            if let page = catalogPage("Composer"),
+               let sample = try? Self.sample(page.props) {
+                comparisonColumn("JavaScript (React → atoms)", width: 784) {
+                    PluginSurface(source: page.source, name: "Composer.js", props: page.props)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("plugin-catalog-js-composer")
+                comparisonColumn("Native SwiftUI (atoms)", width: 784) {
+                    NativeComposerDemo(sample: sample)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("plugin-catalog-native-composer")
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    struct Sample: Decodable {
+        var composer: ComposerModel
+    }
+
+    static func sample(_ props: [String: PluginValue]) throws -> Sample {
+        try PluginValueDecoder.decode(Sample.self, from: .object(props))
+    }
+}
+
+/// The native composer box with the same demo state as Composer.js, built from the same atoms.
+private struct NativeComposerDemo: View {
+    let sample: ComposerComparison.Sample
+    @State private var draft = ""
+    @State private var mode = "default"
+    @State private var provider = "claude"
+    @State private var modelID = "claude-sonnet-5-5"
+    @State private var effort = "medium"
+    @State private var pickerOpen = false
+    @State private var scheduleOpen = false
+    @State private var lastAction = "none"
+
+    /// The demo's state applied to the sample, as the conversation applies its own.
+    private var model: ComposerModel {
+        var model = sample.composer
+        let goal = mode == "goal"
+        let plan = mode == "plan"
+        let title = provider == "codex" ? "Codex" : "Claude"
+        let picked = model.model.models.first { $0.id == modelID }
+        let effortChoice = model.model.effortChoices.first { $0.value == effort }
+        model.prefix = "native-"
+        model.draft = draft
+        if goal { model.placeholder = "Set a goal to keep pursuing" }
+        model.modeMenu.text = goal ? "Goal" : plan ? "Plan" : nil
+        model.modeMenu.badgeIcon = goal ? "scope" : nil
+        model.modeMenu.active = goal || plan
+        model.modeMenu.label = goal ? "Goal" : "Conversation mode: \(plan ? "Plan mode" : "Code mode")"
+        model.modeMenu.items = model.modeMenu.items.map { var item = $0; item.checked = item.id == "mode:\(mode)"; return item }
+        if !plan { model.startImplementing = nil }
+        model.provider.title = title
+        model.provider.value = provider
+        model.provider.label = "Provider: \(title)"
+        model.provider.items = model.provider.items.map { var item = $0; item.checked = item.id == provider; return item }
+        model.model.name = picked?.title ?? ""
+        model.model.effort = effortChoice?.label ?? ""
+        model.model.label = "Model: \(picked?.title ?? ""), effort: \(effortChoice?.label ?? "")"
+        model.model.open = pickerOpen
+        model.model.selectedEffort = effort
+        model.model.models = model.model.models.map { var item = $0; item.checked = item.id == modelID; return item }
+        model.schedule?.open = scheduleOpen
+        model.primary.disabled = draft.trimmingCharacters(in: .whitespaces).isEmpty && !goal
+        return model
+    }
+
+    private var actions: ComposerActions {
+        ComposerActions(
+            change: { draft = $0; lastAction = "edit" },
+            submit: { lastAction = "submit \(draft)"; draft = "" },
+            steer: { lastAction = "steer" },
+            focusChange: { _ in },
+            openSkills: { lastAction = "skills" },
+            modeMenu: { id in
+                mode = id == "goal" ? "goal" : String(id.dropFirst("mode:".count))
+                if id == "goal" { draft = "" }
+                lastAction = "mode \(id)"
+            },
+            startImplementing: { mode = "default"; lastAction = "start implementing" },
+            showRepositoryPicker: { lastAction = "repository picker" },
+            provider: { provider = $0; lastAction = "provider \($0)" },
+            toggleModelPicker: { pickerOpen.toggle(); lastAction = pickerOpen ? "model picker open" : "model picker closed" },
+            dismissModelPicker: { pickerOpen = false; lastAction = "model picker closed" },
+            selectModel: { modelID = $0; lastAction = "model \($0)" },
+            selectEffort: { effort = $0; lastAction = "effort \($0)" },
+            toggleSchedule: { scheduleOpen.toggle(); lastAction = scheduleOpen ? "schedule open" : "schedule closed" },
+            dismissSchedule: { scheduleOpen = false; lastAction = "schedule closed" },
+            primary: { lastAction = "send \(draft)"; draft = "" }
+        )
+    }
+
+    var body: some View {
+        let model = model
+        AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
+            AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
+            AtomStack(props: StackProps(axis: "v"), common: AtomCommon(width: 764)) {
+                ComposerView(model: model, actions: actions, header: { EmptyView() }, scheduleContent: {
+                    AtomText(props: TextProps(text: "The schedule hint stays native.", size: 12), common: AtomCommon(testID: "native-schedule-hint", padding: 12))
+                })
             }
         }
     }

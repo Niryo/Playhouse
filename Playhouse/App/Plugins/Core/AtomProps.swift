@@ -28,6 +28,9 @@ enum AtomType: String, CaseIterable, Sendable {
     case segmented = "Segmented"
     case menu = "Menu"
     case pressArea = "PressArea"
+    case editor = "Editor"
+    case popover = "Popover"
+    case stepSlider = "StepSlider"
 
     /// The events each atom raises; a plugin's handler for any other name is never called.
     var events: Set<String> {
@@ -40,6 +43,9 @@ enum AtomType: String, CaseIterable, Sendable {
         case .toggle: ["onToggle"]
         case .menu: ["onMenu"]
         case .pressArea: ["onPress", "onLongPress"]
+        case .editor: ["onChange", "onSubmit", "onSteerSubmit", "onFocusChange"]
+        case .popover: ["onDismiss"]
+        case .stepSlider: ["onChange"]
         case .stack, .text, .icon, .label, .link, .spinner, .spacer, .panel, .meter, .scroll, .divider: []
         }
     }
@@ -47,8 +53,8 @@ enum AtomType: String, CaseIterable, Sendable {
     /// Whether the atom shows atom children. A Text holds only raw strings.
     var takesAtomChildren: Bool {
         switch self {
-        case .stack, .button, .link, .card, .disclosure, .panel, .scroll, .pressArea: true
-        case .text, .icon, .label, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar, .toggle, .textField, .segmented, .menu: false
+        case .stack, .button, .link, .card, .disclosure, .panel, .scroll, .pressArea, .popover: true
+        case .text, .icon, .label, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar, .toggle, .textField, .segmented, .menu, .editor, .stepSlider: false
         }
     }
 
@@ -57,9 +63,9 @@ enum AtomType: String, CaseIterable, Sendable {
     /// children but is a leaf. The debug atom highlight colors the two apart.
     var isContainer: Bool {
         switch self {
-        case .stack, .panel, .card, .scroll, .disclosure: true
+        case .stack, .panel, .card, .scroll, .disclosure, .popover: true
         case .text, .icon, .label, .button, .link, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar,
-             .toggle, .textField, .segmented, .menu, .pressArea: false
+             .toggle, .textField, .segmented, .menu, .pressArea, .editor, .stepSlider: false
         }
     }
 
@@ -98,6 +104,9 @@ enum AtomType: String, CaseIterable, Sendable {
         case .segmented: Self.keys(SegmentedProps.CodingKeys.self)
         case .menu: Self.keys(MenuProps.CodingKeys.self)
         case .pressArea: Self.keys(PressAreaProps.CodingKeys.self)
+        case .editor: Self.keys(EditorProps.CodingKeys.self)
+        case .popover: Self.keys(PopoverProps.CodingKeys.self)
+        case .stepSlider: Self.keys(StepSliderProps.CodingKeys.self)
         }
     }
 
@@ -142,6 +151,9 @@ enum AtomType: String, CaseIterable, Sendable {
             case .segmented: _ = try SegmentedProps.decode(props)
             case .menu: _ = try MenuProps.decode(props)
             case .pressArea: _ = try PressAreaProps.decode(props)
+            case .editor: _ = try EditorProps.decode(props)
+            case .popover: _ = try PopoverProps.decode(props)
+            case .stepSlider: _ = try StepSliderProps.decode(props)
             }
         } catch let error as DecodingError {
             throw PluginTreeError(message: "<\(type)> has an invalid prop: \(Self.describe(error))")
@@ -188,11 +200,15 @@ struct AtomCommon: AtomPropsDecodable, Equatable {
     var padding: Double?
     /// Extra horizontal padding, inside `padding`.
     var paddingX: Double?
+    /// Extra vertical padding, inside `padding`.
+    var paddingY: Double?
+    /// Dims the atom and everything in it (0...1).
+    var opacity: Double?
     /// Let clicks through to whatever is behind (the card's open button).
     var passThrough: Bool?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case testID, label, value, hint, help, width, height, minWidth, minHeight, fillWidth, padding, paddingX, passThrough
+        case testID, label, value, hint, help, width, height, minWidth, minHeight, fillWidth, padding, paddingX, paddingY, opacity, passThrough
     }
 
     static let keys = Set(CodingKeys.allCases.map(\.stringValue))
@@ -470,15 +486,30 @@ struct MenuProps: AtomPropsDecodable, Equatable {
         var destructive: Bool?
         var help: String?
         var testID: String?
+        /// Marked with a checkmark: the current choice.
+        var checked: Bool?
+        /// An SF Symbol shown before the title.
+        var icon: String?
     }
 
-    var icon: String
+    var icon: String?
     var size: Double?
     var weight: String?
     var color: String?
+    /// Text beside the symbol (or alone), `textSize` and `textWeight` styled.
+    var text: String?
+    var textSize: Double?
+    var textWeight: String?
+    /// A second symbol between the first and the text (the mode menu's goal).
+    var badgeIcon: String?
+    /// The pull-down's chevron; hidden by default.
+    var indicator: Bool?
+    var disabled: Bool?
     var items: [[Item]]
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case icon, size, weight, color, items }
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case icon, size, weight, color, text, textSize, textWeight, badgeIcon, indicator, disabled, items
+    }
 }
 
 /// A leading column of its children that tells a click (`onPress`) from a
@@ -491,4 +522,57 @@ struct PressAreaProps: AtomPropsDecodable, Equatable {
     var pointer: Bool?
 
     enum CodingKeys: String, CodingKey, CaseIterable { case spacing, pointer }
+}
+
+/// A multiline message editor that grows with its text (the composer's).
+/// It is controlled: `text` is what it shows, taken whenever the owner changes
+/// it while the editor isn't being typed in, and each edit calls `onChange`.
+/// `onSubmit` is Return, `onSteerSubmit` is Command-Return; `onFocusChange`
+/// is raised with `"true"` or `"false"`. `focused` moves the keyboard in,
+/// each new `focusRequest` does once with the caret at the end, and
+/// `autofocus` takes it when the editor appears. `placeholder` shows while
+/// `text` is empty, with `placeholderTestID`. The common `hint` is the
+/// editor's accessibility help. A pasted image is native-only: a plugin never
+/// sees it.
+struct EditorProps: AtomPropsDecodable, Equatable {
+    var text: String
+    var placeholder: String?
+    var placeholderTestID: String?
+    var enabled: Bool?
+    var autofocus: Bool?
+    var focused: Bool?
+    var focusRequest: Int?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case text, placeholder, placeholderTestID, enabled, autofocus, focused, focusRequest }
+}
+
+/// A popover anchored to its first child and showing its second. It is
+/// controlled: it is open while `isPresented` is true, and a click outside or
+/// Escape calls `onDismiss`, after which the owner sets `isPresented` false.
+/// `arrowEdge` (`top` default, `bottom`, `leading`, `trailing`) is the
+/// anchor's edge it points at; `width` fixes the popover's. The anchor and
+/// the content keep their own accessibility, so a `testID` here only names
+/// the popover to a plugin's events.
+struct PopoverProps: AtomPropsDecodable, Equatable {
+    var isPresented: Bool
+    var arrowEdge: String?
+    var width: Double?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, arrowEdge, width }
+}
+
+/// A discrete slider over `options`, as wide as its container. It is
+/// controlled: `selected` is what it shows, and moving it (a click, a drag or
+/// the arrow keys) calls `onChange` with the option's value. With a single
+/// option it is inert. The common `label` and `testID` name it for accessibility.
+struct StepSliderProps: AtomPropsDecodable, Equatable {
+    struct Option: Codable, Equatable {
+        var value: String
+        var label: String
+    }
+
+    var options: [Option]
+    var selected: String
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case options, selected }
 }

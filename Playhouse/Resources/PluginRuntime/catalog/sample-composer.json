@@ -1,0 +1,60 @@
+{
+  "composer": {
+    "prefix": "",
+    "draft": "",
+    "placeholder": "Message…",
+    "enabled": true,
+    "autofocus": false,
+    "focused": false,
+    "focusRequest": 0,
+    "editorHelp": "",
+    "modeMenu": {
+      "active": false,
+      "label": "Conversation mode: Code mode",
+      "items": [
+        { "id": "goal", "title": "Goal", "checked": false, "icon": "scope", "help": "Set a goal to keep pursuing", "testID": "conversation-mode-goal" },
+        { "id": "mode:default", "title": "Code mode", "checked": true, "help": "Switch to Code mode mode", "testID": "conversation-mode-default" },
+        { "id": "mode:plan", "title": "Plan mode", "checked": false, "help": "Switch to Plan mode mode", "testID": "conversation-mode-plan" }
+      ]
+    },
+    "startImplementing": {
+      "disabled": false,
+      "help": "Switch to Code mode and start implementing this plan",
+      "value": "Available",
+      "reasonColor": "secondary",
+      "reasonDisabled": false
+    },
+    "provider": {
+      "title": "Claude",
+      "value": "claude",
+      "label": "Provider: Claude",
+      "help": "Choose which assistant runs this task",
+      "enabled": true,
+      "items": [
+        { "id": "claude", "title": "Claude", "checked": true, "help": "Run this task's next turns with Claude", "testID": "conversation-provider-claude" },
+        { "id": "codex", "title": "Codex", "checked": false, "help": "Run this task's next turns with Codex", "testID": "conversation-provider-codex" }
+      ]
+    },
+    "model": {
+      "name": "Sonnet 5.5",
+      "effort": "Medium",
+      "label": "Model: Sonnet 5.5, effort: Medium",
+      "open": false,
+      "models": [
+        { "id": "claude-fable-5-1", "title": "Fable 5.1", "checked": false, "help": "Select Fable 5.1", "testID": "model-option-claude-fable-5-1" },
+        { "id": "claude-opus-5-5", "title": "Opus 5.5", "checked": false, "help": "Select Opus 5.5", "testID": "model-option-claude-opus-5-5" },
+        { "id": "claude-sonnet-5-5", "title": "Sonnet 5.5", "checked": true, "help": "Select Sonnet 5.5", "testID": "model-option-claude-sonnet-5-5" },
+        { "id": "claude-haiku-5-5", "title": "Haiku 5.5", "checked": false, "help": "Select Haiku 5.5", "testID": "model-option-claude-haiku-5-5" }
+      ],
+      "effortChoices": [
+        { "value": "low", "label": "Low" },
+        { "value": "medium", "label": "Medium" },
+        { "value": "high", "label": "High" },
+        { "value": "xhigh", "label": "Extra High" }
+      ],
+      "selectedEffort": "medium"
+    },
+    "schedule": { "on": false, "help": "Schedule this task", "open": false },
+    "primary": { "kind": "send", "disabled": true, "help": "Send message", "label": "Send message", "value": "", "testID": "send-message-button" }
+  }
+}
