@@ -1313,12 +1313,19 @@ struct PullRequestSyncOutcome: Codable, Sendable {
 
 struct PlayhousePullRequestService {
 
+    /// Records which `gh` binary each operation runs, for diagnosing PATH and sign-in
+    /// problems. Arguments are left out: they can carry pull request titles and bodies.
+    private func recordStarted(_ operation: String, executable: String) async {
+        await PlayhouseDiagnostics.record("github.cli.started", fields: ["operation": operation, "executable": executable])
+    }
+
     func resolveExecutable() throws -> String {
         try GitHubPullRequestManager.resolveExecutable()
     }
 
     func findOpen(_ record: RepositoryWorktreeRecord, executable: String) async throws -> GitHubPullRequestManager.PullRequest? {
-        try await PlayhouseBackgroundOperation.run {
+        await recordStarted("findOpen", executable: executable)
+        return try await PlayhouseBackgroundOperation.run {
             try GitHubPullRequestManager.findOpen(record, executable: executable)
         }
     }
@@ -1329,25 +1336,29 @@ struct PlayhousePullRequestService {
         body: String,
         executable: String
     ) async throws -> GitHubPullRequestManager.PullRequest {
-        try await PlayhouseBackgroundOperation.run {
+        await recordStarted("create", executable: executable)
+        return try await PlayhouseBackgroundOperation.run {
             try GitHubPullRequestManager.create(record, title: title, body: body, executable: executable)
         }
     }
 
     func merge(_ record: RepositoryWorktreeRecord, headOid: String, executable: String) async throws -> String {
-        try await PlayhouseBackgroundOperation.run {
+        await recordStarted("merge", executable: executable)
+        return try await PlayhouseBackgroundOperation.run {
             try GitHubPullRequestManager.merge(record, headOid: headOid, executable: executable)
         }
     }
 
     func isMerged(_ record: RepositoryWorktreeRecord, executable: String) async throws -> Bool {
-        try await PlayhouseBackgroundOperation.run {
+        await recordStarted("isMerged", executable: executable)
+        return try await PlayhouseBackgroundOperation.run {
             try GitHubPullRequestManager.isMerged(record, executable: executable)
         }
     }
 
     func reviewState(_ record: RepositoryWorktreeRecord, executable: String, includeReviewThreads: Bool = false) async throws -> PullRequestReviewState {
-        try await PlayhouseBackgroundOperation.run {
+        await recordStarted("reviewState", executable: executable)
+        return try await PlayhouseBackgroundOperation.run {
             try GitHubPullRequestManager.reviewState(record, executable: executable, includeReviewThreads: includeReviewThreads)
         }
     }

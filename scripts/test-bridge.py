@@ -4068,10 +4068,36 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.primary, "rev-parse", "main").strip(), target_head)
         self.assertEqual((worktree / conflict_path).read_text(encoding="utf-8"), "task branch version\n")
         self.assertEqual(target_file.read_text(encoding="utf-8"), "target branch version\n")
-        pr_attempt, _ = self.call_cli("task", "pr", "create", task["id"], expected_status=1)
+        # The fixture gh fails the first create, so the attempt reaches the normal GitHub CLI
+        # failure without depending on the installed gh or its sign-in.
+        gh_directory = self.data_directory / "gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        (gh_directory / "state").write_text("", encoding="utf-8")
+        gh_create_log = gh_directory / "create-calls"
+        gh_create_failure = gh_directory / "fail-create-attempt"
+        gh_create_failure.write_text("1", encoding="utf-8")
+        gh_environment = {
+            # PR creation asks the task's provider for the PR text first; use the fixture that ran its turn.
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture"),
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "PLAYHOUSE_E2E_GH_STATE_PATH": str(gh_directory / "state"),
+            "PLAYHOUSE_E2E_GH_CALL_LOG": str(gh_directory / "calls"),
+            "PLAYHOUSE_E2E_GH_CREATE_LOG": str(gh_create_log),
+            "PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH": str(gh_create_failure),
+        }
+        pr_attempt, _ = self.call_cli("task", "pr", "create", task["id"], expected_status=1, extra_environment=gh_environment)
         self.assert_failure(pr_attempt, "operation_failed")
         self.assertNotIn("conflicts_require_confirmation", json.dumps(pr_attempt))
         self.assertNotIn("Pull request conflicts were found", pr_attempt["error"]["message"])
+        self.assertIn("GitHub CLI couldn't complete the request. fixture GitHub create failure", pr_attempt["error"]["message"])
+        failed_creates = [line.split("\t")[1] for line in gh_create_log.read_text(encoding="utf-8").splitlines() if line.startswith("failed\t")]
+        self.assertEqual(
+            [os.path.realpath(path) for path in failed_creates], [os.path.realpath(worktree)],
+            "gh pr create should have run once in the task worktree.",
+        )
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), branch_head)
         task_branch_ref = f"refs/heads/{record['branch']}"
         published_branch_head = self.run_git(remote, "rev-parse", task_branch_ref).strip()
@@ -5604,6 +5630,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
             offline = self.create_repo_task("Default branch-from while offline", [self.primary])
             offline_id = offline["id"]
+            self.assert_success(self.call_cli("task", "pr", "mode", offline_id, "manual")[0])
             self.assertEqual(offline["repositoryWorktrees"][0]["branchFrom"], "origin/main")
             self.run_git(self.primary, "remote", "set-url", "origin", str(self.data_directory / "unreachable-origin.git"))
             self.complete_fixture_turn(offline_id)
@@ -11527,6 +11554,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(history["messages"][-1]["text"], final_report, "The nudged turn's final answer is the latest message.")
         response, _ = self.call_cli("conversation", "send", task_id, "--message", "Thanks, that's all.", extra_environment=env)
         self.assert_success(response)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Review",
+                         "The later turn's own nudge keeps working and reports completed instead of blocking the task.")
         assert_nudged_work(self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0]), "later turn")
 
     # case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude's usage is read with Claude Code's get_usage control request, which has none for this account yet, so Claude starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Because Claude Code streams rate_limit_event only when a limit's status changes, and a usage-based plan's event has no utilization, every finished Claude turn reads the plan's usage again through get_usage (skipping the local transcript scan) without a refresh: the read replaces the windows with the plan's current ones, keeps get_usage percents as percents, shows a usage-based plan's monthly extra usage as a Spend limit row with the reset time from the stream's overage event, and is persisted; a refresh reads it too, a reply without plan usage keeps the last known rows, a reached spend limit reads as the limit reached, and a usage request that is never answered times out, keeping the last known rows, so later reads work again. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the Scheduled Tasks button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account and plan together on the row beneath the provider name, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. After a Claude turn whose usage read reports the plan's spend, the open window shows Claude's Spend limit row with its percent and reset time and the updated 5h row without a relaunch. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.

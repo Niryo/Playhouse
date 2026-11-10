@@ -213,6 +213,23 @@ private final class TaskStoreWriteLockBarrier {
 private final class ConversationTurnLockBarrier {
     private var descriptor: Int32
 
+    /// Whether another process (the daemon or app running the task's turn) holds the task's
+    /// conversation-turn reservation. A turn keeps it after the task already reads Review,
+    /// while the PR mode's pull request is created. Never call this while the test itself
+    /// holds a barrier for the same task: closing the probe's descriptor would drop that lock.
+    static func isHeldByAnotherProcess(dataDirectory: URL, taskID: String) -> Bool {
+        let lockURL = dataDirectory.appendingPathComponent("conversation-turn-locks", isDirectory: true)
+            .appendingPathComponent("\(taskID).lock")
+        let probe = Darwin.open(lockURL.path, O_RDWR | O_CLOEXEC)
+        guard probe >= 0 else { return false }
+        defer { Darwin.close(probe) }
+        var lock = flock()
+        lock.l_type = Int16(F_WRLCK)
+        lock.l_whence = Int16(SEEK_SET)
+        guard Darwin.fcntl(probe, F_GETLK, &lock) == 0 else { return true }
+        return lock.l_type != Int16(F_UNLCK)
+    }
+
     init(dataDirectory: URL, taskID: String) throws {
         let directory = dataDirectory.appendingPathComponent("conversation-turn-locks", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -2245,7 +2262,7 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Review sync push UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Review sync push UI", whileTurnHeld: {
             // While the provider turn owns the worktree, the sync skips it untouched.
-            let skipped = try self.runCLI(["task", "pr", "sync", taskID])
+            let skipped = try self.runCLI(["task", "pr", "sync", taskID], extraEnvironment: ghEnvironment)
             let result = try XCTUnwrap(skipped["result"] as? [String: Any])
             XCTAssertEqual(result["skipped"] as? String, "turn-active")
             XCTAssertEqual((result["records"] as? [Any])?.isEmpty, true)
@@ -2262,6 +2279,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try runGitOutput(remote, "show", "refs/heads/\(branch):local-side.txt"), "Local turn output.")
 
         // A sync the daemon cannot complete blocks the task instead of resting in Review.
+        // CLI syncs below pass the gh fixture: the daemon resolves gh from each request's own PATH.
         try runGit(fixture.primary, "remote", "set-url", "origin", runDirectory.appendingPathComponent("missing-remote.git").path)
         try "Unpushable local change.\n".write(to: worktree.appendingPathComponent("local-side.txt"), atomically: true, encoding: .utf8)
         openTask(named: "Review sync push UI")
@@ -2272,14 +2290,14 @@ final class PlayhouseUITests: XCTestCase {
 
         // A later successful sync pushes the stranded commit and returns the task to Review.
         try runGit(fixture.primary, "remote", "set-url", "origin", remote.path)
-        _ = try runCLI(["task", "pr", "sync", taskID])
+        _ = try runCLI(["task", "pr", "sync", taskID], extraEnvironment: ghEnvironment)
         assertTaskVisible("Review sync push UI", inColumn: "Review")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
         XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), try runGitOutput(worktree, "rev-parse", "HEAD"))
 
         // A branch deleted on a reachable remote is reported as missing, not as a fetch failure.
         try runGit(remote, "update-ref", "-d", "refs/heads/\(branch)")
-        let deletedSync = try XCTUnwrap(try runCLI(["task", "pr", "sync", taskID])["result"] as? [String: Any])
+        let deletedSync = try XCTUnwrap(try runCLI(["task", "pr", "sync", taskID], extraEnvironment: ghEnvironment)["result"] as? [String: Any])
         XCTAssertEqual((deletedSync["records"] as? [[String: Any]])?.compactMap { $0["action"] as? String }, ["no-remote-branch"])
         XCTAssertEqual(deletedSync["status"] as? String, "Review")
         assertTaskVisible("Review sync push UI", inColumn: "Review")
@@ -2369,7 +2387,8 @@ final class PlayhouseUITests: XCTestCase {
         // push the merged branch, and return the task to Review.
         try "resolved local and remote versions\n".write(to: worktree.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
         try runGit(worktree, "add", conflictPath)
-        _ = try runCLI(["task", "pr", "sync", taskID])
+        // The daemon resolves gh from each request's own PATH, so the CLI sync passes the fixture too.
+        _ = try runCLI(["task", "pr", "sync", taskID], extraEnvironment: ghEnvironment)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
         assertTaskVisible("Review sync conflict UI", inColumn: "Review")
         XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), try runGitOutput(worktree, "rev-parse", "HEAD"))
@@ -2739,7 +2758,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse((try? String(contentsOf: callLogURL, encoding: .utf8))?.contains("threads 801") ?? false, "Only autopilot tasks read review threads.")
         let modePill = element("task-pr-mode-\(taskID)")
         XCTAssertTrue(modePill.waitToExist(timeout: 5), "A linked PR keeps the mode pill beside it.")
-        XCTAssertEqual(modePill.value as? String, "manual")
+        XCTAssertEqual(modePill.value as? String, "pr", "The pill shows the task's own mode; every new task starts in PR mode.")
         XCTAssertGreaterThanOrEqual(modePill.frame.height, 30)
         attachScreenshot(named: "Pending checks colour the PR number blue", fullScreen: true)
 
@@ -2924,7 +2943,11 @@ final class PlayhouseUITests: XCTestCase {
     // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects merge conflicts without mutation, and PR creation still publishes the task branch and reaches the normal GitHub CLI path; conflicts do not block PR creation. CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI confirms PR creation proceeds for a conflicted branch and the existing Fix Conflicts action still appears once the PR is linked.
     func test_task_pr_conflicts_detect_without_mutation() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
-        launchApp(defaultParent: fixture.parent.path)
+        // The fixture gh fails the first create, so the click reaches the normal GitHub CLI
+        // failure without depending on the gh installed in the VM or its sign-in.
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
+        try "1".write(to: URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH"])), atomically: true, encoding: .utf8)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         let created = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "PR conflict choice UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
             "--merge-target", "\(fixture.primary.path)=main",
@@ -2971,16 +2994,25 @@ final class PlayhouseUITests: XCTestCase {
         revealOnBoard(prButton)
         prButton.click()
         let failureAlert = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
-        XCTAssertTrue(failureAlert.waitToExist(timeout: 10), "The local bare remote should reach the normal GitHub CLI failure after the task branch is published.")
+        XCTAssertTrue(failureAlert.waitToExist(timeout: 10), "PR creation should reach the fixture GitHub CLI failure after the task branch is published.")
         let conflictGuidance = failureAlert.staticTexts.matching(
             NSPredicate(format: "value BEGINSWITH %@", "Resolve conflicts")
         ).firstMatch
         XCTAssertFalse(conflictGuidance.exists, "Conflicts must no longer block PR creation.")
         let ghGuidance = failureAlert.staticTexts.matching(
-            NSPredicate(format: "value CONTAINS %@", "GitHub CLI")
+            NSPredicate(format: "value CONTAINS %@", "GitHub CLI couldn't complete the request. fixture GitHub create failure")
         ).firstMatch
-        XCTAssertTrue(ghGuidance.exists, "The failure should come from the normal GitHub CLI path, not a conflict preflight.")
+        XCTAssertTrue(ghGuidance.exists, "The failure should come from the normal GitHub CLI create call, not a conflict preflight.")
         failureAlert.buttons["OK"].click()
+        let createCalls = try String(contentsOfFile: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CREATE_LOG"]), encoding: .utf8)
+        let failedCreateDirectories = createCalls.components(separatedBy: "\n").filter { $0.hasPrefix("failed\t") }
+            .compactMap { $0.split(separator: "\t", maxSplits: 2).dropFirst().first.map(String.init) }
+            .map { $0.replacingOccurrences(of: "/private/tmp/", with: "/tmp/") }
+        XCTAssertEqual(
+            failedCreateDirectories,
+            [worktree.resolvingSymlinksInPath().path.replacingOccurrences(of: "/private/tmp/", with: "/tmp/")],
+            "gh pr create should have run once in the task worktree: \(createCalls)"
+        )
         XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead)
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead)
         XCTAssertEqual(
@@ -3066,8 +3098,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(firstCreatedLink.waitToExist(timeout: 10), "The first repository's successful PR should persist after the second fails.")
         XCTAssertEqual(firstCreatedLink.label, "#501")
         let retryPRButton = element("task-create-pr-\(activeTaskID)")
-        XCTAssertTrue(retryPRButton.waitToExist(timeout: 10), "The task should keep a PRs action while another repository has no PR.")
-        XCTAssertEqual(retryPRButton.label, "PRs. Create pull requests for repositories without a linked pull request")
+        XCTAssertTrue(retryPRButton.waitToExist(timeout: 10), "The task should keep a PR action while another repository has no PR.")
+        // Only the repository still without a PR is counted, so the retry reads as a single PR.
+        XCTAssertEqual(retryPRButton.label, "PR. Create a pull request for the repository without a linked pull request")
         attachScreenshot(named: "Task shows its PR and retry action after partial creation")
         try "\n".write(to: failurePath, atomically: true, encoding: .utf8)
         retryPRButton.click()
@@ -4865,6 +4898,9 @@ final class PlayhouseUITests: XCTestCase {
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any]
         let taskID = try XCTUnwrap(created?["id"] as? String)
+        // This case is about the task's base. Manual mode keeps Review from publishing the task
+        // branch to the fixture origin and opening a pull request through an unfixtured gh.
+        _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
         openTask(named: title)
         let badge = element("conversation-repository-badge-primary")
         XCTAssertTrue(badge.waitToExist(timeout: 5))
@@ -5035,6 +5071,7 @@ final class PlayhouseUITests: XCTestCase {
             "task", "create", "--title", offlineTitle, "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
         ])["result"] as? [String: Any]
         let offlineID = try XCTUnwrap(offline?["id"] as? String)
+        _ = try runCLI(["task", "pr", "mode", offlineID, "manual"])
         XCTAssertEqual(try repositoryRecord(taskID: offlineID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, "origin/main")
         try runGit(fixture.primary, "remote", "set-url", "origin", runDirectory.appendingPathComponent("unreachable-origin.git").path)
         openTask(named: offlineTitle)
@@ -5502,8 +5539,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(changeSuggestionParent.label.localizedCaseInsensitiveContains("Change"))
         changeSuggestionParent.click()
         try chooseFolder(in: openFolderPanel, folder: fixture.alternateParent, confirmationButton: "Use This Folder")
-        XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitToExist(timeout: 10), "Changing the parent should refresh the repository suggestions.")
-        XCTAssertFalse(element("conversation-repository-suggestion-primary").exists, "Suggestions from the previous parent should be replaced.")
+        // The alternate parent sits inside the first parent, so `alternate` is already listed before
+        // the change; the refresh is settled only once the first parent's `primary` is gone.
+        XCTAssertTrue(waitUntil({ !self.element("conversation-repository-suggestion-primary").exists }, timeout: 10), "Suggestions from the previous parent should be replaced.")
+        XCTAssertTrue(element("conversation-repository-suggestion-alternate").exists, "Changing the parent should refresh the repository suggestions.")
         XCTAssertTrue(waitUntil({
             guard let response = try? self.runCLI(["settings", "get"]),
                   let settings = response["result"] as? [String: Any] else { return false }
@@ -11773,6 +11812,11 @@ final class PlayhouseUITests: XCTestCase {
                 _ = waitUntil(condition, timeout: 1)
             }
         }
+        /// Once every message is loaded there is no page left to reveal on the way, so one long
+        /// scroll reaches the first turn instead of dozens of 400-point steps.
+        func scrollTowardFirstTurn() {
+            scrollView.scroll(byDeltaX: 0, deltaY: 40_000)
+        }
         scrollUp(until: { scrollView.value as? String == "Showing latest \(latestWindow + 40) of \(total) messages" })
         XCTAssertEqual(scrollView.value as? String, "Showing latest \(latestWindow + 40) of \(total) messages", "Scrolling up reveals an older batch already loaded.")
         let readsBeforeOlderPage = try historyReads().count
@@ -11785,6 +11829,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Older Claude page read from the store while scrolling up")
         scrollUp(until: { scrollView.value as? String == "Showing latest \(total) of \(total) messages" })
         XCTAssertEqual(scrollView.value as? String, "Showing latest \(total) of \(total) messages")
+        scrollTowardFirstTurn()
         scrollUp(until: { isVisible(oldest) })
         XCTAssertTrue(waitUntil({ isVisible(oldest) }, timeout: 5), "Scrolling to the top shows the first turn.")
         let firstImage = element("chat-image-\(firstUserID)-0")
@@ -11813,6 +11858,7 @@ final class PlayhouseUITests: XCTestCase {
                       "The completed turn joins the transcript without dropping the earlier pages.")
         // Rows far above the viewport are not realized, so scroll back up to
         // confirm the first turn and its image are still loaded.
+        scrollTowardFirstTurn()
         scrollUp(until: { isVisible(firstImage) })
         XCTAssertTrue(waitUntil({ isVisible(oldest) && isVisible(firstImage) }, timeout: 5),
                       "The first turn and its image stay loaded after the turn completes.")
@@ -14199,6 +14245,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.transcriptContains(commentary) }, timeout: 10), "Reopening keeps the nudged turn's commentary.")
 
         try sendLaterTurnAndAssertNudgedCallInline(taskID: nudgedTaskID, callID: "item_nudged_check_1", visibleTexts: [finalReport, commentary])
+        XCTAssertEqual(try taskRecord(id: nudgedTaskID)?["status"] as? String, "Review",
+                       "The later turn's own nudge keeps working and reports completed instead of blocking the task.")
         attachScreenshot(named: "Codex nudged turn work after a later turn")
     }
 
@@ -21670,6 +21718,15 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             (try? self.taskRecord(id: taskID)?["status"] as? String) == expectedStatus
         }, timeout: settleTimeout), "The completed turn should settle in \(expectedStatus).")
+        // Review is written before the turn finishes: it still creates the PR the task's mode asks
+        // for, and the turn is over only once it releases the task's reservation. Other expected
+        // statuses can hand straight on to a follow-up turn (autopilot's fix turn takes the same
+        // reservation), so only a turn that ends in Review is waited out here.
+        if expectedStatus == "Review" {
+            XCTAssertTrue(waitUntil({
+                !ConversationTurnLockBarrier.isHeldByAnotherProcess(dataDirectory: self.dataDirectory, taskID: taskID)
+            }, timeout: settleTimeout), "The completed turn should release its conversation-turn reservation.")
+        }
     }
 
     private func assertTaskVisible(_ title: String, inColumn status: String) {
@@ -22509,8 +22566,9 @@ final class PlayhouseUITests: XCTestCase {
         return (runtime["activeThreadIDs"] as? [String] ?? []).isEmpty && !element("pause-response-button").exists
     }
 
-    /// The suite must never reach an installed Codex or Claude CLI: every provider process a
-    /// case starts, from the app or from the daemon on its behalf, is one of its own fixtures.
+    /// The suite must never reach an installed Codex, Claude or GitHub CLI: every provider or
+    /// `gh` process a case starts, from the app or from the daemon on its behalf, is one of its
+    /// own fixtures. A task left in PR mode reaches `gh` on its way to Review.
     private func providerFixtureViolations() -> [String] {
         guard let events = try? diagnosticEvents() else {
             // A case that launched the app always has a diagnostics log to check.
@@ -22519,9 +22577,13 @@ final class PlayhouseUITests: XCTestCase {
         let fixtureRoots = [WorkspaceFixture.root.path, runDirectory.path]
         return events.compactMap { event in
             guard let name = event["event"] as? String,
-                  name == "codex.app_server.started" || name == "claude.process.started" else { return nil }
+                  ["codex.app_server.started", "claude.process.started", "github.cli.started"].contains(name) else { return nil }
             let executable = event["executable"] as? String ?? ""
             guard !fixtureRoots.contains(where: { executable.hasPrefix($0 + "/") }) else { return nil }
+            if name == "github.cli.started" {
+                let operation = event["operation"] as? String ?? ""
+                return "gh \(operation) ran \(executable) instead of the gh fixture; give the case the gh fixture, or set a task that is not about pull requests to Manual mode."
+            }
             return "\(name) launched \(executable) instead of a test fixture; give the app the case's fixture before it reads the conversation."
         }
     }

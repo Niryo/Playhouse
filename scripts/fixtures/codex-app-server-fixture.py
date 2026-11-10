@@ -1450,6 +1450,10 @@ def main():
                         history_path.write_text(json.dumps(steered_history), encoding="utf-8")
                     if steered_text is None:
                         os._exit(3)
+                    # One steer per pause: a later nudge in the same conversation keeps working
+                    # instead of waiting out the steer deadline.
+                    Path(str(sys.argv[0]) + ".nudged-steer-pause").unlink(missing_ok=True)
+                    Path(str(sys.argv[0]) + ".nudged-steer-ready").unlink(missing_ok=True)
                 for item in nudged_work_items(len(saved.get("turns", [])) - 1):
                     if item["type"] == "commandExecution":
                         write({"jsonrpc": "2.0", "method": "item/started", "params": {
