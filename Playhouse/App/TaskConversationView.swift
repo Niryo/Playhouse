@@ -1135,6 +1135,8 @@ struct TaskConversationView: View {
     @State private var answeredUserInputRequestIDs: Set<String> = []
     // Safe replies this window streamed for secret recovery turns, which history hides.
     @State private var streamedRecoveryReplies: [String: String] = [:]
+    // Text deltas waiting to be applied to `messages`; see `bufferStreamedTextDelta`.
+    @State private var pendingTextDeltas = PendingStreamedTextDeltas()
     @State private var userInputAnswers: [String: [String]] = [:]
     @State private var userInputOther: [String: String] = [:]
     @State private var userInputOtherSelected: Set<String> = []
@@ -1433,6 +1435,8 @@ struct TaskConversationView: View {
     /// trimmed back to the messages already loaded, so a reload never pulls
     /// the whole conversation into memory.
     private func applyHistoryMessages(_ history: ConversationHistory, _ incoming: [ConversationMessage]? = nil) {
+        // Buffered text arrived before this history, so it applies first, as it would have unbuffered.
+        flushStreamedTextDeltas()
         defer { mergeTimelineActivities(history.timelineActivities) }
         let incoming = incoming ?? history.messages
         if let earlierCount = history.earlierMessageCount {
@@ -1586,11 +1590,10 @@ struct TaskConversationView: View {
     /// compaction rows are not: they are positional markers whose meaning comes
     /// from the two messages they sit between, and they reappear with those
     /// messages as older batches are revealed.
-    private func renderedAnchorMessageID(for anchorID: String?) -> String? {
+    private static func renderedAnchorMessageID(for anchorID: String?, renderedIDs: Set<String>, firstRenderedID: String?) -> String? {
         guard let anchorID else { return nil }
-        let rendered = renderedConversationMessages
-        if rendered.contains(where: { $0.id == anchorID }) { return anchorID }
-        return rendered.first?.id ?? anchorID
+        if renderedIDs.contains(anchorID) { return anchorID }
+        return firstRenderedID ?? anchorID
     }
 
     private func goalAchievementAnchorMessageID(for entry: GoalAchievementTimelineEntry) -> String? {
@@ -1814,7 +1817,10 @@ struct TaskConversationView: View {
                   !answeredUserInputRequestIDs.contains(request.id) else { return }
             showUserInputRequest(request)
         }
-        .onChange(of: messages) { _, _ in
+        // Compared only while a streamed recovery reply is waiting: comparing the whole
+        // transcript on every update was a large share of streaming a long conversation.
+        // Showing the replies again is idempotent, so the comparison starting is harmless.
+        .onChange(of: streamedRecoveryReplies.isEmpty ? nil : messages) { _, _ in
             // History reloads bring back the hidden text for replies this window streamed.
             if !streamedRecoveryReplies.isEmpty { showStreamedRecoveryReplies() }
         }
@@ -3292,6 +3298,46 @@ struct TaskConversationView: View {
         let activityDisclosureAnchorID: String?
         let latestTurnStartID: String?
         let conversationMessages: [ConversationMessage]
+        /// Provider boundaries and goal achievements keyed by the rendered message they follow.
+        let boundariesByAnchorID: [String: [ConversationProviderBoundary]]
+        let goalEntriesByAnchorID: [String: [GoalAchievementTimelineEntry]]
+        /// Context compactions with a timeline position, in activity order.
+        let orderedContextCompactions: [ConversationActivity]
+    }
+
+    /// A rendered message's identity and its position in this pass's window. The
+    /// transcript's `ForEach` iterates these rather than the messages themselves:
+    /// SwiftUI compares a `ForEach`'s data on every update, and comparing every
+    /// message's full contents on every streamed delta was a large share of the
+    /// time spent streaming into a long conversation.
+    private struct RenderedMessageReference: Identifiable, Equatable {
+        let id: String
+        let index: Int
+    }
+
+    private func makeTranscriptRowContext(rendered: [ConversationMessage]) -> TranscriptRowContext {
+        let allMessages = conversationMessages
+        let renderedIDs = Set(rendered.map(\.id))
+        func renderedAnchor(_ anchorID: String?) -> String? {
+            Self.renderedAnchorMessageID(for: anchorID, renderedIDs: renderedIDs, firstRenderedID: rendered.first?.id)
+        }
+        var boundaries: [String: [ConversationProviderBoundary]] = [:]
+        for boundary in providerBoundaries {
+            if let anchor = renderedAnchor(boundaryAnchorID(for: boundary)) { boundaries[anchor, default: []].append(boundary) }
+        }
+        var goalEntries: [String: [GoalAchievementTimelineEntry]] = [:]
+        for entry in goalAchievementTimelineEntries {
+            if let anchor = renderedAnchor(goalAchievementAnchorMessageID(for: entry)) { goalEntries[anchor, default: []].append(entry) }
+        }
+        return TranscriptRowContext(
+            inlineTools: inlineToolCalls.byMessageID,
+            activityDisclosureAnchorID: shouldShowActivityDisclosure ? activityDisclosureAnchorID : nil,
+            latestTurnStartID: latestConversationTurnStartID,
+            conversationMessages: allMessages,
+            boundariesByAnchorID: boundaries,
+            goalEntriesByAnchorID: goalEntries,
+            orderedContextCompactions: activities.filter { $0.isContextCompaction && $0.timelineOrder != nil }
+        )
     }
 
     /// One message of the rendered window with the rows anchored to it: its
@@ -3311,14 +3357,10 @@ struct TaskConversationView: View {
             // The question itself starts the newest turn, below any page
             // separator, so a pin lands on the bubble.
             .layoutValue(key: ConversationLatestTurnStartKey.self, value: message.id == context.latestTurnStartID)
-        ForEach(providerBoundaries.filter {
-            renderedAnchorMessageID(for: boundaryAnchorID(for: $0)) == message.id
-        }) { boundary in
+        ForEach(context.boundariesByAnchorID[message.id] ?? []) { boundary in
             providerBoundaryRow(boundary)
         }
-        ForEach(goalAchievementTimelineEntries.filter {
-            renderedAnchorMessageID(for: goalAchievementAnchorMessageID(for: $0)) == message.id
-        }) { entry in
+        ForEach(context.goalEntriesByAnchorID[message.id] ?? []) { entry in
             goalAchievementTimelineRow(entry)
                 .id(entry.id)
         }
@@ -3329,12 +3371,14 @@ struct TaskConversationView: View {
                 ToolCallTimelineRow(activity: activity)
             }
         }
-        let nextOrder = context.conversationMessages.first(where: {
+        // Most transcripts have no compaction, so the scan for the next ordered message runs only when one exists.
+        let compactions = message.timelineOrder == nil ? [] : context.orderedContextCompactions
+        let nextOrder = compactions.isEmpty ? nil : context.conversationMessages.first(where: {
             guard let current = message.timelineOrder, let candidate = $0.timelineOrder else { return false }
             return candidate > current
         })?.timelineOrder
-        ForEach(activities.filter {
-            guard $0.isContextCompaction, let eventOrder = $0.timelineOrder,
+        ForEach(compactions.filter {
+            guard let eventOrder = $0.timelineOrder,
                   let messageOrder = message.timelineOrder, eventOrder > messageOrder else { return false }
             return nextOrder.map { eventOrder < $0 } ?? true
         }) { activity in
@@ -3398,12 +3442,8 @@ struct TaskConversationView: View {
                 let leadingGoalEntries = goalAchievementTimelineEntries.filter { goalAchievementAnchorMessageID(for: $0) == nil }
                 // Worked out once per pass rather than once per row: each walks the whole transcript, and
                 // every row of it is rebuilt whenever the transcript's width changes, as while resizing the chat.
-                let rowContext = TranscriptRowContext(
-                    inlineTools: inlineToolCalls.byMessageID,
-                    activityDisclosureAnchorID: shouldShowActivityDisclosure ? activityDisclosureAnchorID : nil,
-                    latestTurnStartID: latestConversationTurnStartID,
-                    conversationMessages: conversationMessages
-                )
+                let renderedMessages = renderedConversationMessages
+                let rowContext = makeTranscriptRowContext(rendered: renderedMessages)
                 ConversationTranscriptLayout(
                     spacing: 16,
                     minimumLatestTurnHeight: max(0, viewport.size.height - Self.conversationVerticalPadding - Self.conversationScrollEndHeight)
@@ -3454,8 +3494,8 @@ struct TaskConversationView: View {
                         ForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
                             providerBoundaryRow(boundary)
                         }
-                        ForEach(renderedConversationMessages) { message in
-                            transcriptRows(for: message, context: rowContext)
+                        ForEach(renderedMessages.indices.map { RenderedMessageReference(id: renderedMessages[$0].id, index: $0) }) { reference in
+                            transcriptRows(for: renderedMessages[reference.index], context: rowContext)
                         }
                         ForEach(liveChatPageRecalls) { activity in
                             if let pageID = activity.recalledChatPageID {
@@ -3599,13 +3639,16 @@ struct TaskConversationView: View {
             .onChange(of: messages.count) { _, _ in
                 scrollToLatestUserMessage(using: scrollProxy, viewportHeight: viewport.size.height)
             }
-            .onChange(of: messages.map(\.text)) { _, _ in
-                if !hasPresentedLatestConversation {
+            // These compare the transcript only before it is first presented, the only time
+            // their handlers act; a nil on either side is the comparison starting or stopping,
+            // not a change of the transcript.
+            .onChange(of: hasPresentedLatestConversation ? nil : messages.map(\.text)) { previous, current in
+                if previous != nil, current != nil, !hasPresentedLatestConversation {
                     scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
                 }
             }
-            .onChange(of: activities) { _, _ in
-                if isResponding && !hasPresentedLatestConversation {
+            .onChange(of: hasPresentedLatestConversation ? nil : activities) { previous, current in
+                if previous != nil, current != nil, isResponding && !hasPresentedLatestConversation {
                     scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
                 }
             }
@@ -4477,7 +4520,17 @@ struct TaskConversationView: View {
     }
 
     private static func displayableAssistantText(_ text: String) -> String {
-        text
+        // Runs for every assistant row on every transcript pass: most replies have no
+        // plan tags and no surrounding whitespace, so skip building copies for them.
+        // A byte scan for the tags' "<", because a substring search costs more here
+        // than the replacements it would skip.
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        if !text.utf8.contains(UInt8(ascii: "<")),
+           text.unicodeScalars.first.map({ !whitespace.contains($0) }) ?? true,
+           text.unicodeScalars.last.map({ !whitespace.contains($0) }) ?? true {
+            return text
+        }
+        return text
             .replacingOccurrences(of: "<proposed_plan>", with: "")
             .replacingOccurrences(of: "</proposed_plan>", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5682,6 +5735,8 @@ struct TaskConversationView: View {
                 messageLimit: Self.historyPageSize,
                 onActionRequest: { actionNotice = approvalNotice }
             )
+            // Buffered text arrived before this history, so it applies first, as it would have unbuffered.
+            flushStreamedTextDeltas()
             messages = history.messages
             earlierStoredMessageCount = history.earlierMessageCount ?? 0
             // Resolve the window as soon as the messages land. The assignment
@@ -6282,6 +6337,7 @@ struct TaskConversationView: View {
                 }, onUserInput: { request in
                     showUserInputRequest(request)
                 })
+                flushStreamedTextDeltas()
                 if messages.first(where: { $0.id == assistantMessageID })?.text.isEmpty == true {
                     messages.removeAll { $0.id == assistantMessageID }
                 }
@@ -6313,6 +6369,8 @@ struct TaskConversationView: View {
                     }
                 }
             } catch {
+                // Text that streamed before the failure is part of what the window showed.
+                flushStreamedTextDeltas()
                 if resolutionAttempt > 0 {
                     conflictResolutionAttempt = 0
                     onConflictResolutionChecked(false)
@@ -6346,20 +6404,22 @@ struct TaskConversationView: View {
         }
     }
 
+    /// How long streamed text may wait before it is shown. A provider streams a
+    /// delta every few tokens, and every change to `messages` re-renders the whole
+    /// transcript, so deltas are applied together at most this often.
+    private static let streamedTextApplyInterval: UInt64 = 50_000_000
+
     /// Applies one update of a turn this window streams: its own send, or a running turn it
     /// watches (a CLI send, a schedule, or a turn the daemon reattached after a restart).
     private func applyStreamedUpdate(_ update: ConversationUpdate, assistantMessageID: String, pendingAnnotations: [ConversationAnnotation] = []) {
-        switch update.type {
-        case "text_delta":
+        if update.type == "text_delta" {
             guard let delta = update.text else { return }
-            let messageIndex: Int
-            if let existingIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
-                messageIndex = existingIndex
-            } else {
-                messages.append(ConversationMessage(id: assistantMessageID, role: .assistant, text: ""))
-                messageIndex = messages.index(before: messages.endIndex)
-            }
-            messages[messageIndex].text += delta
+            bufferStreamedTextDelta(delta, messageID: assistantMessageID)
+            return
+        }
+        // Every other update applies after the text that streamed before it.
+        flushStreamedTextDeltas()
+        switch update.type {
         case "assistant_final":
             guard let text = update.text else { return }
             if let messageIndex = messages.lastIndex(where: { $0.role == .assistant }),
@@ -6599,6 +6659,7 @@ struct TaskConversationView: View {
             }, onUserInput: { request in
                 showUserInputRequest(request)
             })
+            flushStreamedTextDeltas()
             messages.removeAll { $0.id == assistantMessageID && $0.text.isEmpty }
             // The watched turn's final history arrived as its `completed` update; anything
             // after it (a queued follow-up starting) reaches this window the usual way.
@@ -6972,6 +7033,43 @@ struct TaskConversationView: View {
         }
     }
 
+    /// Holds a streamed delta until the next apply. The first delta of a batch
+    /// schedules it; any other update, and the end of the stream, applies it sooner.
+    private func bufferStreamedTextDelta(_ delta: String, messageID: String) {
+        let pending = pendingTextDeltas
+        if pending.messageID != messageID || pending.taskID != task.id { flushStreamedTextDeltas() }
+        pending.messageID = messageID
+        pending.taskID = task.id
+        pending.text += delta
+        guard !pending.isApplyScheduled else { return }
+        pending.isApplyScheduled = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: Self.streamedTextApplyInterval)
+            pending.isApplyScheduled = false
+            flushStreamedTextDeltas()
+        }
+    }
+
+    /// Appends the buffered text to its message, creating the message on the first text.
+    private func flushStreamedTextDeltas() {
+        let pending = pendingTextDeltas
+        guard let messageID = pending.messageID, let taskID = pending.taskID else { return }
+        let text = pending.text
+        pending.messageID = nil
+        pending.taskID = nil
+        pending.text = ""
+        // Text streamed for another task's conversation is never shown in this one.
+        guard taskID == task.id, !text.isEmpty else { return }
+        let messageIndex: Int
+        if let existingIndex = messages.firstIndex(where: { $0.id == messageID }) {
+            messageIndex = existingIndex
+        } else {
+            messages.append(ConversationMessage(id: messageID, role: .assistant, text: ""))
+            messageIndex = messages.index(before: messages.endIndex)
+        }
+        messages[messageIndex].text += text
+    }
+
     /// Shows a question; the same question can arrive again, so keep its answers.
     private func showUserInputRequest(_ request: ConversationUserInputRequest) {
         let isNewQuestion = request.id != userInputRequest?.id
@@ -6983,6 +7081,8 @@ struct TaskConversationView: View {
     }
 
     private func showLocalSteer(_ text: String, imageDataURLs: [String] = []) {
+        // The steer follows the text that streamed before it.
+        flushStreamedTextDeltas()
         if let index = unconfirmedStreamedSteers.firstIndex(of: text) {
             unconfirmedStreamedSteers.remove(at: index)
             return
@@ -7619,6 +7719,17 @@ private struct ConversationLatestTurnExtentKey: LayoutValueKey {
 /// `minimumLatestTurnHeight` from the top of the newest turn's first row to its
 /// end, adding the difference as blank space below the last row. The extent
 /// view is not stacked: it is laid over the newest turn at its natural height.
+/// Streamed text a conversation window has received but not yet applied.
+/// A reference, so the scheduled apply and the stream share one buffer without
+/// every buffered delta invalidating the view.
+@MainActor
+private final class PendingStreamedTextDeltas {
+    var messageID: String?
+    var taskID: UUID?
+    var text = ""
+    var isApplyScheduled = false
+}
+
 private struct ConversationTranscriptLayout: Layout {
     var spacing: CGFloat
     var minimumLatestTurnHeight: CGFloat

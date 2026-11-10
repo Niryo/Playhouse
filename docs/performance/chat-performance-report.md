@@ -1,5 +1,7 @@
 # Chat performance profile: long conversations
 
+> Follow-up: fixes and before/after numbers are in [chat-performance-fixes-report.md](chat-performance-fixes-report.md). That report also corrects one statement here: the app target compiles with `-O` even in Debug (it also enables coverage instrumentation).
+
 Profiled 2026-11-10 in the shared Tart VM (`playhouse-ui`, macOS 26.6.2, 6 vCPU, 12 GB, Xcode 26.5) against the **Debug** build, the configuration `scripts/run.sh` ships. Instruments recorded each phase separately with Time Profiler and Hangs (`xctrace record --attach`).
 
 ## TL;DR
