@@ -11743,7 +11743,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertLessThan(reloaded.frame.minY, app.staticTexts["Context compaction completed."].frame.minY)
     }
 
-    // case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below. Scrolling upward loads earlier messages automatically in 40-message batches, including when the latest turn alone is shorter than the viewport, while keeping the anchored message in place and preserving chronological order. No separate control is needed on systems that report scroll position; below macOS 15 the transcript keeps an explicit Load earlier messages control inside that runway instead. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn and keeps upward paging working. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
+    // case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below. Scrolling upward loads earlier messages automatically in 40-message batches, including when the latest turn alone is shorter than the viewport, while keeping the anchored message in place and preserving chronological order. No separate control is needed on systems that report scroll position; below macOS 15 the transcript keeps an explicit Load earlier messages control inside that runway instead. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn and keeps upward paging working. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order. The transcript's runway above the rendered window is as tall as the unrendered history is estimated to be, from the loaded messages and the stored count a paged read reports, so the scroller knob already reflects the whole conversation when the latest turn opens and keeps about its size as older batches are revealed; one long upward scroll deep into that runway reveals every batch it passes, reading the stored page as needed, and lands on the first messages.
     func test_conversation_loads_newest_messages_before_older_history() throws {
         let fixtureCopy = WorkspaceFixture.root.appendingPathComponent("codex-fixture-long-history-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the long-history fixture before launch.")
@@ -11824,6 +11824,29 @@ final class PlayhouseUITests: XCTestCase {
         }
         XCTAssertEqual(scrollView.value as? String, "Showing latest 2 of 120 messages", "Opening the conversation must not render earlier turns.")
         XCTAssertFalse(intermediate.exists, "The first message in the excluded prior page should not be rendered before scrolling.")
+        // The knob's length tracks the scroll content's length, so it shows
+        // whether the unrendered history is already accounted for.
+        func scrollerKnobHeight() -> CGFloat {
+            let knob = scrollView.scrollBars.firstMatch.descendants(matching: .valueIndicator).firstMatch
+            return knob.exists ? knob.frame.height : 0
+        }
+        XCTAssertTrue(waitUntil({ scrollerKnobHeight() > 0 }, timeout: 5), "The transcript's scroller should expose its knob.")
+        let openedKnobHeight = scrollerKnobHeight()
+        let scrollerTrackHeight = scrollView.scrollBars.firstMatch.frame.height
+        XCTAssertLessThan(openedKnobHeight, scrollerTrackHeight * 0.25, "The scroller should already reflect the 118 unrendered messages when the latest turn opens.")
+        attachScreenshot(named: "Scroller sized for the whole history on open")
+        func assertKnobKeepsItsSize(_ context: String) {
+            // Read once the knob has settled with the revealed rows' layout.
+            var previous: CGFloat = -1
+            _ = waitUntil({
+                let current = scrollerKnobHeight()
+                defer { previous = current }
+                return current > 0 && current == previous
+            }, timeout: 3)
+            let height = scrollerKnobHeight()
+            XCTAssertGreaterThan(height, openedKnobHeight * 0.67, "The scroller knob should keep about its size \(context).")
+            XCTAssertLessThan(height, openedKnobHeight * 1.5, "The scroller knob should keep about its size \(context).")
+        }
         scrollView.scroll(byDeltaX: 0, deltaY: 200)
         XCTAssertTrue(waitUntil({
             scrollView.value as? String == "Showing latest 42 of 120 messages"
@@ -11831,14 +11854,20 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(isVisible(oldest), "The first older batch should not yet reach the oldest message.")
         XCTAssertTrue(waitUntil({ isVisible(latestQuestion) }, timeout: 5), "Revealing the first older batch should keep the message the reader was on in view instead of jumping.")
         XCTAssertLessThanOrEqual(abs(latestQuestion.frame.minY - scrollView.frame.minY), 150, "The message that was at the top should stay at the top when the older batch is inserted above it.")
+        assertKnobKeepsItsSize("after the first older batch is revealed")
+        attachScreenshot(named: "Scroller keeps its size after an older batch is revealed")
 
         scrollTranscript(by: 400, until: { scrollView.value as? String == "Showing latest 82 of 120 messages" }, limit: 30, settle: 1)
         XCTAssertEqual(scrollView.value as? String, "Showing latest 82 of 120 messages", "Scrolling to the top should automatically load the next older batch.")
         XCTAssertTrue(waitUntil({ isVisible(firstLoadedUser) }, timeout: 5), "The message that was at the top before pagination should stay in view.")
         XCTAssertLessThanOrEqual(abs(firstLoadedUser.frame.minY - scrollView.frame.minY), 150, "Automatic pagination should preserve the visible top anchor.")
+        assertKnobKeepsItsSize("after the second older batch is revealed")
         XCTAssertFalse(isVisible(oldest), "The second batch should still leave the oldest page out of view.")
         scrollTranscript(by: 400, until: { scrollView.value as? String == "Showing latest 120 of 120 messages" }, limit: 30, settle: 1)
         XCTAssertEqual(scrollView.value as? String, "Showing latest 120 of 120 messages")
+        // Every row is real now and the runway is gone, so this is where an
+        // estimate that was off would show as a final jump.
+        assertKnobKeepsItsSize("once every older batch is revealed")
         scrollTranscript(by: 1500, until: { isVisible(oldest) }, limit: 40)
         XCTAssertTrue(waitUntil({ isVisible(oldest) }, timeout: 5), "Scrolling to the top should bring the oldest message into view.")
         let firstAssistant = element("assistant-message-item_long_history_assistant_1")
@@ -11873,6 +11902,16 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             scrollView.value as? String == "Showing latest 42 of 120 messages"
         }, timeout: 10), "Upward scrolling must still reveal earlier messages after an in-place reload.")
+        // One long upward scroll lands far inside the unrendered history, as
+        // dragging the scroller's knob to the top does. Every batch it passes,
+        // including the page still in the store, is revealed in place, so the
+        // viewport shows the first messages instead of an empty estimate.
+        scrollView.scroll(byDeltaX: 0, deltaY: 40_000)
+        XCTAssertTrue(waitUntil({
+            scrollView.value as? String == "Showing latest 120 of 120 messages"
+        }, timeout: 20), "Jumping to the top of the history should reveal every batch above the window.")
+        XCTAssertTrue(waitUntil({ isVisible(oldest) }, timeout: 5), "Jumping to the top of the history should land on its first messages.")
+        attachScreenshot(named: "A jump to the top of the history lands on the first messages")
     }
 
     // case-contract: test_sent_prompt_stays_out_of_composer_past_history_page | A sent prompt followed by a 120-message turn, so that it lies outside the newest history page, never returns to the composer when the task is reopened: the composer is empty, the task keeps hasUnsentDraft false and its last sent prompt as the saved prompt, and the CLI newest page of 80 messages leaves out the earlier messages. Only the saved draft flag decides draft restoration, so the same task restores a real unsent draft after it is typed.

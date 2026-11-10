@@ -1349,28 +1349,64 @@ struct TaskConversationView: View {
 
     /// Reveals the next older batch, keeping the message that was at the top of
     /// the viewport in place so the transcript does not jump under the pointer.
-    private func revealOlderConversationMessages(using proxy: ScrollViewProxy) {
+    /// With a `distance` from the window top up to the viewport's top edge, as
+    /// after dragging the scroller deep into the runway, it reveals whole
+    /// batches until their estimated height reaches that far, and leaves the
+    /// offset where the reader put it.
+    private func revealOlderConversationMessages(using proxy: ScrollViewProxy, covering distance: CGFloat? = nil) {
         guard hasOlderConversationMessages, !isRevealingOlderConversationMessages else { return }
         let allMessages = conversationMessages
         guard let currentTopID = renderedConversationMessages.first?.id,
               let currentStartIndex = allMessages.firstIndex(where: { $0.id == currentTopID }) else { return }
-        // The loaded messages cannot fill another batch above the window, so
-        // read the next older page from the daemon first.
-        if currentStartIndex < Self.olderConversationMessageBatchSize, earlierStoredMessageCount > 0 {
+        let batchSize = Self.olderConversationMessageBatchSize
+        var newStartIndex = max(0, currentStartIndex - batchSize)
+        var needsEarlierPage = currentStartIndex < batchSize
+        if let distance {
+            let heights = estimatedConversationRowHeights(of: 0..<currentStartIndex, in: allMessages)
+            var covered = heights[newStartIndex...].reduce(0, +)
+            while covered < distance, newStartIndex > 0 {
+                let next = max(0, newStartIndex - batchSize)
+                covered += heights[next..<newStartIndex].reduce(0, +)
+                newStartIndex = next
+            }
+            needsEarlierPage = needsEarlierPage || covered < distance
+        }
+        // The loaded messages cannot fill what is to be revealed above the
+        // window, so read the next older page from the daemon first.
+        if needsEarlierPage, earlierStoredMessageCount > 0 {
             isRevealingOlderConversationMessages = true
             isOlderConversationRevealArmed = false
             Task { @MainActor in
                 let loaded = await loadEarlierConversationMessages()
                 isRevealingOlderConversationMessages = false
-                if loaded { revealOlderConversationMessages(using: proxy) }
+                if loaded { revealOlderConversationMessages(using: proxy, covering: distance) }
             }
             return
         }
-        let newStartIndex = max(0, currentStartIndex - Self.olderConversationMessageBatchSize)
         guard newStartIndex < currentStartIndex else { return }
         isRevealingOlderConversationMessages = true
         isOlderConversationRevealArmed = false
         oldestRenderedMessageID = allMessages[newStartIndex].id
+        if distance != nil {
+            Task { @MainActor in
+                // The revealed rows take the runway's place at the reader's
+                // offset; once laid out, judge again in case the estimate fell
+                // short of the viewport.
+                await Task.yield()
+                for delay in Self.scrollSettleDelays {
+                    try? await Task.sleep(nanoseconds: delay)
+                }
+                isRevealingOlderConversationMessages = false
+                if let offsetY = lastConversationScrollSample.offsetY {
+                    handleConversationWindowTop(
+                        conversationWindowTopY(offsetY: offsetY, viewportHeight: lastConversationScrollSample.viewportHeight),
+                        using: proxy,
+                        allowsJump: true
+                    )
+                }
+            }
+            return
+        }
         Task { @MainActor in
             await Task.yield()
             var transaction = Transaction()
@@ -1464,18 +1500,94 @@ struct TaskConversationView: View {
     /// The runway occupies everything above the rendered window, so the distance
     /// from the viewport top to the window top is what is left of it.
     private func conversationWindowTopY(offsetY: CGFloat, viewportHeight: CGFloat) -> CGFloat {
-        hasOlderConversationMessages ? viewportHeight - offsetY : -offsetY
+        guard hasOlderConversationMessages else { return -offsetY }
+        let runwayHeight = lastConversationScrollSample.runwayHeight
+        return (runwayHeight > 0 ? runwayHeight : viewportHeight) - offsetY
+    }
+
+    /// The runway's height: the estimated length of every message above the
+    /// rendered window, the loaded ones and those still in the store, and at
+    /// least a viewport so an upward drag is always available. Recorded on the
+    /// scroll sample, where scroll handling reads where the window top is.
+    private func olderConversationRunwayHeight(viewport: CGSize) -> CGFloat {
+        let sample = lastConversationScrollSample
+        sample.viewportHeight = viewport.height
+        guard hasOlderConversationMessages else {
+            sample.runwayHeight = 0
+            return 0
+        }
+        let allMessages = conversationMessages
+        let startIndex = oldestRenderedMessageID.flatMap { id in allMessages.firstIndex { $0.id == id } }
+            ?? max(0, allMessages.count - Self.olderConversationMessageBatchSize)
+        // The runway sits above everything the reader can see, so a change in
+        // its height moves the content under them. It is estimated again only
+        // when the window or the history above it changes, which a reveal or a
+        // reload owns the position for, never as the transcript reflows to a
+        // new width or the window's own rows, a streaming answer among them,
+        // grow.
+        let key = ConversationScrollSample.RunwayKey(
+            firstLoadedID: allMessages.first?.id,
+            windowStartID: startIndex < allMessages.count ? allMessages[startIndex].id : nil,
+            hiddenLoadedCount: startIndex,
+            storedCount: earlierStoredMessageCount
+        )
+        if key == sample.runwayKey, sample.estimatedHiddenHeight > 0 {
+            let height = max(viewport.height, sample.estimatedHiddenHeight)
+            sample.runwayHeight = height
+            return height
+        }
+        sample.runwayKey = key
+        sample.rowHeightWidth = ConversationRowHeightEstimates.textWidth(viewportWidth: viewport.width)
+        var hiddenHeight = estimatedConversationRowHeights(of: 0..<startIndex, in: allMessages).reduce(0, +)
+        // Messages still in the store are assumed to be like the hidden loaded
+        // ones. With none hidden, the last such average stands in.
+        if startIndex > 0 {
+            sample.storedMessageAverageHeight = hiddenHeight / CGFloat(startIndex)
+        }
+        hiddenHeight += sample.storedMessageAverageHeight * CGFloat(earlierStoredMessageCount)
+        sample.estimatedHiddenHeight = hiddenHeight.rounded()
+        let height = max(viewport.height, sample.estimatedHiddenHeight)
+        sample.runwayHeight = height
+        return height
+    }
+
+    /// Estimated height of each loaded message in `range` with the tool calls
+    /// placed after it, at the width the runway was last laid out at.
+    private func estimatedConversationRowHeights(of range: Range<Int>, in allMessages: [ConversationMessage]) -> [CGFloat] {
+        let sample = lastConversationScrollSample
+        var toolCallCounts: [String: Int] = [:]
+        for activity in timelineActivities {
+            if let anchor = activity.afterMessageID { toolCallCounts[anchor, default: 0] += 1 }
+        }
+        return range.map { index in
+            let message = allMessages[index]
+            return sample.rowHeights.height(for: message, width: sample.rowHeightWidth)
+                + CGFloat(toolCallCounts[message.id] ?? 0) * ConversationRowHeightEstimates.toolCallRowHeight
+        }
     }
 
     /// Handles a new position for the top of the rendered window, measured from
     /// the top of the viewport. Dragging it below the threshold means the user
     /// scrolled past the oldest rendered message, which reveals the next batch.
-    private func handleConversationWindowTop(_ windowTopY: CGFloat, using proxy: ScrollViewProxy) {
+    /// When `allowsJump` is set, a position deep in the runway, as dragging the
+    /// scroller there leaves, reveals as many batches as the estimate says
+    /// reach the viewport. The macOS 14 marker reports layout changes as well
+    /// as scrolls, which is safe because the runway above the window only
+    /// changes height when a reveal or a reload, both guarded here, changes it.
+    private func handleConversationWindowTop(_ windowTopY: CGFloat, using proxy: ScrollViewProxy, allowsJump: Bool = false) {
         // This runs for every scroll sample, and publishing state re-renders the
         // whole transcript, so the armed flag is only ever written when it
         // actually changes.
         guard hasOlderConversationMessages, !isRevealingOlderConversationMessages else {
             if isOlderConversationRevealArmed { isOlderConversationRevealArmed = false }
+            return
+        }
+        // Opening pins the newest turn from an offset of zero, which is the top
+        // of the runway; only a settled transcript can be jumped through.
+        let viewportHeight = lastConversationScrollSample.viewportHeight
+        if allowsJump, hasPresentedLatestConversation, !isLatestConversationTurnPinPending,
+           viewportHeight > 0, windowTopY > viewportHeight {
+            revealOlderConversationMessages(using: proxy, covering: windowTopY + viewportHeight)
             return
         }
         let isWithinWindowTop = windowTopY <= Self.olderConversationRevealThreshold
@@ -3253,10 +3365,13 @@ struct TaskConversationView: View {
                     // Scroll runway above the rendered window. It keeps an
                     // upward drag available even when the latest turn alone is
                     // shorter than the viewport, and it is replaced by the
-                    // earlier messages as soon as they are revealed.
+                    // earlier messages as soon as they are revealed. It is as
+                    // tall as those messages are estimated to be, so the
+                    // scroller keeps about the same size as they appear.
+                    let runwayHeight = olderConversationRunwayHeight(viewport: viewport.size)
                     if hasOlderConversationMessages {
                         Color.clear
-                            .frame(height: viewport.size.height)
+                            .frame(height: runwayHeight)
                             .accessibilityHidden(true)
                         // Scroll position is only observable from macOS 15 on,
                         // so older systems keep an explicit control rather than
@@ -3467,7 +3582,7 @@ struct TaskConversationView: View {
                 // Exactly one source drives the reveal: the scroll observer
                 // where it exists, this marker where it does not.
                 if #unavailable(macOS 15) {
-                    handleConversationWindowTop(markerY, using: scrollProxy)
+                    handleConversationWindowTop(markerY, using: scrollProxy, allowsJump: true)
                 }
             }
             .onPreferenceChange(ConversationScrollGeometryKey.self) { geometry in
@@ -3483,7 +3598,8 @@ struct TaskConversationView: View {
                 lastConversationScrollSample.offsetY = new.offsetY
                 handleConversationWindowTop(
                     conversationWindowTopY(offsetY: new.offsetY, viewportHeight: viewport.size.height),
-                    using: scrollProxy
+                    using: scrollProxy,
+                    allowsJump: true
                 )
             })
             .onPreferenceChange(ConversationLatestTurnHeightKey.self) { height in
@@ -7445,6 +7561,74 @@ private final class ConversationScrollSample {
     /// The last geometry the macOS 14 preference reported, which is what its
     /// next report is compared against.
     var geometry: ConversationScrollGeometry?
+    /// Height of the runway above the rendered window as last laid out, which
+    /// is where the window top sits in the scroll content.
+    var runwayHeight: CGFloat = 0
+    /// What the runway's estimate was last made for, and that estimate.
+    struct RunwayKey: Equatable {
+        var firstLoadedID: String?
+        var windowStartID: String?
+        var hiddenLoadedCount: Int
+        var storedCount: Int
+    }
+    var runwayKey: RunwayKey?
+    var estimatedHiddenHeight: CGFloat = 0
+    var rowHeights = ConversationRowHeightEstimates()
+    /// Estimated height of one message still in the store, taken from the
+    /// loaded messages above the rendered window.
+    var storedMessageAverageHeight: CGFloat = ConversationRowHeightEstimates.typicalMessageHeight
+    /// The text width the runway's estimates were last made at.
+    var rowHeightWidth: CGFloat = ConversationRowHeightEstimates.textWidth(viewportWidth: 820)
+}
+
+/// Estimated heights of transcript messages that are not rendered, so the
+/// runway above the rendered window can stand in for them at about their real
+/// length. The scroller then reflects the whole transcript from the start, the
+/// way list views size unrealized rows from estimates, instead of shrinking
+/// each time a batch of older messages is revealed.
+struct ConversationRowHeightEstimates {
+    private struct Entry {
+        var textLength: Int
+        var width: CGFloat
+        var height: CGFloat
+    }
+
+    private var entries: [String: Entry] = [:]
+
+    /// Width available to message text, rounded so that resizing the window
+    /// does not re-estimate every message on every pixel.
+    static func textWidth(viewportWidth: CGFloat) -> CGFloat {
+        let width = min(viewportWidth, 820) - 56
+        return max(200, (width / 20).rounded(.down) * 20)
+    }
+
+    mutating func height(for message: ConversationMessage, width: CGFloat) -> CGFloat {
+        let textLength = message.text.utf16.count
+        if let entry = entries[message.id], entry.textLength == textLength, entry.width == width {
+            return entry.height
+        }
+        let height = Self.estimatedHeight(text: message.text, isUser: message.role == .user, imageCount: message.imageDataURLs.count, width: width)
+        entries[message.id] = Entry(textLength: textLength, width: width, height: height)
+        return height
+    }
+
+    /// Wrapped lines at the transcript's body size, plus the row's own chrome
+    /// and the spacing that follows it.
+    static func estimatedHeight(text: String, isUser: Bool, imageCount: Int, width: CGFloat) -> CGFloat {
+        // A user question sits in a bubble narrower than the column.
+        let charactersPerLine = max(20, (isUser ? width * 0.75 : width) / 7.5)
+        var lines: CGFloat = 0
+        for paragraph in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            lines += max(1, (CGFloat(paragraph.utf16.count) / charactersPerLine).rounded(.up))
+        }
+        return lines * 21 + (isUser ? 36 : 12) + CGFloat(imageCount) * 180 + 16
+    }
+
+    /// A collapsed tool call row with its spacing.
+    static let toolCallRowHeight: CGFloat = 46
+    /// A stored message's height before any loaded one above the window can
+    /// stand in for it.
+    static let typicalMessageHeight: CGFloat = 80
 }
 
 /// The parts of the transcript's scroll geometry that following the bottom and
