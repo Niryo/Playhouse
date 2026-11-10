@@ -35,7 +35,7 @@ private struct StandaloneChatPanel: View, Equatable {
 
     var body: some View {
         TaskConversationView(
-            task: chat, isNewTask: false, isReadOnly: false,
+            task: chat, isNewTask: false,
             conflictResolutionRequested: false,
             onConflictResolutionChecked: { _ in },
             onOpenTask: onOpenTask,
@@ -52,7 +52,6 @@ private struct StandaloneChatPanel: View, Equatable {
 private struct TaskConversationPanel: View, Equatable {
     let task: BoardTask
     let isNewTask: Bool
-    let isReadOnly: Bool
     let conflictResolutionRequested: Bool
     let skillFixPrompt: String?
     let presentScheduleOnAppear: TaskScheduleKind?
@@ -61,7 +60,7 @@ private struct TaskConversationPanel: View, Equatable {
     let onBack: () -> Void
 
     static func == (lhs: TaskConversationPanel, rhs: TaskConversationPanel) -> Bool {
-        lhs.task === rhs.task && lhs.isNewTask == rhs.isNewTask && lhs.isReadOnly == rhs.isReadOnly
+        lhs.task === rhs.task && lhs.isNewTask == rhs.isNewTask
             && lhs.conflictResolutionRequested == rhs.conflictResolutionRequested
             && lhs.skillFixPrompt == rhs.skillFixPrompt
             && lhs.presentScheduleOnAppear == rhs.presentScheduleOnAppear
@@ -69,7 +68,7 @@ private struct TaskConversationPanel: View, Equatable {
 
     var body: some View {
         TaskConversationView(
-            task: task, isNewTask: isNewTask, isReadOnly: isReadOnly,
+            task: task, isNewTask: isNewTask,
             conflictResolutionRequested: conflictResolutionRequested,
             onConflictResolutionChecked: onConflictResolutionChecked,
             skillFixPrompt: skillFixPrompt,
@@ -173,7 +172,7 @@ struct KanbanBoardView: View {
 
     private func conversationView(for selectedTask: BoardTask) -> some View {
         TaskConversationPanel(
-            task: selectedTask, isNewTask: isSelectedTaskNew, isReadOnly: selectedTask.status == .done,
+            task: selectedTask, isNewTask: isSelectedTaskNew,
             conflictResolutionRequested: conflictResolutionTaskID == selectedTask.id,
             skillFixPrompt: skillFixPrompts[selectedTask.id],
             presentScheduleOnAppear: presentScheduleOnOpen,
@@ -999,7 +998,8 @@ struct KanbanBoardView: View {
                     .accessibilityLabel(hasMultipleRepositories ? "PRs. Create pull requests for repositories without a linked pull request" : "PR. Create a pull request for the repository without a linked pull request")
                     .accessibilityIdentifier("done-archive-create-pr-\(task.id.uuidString)")
                 }
-                ForEach(linked, id: \.repositoryPath) { record in
+                // Pull requests merged before a renewed worktree stay listed ahead of the current ones.
+                ForEach(task.pastRepositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil } + linked, id: \.pullRequestURL) { record in
                     if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
                         Link(destination: url) {
                             Text(verbatim: "#\(number)")

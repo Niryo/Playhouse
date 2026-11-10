@@ -956,6 +956,29 @@ enum PlayhouseWorktreeManager {
         )
     }
 
+    /// The base for follow-up work after a task's pull request merged: the merge target as
+    /// the remote has it now, so the merged commits are included even when the local
+    /// branch is stale. Without a reachable remote branch, the local merge target is used.
+    static func freshMergeTargetBase(repositoryPath: String, mergeTarget: String?) throws -> String {
+        let repository = try repositoryRoot(repositoryPath)
+        let target = try mergeTarget ?? defaultBranches(repository: repository).mergeTarget
+        let remotes = try git(repository, ["remote"]).output.split(whereSeparator: \.isNewline).map(String.init)
+        if let remote = remotes.first(where: { $0 == "origin" }) ?? remotes.first,
+           try git(repository, ["check-ref-format", "--branch", target], allowFailure: true).status == 0 {
+            let trackingRef = "refs/remotes/\(remote)/\(target)"
+            let fetch = try git(
+                repository,
+                ["fetch", "--quiet", "--no-tags", remote, "+refs/heads/\(target):\(trackingRef)"],
+                allowFailure: true
+            )
+            if fetch.status == 0, try isCommit(repository: repository, trackingRef) { return "\(remote)/\(target)" }
+        }
+        guard try isCommit(repository: repository, target) else {
+            throw BridgeCommandError(code: "operation_failed", message: "The merge target '\(target)' doesn't exist in \(repository) or on its remotes.")
+        }
+        return target
+    }
+
     static func preflightRemoval(_ record: RepositoryWorktreeRecord) throws {
         let status = try git(record.worktreePath, ["status", "--porcelain", "--untracked-files=all"]).output
         guard status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -1509,6 +1532,14 @@ struct PlayhouseWorktreeService {
     func hasMergeInProgress(_ record: RepositoryWorktreeRecord) async throws -> Bool {
         try await perform("git.check_merge_in_progress", record: record) {
             try await PlayhouseBackgroundOperation.run { try PlayhouseWorktreeManager.hasMergeInProgress(record) }
+        }
+    }
+
+    func freshMergeTargetBase(repositoryPath: String, mergeTarget: String?) async throws -> String {
+        try await perform("worktree.fresh_base", fields: ["repositoryPath": repositoryPath, "mergeTarget": mergeTarget ?? ""]) {
+            try await PlayhouseBackgroundOperation.run {
+                try PlayhouseWorktreeManager.freshMergeTargetBase(repositoryPath: repositoryPath, mergeTarget: mergeTarget)
+            }
         }
     }
 

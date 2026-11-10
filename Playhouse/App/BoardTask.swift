@@ -185,6 +185,9 @@ final class BoardTask {
     var hasUnsentDraft: Bool = false
     var workspaceRootPathsData: Data?
     var repositoryWorktreesData: Data?
+    /// Repository worktree records retired by `task repository renew` after their pull
+    /// request merged. They keep the merged PR link on the card; their worktrees are gone.
+    var pastRepositoryWorktreesData: Data?
     var contextFolderPathsData: Data?
     var draftImageDataURLsData: Data?
     var conversationActivityDurationsData: Data?
@@ -247,6 +250,11 @@ final class BoardTask {
     var repositoryWorktrees: [RepositoryWorktreeRecord] {
         get { guard let repositoryWorktreesData else { return [] }; return (try? JSONDecoder().decode([RepositoryWorktreeRecord].self, from: repositoryWorktreesData)) ?? [] }
         set { repositoryWorktreesData = try? JSONEncoder().encode(newValue) }
+    }
+
+    var pastRepositoryWorktrees: [RepositoryWorktreeRecord] {
+        get { guard let pastRepositoryWorktreesData else { return [] }; return (try? JSONDecoder().decode([RepositoryWorktreeRecord].self, from: pastRepositoryWorktreesData)) ?? [] }
+        set { pastRepositoryWorktreesData = newValue.isEmpty ? nil : try? JSONEncoder().encode(newValue) }
     }
 
     var contextFolderPaths: [String] {
@@ -440,13 +448,15 @@ struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
     var isPending: Bool = false
     var pullRequestNumber: Int? = nil
     var pullRequestURL: String? = nil
+    /// Set once Playhouse confirms the linked pull request merged.
+    var isPullRequestMerged: Bool = false
     /// The branch head when pull request creation last found nothing here to
     /// propose. The review gate clears it once the task changes the repository.
     var pullRequestSkippedHead: String? = nil
 
     private enum CodingKeys: String, CodingKey {
         case repositoryPath, branch, worktreePath, branchFrom, createdByPlayhouse
-        case mergeTarget, isPending, pullRequestNumber, pullRequestURL, pullRequestSkippedHead
+        case mergeTarget, isPending, pullRequestNumber, pullRequestURL, isPullRequestMerged, pullRequestSkippedHead
     }
 
     /// A started repository with no linked pull request that is not known to
@@ -465,6 +475,7 @@ struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
         isPending: Bool = false,
         pullRequestNumber: Int? = nil,
         pullRequestURL: String? = nil,
+        isPullRequestMerged: Bool = false,
         pullRequestSkippedHead: String? = nil
     ) {
         self.repositoryPath = repositoryPath
@@ -476,6 +487,7 @@ struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
         self.isPending = isPending
         self.pullRequestNumber = pullRequestNumber
         self.pullRequestURL = pullRequestURL
+        self.isPullRequestMerged = isPullRequestMerged
         self.pullRequestSkippedHead = pullRequestSkippedHead
     }
 
@@ -490,6 +502,7 @@ struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
         isPending = try values.decodeIfPresent(Bool.self, forKey: .isPending) ?? false
         pullRequestNumber = try values.decodeIfPresent(Int.self, forKey: .pullRequestNumber)
         pullRequestURL = try values.decodeIfPresent(String.self, forKey: .pullRequestURL)
+        isPullRequestMerged = try values.decodeIfPresent(Bool.self, forKey: .isPullRequestMerged) ?? false
         pullRequestSkippedHead = try values.decodeIfPresent(String.self, forKey: .pullRequestSkippedHead)
     }
 }
