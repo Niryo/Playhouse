@@ -4,9 +4,10 @@ A plugin is plain JavaScript that builds UI with React. A custom React
 renderer running in JavaScriptCore turns each commit into mutation ops. Swift
 applies them to an observable node tree, and SwiftUI draws that tree from
 native **atoms**. Plugins compose only atoms. Composites such as the task
-item, the board's Agents info section, the Token Stats modal and the Skills
-page's header and gallery exist only as native SwiftUI built from the same
-atoms (`Playhouse/App/TaskItemView.swift`, `AgentsInfoSection` in
+item, a board column's frame, the board's Agents info section, the Token Stats
+modal and the Skills page's header and gallery exist only as native SwiftUI
+built from the same atoms (`Playhouse/App/TaskItemView.swift`,
+`KanbanColumnSection` in `Playhouse/App/KanbanColumnSection.swift`, `AgentsInfoSection` in
 `Playhouse/App/AgentsInfoView.swift`, `TokenStatsView` in
 `Playhouse/App/TokenStatsView.swift`, `SkillsPageHeader` and
 `SkillGalleryView` in `Playhouse/App/SkillGalleryView.swift`).
@@ -36,9 +37,14 @@ opened by the composer's Skills button (`SkillsButton`); `SkillsPageView`
 owns their state and keeps the delete and link confirmations, the editor and
 New Skill panels, and the Rules and MCP lists native. Change it whenever the
 header or gallery changes; `test_plugin_skills_page_renders_from_atoms_like_native`
-compares those two. Each composite reads a display model that is already
+compares those two. `catalog/KanbanColumn.js` does the same for `KanbanColumnSection`, a board
+column's header (status dot, title, count, the Backlog's Add button), Blocked
+notice and empty state; the column's cards stay native `TaskCardView`s passed in
+as content. Change it whenever the column's frame changes;
+`test_plugin_kanban_column_renders_from_atoms_like_native` compares the two.
+Each composite reads a display model that is already
 derived (`TaskItemModel`, `AgentsInfoModel`, `TokenStatsModel`,
-`SkillsPageModel`), so the JavaScript copy formats nothing the native one
+`SkillsPageModel`, `KanbanColumnModel`), so the JavaScript copy formats nothing the native one
 doesn't.
 
 The app build does not run npm. `scripts/vendor-react.sh` is the one-time
@@ -56,7 +62,7 @@ A plugin is one script. The runtime defines these globals:
   the top-level fields of every `catalog/sample-*.json` (`task` and
   `blockedStatusMessage` for the task item, `agentsInfo` for Agents info,
   `tokenStats` and `tokenCounter` for Token Stats, `skillsPage` for the Skills
-  page).
+  page, `kanbanColumns` for the Kanban Column page).
   Two samples may not share a field.
 - `Playhouse.render(element)`: mounts the root.
 - `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`, `queueMicrotask`, `console`.
@@ -127,7 +133,7 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | `PillPicker` | `options` (`[{value, label, help?, testID?}]`), `selected`; the `help` tooltip may contain `{help}`, which is replaced by the shown option's help | `onChange(value)` | |
 | `Card` | `menu` (`[{id, title, icon?, destructive?, testID?}]`), `meter` (0…1 usage bar), `meterLabel`, `meterTestID`; `testID`, `label` and `hint` describe its open button | `onPress()`, `onMenu(id)` | atoms |
 | `Disclosure` | `title`, `collapsed` (required; the atom shows what it is given), `spacing`, `toggleTestID` (the title button); a collapsed section keeps its children in the tree and hides them | `onToggle()`, called inside an animation; the owner flips `collapsed` | atoms |
-| `Panel` | `spacing`, `fill` (a color, `primary` default), `fillOpacity` (0.05 default), `cornerRadius` (8 default), `stroke` (a border color), `strokeOpacity` (1 default); a rounded filled background behind a leading column, one accessibility container | | atoms |
+| `Panel` | `spacing`, `fill` (a color, `primary` default), `fillOpacity` (0.05 default), `cornerRadius` (8 default), `stroke` (a border color), `strokeOpacity` (1 default), `strokeWidth` (1 default), `dash` (`[on, off]`, solid default), `align` (`leading` default, whose `minHeight` keeps children at the top, or `center`), `combine` (one accessibility element joining its children's labels); a rounded filled background behind a leading column, one accessibility container | | atoms |
 | `Meter` | `fraction` (0…1, required), `color` (`accent` default), `thickness` (3 default), `trackOpacity` (0.12 default), `minFill` (shortest fill in points, 0 default); decorative unless it has a `label` | | |
 | `Scroll` | `spacing`, `maxHeight` (shrinks to its content up to it; the common `height` fixes it), `inset` (padding inside the scroll view), `lazy` (builds only the children in view); a vertical scroll view around a leading column that fills its width | | atoms |
 | `Divider` | none; a thin separator across its stack | | |

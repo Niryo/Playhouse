@@ -358,7 +358,13 @@ struct DisclosureProps: AtomPropsDecodable, Equatable {
 /// leading column (an agent's block in Agents info). `fill` is a color name
 /// (primary by default) drawn at `fillOpacity` (0.05 by default); `stroke`
 /// is a color name for a border inside its edge, drawn at `strokeOpacity`
-/// (1 by default). It is one accessibility container.
+/// (1 by default), `strokeWidth` points wide (1 by default) and dashed by
+/// `dash` (on, off lengths; solid by default). `align` is `leading` (the
+/// default: children at the leading edge, and a `minHeight` keeps them at the
+/// top, as a board column does) or `center` (children centered both ways, as
+/// an empty state's are, with `fillWidth` stretching it without moving them).
+/// It is one accessibility container, or with `combine` one element whose
+/// label joins its children's.
 struct PanelProps: AtomPropsDecodable, Equatable {
     var spacing: Double?
     var fill: String?
@@ -366,8 +372,12 @@ struct PanelProps: AtomPropsDecodable, Equatable {
     var cornerRadius: Double?
     var stroke: String?
     var strokeOpacity: Double?
+    var strokeWidth: Double?
+    var dash: [Double]?
+    var align: String?
+    var combine: Bool?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case spacing, fill, fillOpacity, cornerRadius, stroke, strokeOpacity }
+    enum CodingKeys: String, CodingKey, CaseIterable { case spacing, fill, fillOpacity, cornerRadius, stroke, strokeOpacity, strokeWidth, dash, align, combine }
 }
 
 /// A horizontal usage bar: a capsule track filled to `fraction` (0...1) in

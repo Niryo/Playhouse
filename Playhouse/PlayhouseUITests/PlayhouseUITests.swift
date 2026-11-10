@@ -3598,7 +3598,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
 
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize. Each board column is built from plugin atoms: the empty In Progress and Review columns show their empty state while the populated Backlog does not, and the Backlog's Add button opens a new task conversation.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         let waitingFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: waitingFixture.path))
@@ -3658,6 +3658,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("column-heading-blocked").exists, "The blocked section should be hidden when no tasks are blocked.")
         XCTAssertFalse(element("blocked-waiting-indicator").exists)
         XCTAssertFalse(element("column-heading-ready").exists)
+        XCTAssertTrue(element("empty-state-in-progress").exists, "An empty column shows its empty state.")
+        XCTAssertTrue(element("empty-state-review").exists, "An empty Review column shows its empty state.")
+        XCTAssertFalse(element("empty-state-backlog").exists, "A column with tasks has no empty state.")
+        XCTAssertTrue(element("add-backlog-task-button").exists, "Only the Backlog column has an Add button.")
         assertTaskVisible("Status transitions", inColumn: "Backlog")
 
         let statusTaskID = try taskID(named: "Status transitions")
@@ -3815,6 +3819,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10), "Clicking the card where it draws should open the task.")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
+        element("add-backlog-task-button").click()
+        XCTAssertTrue(element("empty-conversation").waitToExist(timeout: 10), "The Backlog's Add button should open a new task conversation.")
     }
 
     // case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response; once GitHub reports the pull request merged, a retry commits local work, skips syncing the merged branch even though its remote is unreachable, and moves the task to Review.
@@ -20929,6 +20935,73 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 6: text → node ") }, timeout: 5),
                       "Switching changed only the readout: \(pluginText(commit))")
         XCTAssertEqual(pluginText(native("native-last-action")), "Last: expand", "The native section keeps its own state.")
+    }
+
+    // case-contract: test_plugin_kanban_column_renders_from_atoms_like_native | The Plugin Catalog's Kanban Column page shows the board's columns composed in JavaScript from atoms beside the native SwiftUI columns the board uses, built from the same atoms and sample models (a column's cards are native and not part of the page): each side shows a Backlog column with its Add button and its empty state, an In Progress column with a count of 2 and no empty state, a Blocked column with the Waiting for user intervention notice and its empty state, and a Done column with its empty state, with the board's identifiers (column-heading, column-count, add-backlog-task-button, empty-state, blocked-waiting-indicator), and every one is the same size in both and reads the same text (the uppercased title, the count, No tasks yet with Create a task to get started or Drop a task here). The JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer): each column is a Panel holding the header (a status dot Panel, the title, a Spacer, the count Panel, and for the Backlog the Add button), then the notice and the empty state, which is a dashed Panel with centered content. Pressing the JavaScript Add button runs its onPress in JavaScript (Last: add) as one commit that changes only the readout, and the native Add button runs its own handler without touching the JavaScript side. On the board itself, every column keeps its column-<status>, column-heading-<status> and empty-state-<status> identifiers, the Backlog its Add button and the Blocked column its notice, now built from the same atoms.
+    func test_plugin_kanban_column_renders_from_atoms_like_native() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Plugin Catalog")
+        let example = catalogSidebarRow("plugin-catalog-kanban-column")
+        XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Kanban Column example.")
+        example.click()
+        let jsSide = element("plugin-catalog-js-kanban-column")
+        let nativeSide = element("plugin-catalog-native-kanban-column")
+        XCTAssertTrue(jsSide.waitToExist(timeout: 10), "The page shows the JavaScript columns.")
+        XCTAssertTrue(nativeSide.waitToExist(timeout: 10), "The page shows the native columns.")
+        XCTAssertFalse(element("plugin-error").exists, "The JavaScript columns render without errors.")
+
+        // The board window behind the catalog has the same identifiers, so every
+        // lookup is scoped to its catalog column.
+        func js(_ identifier: String) -> XCUIElement {
+            jsSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func native(_ identifier: String) -> XCUIElement {
+            nativeSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func assertSameSize(_ identifier: String) {
+            let jsElement = js(identifier), nativeElement = native("native-\(identifier)")
+            XCTAssertTrue(jsElement.waitToExist(timeout: 10), "The JavaScript column has \(identifier).")
+            XCTAssertTrue(nativeElement.waitToExist(timeout: 10), "The native column has \(identifier).")
+            XCTAssertEqual(jsElement.frame.width, nativeElement.frame.width, accuracy: 1, "\(identifier) has the same width in both.")
+            XCTAssertEqual(jsElement.frame.height, nativeElement.frame.height, accuracy: 1, "\(identifier) has the same height in both.")
+        }
+        for key in ["backlog", "in-progress", "blocked", "done"] {
+            for identifier in ["column-\(key)", "column-heading-\(key)", "column-count-\(key)"] {
+                assertSameSize(identifier)
+            }
+        }
+        for identifier in ["add-backlog-task-button", "empty-state-backlog", "blocked-waiting-indicator", "empty-state-blocked", "empty-state-done"] {
+            assertSameSize(identifier)
+        }
+        XCTAssertFalse(js("empty-state-in-progress").exists, "A column with tasks has no empty state.")
+        XCTAssertFalse(native("native-empty-state-in-progress").exists)
+        XCTAssertEqual(pluginText(js("column-heading-in-progress")), "IN PROGRESS")
+        XCTAssertEqual(pluginText(js("column-heading-in-progress")), pluginText(native("native-column-heading-in-progress")), "Both show the same title.")
+        for key in ["backlog", "in-progress", "blocked", "done"] {
+            XCTAssertEqual(pluginText(js("column-count-\(key)")), pluginText(native("native-column-count-\(key)")), "Both show the same count for \(key).")
+        }
+        XCTAssertEqual(pluginText(js("column-count-in-progress")), "2")
+        for key in ["backlog", "blocked", "done"] {
+            let jsLabel = accessibleLabelOrValue(of: js("empty-state-\(key)"))
+            XCTAssertTrue(jsLabel.contains("No tasks yet"), "The \(key) empty state reads No tasks yet: \(jsLabel)")
+        }
+        XCTAssertTrue(accessibleLabelOrValue(of: js("empty-state-backlog")).contains("Create a task to get started"))
+        XCTAssertTrue(accessibleLabelOrValue(of: js("empty-state-done")).contains("Drop a task here"))
+        XCTAssertTrue(jsSide.staticTexts["Waiting for user intervention"].exists, "The JavaScript Blocked column shows its notice.")
+        XCTAssertTrue(nativeSide.staticTexts["Waiting for user intervention"].exists, "The native Blocked column shows its notice.")
+        XCTAssertLessThanOrEqual(js("column-backlog").frame.maxY, js("column-in-progress").frame.minY, "The columns stack in the order of the sample.")
+        attachScreenshot(named: "Kanban columns: JavaScript beside native")
+
+        // Pressing Add runs the pressed side's own handler.
+        let commit = jsSide.descendants(matching: .any).matching(identifier: "plugin-last-commit").firstMatch
+        js("add-backlog-task-button").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(js("js-last-action")) == "Last: add" }, timeout: 5), "Add ran its JavaScript handler.")
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 2: text → node ") }, timeout: 5),
+                      "Pressing Add changed only the readout: \(pluginText(commit))")
+        XCTAssertEqual(pluginText(native("native-last-action")), "Last: none", "The native columns keep their own state.")
+        native("native-add-backlog-task-button").click()
+        XCTAssertTrue(waitUntil({ self.pluginText(native("native-last-action")) == "Last: add" }, timeout: 5), "The native Add button ran its handler.")
+        attachScreenshot(named: "Kanban columns: Add pressed in both")
     }
 
     // case-contract: test_plugin_token_stats_renders_from_atoms_like_native | The Plugin Catalog's Token Stats page shows the Token Stats modal composed in JavaScript from atoms above the native SwiftUI modal the board presents, built from the same atoms and sample data, each opened by the task item's token counter (the same overhanging Button atom, labelled with its description and hinted Open Token Stats). Both show the title and the task's title, the View raw input… button, a section bar of Overview, Wasters, Tools & MCP and Overhead with Overview selected, the call headlines (Final transcript size, Total sent (incl. subagents), Excluding cache reads (incl. subagents)), the main-agent and subagent split, the call and output lines, the total, the four buckets, the per-tool rollup and the per-turn rows, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Label, Button, Spacer, ChoiceBar, Divider, Scroll, Meter) with the board modal's identifiers. Choosing Wasters in the JavaScript section bar runs onChange with its value (Last: section wasters) and shows the largest items, each with a 72-point share bar, its kind, the removed-by-compaction flag, its request count and a small Show button, then the repeated result and the cache miss, while the native modal stays on Overview until its own bar moves it, after which both show the same rows at the same size. Show runs its JavaScript handler with the item's raw input target (Last: raw input claude #14) and View raw input… with the final transcript (Last: raw input final transcript), without re-rendering any row. Tools & MCP lists each tool's bar, calls and total and the MCP server, and Overhead lists what every request carries and each agent. The overview scrolls within at most 320 points and each map section within a fixed 420. Done closes the JavaScript modal (Last: done) and leaves the native one open, and the counter opens it again (Last: open). The section bar raises no onPress, so pressing it is refused as invalid_argument.
