@@ -71,6 +71,7 @@ struct PluginCatalogView: View {
         case atom(AtomType)
         case taskItem
         case agentsInfo
+        case kanbanColumn
         case tokenStats
         case skillsPage
         case repositoryChips
@@ -96,6 +97,9 @@ struct PluginCatalogView: View {
                     Text("Agents Info")
                         .tag(Page.agentsInfo)
                         .accessibilityIdentifier("plugin-catalog-agents-info")
+                    Text("Kanban Column")
+                        .tag(Page.kanbanColumn)
+                        .accessibilityIdentifier("plugin-catalog-kanban-column")
                     Text("Token Stats")
                         .tag(Page.tokenStats)
                         .accessibilityIdentifier("plugin-catalog-token-stats")
@@ -120,6 +124,8 @@ struct PluginCatalogView: View {
                     TaskItemComparison()
                 case .agentsInfo?:
                     AgentsInfoComparison()
+                case .kanbanColumn?:
+                    KanbanColumnComparison()
                 case .tokenStats?:
                     TokenStatsComparison()
                 case .skillsPage?:
@@ -341,6 +347,70 @@ private struct NativeAgentsInfoDemo: View {
                 }
                 AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
             }
+        }
+    }
+}
+
+/// The JavaScript board columns beside the native ones, from the same sample
+/// models (264 points wide, the board's column width, with no cards). The
+/// native side uses a "native-" id prefix so the two never share
+/// accessibility identifiers.
+private struct KanbanColumnComparison: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Kanban Column")
+                .font(.title2.weight(.semibold))
+                .accessibilityIdentifier("plugin-catalog-title")
+            if let page = catalogPage("KanbanColumn"),
+               let sample = try? Self.sample(page.props) {
+                HStack(alignment: .top, spacing: 28) {
+                    comparisonColumn("JavaScript (React → atoms)", width: 264) {
+                        PluginSurface(source: page.source, name: "KanbanColumn.js", props: page.props)
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("plugin-catalog-js-kanban-column")
+                    comparisonColumn("Native SwiftUI (atoms)", width: 264) {
+                        NativeKanbanColumnDemo(sample: sample)
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("plugin-catalog-native-kanban-column")
+                }
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    struct Sample: Decodable {
+        var kanbanColumns: [KanbanColumnModel]
+    }
+
+    static func sample(_ props: [String: PluginValue]) throws -> Sample {
+        try PluginValueDecoder.decode(Sample.self, from: .object(props))
+    }
+}
+
+/// The native columns with the same demo readout as KanbanColumn.js, built from the same atoms.
+private struct NativeKanbanColumnDemo: View {
+    let sample: KanbanColumnComparison.Sample
+    @State private var lastAction = "none"
+
+    private func nativeModel(_ column: KanbanColumnModel) -> KanbanColumnModel {
+        var model = column
+        model.idPrefix = "native-"
+        return model
+    }
+
+    var body: some View {
+        AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
+            ForEach(sample.kanbanColumns, id: \.key) { column in
+                AtomStack(props: StackProps(axis: "v"), common: AtomCommon(width: 264)) {
+                    KanbanColumnSection(model: nativeModel(column), minHeight: 170, testID: "native-column-\(column.key)", onAdd: { lastAction = "add" }) {
+                        EmptyView()
+                    }
+                }
+            }
+            AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
         }
     }
 }

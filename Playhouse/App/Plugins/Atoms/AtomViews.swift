@@ -613,30 +613,44 @@ struct AtomDisclosure<Content: View>: View {
 }
 
 /// A rounded, filled background behind a leading column of its children.
-/// The frame and padding props size the panel, so the fill covers them.
+/// The frame and padding props size the panel, so the fill covers them. Its
+/// minimum size is a plain frame around the column rather than `atomFrame`'s,
+/// so the children stay at the top (or the center, with `align: "center"`).
 struct AtomPanel<Content: View>: View {
     var props = PanelProps()
     var common = AtomCommon()
     @ViewBuilder var content: () -> Content
 
     var body: some View {
+        let centered = props.align == "center"
         if props.capsule == true {
-            panel(Capsule())
+            panel(Capsule(), centered: centered)
         } else {
-            panel(RoundedRectangle(cornerRadius: CGFloat(props.cornerRadius ?? 8), style: .continuous))
+            panel(RoundedRectangle(cornerRadius: CGFloat(props.cornerRadius ?? 8), style: .continuous), centered: centered)
         }
     }
 
-    private func panel(_ shape: some InsettableShape) -> some View {
-        VStack(alignment: .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
-            .atomFrame(common)
+    private func panel(_ shape: some InsettableShape, centered: Bool) -> some View {
+        var framed = common
+        framed.minWidth = nil
+        framed.minHeight = nil
+        if centered { framed.fillWidth = nil }
+        return VStack(alignment: centered ? .center : .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
+            .atomFrame(framed)
+            .modifier(Applied(when: centered && common.fillWidth == true) { $0.frame(maxWidth: .infinity) })
+            .modifier(Applied(when: common.minWidth != nil || common.minHeight != nil) {
+                $0.frame(minWidth: common.minWidth.map { CGFloat($0) }, minHeight: common.minHeight.map { CGFloat($0) }, alignment: centered ? .center : .topLeading)
+            })
             .background((AtomColor.style(props.fill) ?? AnyShapeStyle(.primary)).opacity(props.fillOpacity ?? 0.05), in: shape)
             .overlay {
                 if let stroke = AtomColor.style(props.stroke) {
-                    shape.strokeBorder(stroke.opacity(props.strokeOpacity ?? 1))
+                    shape.strokeBorder(
+                        stroke.opacity(props.strokeOpacity ?? 1),
+                        style: StrokeStyle(lineWidth: CGFloat(props.strokeWidth ?? 1), dash: (props.dash ?? []).map { CGFloat($0) })
+                    )
                 }
             }
-            .atomCommon(common, atom: .panel, group: true, frame: false)
+            .atomCommon(common, atom: .panel, group: props.combine != true, combine: props.combine == true, frame: false)
     }
 }
 

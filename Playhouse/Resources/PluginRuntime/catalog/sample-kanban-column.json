@@ -1,0 +1,49 @@
+{
+  "kanbanColumns": [
+    {
+      "idPrefix": "",
+      "key": "backlog",
+      "title": "BACKLOG",
+      "accent": "#8591A8",
+      "count": "0",
+      "addHelp": "Add task to Backlog",
+      "empty": {
+        "icon": "tray",
+        "title": "No tasks yet",
+        "hint": "Create a task to get started"
+      }
+    },
+    {
+      "idPrefix": "",
+      "key": "in-progress",
+      "title": "IN PROGRESS",
+      "accent": "#BF7A33",
+      "count": "2"
+    },
+    {
+      "idPrefix": "",
+      "key": "blocked",
+      "title": "BLOCKED",
+      "accent": "#D14D4D",
+      "count": "0",
+      "notice": "Waiting for user intervention",
+      "empty": {
+        "icon": "tray",
+        "title": "No tasks yet",
+        "hint": "Drop a task here"
+      }
+    },
+    {
+      "idPrefix": "",
+      "key": "done",
+      "title": "DONE",
+      "accent": "#339E73",
+      "count": "0",
+      "empty": {
+        "icon": "checkmark.circle",
+        "title": "No tasks yet",
+        "hint": "Drop a task here"
+      }
+    }
+  ]
+}

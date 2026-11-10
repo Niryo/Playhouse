@@ -1643,60 +1643,14 @@ private struct KanbanColumnView: View {
     }
 
     private var columnContent: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack(spacing: 9) {
-                Circle()
-                    .fill(status.accent)
-                    .frame(width: 8, height: 8)
-                Text(status.rawValue.uppercased())
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .tracking(0.65)
-                    .foregroundStyle(.primary.opacity(0.82))
-                    .accessibilityIdentifier("column-heading-\(status.accessibilityKey)")
-                Spacer(minLength: 4)
-                Text("\(tasks.count)")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(Color.primary.opacity(0.055)))
-                if status == .backlog {
-                    Button(action: onAddTask) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 11, weight: .semibold))
-                    }
-                    .buttonHoverPointer()
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .accessibilityLabel("Add task to Backlog")
-                    .accessibilityIdentifier("add-backlog-task-button")
-                    .nativeHelp("Add task to Backlog")
-                }
+        KanbanColumnSection(
+            model: KanbanColumnModel(status: status, taskCount: tasks.count),
+            minHeight: Double(minHeight),
+            onAdd: onAddTask
+        ) {
+            ForEach(tasks) { task in
+                draggableTaskCard(task)
             }
-            .padding(.horizontal, 3)
-
-            if status == .blocked {
-                Label("Waiting for user intervention", systemImage: "hand.raised.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Color.red)
-                    .padding(.horizontal, 3)
-                    .accessibilityIdentifier("blocked-waiting-indicator")
-            }
-
-            if tasks.isEmpty {
-                emptyState
-            } else {
-                ForEach(tasks) { task in
-                    draggableTaskCard(task)
-                }
-            }
-
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
-        .background {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(WorkspaceTheme.panelBackground.opacity(0.78))
         }
         .overlay {
             if acceptsDraggedTask {
@@ -1705,9 +1659,6 @@ private struct KanbanColumnView: View {
                     .strokeBorder(status.accent.opacity(isDropTargeted ? 0.9 : 0.45), style: StrokeStyle(lineWidth: isDropTargeted ? 2 : 1.5, dash: isDropTargeted ? [] : [6, 4]))
                     .allowsHitTesting(false)
                     .accessibilityIdentifier("task-\(status.accessibilityKey)-drop-target")
-            } else {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.075), lineWidth: 1)
             }
         }
     }
@@ -1771,28 +1722,6 @@ private struct KanbanColumnView: View {
         } else {
             card
         }
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 9) {
-            Image(systemName: status == .done ? "checkmark.circle" : "tray")
-                .font(.system(size: 18, weight: .regular))
-                .foregroundStyle(status.accent.opacity(0.75))
-            Text("No tasks yet")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-            Text(status == .backlog ? "Create a task to get started" : "Drop a task here")
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity, minHeight: 124)
-        .background {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.10), style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("empty-state-\(status.accessibilityKey)")
     }
 }
 

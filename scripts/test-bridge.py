@@ -4753,7 +4753,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         notice = json.loads((self.data_directory / "task-lifecycle-v2-notice.json").read_text(encoding="utf-8"))
         self.assertEqual(notice, [str(dirty_path)])
 
-    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize.
+    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize. Each board column is built from plugin atoms: the empty In Progress and Review columns show their empty state while the populated Backlog does not, and the Backlog's Add button opens a new task conversation.
     def test_task_status_transitions_and_rejects_unknown_status(self):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli("task", "move", task_id, "Unknown", expected_status=2)
@@ -14745,12 +14745,12 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
                         f"An op whose node id is out of range is reported, not a crash: {out_of_range['result']['errors']}")
 
         for page in ["AgentsInfo", "Button", "Card", "ChoiceBar", "Composer", "Disclosure", "Divider", "Editor", "Icon", "Label", "Link", "Menu", "Meter", "Overlay",
-                     "Panel", "PillPicker", "Popover", "PressArea", "RepositoryChips", "Scroll", "Segmented", "SkillsPage", "Spacer", "Spinner", "Stack", "StepSlider",
+                     "KanbanColumn", "Panel", "PillPicker", "Popover", "PressArea", "RepositoryChips", "Scroll", "Segmented", "SkillsPage", "Spacer", "Spinner", "Stack", "StepSlider",
                      "TaskItem", "Text", "TextField", "Toggle", "TokenStats"]:
             page_render = self.assert_success(self.call_cli("plugin", "render", "--page", page)[0])
             self.assertEqual(page_render["errors"], [], f"The {page} catalog page renders without errors.")
             used = {node["type"] for node in self.plugin_nodes(page_render["tree"])}
-            if page not in ("TaskItem", "AgentsInfo", "TokenStats", "SkillsPage", "RepositoryChips", "Composer"):
+            if page not in ("TaskItem", "AgentsInfo", "TokenStats", "SkillsPage", "RepositoryChips", "Composer", "KanbanColumn"):
                 self.assertIn(page, used, f"The {page} page shows its atom.")
         disclosure = self.assert_success(self.call_cli("plugin", "render", "--page", "Disclosure", "--event", "disclosure-demo:onToggle")[0])
         section = self.plugin_node(disclosure["tree"], "disclosure-demo")
@@ -14985,6 +14985,53 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(self.plugin_text(self.plugin_node(logged_in["tree"], "js-last-action")), "Last: login claude", "Log in ran its JavaScript handler.")
         self.plugin_node(logged_in["tree"], "agents-info-claude-window-five_hour")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "AgentsInfo", "--event", "agents-info:onPress", expected_status=2)[0], "invalid_argument")
+
+    # case-contract: test_plugin_kanban_column_renders_from_atoms_like_native | The Plugin Catalog's Kanban Column page shows the board's columns composed in JavaScript from atoms beside the native SwiftUI columns the board uses, built from the same atoms and sample models (a column's cards are native and not part of the page): each side shows a Backlog column with its Add button and its empty state, an In Progress column with a count of 2 and no empty state, a Blocked column with the Waiting for user intervention notice and its empty state, and a Done column with its empty state, with the board's identifiers (column-heading, column-count, add-backlog-task-button, empty-state, blocked-waiting-indicator), and every one is the same size in both and reads the same text (the uppercased title, the count, No tasks yet with Create a task to get started or Drop a task here). The JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer): each column is a Panel holding the header (a status dot Panel, the title, a Spacer, the count Panel, and for the Backlog the Add button), then the notice and the empty state, which is a dashed Panel with centered content. Pressing the JavaScript Add button runs its onPress in JavaScript (Last: add) as one commit that changes only the readout, and the native Add button runs its own handler without touching the JavaScript side. On the board itself, every column keeps its column-<status>, column-heading-<status> and empty-state-<status> identifiers, the Backlog its Add button and the Blocked column its notice, now built from the same atoms.
+    def test_plugin_kanban_column_renders_from_atoms_like_native(self):
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "KanbanColumn", "--event", "add-backlog-task-button:onPress")[0])
+        self.assertEqual(rendered["errors"], [])
+        tree = rendered["tree"]
+        # The same identifiers the board's native KanbanColumnSection gives its column.
+        for test_id in ["column-backlog", "column-heading-backlog", "column-count-backlog", "add-backlog-task-button", "empty-state-backlog",
+                        "column-in-progress", "column-heading-in-progress", "column-count-in-progress",
+                        "column-blocked", "column-heading-blocked", "column-count-blocked", "blocked-waiting-indicator", "empty-state-blocked",
+                        "column-done", "column-heading-done", "column-count-done", "empty-state-done"]:
+            self.plugin_node(tree, test_id)
+        types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
+        self.assertEqual(types, {"Panel", "Stack", "Text", "Icon", "Label", "Button", "Spacer"}, "The columns are atoms only.")
+        all_ids = [node.get("props", {}).get("testID") for node in self.plugin_nodes(tree)]
+        self.assertEqual(all_ids.count("add-backlog-task-button"), 1, "Only the Backlog has an Add button.")
+        self.assertEqual(all_ids.count("blocked-waiting-indicator"), 1, "Only the Blocked column has the notice.")
+        self.assertNotIn("empty-state-in-progress", all_ids, "A column with tasks has no empty state.")
+
+        backlog = self.plugin_node(tree, "column-backlog")
+        self.assertEqual(backlog["type"], "Panel")
+        self.assertEqual((backlog["props"]["spacing"], backlog["props"]["padding"], backlog["props"]["cornerRadius"], backlog["props"]["minHeight"]), (13, 14, 16, 170))
+        self.assertEqual([child["type"] for child in backlog["children"]], ["Stack", "Panel"], "The header, then the empty state.")
+        header = backlog["children"][0]
+        self.assertEqual([child["type"] for child in header["children"]], ["Panel", "Text", "Spacer", "Panel", "Button"], "Dot, title, spacer, count, Add.")
+        dot = header["children"][0]
+        self.assertEqual((dot["props"]["fill"], dot["props"]["width"], dot["props"]["height"]), ("#8591A8", 8, 8))
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "column-heading-backlog")), "BACKLOG")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "column-count-backlog")), "0")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "column-count-in-progress")), "2")
+        add = self.plugin_node(tree, "add-backlog-task-button")
+        self.assertEqual((add["props"]["style"], add["props"]["controlSize"], add["props"]["label"], add["events"]), ("bordered", "small", "Add task to Backlog", ["onPress"]))
+        empty = self.plugin_node(tree, "empty-state-backlog")
+        self.assertEqual((empty["props"]["dash"], empty["props"]["align"], empty["props"]["minHeight"]), ([5, 4], "center", 124))
+        self.assertEqual([self.plugin_text(child) for child in empty["children"] if child["type"] == "Text"], ["No tasks yet", "Create a task to get started"])
+        self.assertEqual([self.plugin_text(child) for child in self.plugin_node(tree, "empty-state-done")["children"] if child["type"] == "Text"], ["No tasks yet", "Drop a task here"])
+        self.assertEqual(self.plugin_node(tree, "empty-state-done")["children"][0]["props"]["name"], "checkmark.circle")
+        notice = self.plugin_node(tree, "blocked-waiting-indicator")
+        self.assertEqual((notice["type"], notice["props"]["text"], notice["props"]["icon"], notice["props"]["color"]), ("Label", "Waiting for user intervention", "hand.raised.fill", "red"))
+
+        last_action = self.plugin_node(tree, "js-last-action")
+        self.assertEqual(self.plugin_text(last_action), "Last: add", "The Add button ran its JavaScript handler.")
+        pressed = {commit["step"]: commit for commit in rendered["commits"]}["add-backlog-task-button:onPress"]
+        self.assertEqual(pressed["ops"], ["text"], "Pressing Add changes only the readout.")
+        self.assertEqual(pressed["touchedNodes"], [last_action["children"][1]["id"]])
+        self.assertEqual(backlog["updates"], 0, "No column re-rendered.")
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "KanbanColumn", "--event", "column-backlog:onPress", expected_status=2)[0], "invalid_argument")
 
     # case-contract: test_plugin_token_stats_renders_from_atoms_like_native | The Plugin Catalog's Token Stats page shows the Token Stats modal composed in JavaScript from atoms above the native SwiftUI modal the board presents, built from the same atoms and sample data, each opened by the task item's token counter (the same overhanging Button atom, labelled with its description and hinted Open Token Stats). Both show the title and the task's title, the View raw input… button, a section bar of Overview, Wasters, Tools & MCP and Overhead with Overview selected, the call headlines (Final transcript size, Total sent (incl. subagents), Excluding cache reads (incl. subagents)), the main-agent and subagent split, the call and output lines, the total, the four buckets, the per-tool rollup and the per-turn rows, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Label, Button, Spacer, ChoiceBar, Divider, Scroll, Meter) with the board modal's identifiers. Choosing Wasters in the JavaScript section bar runs onChange with its value (Last: section wasters) and shows the largest items, each with a 72-point share bar, its kind, the removed-by-compaction flag, its request count and a small Show button, then the repeated result and the cache miss, while the native modal stays on Overview until its own bar moves it, after which both show the same rows at the same size. Show runs its JavaScript handler with the item's raw input target (Last: raw input claude #14) and View raw input… with the final transcript (Last: raw input final transcript), without re-rendering any row. Tools & MCP lists each tool's bar, calls and total and the MCP server, and Overhead lists what every request carries and each agent. The overview scrolls within at most 320 points and each map section within a fixed 420. Done closes the JavaScript modal (Last: done) and leaves the native one open, and the counter opens it again (Last: open). The section bar raises no onPress, so pressing it is refused as invalid_argument.
     def test_plugin_token_stats_renders_from_atoms_like_native(self):
