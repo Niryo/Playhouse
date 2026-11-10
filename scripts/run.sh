@@ -15,13 +15,14 @@ if [[ -z "${worktree_label}" ]]; then
 fi
 
 terminate_running_playhouse() {
+  local reason="$1"
   local running_pids process_id attempt
   running_pids="$(playhouse_profile_processes)"
   if [[ -z "${running_pids}" ]]; then
     return
   fi
 
-  printf 'Closing Playhouse instance(s) from this worktree before rebuilding...\n'
+  printf 'Closing Playhouse instance(s) from this worktree %s...\n' "${reason}"
   while IFS= read -r process_id; do
     if [[ -n "${process_id}" ]]; then
       kill -TERM "${process_id}" 2>/dev/null || true
@@ -55,7 +56,7 @@ terminate_running_playhouse() {
   fi
 }
 
-terminate_running_playhouse
+terminate_running_playhouse "before rebuilding"
 
 # Older builds placed the lowercase CLI at Contents/MacOS/playhouse. On the
 # default case-insensitive macOS filesystem that replaced the GUI executable.
@@ -90,6 +91,14 @@ if [[ "${app_executable}" -ef "${cli_executable}" ]]; then
   printf 'Playhouse CLI and app executable resolve to the same file: %s\n' "${app_executable}" >&2
   exit 1
 fi
+# The build takes minutes. Meanwhile an agent turn or CLI call can start this
+# worktree's bridge daemon on demand from the previous build, which is still on
+# disk until xcodebuild replaces it. That old daemon reopens the task store for
+# each request, and SwiftData migrates the store back to the old model, dropping
+# any column the new build added. The new window then fails every read of that
+# column with "The file “Playhouse-v2.store” couldn’t be opened." Stop any
+# instance started during the build so the new app and daemon share one model.
+terminate_running_playhouse "started from the previous build"
 playhouse_clear_inherited_bridge_overrides
 open -n \
   --env "PLAYHOUSE_DATA_DIRECTORY=${launch_data_directory}" \

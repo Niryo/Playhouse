@@ -182,7 +182,13 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 To add an atom, add its case and props struct to `Core/AtomProps.swift`, its
 view to `Atoms/AtomViews.swift`, its registry entry to
 `Atoms/AtomRegistry.swift`, and a catalog page `catalog/<Atom>.js`. Add one
-only when a native composite needs it. Its view passes its type to
+only when a native composite needs it, and only when existing smaller atoms
+(or a primitive prop on them) can't compose it: an atom does one thing, such
+as laying out, drawing a surface or taking input. A composite atom, a
+shorthand for a common composition of smaller atoms, is fine when the
+composition is very common, as long as those smaller atoms stay exposed and
+can do everything it does; build its view from their views and say in its
+row of the table above and on its catalog page which atoms it stands for. Its view passes its type to
 `atomCommon` (or applies `atomHighlight` itself) and its case says whether it
 `isContainer`, so Debug ▸ Highlight Native Atoms outlines it: containers in
 orange, leaves in green, with its type name on hover. The overlay is

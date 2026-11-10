@@ -2881,7 +2881,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["savedPrompt"], "Protected draft")
 
-    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory, and run.sh drops PLAYHOUSE_BRIDGE_SERVICE_NAME and PLAYHOUSE_BRIDGE_SOCKET_PATH inherited from another Playhouse app, saying so, while keeping the launching worktree's own bridge. A saved conversation remains visible after an app restart.
+    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory, and run.sh drops PLAYHOUSE_BRIDGE_SERVICE_NAME and PLAYHOUSE_BRIDGE_SOCKET_PATH inherited from another Playhouse app, saying so, while keeping the launching worktree's own bridge. After its build and right before it opens the app, run.sh again stops this worktree's app and bridge daemon, so a daemon started from the previous build during the build cannot serve the new app. A saved conversation remains visible after an app restart.
     def test_worktree_app_profiles_isolate_identity_and_store(self):
         script = Path(__file__).resolve().parent / "app-profile.sh"
         linked = self.fixture / "existing-worktree"
@@ -2987,6 +2987,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assertEqual("inherited from another Playhouse app" in result.stderr, ignored, result.stderr)
         self.assertIn("playhouse_clear_inherited_bridge_overrides\nopen -n", (Path(script).parent / "run.sh").read_text(encoding="utf-8"),
                       "run.sh must clear inherited bridge overrides right before it opens the app.")
+        run_script = (Path(script).parent / "run.sh").read_text(encoding="utf-8")
+        self.assertIn('terminate_running_playhouse "started from the previous build"\nplayhouse_clear_inherited_bridge_overrides\nopen -n', run_script,
+                      "run.sh must stop a daemon started from the previous build right before it opens the app.")
+        self.assertLess(run_script.index("xcodebuild build"), run_script.index('terminate_running_playhouse "started from the previous build"'),
+                        "run.sh must stop the previous build's processes again after xcodebuild finishes.")
         # The bridge daemon and CLI ship flat in Contents/MacOS and resolve
         # their identity from this same Info.plist via `Bundle.main` (no
         # separate XPC bundle/Info.plist to cross-check anymore); the service
