@@ -2219,7 +2219,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !resolveButton.exists }, timeout: 10), "The action should disappear after GitHub confirms the pushed head.")
     }
 
-    // case-contract: test_review_sync_pushes_unpushed_changes_on_completion | A completed turn outcome on a task with a PR-linked repository and a configured remote commits local work, merges new remote pull request commits, and pushes the branch before the task reaches Review, so the reviewed worktree holds no local-only changes. A linked repository without a publishing remote is left untouched and still reaches Review. When the sync cannot complete, the task moves to Blocked with the sync failure message instead of resting in Review, and a later successful sync pushes the stranded commits and returns the task to Review. While a provider turn holds the task's worktree, the sync command skips it untouched and reports turn-active. A task branch deleted on a reachable remote is reported as no-remote-branch and leaves the task in Review.
+    // case-contract: test_review_sync_pushes_unpushed_changes_on_completion | A completed turn outcome on a task with a PR-linked repository and a configured remote commits local work, merges new remote pull request commits, and pushes the branch before the task reaches Review, so the reviewed worktree holds no local-only changes. A linked repository without a publishing remote is left untouched and still reaches Review. When the sync cannot complete, the task moves to Blocked with the sync failure message instead of resting in Review, and a later successful sync pushes the stranded commits and returns the task to Review. While a provider turn holds the task's worktree, the sync command skips it untouched and reports turn-active. A worktree switched off its task branch fails the sync with a message naming both branches and blocks the task, leaving that other branch and the remote untouched; once switched back, a remote commit whose changes the branch already holds is concluded as a merge commit and pushed, the task returns to Review, and the next sync is up-to-date instead of failing on an unfinished merge. A merge Git refuses outright, such as one with unrelated history, blocks the task with Git's own error after the generic merge failure message, and restoring the remote branch heals it back to Review. A clean merge an earlier sync left unfinished on the task branch is concluded as a merge commit and pushed. A task branch deleted on a reachable remote is reported as no-remote-branch and leaves the task in Review.
     func test_review_sync_pushes_unpushed_changes_on_completion() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123]).merging(Self.prCheckCooldownEnvironment) { $1 }
@@ -2294,6 +2294,87 @@ final class PlayhouseUITests: XCTestCase {
         assertTaskVisible("Review sync push UI", inColumn: "Review")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
         XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), try runGitOutput(worktree, "rev-parse", "HEAD"))
+
+        // A remote commit whose changes the local branch already holds, as after a squash merge.
+        try runGit(clone, "pull", "--ff-only", "origin", branch)
+        for repository in [clone, worktree] {
+            try "Same change on both sides.\n".write(to: repository.appendingPathComponent("duplicate-side.txt"), atomically: true, encoding: .utf8)
+            try runGit(repository, "add", "duplicate-side.txt")
+            try runGit(repository, "commit", "-m", "Duplicate change in \(repository.lastPathComponent)")
+        }
+        try runGit(clone, "push", "origin", branch)
+        let duplicateRemoteHead = try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)")
+
+        // A worktree switched off its task branch is never merged into, committed to, or pushed.
+        try runGit(worktree, "checkout", "-b", "agent-side-branch")
+        let sideHead = try runGitOutput(worktree, "rev-parse", "HEAD")
+        let switched = try runCLI(["task", "pr", "sync", taskID], expectedStatus: 1, extraEnvironment: ghEnvironment)
+        let switchedMessage = ((switched["error"] as? [String: Any])?["message"] as? String) ?? ""
+        XCTAssertTrue(switchedMessage.contains("is on branch 'agent-side-branch', not its pull request branch"), switchedMessage)
+        XCTAssertTrue(switchedMessage.contains("'\(branch)'"), switchedMessage)
+        assertTaskVisible("Review sync push UI", inColumn: "Blocked")
+        let switchedStatusMessage = try taskRecord(id: taskID)?["statusMessage"] as? String
+        XCTAssertTrue((switchedStatusMessage ?? "").contains("agent-side-branch"), switchedStatusMessage ?? "nil")
+        let switchedCardMessage = element("task-status-message-\(taskID)")
+        XCTAssertTrue(switchedCardMessage.waitToExist(timeout: 10), "The Blocked card shows why the sync stopped.")
+        let switchedCardText = accessibleLabelOrValue(of: switchedCardMessage)
+        XCTAssertTrue(switchedCardText.contains("agent-side-branch") && switchedCardText.contains("not its pull request branch"), switchedCardText)
+        attachScreenshot(named: "review-sync-blocked-on-switched-branch")
+        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), sideHead)
+        let mergeHead = URL(fileURLWithPath: try runGitOutput(worktree, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"), relativeTo: worktree)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: mergeHead.path), "A sync on a switched branch must not start a merge.")
+        XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), duplicateRemoteHead)
+
+        // Back on the task branch, the clean merge is committed and pushed rather than left in progress.
+        try runGit(worktree, "checkout", branch)
+        try runGit(worktree, "branch", "-D", "agent-side-branch")
+        let mergedSync = try XCTUnwrap(try runCLI(["task", "pr", "sync", taskID], extraEnvironment: ghEnvironment)["result"] as? [String: Any])
+        XCTAssertEqual((mergedSync["records"] as? [[String: Any]])?.compactMap { $0["action"] as? String }, ["merged-and-pushed"])
+        assertTaskVisible("Review sync push UI", inColumn: "Review")
+        XCTAssertTrue(
+            waitUntil({ !self.element("task-status-message-\(taskID)").exists || !self.accessibleLabelOrValue(of: self.element("task-status-message-\(taskID)")).contains("agent-side-branch") }, timeout: 10),
+            "The healed Review card must not keep the stale branch-switch reason."
+        )
+        attachScreenshot(named: "review-sync-healed-after-branch-restored")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: mergeHead.path), "A merge whose result matches HEAD must still be concluded.")
+        let mergedHead = try runGitOutput(worktree, "rev-parse", "HEAD")
+        XCTAssertEqual(try runGitOutput(worktree, "rev-list", "--parents", "-n", "1", mergedHead).split(separator: " ").count, 3)
+        XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), mergedHead)
+        let againSync = try XCTUnwrap(try runCLI(["task", "pr", "sync", taskID], extraEnvironment: ghEnvironment)["result"] as? [String: Any])
+        XCTAssertEqual((againSync["records"] as? [[String: Any]])?.compactMap { $0["action"] as? String }, ["up-to-date"])
+
+        // A fatal merge failure reports Git's own error instead of only a generic message.
+        let unrelated = try runGitOutput(clone, "commit-tree", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-m", "Unrelated history")
+        try runGit(clone, "push", "--force", "origin", "\(unrelated):refs/heads/\(branch)")
+        let fatal = try runCLI(["task", "pr", "sync", taskID], expectedStatus: 1, extraEnvironment: ghEnvironment)
+        let fatalMessage = ((fatal["error"] as? [String: Any])?["message"] as? String) ?? ""
+        XCTAssertTrue(fatalMessage.contains("Git couldn't merge the remote task branch.") && fatalMessage.contains("unrelated histories"), fatalMessage)
+        assertTaskVisible("Review sync push UI", inColumn: "Blocked")
+        XCTAssertTrue((try taskRecord(id: taskID)?["statusMessage"] as? String ?? "").contains("unrelated histories"))
+        try runGit(worktree, "push", "--force", "origin", "\(mergedHead):refs/heads/\(branch)")
+        let restoredSync = try XCTUnwrap(try runCLI(["task", "pr", "sync", taskID], extraEnvironment: ghEnvironment)["result"] as? [String: Any])
+        XCTAssertEqual((restoredSync["records"] as? [[String: Any]])?.compactMap { $0["action"] as? String }, ["up-to-date"])
+        XCTAssertEqual(restoredSync["status"] as? String, "Review")
+
+        // A clean merge an earlier sync left unfinished on the task branch is concluded and pushed.
+        try runGit(clone, "pull", "--ff-only", "origin", branch)
+        for repository in [clone, worktree] {
+            try "Already merged change.\n".write(to: repository.appendingPathComponent("leftover-side.txt"), atomically: true, encoding: .utf8)
+            try runGit(repository, "add", "leftover-side.txt")
+            try runGit(repository, "commit", "-m", "Leftover change in \(repository.lastPathComponent)")
+        }
+        try runGit(clone, "push", "origin", branch)
+        try runGit(worktree, "fetch", "--quiet", "origin", branch)
+        try runGit(worktree, "merge", "--no-commit", "--no-ff", "FETCH_HEAD")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: mergeHead.path), "The fixture should leave a clean merge unfinished.")
+        let leftoverSync = try XCTUnwrap(try runCLI(["task", "pr", "sync", taskID], extraEnvironment: ghEnvironment)["result"] as? [String: Any])
+        XCTAssertEqual((leftoverSync["records"] as? [[String: Any]])?.compactMap { $0["action"] as? String }, ["pushed"])
+        XCTAssertEqual(leftoverSync["status"] as? String, "Review")
+        assertTaskVisible("Review sync push UI", inColumn: "Review")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: mergeHead.path), "The sync should conclude a merge an earlier sync left unfinished.")
+        let leftoverHead = try runGitOutput(worktree, "rev-parse", "HEAD")
+        XCTAssertEqual(try runGitOutput(worktree, "rev-list", "--parents", "-n", "1", leftoverHead).split(separator: " ").count, 3)
+        XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), leftoverHead)
 
         // A branch deleted on a reachable remote is reported as missing, not as a fetch failure.
         try runGit(remote, "update-ref", "-d", "refs/heads/\(branch)")

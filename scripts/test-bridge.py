@@ -4639,7 +4639,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_failure(invalid, "invalid_argument")
         self.run_git(self.primary, "remote", "remove", "origin")
 
-    # case-contract: test_review_sync_pushes_unpushed_changes_on_completion | A completed turn outcome on a task with a PR-linked repository and a configured remote commits local work, merges new remote pull request commits, and pushes the branch before the task reaches Review, so the reviewed worktree holds no local-only changes. A linked repository without a publishing remote is left untouched and still reaches Review. When the sync cannot complete, the task moves to Blocked with the sync failure message instead of resting in Review, and a later successful sync pushes the stranded commits and returns the task to Review. While a provider turn holds the task's worktree, the sync command skips it untouched and reports turn-active. A task branch deleted on a reachable remote is reported as no-remote-branch and leaves the task in Review.
+    # case-contract: test_review_sync_pushes_unpushed_changes_on_completion | A completed turn outcome on a task with a PR-linked repository and a configured remote commits local work, merges new remote pull request commits, and pushes the branch before the task reaches Review, so the reviewed worktree holds no local-only changes. A linked repository without a publishing remote is left untouched and still reaches Review. When the sync cannot complete, the task moves to Blocked with the sync failure message instead of resting in Review, and a later successful sync pushes the stranded commits and returns the task to Review. While a provider turn holds the task's worktree, the sync command skips it untouched and reports turn-active. A worktree switched off its task branch fails the sync with a message naming both branches and blocks the task, leaving that other branch and the remote untouched; once switched back, a remote commit whose changes the branch already holds is concluded as a merge commit and pushed, the task returns to Review, and the next sync is up-to-date instead of failing on an unfinished merge. A merge Git refuses outright, such as one with unrelated history, blocks the task with Git's own error after the generic merge failure message, and restoring the remote branch heals it back to Review. A clean merge an earlier sync left unfinished on the task branch is concluded as a merge commit and pushed. A task branch deleted on a reachable remote is reported as no-remote-branch and leaves the task in Review.
     def test_review_sync_pushes_unpushed_changes_on_completion(self):
         task = self.create_repo_task("Review sync push", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
         record = task["repositoryWorktrees"][0]
@@ -4717,6 +4717,88 @@ class PlayhouseBridgeTests(unittest.TestCase):
         healed_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
         self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), healed_head)
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
+
+        # A remote commit whose changes the local branch already holds, as after a squash merge.
+        self.run_git(clone, "pull", "--ff-only", "origin", branch)
+        for repository in (clone, worktree):
+            (repository / "duplicate-side.txt").write_text("Same change on both sides.\n", encoding="utf-8")
+            self.run_git(repository, "add", "duplicate-side.txt")
+            self.run_git(repository, "commit", "-m", f"Duplicate change in {repository.name}")
+        self.run_git(clone, "push", "origin", branch)
+        duplicate_remote_head = self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip()
+
+        # A worktree switched off its task branch is never merged into, committed to, or pushed.
+        self.run_git(worktree, "checkout", "-b", "agent-side-branch")
+        side_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        switched, _ = self.call_cli("task", "pr", "sync", task["id"], expected_status=1)
+        self.assert_failure(switched, "operation_failed")
+        self.assertIn("is on branch 'agent-side-branch', not its pull request branch", switched["error"]["message"])
+        self.assertIn(f"'{branch}'", switched["error"]["message"])
+        switched_task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(switched_task["status"], "Blocked")
+        self.assertIn("agent-side-branch", switched_task.get("statusMessage") or "")
+        self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), side_head)
+        self.assertNotEqual(
+            subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "MERGE_HEAD"], check=False, capture_output=True).returncode,
+            0, "A sync on a switched branch must not start a merge.",
+        )
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), duplicate_remote_head)
+
+        # Back on the task branch, the clean merge is committed and pushed rather than left in progress.
+        self.run_git(worktree, "checkout", branch)
+        self.run_git(worktree, "branch", "-D", "agent-side-branch")
+        merged, _ = self.call_cli("task", "pr", "sync", task["id"])
+        merged_result = self.assert_success(merged)
+        self.assertEqual([item["action"] for item in merged_result["records"]], ["merged-and-pushed"])
+        self.assertEqual(merged_result["status"], "Review")
+        self.assertNotIn("agent-side-branch", self.assert_success(self.call_cli("task", "get", task["id"])[0]).get("statusMessage") or "")
+        self.assertNotEqual(
+            subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "MERGE_HEAD"], check=False, capture_output=True).returncode,
+            0, "A merge whose result matches HEAD must still be concluded.",
+        )
+        merged_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertEqual(len(self.run_git(worktree, "rev-list", "--parents", "-n", "1", merged_head).split()), 3)
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), merged_head)
+        again, _ = self.call_cli("task", "pr", "sync", task["id"])
+        self.assertEqual([item["action"] for item in self.assert_success(again)["records"]], ["up-to-date"])
+
+        # A fatal merge failure reports Git's own error instead of only a generic message.
+        unrelated = self.run_git(clone, "commit-tree", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-m", "Unrelated history").strip()
+        self.run_git(clone, "push", "--force", "origin", f"{unrelated}:refs/heads/{branch}")
+        fatal, _ = self.call_cli("task", "pr", "sync", task["id"], expected_status=1)
+        self.assert_failure(fatal, "operation_failed")
+        self.assertIn("Git couldn't merge the remote task branch.", fatal["error"]["message"])
+        self.assertIn("unrelated histories", fatal["error"]["message"])
+        fatal_task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(fatal_task["status"], "Blocked")
+        self.assertIn("unrelated histories", fatal_task.get("statusMessage") or "")
+        self.run_git(worktree, "push", "--force", "origin", f"{merged_head}:refs/heads/{branch}")
+        restored, _ = self.call_cli("task", "pr", "sync", task["id"])
+        restored_result = self.assert_success(restored)
+        self.assertEqual([item["action"] for item in restored_result["records"]], ["up-to-date"])
+        self.assertEqual(restored_result["status"], "Review")
+
+        # A clean merge an earlier sync left unfinished on the task branch is concluded and pushed.
+        self.run_git(clone, "pull", "--ff-only", "origin", branch)
+        for repository in (clone, worktree):
+            (repository / "leftover-side.txt").write_text("Already merged change.\n", encoding="utf-8")
+            self.run_git(repository, "add", "leftover-side.txt")
+            self.run_git(repository, "commit", "-m", f"Leftover change in {repository.name}")
+        self.run_git(clone, "push", "origin", branch)
+        self.run_git(worktree, "fetch", "--quiet", "origin", branch)
+        self.run_git(worktree, "merge", "--no-commit", "--no-ff", "FETCH_HEAD")
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain", "--untracked-files=all").strip(), "")
+        leftover, _ = self.call_cli("task", "pr", "sync", task["id"])
+        leftover_result = self.assert_success(leftover)
+        self.assertEqual([item["action"] for item in leftover_result["records"]], ["pushed"])
+        self.assertEqual(leftover_result["status"], "Review")
+        self.assertNotEqual(
+            subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "MERGE_HEAD"], check=False, capture_output=True).returncode,
+            0, "The sync should conclude a merge an earlier sync left unfinished.",
+        )
+        leftover_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertEqual(len(self.run_git(worktree, "rev-list", "--parents", "-n", "1", leftover_head).split()), 3)
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), leftover_head)
 
         # A branch deleted on a reachable remote is reported as missing, not as a fetch failure.
         self.run_git(remote, "update-ref", "-d", f"refs/heads/{branch}")
