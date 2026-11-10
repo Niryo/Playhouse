@@ -3148,8 +3148,9 @@ final class BoardTaskManager {
     /// Commits local work, merges new remote pull request commits, and pushes
     /// every PR-linked task branch, so a reviewed task never holds local-only
     /// changes. Merge conflicts are resolved by the task's provider. A repository
-    /// without a publishing remote or remote branch is left untouched. Throws on
-    /// any failure so the caller can move the task to Blocked.
+    /// without a publishing remote or remote branch is left untouched. A worktree
+    /// switched off its task branch fails the sync untouched. Throws on any
+    /// failure so the caller can move the task to Blocked.
     func syncPullRequestChanges(_ id: UUID, clients: ConversationClients) async throws -> [TaskBranchSyncResult] {
         try await withTaskOperationLock(id) {
             let task = try requireTask(id)
@@ -3160,12 +3161,17 @@ final class BoardTaskManager {
             // GitHub is the source of truth for a merged PR; without gh the check is skipped.
             let executable = records.isEmpty ? nil : try? pullRequestService.resolveExecutable()
             for record in records {
+                // Every step below acts on HEAD; never commit to or merge into a
+                // branch the agent switched to instead of the pull request branch.
+                try await worktreeService.requireTaskBranchCheckedOut(record)
                 // A failed earlier sync can leave its merge in progress; resolve
                 // its conflicts before anything else touches the working tree.
-                if try await worktreeService.hasMergeInProgress(record) {
+                // A merge whose result matches HEAD leaves no file changes but must still be concluded.
+                let mergeWasInProgress = try await worktreeService.hasMergeInProgress(record)
+                if mergeWasInProgress {
                     try await resolveMergeConflictsWithProvider([record], provider: provider, clients: clients)
                 }
-                let hadLocalChanges = try await worktreeService.hasChanges(record)
+                let hadLocalChanges = try await worktreeService.hasChanges(record) || mergeWasInProgress
                 if hadLocalChanges {
                     try await worktreeService.commitChanges(record, message: "Complete task: \(title)")
                 }

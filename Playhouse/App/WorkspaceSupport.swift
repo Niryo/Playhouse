@@ -986,9 +986,12 @@ enum PlayhouseWorktreeManager {
         }
     }
 
+    /// Commits the worktree's changes. An in-progress merge is always concluded, even
+    /// when its result matches HEAD (the remote commits were already present), so a
+    /// leftover MERGE_HEAD can't make the next merge fail.
     static func commitChanges(_ record: RepositoryWorktreeRecord, message: String) throws {
         let status = try git(record.worktreePath, ["status", "--porcelain", "--untracked-files=all"]).output
-        guard !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard try !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasMergeInProgress(record) else { return }
         _ = try git(record.worktreePath, ["add", "-A"])
         _ = try git(record.worktreePath, ["commit", "-m", message])
     }
@@ -1033,7 +1036,28 @@ enum PlayhouseWorktreeManager {
     static func mergeFetchedRemoteBranch(_ record: RepositoryWorktreeRecord) throws {
         let result = try git(record.worktreePath, ["merge", "--no-commit", "--no-ff", "FETCH_HEAD"], allowFailure: true)
         guard result.status == 0 || result.status == 1 else {
-            throw BridgeCommandError(code: "operation_failed", message: result.output.isEmpty ? "Git couldn't merge the remote task branch." : result.output)
+            throw BridgeCommandError(code: "operation_failed", message: gitFailureMessage(result, fallback: "Git couldn't merge the remote task branch."))
+        }
+    }
+
+    /// Git reports fatal errors on stderr, so prefer it over stdout in failure messages.
+    private static func gitFailureMessage(_ result: GitResult, fallback: String) -> String {
+        let detail = [result.error, result.output.trimmingCharacters(in: .whitespacesAndNewlines)].first { !$0.isEmpty }
+        return detail.map { "\(fallback) \($0)" } ?? fallback
+    }
+
+    /// Syncing commits, merges, and pushes through the worktree's HEAD, so it is only
+    /// safe while HEAD is the task branch. An agent that switched the worktree to
+    /// another branch would otherwise get the PR branch merged into that branch.
+    static func requireTaskBranchCheckedOut(_ record: RepositoryWorktreeRecord) throws {
+        let current = try git(record.worktreePath, ["branch", "--show-current"]).output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard current == record.branch else {
+            let checkedOut = current.isEmpty ? "a detached HEAD" : "branch '\(current)'"
+            throw BridgeCommandError(
+                code: "operation_failed",
+                message: "The task worktree \(record.worktreePath) is on \(checkedOut), not its pull request branch '\(record.branch)'. Switch it back to '\(record.branch)' and sync again."
+            )
         }
     }
 
@@ -1070,7 +1094,7 @@ enum PlayhouseWorktreeManager {
         let targetRef = try mergeTargetRef(record)
         let result = try git(record.worktreePath, ["merge", "--no-commit", "--no-ff", targetRef], allowFailure: true)
         guard result.status == 0 || result.status == 1 else {
-            throw BridgeCommandError(code: "operation_failed", message: result.output.isEmpty ? "Git couldn't merge the target branch." : result.output)
+            throw BridgeCommandError(code: "operation_failed", message: gitFailureMessage(result, fallback: "Git couldn't merge the target branch."))
         }
     }
 
@@ -1595,6 +1619,14 @@ struct PlayhouseWorktreeService {
         try await perform("git.fetch_branch_state", record: record) {
             try await PlayhouseBackgroundOperation.run {
                 try PlayhouseWorktreeManager.fetchRemoteBranchState(record)
+            }
+        }
+    }
+
+    func requireTaskBranchCheckedOut(_ record: RepositoryWorktreeRecord) async throws {
+        try await perform("git.require_task_branch", record: record) {
+            try await PlayhouseBackgroundOperation.run {
+                try PlayhouseWorktreeManager.requireTaskBranchCheckedOut(record)
             }
         }
     }
