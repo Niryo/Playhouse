@@ -922,10 +922,6 @@ struct TaskConversationView: View {
         let dataURL: String
         let image: NSImage
     }
-    private struct RepositoryBadgeEditID: Identifiable, Equatable {
-        let path: String
-        var id: String { path }
-    }
 
     /// An outlined pencil with a wide body, drawn on a 24-point grid. The SF Symbol pencil
     /// stays a thin stick at small sizes, which does not read as an edit button.
@@ -1135,6 +1131,8 @@ struct TaskConversationView: View {
     @State private var answeredUserInputRequestIDs: Set<String> = []
     // Safe replies this window streamed for secret recovery turns, which history hides.
     @State private var streamedRecoveryReplies: [String: String] = [:]
+    // Text deltas waiting to be applied to `messages`; see `bufferStreamedTextDelta`.
+    @State private var pendingTextDeltas = PendingStreamedTextDeltas()
     @State private var userInputAnswers: [String: [String]] = [:]
     @State private var userInputOther: [String: String] = [:]
     @State private var userInputOtherSelected: Set<String> = []
@@ -1159,7 +1157,6 @@ struct TaskConversationView: View {
     @State private var recentRepositoryPaths: [String] = []
     @FocusState private var focusedRepositoryField: String?
     @FocusState private var isComposerFocused: Bool
-    @FocusState private var isRepositorySearchFocused: Bool
 
     private var isSendDisabled: Bool {
         !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isLoadingHistory || userInputRequest != nil
@@ -1354,28 +1351,64 @@ struct TaskConversationView: View {
 
     /// Reveals the next older batch, keeping the message that was at the top of
     /// the viewport in place so the transcript does not jump under the pointer.
-    private func revealOlderConversationMessages(using proxy: ScrollViewProxy) {
+    /// With a `distance` from the window top up to the viewport's top edge, as
+    /// after dragging the scroller deep into the runway, it reveals whole
+    /// batches until their estimated height reaches that far, and leaves the
+    /// offset where the reader put it.
+    private func revealOlderConversationMessages(using proxy: ScrollViewProxy, covering distance: CGFloat? = nil) {
         guard hasOlderConversationMessages, !isRevealingOlderConversationMessages else { return }
         let allMessages = conversationMessages
         guard let currentTopID = renderedConversationMessages.first?.id,
               let currentStartIndex = allMessages.firstIndex(where: { $0.id == currentTopID }) else { return }
-        // The loaded messages cannot fill another batch above the window, so
-        // read the next older page from the daemon first.
-        if currentStartIndex < Self.olderConversationMessageBatchSize, earlierStoredMessageCount > 0 {
+        let batchSize = Self.olderConversationMessageBatchSize
+        var newStartIndex = max(0, currentStartIndex - batchSize)
+        var needsEarlierPage = currentStartIndex < batchSize
+        if let distance {
+            let heights = estimatedConversationRowHeights(of: 0..<currentStartIndex, in: allMessages)
+            var covered = heights[newStartIndex...].reduce(0, +)
+            while covered < distance, newStartIndex > 0 {
+                let next = max(0, newStartIndex - batchSize)
+                covered += heights[next..<newStartIndex].reduce(0, +)
+                newStartIndex = next
+            }
+            needsEarlierPage = needsEarlierPage || covered < distance
+        }
+        // The loaded messages cannot fill what is to be revealed above the
+        // window, so read the next older page from the daemon first.
+        if needsEarlierPage, earlierStoredMessageCount > 0 {
             isRevealingOlderConversationMessages = true
             isOlderConversationRevealArmed = false
             Task { @MainActor in
                 let loaded = await loadEarlierConversationMessages()
                 isRevealingOlderConversationMessages = false
-                if loaded { revealOlderConversationMessages(using: proxy) }
+                if loaded { revealOlderConversationMessages(using: proxy, covering: distance) }
             }
             return
         }
-        let newStartIndex = max(0, currentStartIndex - Self.olderConversationMessageBatchSize)
         guard newStartIndex < currentStartIndex else { return }
         isRevealingOlderConversationMessages = true
         isOlderConversationRevealArmed = false
         oldestRenderedMessageID = allMessages[newStartIndex].id
+        if distance != nil {
+            Task { @MainActor in
+                // The revealed rows take the runway's place at the reader's
+                // offset; once laid out, judge again in case the estimate fell
+                // short of the viewport.
+                await Task.yield()
+                for delay in Self.scrollSettleDelays {
+                    try? await Task.sleep(nanoseconds: delay)
+                }
+                isRevealingOlderConversationMessages = false
+                if let offsetY = lastConversationScrollSample.offsetY {
+                    handleConversationWindowTop(
+                        conversationWindowTopY(offsetY: offsetY, viewportHeight: lastConversationScrollSample.viewportHeight),
+                        using: proxy,
+                        allowsJump: true
+                    )
+                }
+            }
+            return
+        }
         Task { @MainActor in
             await Task.yield()
             var transaction = Transaction()
@@ -1433,6 +1466,8 @@ struct TaskConversationView: View {
     /// trimmed back to the messages already loaded, so a reload never pulls
     /// the whole conversation into memory.
     private func applyHistoryMessages(_ history: ConversationHistory, _ incoming: [ConversationMessage]? = nil) {
+        // Buffered text arrived before this history, so it applies first, as it would have unbuffered.
+        flushStreamedTextDeltas()
         defer { mergeTimelineActivities(history.timelineActivities) }
         let incoming = incoming ?? history.messages
         if let earlierCount = history.earlierMessageCount {
@@ -1469,18 +1504,94 @@ struct TaskConversationView: View {
     /// The runway occupies everything above the rendered window, so the distance
     /// from the viewport top to the window top is what is left of it.
     private func conversationWindowTopY(offsetY: CGFloat, viewportHeight: CGFloat) -> CGFloat {
-        hasOlderConversationMessages ? viewportHeight - offsetY : -offsetY
+        guard hasOlderConversationMessages else { return -offsetY }
+        let runwayHeight = lastConversationScrollSample.runwayHeight
+        return (runwayHeight > 0 ? runwayHeight : viewportHeight) - offsetY
+    }
+
+    /// The runway's height: the estimated length of every message above the
+    /// rendered window, the loaded ones and those still in the store, and at
+    /// least a viewport so an upward drag is always available. Recorded on the
+    /// scroll sample, where scroll handling reads where the window top is.
+    private func olderConversationRunwayHeight(viewport: CGSize) -> CGFloat {
+        let sample = lastConversationScrollSample
+        sample.viewportHeight = viewport.height
+        guard hasOlderConversationMessages else {
+            sample.runwayHeight = 0
+            return 0
+        }
+        let allMessages = conversationMessages
+        let startIndex = oldestRenderedMessageID.flatMap { id in allMessages.firstIndex { $0.id == id } }
+            ?? max(0, allMessages.count - Self.olderConversationMessageBatchSize)
+        // The runway sits above everything the reader can see, so a change in
+        // its height moves the content under them. It is estimated again only
+        // when the window or the history above it changes, which a reveal or a
+        // reload owns the position for, never as the transcript reflows to a
+        // new width or the window's own rows, a streaming answer among them,
+        // grow.
+        let key = ConversationScrollSample.RunwayKey(
+            firstLoadedID: allMessages.first?.id,
+            windowStartID: startIndex < allMessages.count ? allMessages[startIndex].id : nil,
+            hiddenLoadedCount: startIndex,
+            storedCount: earlierStoredMessageCount
+        )
+        if key == sample.runwayKey, sample.estimatedHiddenHeight > 0 {
+            let height = max(viewport.height, sample.estimatedHiddenHeight)
+            sample.runwayHeight = height
+            return height
+        }
+        sample.runwayKey = key
+        sample.rowHeightWidth = ConversationRowHeightEstimates.textWidth(viewportWidth: viewport.width)
+        var hiddenHeight = estimatedConversationRowHeights(of: 0..<startIndex, in: allMessages).reduce(0, +)
+        // Messages still in the store are assumed to be like the hidden loaded
+        // ones. With none hidden, the last such average stands in.
+        if startIndex > 0 {
+            sample.storedMessageAverageHeight = hiddenHeight / CGFloat(startIndex)
+        }
+        hiddenHeight += sample.storedMessageAverageHeight * CGFloat(earlierStoredMessageCount)
+        sample.estimatedHiddenHeight = hiddenHeight.rounded()
+        let height = max(viewport.height, sample.estimatedHiddenHeight)
+        sample.runwayHeight = height
+        return height
+    }
+
+    /// Estimated height of each loaded message in `range` with the tool calls
+    /// placed after it, at the width the runway was last laid out at.
+    private func estimatedConversationRowHeights(of range: Range<Int>, in allMessages: [ConversationMessage]) -> [CGFloat] {
+        let sample = lastConversationScrollSample
+        var toolCallCounts: [String: Int] = [:]
+        for activity in timelineActivities {
+            if let anchor = activity.afterMessageID { toolCallCounts[anchor, default: 0] += 1 }
+        }
+        return range.map { index in
+            let message = allMessages[index]
+            return sample.rowHeights.height(for: message, width: sample.rowHeightWidth)
+                + CGFloat(toolCallCounts[message.id] ?? 0) * ConversationRowHeightEstimates.toolCallRowHeight
+        }
     }
 
     /// Handles a new position for the top of the rendered window, measured from
     /// the top of the viewport. Dragging it below the threshold means the user
     /// scrolled past the oldest rendered message, which reveals the next batch.
-    private func handleConversationWindowTop(_ windowTopY: CGFloat, using proxy: ScrollViewProxy) {
+    /// When `allowsJump` is set, a position deep in the runway, as dragging the
+    /// scroller there leaves, reveals as many batches as the estimate says
+    /// reach the viewport. The macOS 14 marker reports layout changes as well
+    /// as scrolls, which is safe because the runway above the window only
+    /// changes height when a reveal or a reload, both guarded here, changes it.
+    private func handleConversationWindowTop(_ windowTopY: CGFloat, using proxy: ScrollViewProxy, allowsJump: Bool = false) {
         // This runs for every scroll sample, and publishing state re-renders the
         // whole transcript, so the armed flag is only ever written when it
         // actually changes.
         guard hasOlderConversationMessages, !isRevealingOlderConversationMessages else {
             if isOlderConversationRevealArmed { isOlderConversationRevealArmed = false }
+            return
+        }
+        // Opening pins the newest turn from an offset of zero, which is the top
+        // of the runway; only a settled transcript can be jumped through.
+        let viewportHeight = lastConversationScrollSample.viewportHeight
+        if allowsJump, hasPresentedLatestConversation, !isLatestConversationTurnPinPending,
+           viewportHeight > 0, windowTopY > viewportHeight {
+            revealOlderConversationMessages(using: proxy, covering: windowTopY + viewportHeight)
             return
         }
         let isWithinWindowTop = windowTopY <= Self.olderConversationRevealThreshold
@@ -1586,11 +1697,10 @@ struct TaskConversationView: View {
     /// compaction rows are not: they are positional markers whose meaning comes
     /// from the two messages they sit between, and they reappear with those
     /// messages as older batches are revealed.
-    private func renderedAnchorMessageID(for anchorID: String?) -> String? {
+    private static func renderedAnchorMessageID(for anchorID: String?, renderedIDs: Set<String>, firstRenderedID: String?) -> String? {
         guard let anchorID else { return nil }
-        let rendered = renderedConversationMessages
-        if rendered.contains(where: { $0.id == anchorID }) { return anchorID }
-        return rendered.first?.id ?? anchorID
+        if renderedIDs.contains(anchorID) { return anchorID }
+        return firstRenderedID ?? anchorID
     }
 
     private func goalAchievementAnchorMessageID(for entry: GoalAchievementTimelineEntry) -> String? {
@@ -1814,7 +1924,10 @@ struct TaskConversationView: View {
                   !answeredUserInputRequestIDs.contains(request.id) else { return }
             showUserInputRequest(request)
         }
-        .onChange(of: messages) { _, _ in
+        // Compared only while a streamed recovery reply is waiting: comparing the whole
+        // transcript on every update was a large share of streaming a long conversation.
+        // Showing the replies again is idempotent, so the comparison starting is harmless.
+        .onChange(of: streamedRecoveryReplies.isEmpty ? nil : messages) { _, _ in
             // History reloads bring back the hidden text for replies this window streamed.
             if !streamedRecoveryReplies.isEmpty { showStreamedRecoveryReplies() }
         }
@@ -2917,81 +3030,50 @@ struct TaskConversationView: View {
     private var repositoryBadges: some View {
         let suggestedRepositoryPaths = suggestedRepositories.map(\.path)
         let attachedRepositoryPaths = task.repositoryWorktrees.map(\.repositoryPath)
-        return HStack(spacing: 10) {
-            ForEach(task.repositoryWorktrees, id: \.repositoryPath) { repository in
-                repositoryChip(repository)
-            }
-            Button {
-                if isShowingRepositoryPicker { isShowingRepositoryPicker = false } else { showRepositoryPicker() }
-            } label: {
-                Image(systemName: "plus").font(.system(size: 12, weight: .semibold))
-                    .frame(width: 28, height: 28).background(Color.primary.opacity(0.07), in: Circle())
-            }
-            .buttonHoverPointer()
-            .buttonStyle(.plain).nativeHelp("Add a repository").accessibilityLabel("Add repository")
-            .accessibilityIdentifier("add-conversation-repository-button")
+        return RepositoryChipsView(
+            model: RepositoryChipsModel(repositoryPaths: attachedRepositoryPaths, readOnly: isReadOnly),
+            actions: RepositoryChipsActions(
+                edit: { path in
+                    guard let repository = task.repositoryWorktrees.first(where: { $0.repositoryPath == path }) else { return }
+                    repositoryBeingEdited = repository
+                    resetRepositoryEdits(to: repository)
+                    editingRepositoryField = nil
+                },
+                remove: { path in
+                    guard let repository = task.repositoryWorktrees.first(where: { $0.repositoryPath == path }) else { return }
+                    removeConversationRepository(repository)
+                },
+                add: {
+                    if isShowingRepositoryPicker { isShowingRepositoryPicker = false } else { showRepositoryPicker() }
+                }
+            ),
+            isPickerPresented: $isShowingRepositoryPicker,
+            editingPath: Binding(
+                get: { repositoryBeingEdited?.repositoryPath },
+                set: { if $0 == nil { repositoryBeingEdited = nil } }
+            ),
             // The popover content only refreshes with this view, so key it to the suggestions it lists.
-            .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker.id(suggestedRepositoryPaths + recentRepositoryPaths) }
-            .disabled(isReadOnly)
-        }
+            picker: { repositoryPicker.id(suggestedRepositoryPaths + recentRepositoryPaths) },
+            settings: { chip in
+                if let repository = task.repositoryWorktrees.first(where: { $0.repositoryPath == chip.path }) {
+                    repositorySettingsPopover(repository, name: chip.name)
+                }
+            }
+        )
         .onAppear { loadRecentRepositories() }
         .onChange(of: attachedRepositoryPaths) { _, _ in loadRecentRepositories() }
+        .onChange(of: repositorySearch) { _, value in
+            repositorySuggestionIndex = 0
+            if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                didOverrideRepositoryDefault = true
+            }
+        }
     }
 
     private func showRepositoryPicker() {
         isShowingRepositoryPicker = true
         loadRecentRepositories()
         if suggestedRepositories.isEmpty { loadSuggestedRepositories() }
-    }
-
-    private func repositoryChip(_ repository: RepositoryWorktreeRecord) -> some View {
-        let name = URL(fileURLWithPath: repository.repositoryPath).lastPathComponent
-        return Button {
-            repositoryBeingEdited = repository
-            resetRepositoryEdits(to: repository)
-            editingRepositoryField = nil
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.triangle.branch")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(WorkspaceTheme.accent)
-                Text(name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                    .foregroundStyle(.primary)
-            }
-            .padding(.leading, 11).padding(.trailing, 14).padding(.vertical, 7)
-            .background(Color.primary.opacity(0.08), in: Capsule())
-            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.14), lineWidth: 1))
-        }
-        .buttonHoverPointer()
-        .nativeHelp("Edit repository settings for \(name)")
-        .buttonStyle(.plain)
-        .disabled(isReadOnly)
-        .popover(item: Binding(
-            get: { repositoryBeingEdited?.repositoryPath == repository.repositoryPath ? RepositoryBadgeEditID(path: repository.repositoryPath) : nil },
-            set: { if $0 == nil { repositoryBeingEdited = nil } }
-        )) { _ in
-            repositorySettingsPopover(repository, name: name)
-        }
-        .accessibilityIdentifier("conversation-repository-badge-\(name)")
-        .overlay(alignment: .topTrailing) {
-            if !isReadOnly {
-                Button { removeConversationRepository(repository) } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 20, height: 20)
-                        .background(WorkspaceTheme.panelBackground, in: Circle())
-                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.16), lineWidth: 1))
-                        .contentShape(Circle())
-                }
-                .buttonHoverPointer()
-                .buttonStyle(.plain)
-                .nativeHelp("Remove \(name) from this task")
-                .accessibilityLabel("Remove \(name)")
-                .accessibilityIdentifier("remove-conversation-repository-\(name)")
-                .offset(x: 6, y: -6)
-            }
-        }
     }
 
     private func repositorySettingsPopover(_ repository: RepositoryWorktreeRecord, name: String) -> some View {
@@ -3024,107 +3106,46 @@ struct TaskConversationView: View {
     }
 
     private var repositoryPicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let parentFolderURL = WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) {
-                HStack(spacing: 5) {
-                    Text("Suggestions from \(parentFolderURL.path)")
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .nativeHelp(parentFolderURL.path)
-                    Spacer(minLength: 0)
-                    Button("Change…") { chooseRepositoryParentFolder() }
-                        .buttonHoverPointer()
-                        .nativeHelp("Choose a different repository suggestion folder")
-                        .disabled(isChoosingRepositoryParent)
-                        .accessibilityIdentifier("choose-repository-suggestion-parent-button")
-                }
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-            } else {
-                Text("Choose a parent folder to find Git repositories.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                Button("Choose suggestion folder…") { chooseRepositoryParentFolder() }
-                    .buttonHoverPointer()
-                    .nativeHelp("Choose a folder to find repository suggestions")
-                    .disabled(isChoosingRepositoryParent)
-                    .accessibilityIdentifier("choose-repository-suggestion-parent-button")
-            }
-            TextField(repositorySearchPlaceholder, text: $repositorySearch)
-                .textFieldStyle(.roundedBorder)
-                .focused($isRepositorySearchFocused)
-                .onChange(of: repositorySearch) { _, value in
-                    repositorySuggestionIndex = 0
-                    if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        didOverrideRepositoryDefault = true
-                    }
-                }
-                .onKeyPress { press in
+        let available = pickerRepositories
+        return RepositoryPickerView(
+            model: RepositoryPickerModel(
+                parentFolder: WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath)?.path,
+                isChoosingParent: isChoosingRepositoryParent,
+                placeholder: repositorySearchPlaceholder,
+                search: repositorySearch,
+                isListingRecent: isShowingRecentRepositories,
+                repositories: available,
+                highlighted: repositorySuggestionIndex,
+                focusesSearch: isNewTask,
+                canSubmit: isUsingSavedRepositoryDefault || available.indices.contains(repositorySuggestionIndex)
+            ),
+            actions: RepositoryPickerActions(
+                chooseParent: { chooseRepositoryParentFolder() },
+                search: { repositorySearch = $0 },
+                arrow: { direction in
                     let available = pickerRepositories
-                    switch press.key {
-                    case .downArrow:
-                        guard !available.isEmpty else { return .ignored }
-                        didOverrideRepositoryDefault = true
-                        repositorySuggestionIndex = min(repositorySuggestionIndex + 1, available.count - 1)
-                        return .handled
-                    case .upArrow:
-                        guard !available.isEmpty else { return .ignored }
-                        didOverrideRepositoryDefault = true
-                        repositorySuggestionIndex = max(repositorySuggestionIndex - 1, 0)
-                        return .handled
-                    case .return:
-                        if isUsingSavedRepositoryDefault {
-                            let savedRepositories = validLastSelectedRepositoryURLs
-                            guard !savedRepositories.isEmpty else { return .handled }
-                            selectRepositories(savedRepositories)
-                        } else if available.indices.contains(repositorySuggestionIndex) {
-                            selectRepositorySuggestion(available[repositorySuggestionIndex])
-                        } else {
-                            return .ignored
-                        }
-                        return .handled
-                    default:
-                        return .ignored
+                    guard !available.isEmpty else { return }
+                    didOverrideRepositoryDefault = true
+                    repositorySuggestionIndex = direction == "down"
+                        ? min(repositorySuggestionIndex + 1, available.count - 1)
+                        : max(repositorySuggestionIndex - 1, 0)
+                },
+                submit: {
+                    let available = pickerRepositories
+                    if isUsingSavedRepositoryDefault {
+                        let savedRepositories = validLastSelectedRepositoryURLs
+                        guard !savedRepositories.isEmpty else { return }
+                        selectRepositories(savedRepositories)
+                    } else if available.indices.contains(repositorySuggestionIndex) {
+                        selectRepositorySuggestion(available[repositorySuggestionIndex])
                     }
+                },
+                select: { path in
+                    guard let repository = pickerRepositories.first(where: { $0.path == path }) else { return }
+                    selectRepositorySuggestion(repository)
                 }
-                .accessibilityIdentifier("conversation-repository-search")
-            let available = pickerRepositories
-            let isListingRecent = isShowingRecentRepositories
-            if isListingRecent {
-                Text("Recent")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("conversation-repository-recent-header")
-            }
-            if !isListingRecent, WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) == nil {
-                EmptyView()
-            } else if available.isEmpty {
-                Text("No matching repositories.").font(.system(size: 10)).foregroundStyle(.secondary)
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(available.enumerated()), id: \.element.path) { index, repository in
-                            Button {
-                                selectRepositorySuggestion(repository)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(repository.lastPathComponent).font(.system(size: 11, weight: .medium))
-                                    Text(repository.path).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
-                                }.frame(maxWidth: .infinity, alignment: .leading).padding(7).contentShape(Rectangle())
-                            }
-                            .buttonHoverPointer()
-                            .nativeHelp("Select repository")
-                            .buttonStyle(.plain)
-                            .background(index == repositorySuggestionIndex ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
-                            .accessibilityIdentifier("conversation-repository-\(isListingRecent ? "recent" : "suggestion")-\(repository.lastPathComponent)")
-                        }
-                    }
-                }.frame(width: 280, height: min(CGFloat(available.count * 42), 180))
-            }
-        }
-        .padding(12)
-        .frame(width: 304)
-        .defaultFocus($isRepositorySearchFocused, isNewTask)
+            )
+        )
     }
 
     private var repositorySearchPlaceholder: String {
@@ -3292,6 +3313,46 @@ struct TaskConversationView: View {
         let activityDisclosureAnchorID: String?
         let latestTurnStartID: String?
         let conversationMessages: [ConversationMessage]
+        /// Provider boundaries and goal achievements keyed by the rendered message they follow.
+        let boundariesByAnchorID: [String: [ConversationProviderBoundary]]
+        let goalEntriesByAnchorID: [String: [GoalAchievementTimelineEntry]]
+        /// Context compactions with a timeline position, in activity order.
+        let orderedContextCompactions: [ConversationActivity]
+    }
+
+    /// A rendered message's identity and its position in this pass's window. The
+    /// transcript's `ForEach` iterates these rather than the messages themselves:
+    /// SwiftUI compares a `ForEach`'s data on every update, and comparing every
+    /// message's full contents on every streamed delta was a large share of the
+    /// time spent streaming into a long conversation.
+    private struct RenderedMessageReference: Identifiable, Equatable {
+        let id: String
+        let index: Int
+    }
+
+    private func makeTranscriptRowContext(rendered: [ConversationMessage]) -> TranscriptRowContext {
+        let allMessages = conversationMessages
+        let renderedIDs = Set(rendered.map(\.id))
+        func renderedAnchor(_ anchorID: String?) -> String? {
+            Self.renderedAnchorMessageID(for: anchorID, renderedIDs: renderedIDs, firstRenderedID: rendered.first?.id)
+        }
+        var boundaries: [String: [ConversationProviderBoundary]] = [:]
+        for boundary in providerBoundaries {
+            if let anchor = renderedAnchor(boundaryAnchorID(for: boundary)) { boundaries[anchor, default: []].append(boundary) }
+        }
+        var goalEntries: [String: [GoalAchievementTimelineEntry]] = [:]
+        for entry in goalAchievementTimelineEntries {
+            if let anchor = renderedAnchor(goalAchievementAnchorMessageID(for: entry)) { goalEntries[anchor, default: []].append(entry) }
+        }
+        return TranscriptRowContext(
+            inlineTools: inlineToolCalls.byMessageID,
+            activityDisclosureAnchorID: shouldShowActivityDisclosure ? activityDisclosureAnchorID : nil,
+            latestTurnStartID: latestConversationTurnStartID,
+            conversationMessages: allMessages,
+            boundariesByAnchorID: boundaries,
+            goalEntriesByAnchorID: goalEntries,
+            orderedContextCompactions: activities.filter { $0.isContextCompaction && $0.timelineOrder != nil }
+        )
     }
 
     /// One message of the rendered window with the rows anchored to it: its
@@ -3311,14 +3372,10 @@ struct TaskConversationView: View {
             // The question itself starts the newest turn, below any page
             // separator, so a pin lands on the bubble.
             .layoutValue(key: ConversationLatestTurnStartKey.self, value: message.id == context.latestTurnStartID)
-        ForEach(providerBoundaries.filter {
-            renderedAnchorMessageID(for: boundaryAnchorID(for: $0)) == message.id
-        }) { boundary in
+        ForEach(context.boundariesByAnchorID[message.id] ?? []) { boundary in
             providerBoundaryRow(boundary)
         }
-        ForEach(goalAchievementTimelineEntries.filter {
-            renderedAnchorMessageID(for: goalAchievementAnchorMessageID(for: $0)) == message.id
-        }) { entry in
+        ForEach(context.goalEntriesByAnchorID[message.id] ?? []) { entry in
             goalAchievementTimelineRow(entry)
                 .id(entry.id)
         }
@@ -3329,12 +3386,14 @@ struct TaskConversationView: View {
                 ToolCallTimelineRow(activity: activity)
             }
         }
-        let nextOrder = context.conversationMessages.first(where: {
+        // Most transcripts have no compaction, so the scan for the next ordered message runs only when one exists.
+        let compactions = message.timelineOrder == nil ? [] : context.orderedContextCompactions
+        let nextOrder = compactions.isEmpty ? nil : context.conversationMessages.first(where: {
             guard let current = message.timelineOrder, let candidate = $0.timelineOrder else { return false }
             return candidate > current
         })?.timelineOrder
-        ForEach(activities.filter {
-            guard $0.isContextCompaction, let eventOrder = $0.timelineOrder,
+        ForEach(compactions.filter {
+            guard let eventOrder = $0.timelineOrder,
                   let messageOrder = message.timelineOrder, eventOrder > messageOrder else { return false }
             return nextOrder.map { eventOrder < $0 } ?? true
         }) { activity in
@@ -3350,10 +3409,13 @@ struct TaskConversationView: View {
                     // Scroll runway above the rendered window. It keeps an
                     // upward drag available even when the latest turn alone is
                     // shorter than the viewport, and it is replaced by the
-                    // earlier messages as soon as they are revealed.
+                    // earlier messages as soon as they are revealed. It is as
+                    // tall as those messages are estimated to be, so the
+                    // scroller keeps about the same size as they appear.
+                    let runwayHeight = olderConversationRunwayHeight(viewport: viewport.size)
                     if hasOlderConversationMessages {
                         Color.clear
-                            .frame(height: viewport.size.height)
+                            .frame(height: runwayHeight)
                             .accessibilityHidden(true)
                         // Scroll position is only observable from macOS 15 on,
                         // so older systems keep an explicit control rather than
@@ -3398,12 +3460,8 @@ struct TaskConversationView: View {
                 let leadingGoalEntries = goalAchievementTimelineEntries.filter { goalAchievementAnchorMessageID(for: $0) == nil }
                 // Worked out once per pass rather than once per row: each walks the whole transcript, and
                 // every row of it is rebuilt whenever the transcript's width changes, as while resizing the chat.
-                let rowContext = TranscriptRowContext(
-                    inlineTools: inlineToolCalls.byMessageID,
-                    activityDisclosureAnchorID: shouldShowActivityDisclosure ? activityDisclosureAnchorID : nil,
-                    latestTurnStartID: latestConversationTurnStartID,
-                    conversationMessages: conversationMessages
-                )
+                let renderedMessages = renderedConversationMessages
+                let rowContext = makeTranscriptRowContext(rendered: renderedMessages)
                 ConversationTranscriptLayout(
                     spacing: 16,
                     minimumLatestTurnHeight: max(0, viewport.size.height - Self.conversationVerticalPadding - Self.conversationScrollEndHeight)
@@ -3454,8 +3512,8 @@ struct TaskConversationView: View {
                         ForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
                             providerBoundaryRow(boundary)
                         }
-                        ForEach(renderedConversationMessages) { message in
-                            transcriptRows(for: message, context: rowContext)
+                        ForEach(renderedMessages.indices.map { RenderedMessageReference(id: renderedMessages[$0].id, index: $0) }) { reference in
+                            transcriptRows(for: renderedMessages[reference.index], context: rowContext)
                         }
                         ForEach(liveChatPageRecalls) { activity in
                             if let pageID = activity.recalledChatPageID {
@@ -3564,7 +3622,7 @@ struct TaskConversationView: View {
                 // Exactly one source drives the reveal: the scroll observer
                 // where it exists, this marker where it does not.
                 if #unavailable(macOS 15) {
-                    handleConversationWindowTop(markerY, using: scrollProxy)
+                    handleConversationWindowTop(markerY, using: scrollProxy, allowsJump: true)
                 }
             }
             .onPreferenceChange(ConversationScrollGeometryKey.self) { geometry in
@@ -3580,7 +3638,8 @@ struct TaskConversationView: View {
                 lastConversationScrollSample.offsetY = new.offsetY
                 handleConversationWindowTop(
                     conversationWindowTopY(offsetY: new.offsetY, viewportHeight: viewport.size.height),
-                    using: scrollProxy
+                    using: scrollProxy,
+                    allowsJump: true
                 )
             })
             .onPreferenceChange(ConversationLatestTurnHeightKey.self) { height in
@@ -3599,13 +3658,16 @@ struct TaskConversationView: View {
             .onChange(of: messages.count) { _, _ in
                 scrollToLatestUserMessage(using: scrollProxy, viewportHeight: viewport.size.height)
             }
-            .onChange(of: messages.map(\.text)) { _, _ in
-                if !hasPresentedLatestConversation {
+            // These compare the transcript only before it is first presented, the only time
+            // their handlers act; a nil on either side is the comparison starting or stopping,
+            // not a change of the transcript.
+            .onChange(of: hasPresentedLatestConversation ? nil : messages.map(\.text)) { previous, current in
+                if previous != nil, current != nil, !hasPresentedLatestConversation {
                     scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
                 }
             }
-            .onChange(of: activities) { _, _ in
-                if isResponding && !hasPresentedLatestConversation {
+            .onChange(of: hasPresentedLatestConversation ? nil : activities) { previous, current in
+                if previous != nil, current != nil, isResponding && !hasPresentedLatestConversation {
                     scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
                 }
             }
@@ -4477,7 +4539,17 @@ struct TaskConversationView: View {
     }
 
     private static func displayableAssistantText(_ text: String) -> String {
-        text
+        // Runs for every assistant row on every transcript pass: most replies have no
+        // plan tags and no surrounding whitespace, so skip building copies for them.
+        // A byte scan for the tags' "<", because a substring search costs more here
+        // than the replacements it would skip.
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        if !text.utf8.contains(UInt8(ascii: "<")),
+           text.unicodeScalars.first.map({ !whitespace.contains($0) }) ?? true,
+           text.unicodeScalars.last.map({ !whitespace.contains($0) }) ?? true {
+            return text
+        }
+        return text
             .replacingOccurrences(of: "<proposed_plan>", with: "")
             .replacingOccurrences(of: "</proposed_plan>", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5092,383 +5164,73 @@ struct TaskConversationView: View {
                 .accessibilityIdentifier("queued-follow-ups")
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                let pendingCommentCount = annotations.filter(\.pending).count
-                if pendingCommentCount > 0 {
-                    Label("\(pendingCommentCount) comment\(pendingCommentCount == 1 ? "" : "s")", systemImage: "text.bubble")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.primary.opacity(0.82))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color.primary.opacity(0.1), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
-                        .accessibilityIdentifier("pending-comment-count")
-                }
+            ComposerView(model: composerModel, actions: composerActions, header: {
+        let pendingCommentCount = annotations.filter(\.pending).count
+        if pendingCommentCount > 0 {
+            Label("\(pendingCommentCount) comment\(pendingCommentCount == 1 ? "" : "s")", systemImage: "text.bubble")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.primary.opacity(0.82))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.primary.opacity(0.1), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
+                .accessibilityIdentifier("pending-comment-count")
+        }
 
-                if let activeGoal, activeGoal.status != "complete", !isReadOnly, provider.supportsGoals {
-                    HStack(spacing: 10) {
-                        Image(systemName: "scope").font(.system(size: 17, weight: .medium)).foregroundStyle(.secondary)
-                        Text("\(activeGoal.status == "paused" ? "Paused goal" : "Pursuing goal") \(activeGoal.objective)")
-                            .lineLimit(1).truncationMode(.tail).font(.system(size: 15))
-                            .accessibilityIdentifier("active-goal-title")
-                        Spacer(minLength: 4)
-                        if let seconds = activeGoal.timeUsedSeconds {
-                            TimelineView(.periodic(from: .now, by: 1)) { context in
-                                Text(Self.goalDuration(goalElapsedTime(for: activeGoal, reportedSeconds: seconds)
-                                    + (activeGoal.status == "active" ? context.date.timeIntervalSince(goalStatusUpdatedAt) : 0)))
-                                    .foregroundStyle(.secondary)
-                                    .accessibilityIdentifier("goal-elapsed-time")
-                            }
-                        }
-                        Button(role: .destructive) { Task { await mutateGoal("clear") } } label: { Image(systemName: "trash") }
-                            .buttonHoverPointer().buttonStyle(.plain).nativeHelp("Clear goal")
-                            .accessibilityLabel("Clear goal").accessibilityIdentifier("goal-clear-button")
-                        Button { Task { await mutateGoal(activeGoal.status == "paused" ? "resume" : "pause") } } label: {
-                            Image(systemName: activeGoal.status == "paused" ? "play.fill" : "pause")
-                        }
-                            .buttonHoverPointer().buttonStyle(.plain).nativeHelp(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
-                            .accessibilityLabel(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
-                            .accessibilityIdentifier("goal-pause-resume-button")
-                        Button { isGoalExpanded.toggle() } label: { Image(systemName: isGoalExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") }
-                            .frame(width: 30, height: 30)
-                            .contentShape(Rectangle())
-                            .buttonHoverPointer().buttonStyle(.plain).nativeHelp(isGoalExpanded ? "Collapse goal" : "Expand goal")
-                            .accessibilityLabel(isGoalExpanded ? "Collapse goal" : "Expand goal")
-                            .accessibilityValue(isGoalExpanded ? "Expanded" : "Collapsed")
-                            .accessibilityIdentifier("goal-expand-button")
-                    }
-                    .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(Color.primary.opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1).allowsHitTesting(false) }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityValue(conversationRuntime.snapshot.goal.turnStartedThreadID == task.codexThreadID ? "Work started" : (conversationRuntime.isTurnActive(threadID: task.codexThreadID ?? "") ? "Working" : "Waiting"))
-                    .accessibilityIdentifier("active-goal-progress-row")
-                    if isGoalExpanded {
-                        Text(activeGoal.objective).font(.system(size: 13)).foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14)
-                            .accessibilityIdentifier("active-goal-details")
+        if let activeGoal, activeGoal.status != "complete", !isReadOnly, provider.supportsGoals {
+            HStack(spacing: 10) {
+                Image(systemName: "scope").font(.system(size: 17, weight: .medium)).foregroundStyle(.secondary)
+                Text("\(activeGoal.status == "paused" ? "Paused goal" : "Pursuing goal") \(activeGoal.objective)")
+                    .lineLimit(1).truncationMode(.tail).font(.system(size: 15))
+                    .accessibilityIdentifier("active-goal-title")
+                Spacer(minLength: 4)
+                if let seconds = activeGoal.timeUsedSeconds {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(Self.goalDuration(goalElapsedTime(for: activeGoal, reportedSeconds: seconds)
+                            + (activeGoal.status == "active" ? context.date.timeIntervalSince(goalStatusUpdatedAt) : 0)))
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("goal-elapsed-time")
                     }
                 }
-                NativeChatEditor(
-                    text: $composerDraft.text,
-                    height: $composerHeight,
-                    isFocused: Binding(get: { isComposerFocused }, set: { isComposerFocused = $0 }),
-                    focusRequest: composerDraft.focusRequest,
-                    isEnabled: !isReadOnly,
-                    autofocusOnAppear: isNewTask,
-                    accessibilityHelp: isReadOnly
-                        ? "Archived conversation, read-only."
-                         : (isResponding ? "Press Return to queue this follow-up. Press Command-Return to steer the active turn, or use a queued row's Steer action."
-                            : (isLoadingHistory ? "Composer unavailable while conversation history loads." : "")),
-                    onSubmit: {
-                        if isResponding {
-                            queueDraftForAfterTurn()
-                        } else {
-                            sendOrSchedule()
-                        }
-                    },
-                    onSteerSubmit: {
-                        if isResponding, isConversationTurnActive {
-                            steerCurrentTurn()
-                        }
-                    },
-                    onPasteImage: { image in
-                        do { try addImageData(image) }
-                        catch { errorMessage = error.localizedDescription }
-                    }
-                )
-                    .frame(height: composerHeight)
-                    .overlay(alignment: .topLeading) {
-                        if draft.isEmpty {
-                            Text(isEnteringGoal ? "Set a goal to keep pursuing" : (isResponding || activeGoal != nil ? "Ask for follow-up changes" : "Message…"))
-                                .font(.system(size: 15))
-                                .foregroundStyle(.tertiary)
-                                .padding(.horizontal, 5)
-                                .padding(.top, 4)
-                                .allowsHitTesting(false)
-                                .accessibilityIdentifier("composer-placeholder")
-                        }
-                    }
-                    .onChange(of: draft) { _, newValue in
-                        if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {
-                            activatePlanMode()
-                        } else if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/goal", provider.supportsGoals {
-                            isEnteringGoal = true
-                            draft = ""
-                        }
-                        scheduleDraftAutosave(newValue)
-                    }
-                    .disabled(isReadOnly || isPreparingSubmittedMessage)
-                    .accessibilityIdentifier("message-composer-scroll-view")
-
-                HStack(spacing: 12) {
-                    SkillsButton(testID: "open-skills-button") { isShowingSkills = true }
-                    Menu {
-                        if provider.supportsGoals {
-                            Button {
-                                isEnteringGoal = true
-                                draft = ""
-                            } label: {
-                                Label("Goal", systemImage: "scope")
-                            }
-                            .buttonHoverPointer()
-                            .help("Set a goal to keep pursuing")
-                            .accessibilityIdentifier("conversation-mode-goal")
-                        }
-                        ForEach(ConversationMode.allCases, id: \.self) { mode in
-                            Button {
-                                isEnteringGoal = false
-                                setConversationMode(mode)
-                            } label: {
-                                if conversationMode == mode {
-                                    Label(mode.title, systemImage: "checkmark")
-                                } else {
-                                    Text(mode.title)
-                                }
-                            }
-                            .buttonHoverPointer()
-                            .help("Switch to \(mode.title) mode")
-                            .accessibilityIdentifier("conversation-mode-\(mode.rawValue)")
-                        }
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "plus")
-                                .font(.system(size: 14, weight: .semibold))
-                            if isEnteringGoal {
-                                Image(systemName: "scope")
-                                Text("Goal")
-                                    .font(.system(size: 11, weight: .semibold))
-                            } else if conversationMode == .plan {
-                                Text("Plan")
-                                    .font(.system(size: 11, weight: .semibold))
-                            }
-                        }
-                        .foregroundStyle(isEnteringGoal || conversationMode == .plan ? Color.accentColor : Color.secondary)
-                        .frame(minWidth: 30, minHeight: 31)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonHoverPointer()
-                    .menuStyle(.borderlessButton)
-                    .nativeHelp("Change conversation mode or add context")
-                    .accessibilityLabel(isEnteringGoal ? "Goal" : "Conversation mode: \(conversationMode.title)")
-                    .accessibilityIdentifier("conversation-mode-menu")
-
-                    if canShowStartImplementing {
-                        Button(action: startImplementingPlan) {
-                            Text("Start Implementing")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 11)
-                                .frame(height: 31)
-                                .background(Color.accentColor, in: Capsule())
-                        }
-                        .buttonHoverPointer()
-                        .buttonStyle(.plain)
-                        .disabled(workspaceRootURLs.isEmpty || isLoadingHistory || isPreparingSubmittedMessage)
-                        .nativeHelp(startImplementingUnavailableReason ?? "Switch to Code mode and start implementing this plan")
-                        .accessibilityValue(startImplementingUnavailableReason ?? (workspaceRootURLs.isEmpty ? "Unavailable" : "Available"))
-                        .accessibilityHint("Switches to Code mode and starts implementing this plan")
-                        .accessibilityIdentifier("start-implementing-button")
-
-                        // The reason is shown, not only hovered, and opens the header's repository picker.
-                        if let reason = startImplementingUnavailableReason {
-                            Button(action: showRepositoryPicker) {
-                                Label("No repository", systemImage: "exclamationmark.triangle.fill")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(emptyConversationRepositoryTitleColor)
-                                    .lineLimit(1)
-                                    .fixedSize()
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonHoverPointer()
-                            .buttonStyle(.plain)
-                            .disabled(isReadOnly)
-                            .nativeHelp(reason)
-                            .accessibilityLabel("No repository")
-                            .accessibilityValue(reason)
-                            .accessibilityHint("Opens the repository picker")
-                            .accessibilityIdentifier("start-implementing-unavailable-reason")
-                        }
-                    }
-
-                    Spacer(minLength: 0)
-
-                    providerMenu
-
-                    Button {
-                        if isModelPickerPresented {
-                            commitModelPickerSelection()
-                            isModelPickerPresented = false
-                        } else {
-                            pickerModelID = selectedModelID
-                            pickerEffort = selectedEffort
-                            isModelPickerPresented = true
-                        }
-                    } label: {
-                        HStack(spacing: 7) {
-                            Text(selectedModelName)
-                            Text(selectedEffort.title).foregroundStyle(.secondary)
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(.tertiary)
-                        }
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.primary.opacity(0.82))
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .buttonHoverPointer()
-                    .nativeHelp("Choose a model and reasoning effort")
-                    .accessibilityLabel("Model: \(selectedModelName), effort: \(selectedEffort.title)")
-                    .accessibilityValue(selectedModelName)
-                    .accessibilityIdentifier("model-picker-menu")
-                    .popover(isPresented: Binding(
-                        get: { isModelPickerPresented },
-                        set: { isPresented in
-                            if !isPresented && isModelPickerPresented {
-                                commitModelPickerSelection()
-                            }
-                            isModelPickerPresented = isPresented
-                        }
-                    ), arrowEdge: .top) {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ForEach(modelOptions) { model in
-                                Button {
-                                    selectPickerModel(model)
-                                } label: {
-                                    HStack {
-                                        Text(model.name)
-                                        Spacer()
-                                        if pickerModelID == model.id || (pickerModelID.isEmpty && model.isDefault) {
-                                            Image(systemName: "checkmark")
-                                                .font(.system(size: 12, weight: .semibold))
-                                        }
-                                    }
-                                    .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .buttonHoverPointer()
-                                .nativeHelp("Select \(model.name)")
-                                .accessibilityIdentifier("model-option-\(model.id)")
-                            }
-                            Divider().padding(.vertical, 8)
-                            Text(pickerEffort.title)
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundStyle(Color.accentColor)
-                                .accessibilityIdentifier("selected-model-effort")
-                            if pickerEffortChoices.count > 1 {
-                                // The native slider knob is translucent on macOS 26, so it is drawn by
-                                // EffortStepSlider; an undrawn native slider laid over it takes the
-                                // pointer and keyboard, and a SwiftUI Slider represents it to accessibility.
-                                EffortStepSlider(selection: $pickerEffort, choices: pickerEffortChoices)
-                                    .overlay {
-                                        EffortAccessibilitySlider(selection: $pickerEffort, choices: pickerEffortChoices)
-                                    }
-                                    .accessibilityRepresentation {
-                                        Slider(value: Binding(
-                                            get: { Double(pickerEffortChoices.firstIndex(of: pickerEffort) ?? 0) },
-                                            set: { pickerEffort = pickerEffortChoices[min(max(Int($0.rounded()), 0), pickerEffortChoices.count - 1)] }
-                                        ), in: 0...Double(pickerEffortChoices.count - 1), step: 1)
-                                        .accessibilityLabel("Model effort")
-                                        .accessibilityValue(pickerEffort.title)
-                                        .accessibilityIdentifier("model-effort-slider")
-                                    }
-                            } else {
-                                EffortStepSlider(selection: $pickerEffort, choices: pickerEffortChoices)
-                                    .accessibilityRepresentation {
-                                        Text(pickerEffort.title)
-                                            .accessibilityElement()
-                                            .accessibilityLabel("Model effort")
-                                            .accessibilityValue(pickerEffort.title)
-                                            .accessibilityIdentifier("model-effort-slider")
-                                    }
-                            }
-                        }
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 13)
-                        .frame(width: 320)
-                    }
-
-                    if canSchedule {
-                        scheduleButton
-                    }
-
-                    // A turn still finishing after its final answer can still be stopped; one
-                    // that is only waiting on a question keeps the composer's send control.
-                    if isDisplayingActiveResponse
-                        || (isResponding && providerTurnIsActive && userInputRequest == nil && providerPendingUserInputRequest == nil) {
-                        Button(action: pauseResponse) {
-                            Image(systemName: "stop.fill")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(.white)
-                                .frame(width: 31, height: 31)
-                                .background(Color.primary.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
-                        }
-                        .buttonHoverPointer()
-                        .nativeHelp("Pause \(provider.displayName) response")
-                        .buttonStyle(.plain)
-                        .disabled(isPausingResponse || !canPauseResponse)
-                        .accessibilityLabel("Stop response")
-                        .accessibilityIdentifier("pause-response-button")
-                    } else if hasPausedResponse {
-                        Button(action: continueResponse) {
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(.white)
-                                .frame(width: 31, height: 31)
-                                .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 9))
-                        }
-                        .buttonHoverPointer()
-                        .nativeHelp("Continue \(provider.displayName) response")
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Continue response")
-                        .accessibilityIdentifier("continue-response-button")
-                    } else if composerSchedule != nil, canSchedule {
-                        Button { confirmSchedule() } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: "clock")
-                                Text("Schedule")
-                            }
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 12)
-                            .frame(height: 31)
-                            .background(Color.accentColor, in: Capsule())
-                        }
-                        .buttonHoverPointer()
-                        .nativeHelp(composerSchedule.map { "Schedule: \($0.summary())" } ?? "Schedule task")
-                        .buttonStyle(.plain)
-                        .disabled(isScheduleSendDisabled)
-                        .opacity(isScheduleSendDisabled ? 0.45 : 1)
-                        .accessibilityLabel("Schedule task")
-                        .accessibilityValue(composerSchedule?.summary() ?? "")
-                        .accessibilityIdentifier("send-message-button")
-                    } else {
-                        Button { sendOrSchedule() } label: {
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: 13, weight: .bold))
-                                .foregroundStyle(.white)
-                                .frame(width: 31, height: 31)
-                                .background(Color.accentColor, in: Circle())
-                        }
-                        .buttonHoverPointer()
-                        .nativeHelp("Send message")
-                        .buttonStyle(.plain)
-                        .disabled(isSendDisabled)
-                        .opacity(isSendDisabled ? 0.45 : 1)
-                        .accessibilityLabel("Send message")
-                        .accessibilityIdentifier("send-message-button")
-                    }
+                Button(role: .destructive) { Task { await mutateGoal("clear") } } label: { Image(systemName: "trash") }
+                    .buttonHoverPointer().buttonStyle(.plain).nativeHelp("Clear goal")
+                    .accessibilityLabel("Clear goal").accessibilityIdentifier("goal-clear-button")
+                Button { Task { await mutateGoal(activeGoal.status == "paused" ? "resume" : "pause") } } label: {
+                    Image(systemName: activeGoal.status == "paused" ? "play.fill" : "pause")
                 }
+                    .buttonHoverPointer().buttonStyle(.plain).nativeHelp(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
+                    .accessibilityLabel(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
+                    .accessibilityIdentifier("goal-pause-resume-button")
+                Button { isGoalExpanded.toggle() } label: { Image(systemName: isGoalExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") }
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+                    .buttonHoverPointer().buttonStyle(.plain).nativeHelp(isGoalExpanded ? "Collapse goal" : "Expand goal")
+                    .accessibilityLabel(isGoalExpanded ? "Collapse goal" : "Expand goal")
+                    .accessibilityValue(isGoalExpanded ? "Expanded" : "Collapsed")
+                    .accessibilityIdentifier("goal-expand-button")
             }
-            .padding(13)
-            .background(WorkspaceTheme.panelBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 21, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(Color.primary.opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1).allowsHitTesting(false) }
+            .accessibilityElement(children: .contain)
+            .accessibilityValue(conversationRuntime.snapshot.goal.turnStartedThreadID == task.codexThreadID ? "Work started" : (conversationRuntime.isTurnActive(threadID: task.codexThreadID ?? "") ? "Working" : "Waiting"))
+            .accessibilityIdentifier("active-goal-progress-row")
+            if isGoalExpanded {
+                Text(activeGoal.objective).font(.system(size: 13)).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14)
+                    .accessibilityIdentifier("active-goal-details")
             }
+        }
+            }, scheduleContent: { scheduleHint })
+                .onChange(of: draft) { _, newValue in
+                    if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {
+                        activatePlanMode()
+                    } else if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/goal", provider.supportsGoals {
+                        isEnteringGoal = true
+                        draft = ""
+                    }
+                    scheduleDraftAutosave(newValue)
+                }
         }
         .padding(.horizontal, 28)
         .padding(.top, 14)
@@ -5477,6 +5239,159 @@ struct TaskConversationView: View {
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-composer")
+    }
+
+    /// The composer box's display model, derived from this conversation's state.
+    private var composerModel: ComposerModel {
+        let reason = startImplementingUnavailableReason
+        let primary: ComposerModel.Primary
+        if isDisplayingActiveResponse
+            || (isResponding && providerTurnIsActive && userInputRequest == nil && providerPendingUserInputRequest == nil) {
+            primary = .init(kind: "stop", disabled: isPausingResponse || !canPauseResponse, help: "Pause \(provider.displayName) response", label: "Stop response", value: "", testID: "pause-response-button")
+        } else if hasPausedResponse {
+            primary = .init(kind: "continue", disabled: false, help: "Continue \(provider.displayName) response", label: "Continue response", value: "", testID: "continue-response-button")
+        } else if composerSchedule != nil, canSchedule {
+            primary = .init(kind: "schedule", disabled: isScheduleSendDisabled, help: composerSchedule.map { "Schedule: \($0.summary())" } ?? "Schedule task", label: "Schedule task", value: composerSchedule?.summary() ?? "", testID: "send-message-button")
+        } else {
+            primary = .init(kind: "send", disabled: isSendDisabled, help: "Send message", label: "Send message", value: "", testID: "send-message-button")
+        }
+        var modeItems: [ComposerModel.Item] = []
+        if provider.supportsGoals {
+            modeItems.append(.init(id: "goal", title: "Goal", checked: false, icon: "scope", help: "Set a goal to keep pursuing", testID: "conversation-mode-goal"))
+        }
+        modeItems += ConversationMode.allCases.map { mode in
+            .init(id: "mode:\(mode.rawValue)", title: mode.title, checked: conversationMode == mode, icon: nil, help: "Switch to \(mode.title) mode", testID: "conversation-mode-\(mode.rawValue)")
+        }
+        return ComposerModel(
+            prefix: "",
+            draft: draft,
+            placeholder: isEnteringGoal ? "Set a goal to keep pursuing" : (isResponding || activeGoal != nil ? "Ask for follow-up changes" : "Message…"),
+            enabled: !isReadOnly && !isPreparingSubmittedMessage,
+            autofocus: isNewTask,
+            focused: isComposerFocused,
+            focusRequest: composerDraft.focusRequest,
+            editorHelp: isReadOnly
+                ? "Archived conversation, read-only."
+                : (isResponding ? "Press Return to queue this follow-up. Press Command-Return to steer the active turn, or use a queued row's Steer action."
+                    : (isLoadingHistory ? "Composer unavailable while conversation history loads." : "")),
+            modeMenu: .init(
+                text: isEnteringGoal ? "Goal" : (conversationMode == .plan ? "Plan" : nil),
+                badgeIcon: isEnteringGoal ? "scope" : nil,
+                active: isEnteringGoal || conversationMode == .plan,
+                label: isEnteringGoal ? "Goal" : "Conversation mode: \(conversationMode.title)",
+                items: modeItems
+            ),
+            startImplementing: canShowStartImplementing ? .init(
+                disabled: workspaceRootURLs.isEmpty || isLoadingHistory || isPreparingSubmittedMessage,
+                help: reason ?? "Switch to Code mode and start implementing this plan",
+                value: reason ?? (workspaceRootURLs.isEmpty ? "Unavailable" : "Available"),
+                unavailableReason: reason,
+                reasonColor: colorScheme == .dark ? "orange" : "#2E4FAD",
+                reasonDisabled: isReadOnly
+            ) : nil,
+            provider: .init(
+                title: provider.displayName,
+                value: provider.rawValue,
+                label: "Provider: \(provider.displayName)",
+                help: providerMenuHelp,
+                enabled: canSwitchProvider,
+                items: ConversationProvider.allCases.map { option in
+                    .init(id: option.rawValue, title: option.displayName, checked: option == provider, icon: nil, help: "Run this task's next turns with \(option.displayName)", testID: "conversation-provider-\(option.rawValue)")
+                }
+            ),
+            model: .init(
+                name: selectedModelName,
+                effort: selectedEffort.title,
+                label: "Model: \(selectedModelName), effort: \(selectedEffort.title)",
+                open: isModelPickerPresented,
+                models: modelOptions.map { option in
+                    .init(id: option.id, title: option.name, checked: pickerModelID == option.id || (pickerModelID.isEmpty && option.isDefault), icon: nil, help: "Select \(option.name)", testID: "model-option-\(option.id)")
+                },
+                effortChoices: pickerEffortChoices.map { .init(value: $0.rawValue, label: $0.title) },
+                selectedEffort: pickerEffort.rawValue
+            ),
+            schedule: canSchedule ? .init(
+                on: composerSchedule != nil,
+                help: composerSchedule != nil ? "Change the schedule" : "Schedule this task",
+                open: isSchedulePopoverPresented
+            ) : nil,
+            primary: primary
+        )
+    }
+
+    private var composerActions: ComposerActions {
+        ComposerActions(
+            change: { draft = $0 },
+            submit: {
+                if isResponding {
+                    queueDraftForAfterTurn()
+                } else {
+                    sendOrSchedule()
+                }
+            },
+            steer: {
+                if isResponding, isConversationTurnActive {
+                    steerCurrentTurn()
+                }
+            },
+            focusChange: { isComposerFocused = $0 },
+            pasteImage: { image in
+                do { try addImageData(image) }
+                catch { errorMessage = error.localizedDescription }
+            },
+            openSkills: { isShowingSkills = true },
+            modeMenu: { id in
+                if id == "goal" {
+                    isEnteringGoal = true
+                    draft = ""
+                } else if let mode = ConversationMode(rawValue: String(id.dropFirst("mode:".count))) {
+                    isEnteringGoal = false
+                    setConversationMode(mode)
+                }
+            },
+            startImplementing: startImplementingPlan,
+            showRepositoryPicker: showRepositoryPicker,
+            provider: { id in
+                if let option = ConversationProvider(rawValue: id) { switchProvider(to: option) }
+            },
+            toggleModelPicker: {
+                if isModelPickerPresented {
+                    commitModelPickerSelection()
+                    isModelPickerPresented = false
+                } else {
+                    pickerModelID = selectedModelID
+                    pickerEffort = selectedEffort
+                    isModelPickerPresented = true
+                }
+            },
+            dismissModelPicker: {
+                if isModelPickerPresented { commitModelPickerSelection() }
+                isModelPickerPresented = false
+            },
+            selectModel: { id in
+                if let option = modelOptions.first(where: { $0.id == id }) { selectPickerModel(option) }
+            },
+            selectEffort: { value in
+                if let effort = ConversationEffort(rawValue: value) { pickerEffort = effort }
+            },
+            toggleSchedule: {
+                if isSchedulePopoverPresented {
+                    isSchedulePopoverPresented = false
+                } else {
+                    scheduleDraft = composerSchedule ?? defaultScheduleDraft(kind: .once)
+                    isSchedulePopoverPresented = true
+                }
+            },
+            dismissSchedule: { isSchedulePopoverPresented = false },
+            primary: {
+                switch composerModel.primary.kind {
+                case "stop": pauseResponse()
+                case "continue": continueResponse()
+                case "schedule": confirmSchedule()
+                default: sendOrSchedule()
+                }
+            }
+        )
     }
 
     private func userInputForm(_ request: ConversationUserInputRequest) -> some View {
@@ -5682,6 +5597,8 @@ struct TaskConversationView: View {
                 messageLimit: Self.historyPageSize,
                 onActionRequest: { actionNotice = approvalNotice }
             )
+            // Buffered text arrived before this history, so it applies first, as it would have unbuffered.
+            flushStreamedTextDeltas()
             messages = history.messages
             earlierStoredMessageCount = history.earlierMessageCount ?? 0
             // Resolve the window as soon as the messages land. The assignment
@@ -5924,32 +5841,6 @@ struct TaskConversationView: View {
     }
 
     // MARK: Scheduling
-
-    private var scheduleButton: some View {
-        let isOn = composerSchedule != nil
-        return Button {
-            if isSchedulePopoverPresented {
-                isSchedulePopoverPresented = false
-            } else {
-                scheduleDraft = composerSchedule ?? defaultScheduleDraft(kind: .once)
-                isSchedulePopoverPresented = true
-            }
-        } label: {
-            Image(systemName: isOn ? "clock.fill" : "clock")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
-                .frame(width: 26, height: 26)
-                .background(isOn ? Color.accentColor.opacity(0.14) : Color.clear, in: Circle())
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .buttonHoverPointer()
-        .nativeHelp(isOn ? "Change the schedule" : "Schedule this task")
-        .accessibilityLabel("Schedule")
-        .accessibilityValue(isOn ? "On" : "Off")
-        .accessibilityIdentifier("schedule-task-button")
-        .popover(isPresented: $isSchedulePopoverPresented, arrowEdge: .top) { scheduleHint }
-    }
 
     /// The hint for choosing when the task runs. Done only arms Send's schedule mode; the
     /// schedule is saved when Send is pressed.
@@ -6282,6 +6173,7 @@ struct TaskConversationView: View {
                 }, onUserInput: { request in
                     showUserInputRequest(request)
                 })
+                flushStreamedTextDeltas()
                 if messages.first(where: { $0.id == assistantMessageID })?.text.isEmpty == true {
                     messages.removeAll { $0.id == assistantMessageID }
                 }
@@ -6313,6 +6205,8 @@ struct TaskConversationView: View {
                     }
                 }
             } catch {
+                // Text that streamed before the failure is part of what the window showed.
+                flushStreamedTextDeltas()
                 if resolutionAttempt > 0 {
                     conflictResolutionAttempt = 0
                     onConflictResolutionChecked(false)
@@ -6346,20 +6240,22 @@ struct TaskConversationView: View {
         }
     }
 
+    /// How long streamed text may wait before it is shown. A provider streams a
+    /// delta every few tokens, and every change to `messages` re-renders the whole
+    /// transcript, so deltas are applied together at most this often.
+    private static let streamedTextApplyInterval: UInt64 = 50_000_000
+
     /// Applies one update of a turn this window streams: its own send, or a running turn it
     /// watches (a CLI send, a schedule, or a turn the daemon reattached after a restart).
     private func applyStreamedUpdate(_ update: ConversationUpdate, assistantMessageID: String, pendingAnnotations: [ConversationAnnotation] = []) {
-        switch update.type {
-        case "text_delta":
+        if update.type == "text_delta" {
             guard let delta = update.text else { return }
-            let messageIndex: Int
-            if let existingIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
-                messageIndex = existingIndex
-            } else {
-                messages.append(ConversationMessage(id: assistantMessageID, role: .assistant, text: ""))
-                messageIndex = messages.index(before: messages.endIndex)
-            }
-            messages[messageIndex].text += delta
+            bufferStreamedTextDelta(delta, messageID: assistantMessageID)
+            return
+        }
+        // Every other update applies after the text that streamed before it.
+        flushStreamedTextDeltas()
+        switch update.type {
         case "assistant_final":
             guard let text = update.text else { return }
             if let messageIndex = messages.lastIndex(where: { $0.role == .assistant }),
@@ -6599,6 +6495,7 @@ struct TaskConversationView: View {
             }, onUserInput: { request in
                 showUserInputRequest(request)
             })
+            flushStreamedTextDeltas()
             messages.removeAll { $0.id == assistantMessageID && $0.text.isEmpty }
             // The watched turn's final history arrived as its `completed` update; anything
             // after it (a queued follow-up starting) reaches this window the usual way.
@@ -6972,6 +6869,43 @@ struct TaskConversationView: View {
         }
     }
 
+    /// Holds a streamed delta until the next apply. The first delta of a batch
+    /// schedules it; any other update, and the end of the stream, applies it sooner.
+    private func bufferStreamedTextDelta(_ delta: String, messageID: String) {
+        let pending = pendingTextDeltas
+        if pending.messageID != messageID || pending.taskID != task.id { flushStreamedTextDeltas() }
+        pending.messageID = messageID
+        pending.taskID = task.id
+        pending.text += delta
+        guard !pending.isApplyScheduled else { return }
+        pending.isApplyScheduled = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: Self.streamedTextApplyInterval)
+            pending.isApplyScheduled = false
+            flushStreamedTextDeltas()
+        }
+    }
+
+    /// Appends the buffered text to its message, creating the message on the first text.
+    private func flushStreamedTextDeltas() {
+        let pending = pendingTextDeltas
+        guard let messageID = pending.messageID, let taskID = pending.taskID else { return }
+        let text = pending.text
+        pending.messageID = nil
+        pending.taskID = nil
+        pending.text = ""
+        // Text streamed for another task's conversation is never shown in this one.
+        guard taskID == task.id, !text.isEmpty else { return }
+        let messageIndex: Int
+        if let existingIndex = messages.firstIndex(where: { $0.id == messageID }) {
+            messageIndex = existingIndex
+        } else {
+            messages.append(ConversationMessage(id: messageID, role: .assistant, text: ""))
+            messageIndex = messages.index(before: messages.endIndex)
+        }
+        messages[messageIndex].text += text
+    }
+
     /// Shows a question; the same question can arrive again, so keep its answers.
     private func showUserInputRequest(_ request: ConversationUserInputRequest) {
         let isNewQuestion = request.id != userInputRequest?.id
@@ -6983,6 +6917,8 @@ struct TaskConversationView: View {
     }
 
     private func showLocalSteer(_ text: String, imageDataURLs: [String] = []) {
+        // The steer follows the text that streamed before it.
+        flushStreamedTextDeltas()
         if let index = unconfirmedStreamedSteers.firstIndex(of: text) {
             unconfirmedStreamedSteers.remove(at: index)
             return
@@ -7108,37 +7044,6 @@ struct TaskConversationView: View {
 
     private func generateTaskTitle(from prompt: String) async -> (title: String, provider: ConversationProvider)? {
         await conversationManager.generateTitle(taskID: task.id, prompt: prompt)
-    }
-
-    private var providerMenu: some View {
-        Menu {
-            ForEach(ConversationProvider.allCases) { option in
-                Button {
-                    switchProvider(to: option)
-                } label: {
-                    if option == provider {
-                        Label(option.displayName, systemImage: "checkmark")
-                    } else {
-                        Text(option.displayName)
-                    }
-                }
-                .buttonHoverPointer()
-                .help("Run this task's next turns with \(option.displayName)")
-                .accessibilityIdentifier("conversation-provider-\(option.rawValue)")
-            }
-        } label: {
-            Text(provider.displayName)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .buttonHoverPointer()
-        .disabled(!canSwitchProvider)
-        .nativeHelp(providerMenuHelp)
-        .accessibilityLabel("Provider: \(provider.displayName)")
-        .accessibilityValue(provider.rawValue)
-        .accessibilityIdentifier("conversation-provider-menu")
     }
 
     private var providerMenuHelp: String {
@@ -7542,6 +7447,74 @@ private final class ConversationScrollSample {
     /// The last geometry the macOS 14 preference reported, which is what its
     /// next report is compared against.
     var geometry: ConversationScrollGeometry?
+    /// Height of the runway above the rendered window as last laid out, which
+    /// is where the window top sits in the scroll content.
+    var runwayHeight: CGFloat = 0
+    /// What the runway's estimate was last made for, and that estimate.
+    struct RunwayKey: Equatable {
+        var firstLoadedID: String?
+        var windowStartID: String?
+        var hiddenLoadedCount: Int
+        var storedCount: Int
+    }
+    var runwayKey: RunwayKey?
+    var estimatedHiddenHeight: CGFloat = 0
+    var rowHeights = ConversationRowHeightEstimates()
+    /// Estimated height of one message still in the store, taken from the
+    /// loaded messages above the rendered window.
+    var storedMessageAverageHeight: CGFloat = ConversationRowHeightEstimates.typicalMessageHeight
+    /// The text width the runway's estimates were last made at.
+    var rowHeightWidth: CGFloat = ConversationRowHeightEstimates.textWidth(viewportWidth: 820)
+}
+
+/// Estimated heights of transcript messages that are not rendered, so the
+/// runway above the rendered window can stand in for them at about their real
+/// length. The scroller then reflects the whole transcript from the start, the
+/// way list views size unrealized rows from estimates, instead of shrinking
+/// each time a batch of older messages is revealed.
+struct ConversationRowHeightEstimates {
+    private struct Entry {
+        var textLength: Int
+        var width: CGFloat
+        var height: CGFloat
+    }
+
+    private var entries: [String: Entry] = [:]
+
+    /// Width available to message text, rounded so that resizing the window
+    /// does not re-estimate every message on every pixel.
+    static func textWidth(viewportWidth: CGFloat) -> CGFloat {
+        let width = min(viewportWidth, 820) - 56
+        return max(200, (width / 20).rounded(.down) * 20)
+    }
+
+    mutating func height(for message: ConversationMessage, width: CGFloat) -> CGFloat {
+        let textLength = message.text.utf16.count
+        if let entry = entries[message.id], entry.textLength == textLength, entry.width == width {
+            return entry.height
+        }
+        let height = Self.estimatedHeight(text: message.text, isUser: message.role == .user, imageCount: message.imageDataURLs.count, width: width)
+        entries[message.id] = Entry(textLength: textLength, width: width, height: height)
+        return height
+    }
+
+    /// Wrapped lines at the transcript's body size, plus the row's own chrome
+    /// and the spacing that follows it.
+    static func estimatedHeight(text: String, isUser: Bool, imageCount: Int, width: CGFloat) -> CGFloat {
+        // A user question sits in a bubble narrower than the column.
+        let charactersPerLine = max(20, (isUser ? width * 0.75 : width) / 7.5)
+        var lines: CGFloat = 0
+        for paragraph in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            lines += max(1, (CGFloat(paragraph.utf16.count) / charactersPerLine).rounded(.up))
+        }
+        return lines * 21 + (isUser ? 36 : 12) + CGFloat(imageCount) * 180 + 16
+    }
+
+    /// A collapsed tool call row with its spacing.
+    static let toolCallRowHeight: CGFloat = 46
+    /// A stored message's height before any loaded one above the window can
+    /// stand in for it.
+    static let typicalMessageHeight: CGFloat = 80
 }
 
 /// The parts of the transcript's scroll geometry that following the bottom and
@@ -7619,6 +7592,17 @@ private struct ConversationLatestTurnExtentKey: LayoutValueKey {
 /// `minimumLatestTurnHeight` from the top of the newest turn's first row to its
 /// end, adding the difference as blank space below the last row. The extent
 /// view is not stacked: it is laid over the newest turn at its natural height.
+/// Streamed text a conversation window has received but not yet applied.
+/// A reference, so the scheduled apply and the stream share one buffer without
+/// every buffered delta invalidating the view.
+@MainActor
+private final class PendingStreamedTextDeltas {
+    var messageID: String?
+    var taskID: UUID?
+    var text = ""
+    var isApplyScheduled = false
+}
+
 private struct ConversationTranscriptLayout: Layout {
     var spacing: CGFloat
     var minimumLatestTurnHeight: CGFloat
@@ -7683,251 +7667,6 @@ private struct ConversationTranscriptLayout: Layout {
     }
 }
 
-
-// The native text view owns wrapping and document sizing. SwiftUI only receives
-// a bounded viewport height; it never asks a multiline TextField for its ideal size.
-private struct NativeChatEditor: NSViewRepresentable {
-    @Binding var text: String
-    @Binding var height: CGFloat
-    @Binding var isFocused: Bool
-    /// Each new value moves the keyboard into the editor once, with the caret at the end.
-    let focusRequest: Int
-    let isEnabled: Bool
-    let autofocusOnAppear: Bool
-    let accessibilityHelp: String
-    let onSubmit: () -> Void
-    let onSteerSubmit: () -> Void
-    let onPasteImage: (Data) -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    func makeNSView(context: Context) -> ChatEditorScrollView {
-        let scroll = ChatEditorScrollView()
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.scrollerStyle = .overlay
-        let editor = ChatEditorTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 28))
-        editor.isRichText = false
-        // Prompts carry code and commands; send exactly the quotes and dashes the user typed.
-        editor.isAutomaticQuoteSubstitutionEnabled = false
-        editor.isAutomaticDashSubstitutionEnabled = false
-        editor.allowsUndo = true
-        editor.drawsBackground = false
-        editor.font = .systemFont(ofSize: 14)
-        editor.textColor = .textColor
-        editor.textContainerInset = NSSize(width: 0, height: 4)
-        editor.isVerticallyResizable = true
-        editor.isHorizontallyResizable = false
-        editor.minSize = NSSize(width: 0, height: 28)
-        editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        editor.autoresizingMask = [.width]
-        editor.textContainer?.widthTracksTextView = true
-        editor.textContainer?.heightTracksTextView = false
-        editor.textContainer?.containerSize = NSSize(width: 100, height: CGFloat.greatestFiniteMagnitude)
-        editor.setAccessibilityIdentifier("message-composer")
-        editor.setAccessibilityLabel("Message")
-        editor.delegate = context.coordinator
-        scroll.documentView = editor
-        scroll.onHeightChange = { [weak coordinator = context.coordinator] height in
-            // AppKit layout must finish before updating SwiftUI state.
-            DispatchQueue.main.async { [weak scroll] in
-                guard let scroll, scroll.viewportHeight == height else { return }
-                if coordinator?.parent.height != height { coordinator?.parent.height = height }
-            }
-        }
-        return scroll
-    }
-
-    func updateNSView(_ scroll: ChatEditorScrollView, context: Context) {
-        context.coordinator.parent = self
-        guard let editor = scroll.documentView as? ChatEditorTextView else { return }
-        editor.onSubmit = onSubmit
-        editor.onSteerSubmit = onSteerSubmit
-        editor.onPasteImage = onPasteImage
-        editor.isEditable = isEnabled
-        editor.isSelectable = isEnabled
-        editor.setAccessibilityHelp(accessibilityHelp)
-        scroll.shouldFocusEditor = isFocused && isEnabled
-        scroll.shouldAutofocusEditor = autofocusOnAppear && isEnabled
-        let editorOwnsEditing = isFocused && editor.window?.firstResponder === editor
-        if editor.string != text, !editorOwnsEditing {
-            editor.string = text
-            editor.undoManager?.removeAllActions()
-            scroll.requestTextLayout()
-        }
-        if isFocused, isEnabled, editor.window?.firstResponder !== editor {
-            if let window = editor.window {
-                window.makeFirstResponder(editor)
-            } else {
-                DispatchQueue.main.async { [weak editor, weak coordinator = context.coordinator] in
-                    guard let editor,
-                          let coordinator,
-                          coordinator.parent.isFocused,
-                          coordinator.parent.isEnabled else { return }
-                    editor.window?.makeFirstResponder(editor)
-                }
-            }
-        }
-        scroll.focusEditorIfNeeded()
-        if focusRequest != context.coordinator.handledFocusRequest, isEnabled {
-            context.coordinator.handledFocusRequest = focusRequest
-            // After this update, so a view that covered the editor has gone.
-            DispatchQueue.main.async { [weak editor] in
-                guard let editor, editor.window?.makeFirstResponder(editor) == true else { return }
-                editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
-            }
-        }
-    }
-
-    final class Coordinator: NSObject, NSTextViewDelegate {
-        var parent: NativeChatEditor
-        var handledFocusRequest: Int
-        init(_ parent: NativeChatEditor) {
-            self.parent = parent
-            handledFocusRequest = parent.focusRequest
-        }
-
-        func textDidChange(_ notification: Notification) {
-            guard let editor = notification.object as? ChatEditorTextView else { return }
-            parent.text = editor.string
-            (editor.enclosingScrollView as? ChatEditorScrollView)?.requestTextLayout()
-        }
-
-        func textDidBeginEditing(_ notification: Notification) { parent.isFocused = true }
-        func textDidEndEditing(_ notification: Notification) { parent.isFocused = false }
-    }
-}
-
-private final class ChatEditorScrollView: NSScrollView {
-    var onHeightChange: ((CGFloat) -> Void)?
-    var shouldFocusEditor = false
-    var shouldAutofocusEditor = false
-    private var didAutofocusEditor = false
-    private(set) var viewportHeight: CGFloat = 28
-    private var previousWidth: CGFloat = 0
-    private var textLayoutNeeded = true
-    private var layoutRequestGeneration = 0
-
-    func requestTextLayout() {
-        textLayoutNeeded = true
-        layoutRequestGeneration += 1
-        let generation = layoutRequestGeneration
-        // Let NSTextView finish its edit/layout pass, then update the viewport
-        // before another typing burst can reach the next wrapped line.
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.layoutRequestGeneration == generation else { return }
-            self.needsLayout = true
-            self.layoutSubtreeIfNeeded()
-        }
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        guard window != nil else { return }
-        DispatchQueue.main.async { [weak self] in
-            self?.focusEditorIfNeeded()
-        }
-    }
-
-    func focusEditorIfNeeded() {
-        guard let window,
-              let editor = documentView as? NSTextView,
-              shouldFocusEditor || (shouldAutofocusEditor && !didAutofocusEditor) else { return }
-        if window.makeFirstResponder(editor), shouldAutofocusEditor {
-            didAutofocusEditor = true
-        }
-    }
-
-    override func layout() {
-        super.layout()
-        guard let editor = documentView as? NSTextView else { return }
-        let width = contentSize.width
-        guard width > 0, textLayoutNeeded || width != previousWidth else { return }
-        textLayoutNeeded = false
-        previousWidth = width
-        editor.setFrameSize(NSSize(width: width, height: editor.frame.height))
-        let font = editor.font ?? NSFont.systemFont(ofSize: 14)
-        let inset = editor.textContainerInset
-        let laidOutTextHeight: CGFloat
-        if let layoutManager = editor.layoutManager, let textContainer = editor.textContainer {
-            // Measure with the same TextKit container that wraps the live editor.
-            // A separate boundingRect calculation ignores line-fragment padding,
-            // so it can report one fewer line exactly as text crosses a wrap.
-            layoutManager.ensureLayout(for: textContainer)
-            let usedRect = layoutManager.usedRect(for: textContainer)
-            laidOutTextHeight = max(usedRect.maxY, layoutManager.extraLineFragmentRect.maxY)
-        } else {
-            laidOutTextHeight = 0
-        }
-        let lineHeight = editor.layoutManager?.defaultLineHeight(for: font) ?? font.pointSize * 1.2
-        let contentHeight = ceil(max(lineHeight, laidOutTextHeight) + inset.height * 2)
-        let documentHeight = max(28, contentHeight)
-        editor.setFrameSize(NSSize(width: width, height: documentHeight))
-        documentHeightDidChange(documentHeight)
-    }
-
-    func documentHeightDidChange(_ documentHeight: CGFloat) {
-        let editor = documentView as? NSTextView
-        let font = editor?.font ?? NSFont.systemFont(ofSize: 14)
-        let lineHeight = editor?.layoutManager?.defaultLineHeight(for: font) ?? 17
-        let verticalInset = editor?.textContainerInset.height ?? 4
-        let maximumHeight = ceil(lineHeight * 12 + verticalInset * 2)
-        let newHeight = min(maximumHeight, max(28, ceil(documentHeight)))
-        if viewportHeight != newHeight {
-            viewportHeight = newHeight
-            onHeightChange?(newHeight)
-        }
-    }
-}
-
-private final class ChatEditorTextView: NSTextView {
-    var onSubmit: (() -> Void)?
-    var onSteerSubmit: (() -> Void)?
-    var onPasteImage: ((Data) -> Void)?
-
-    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
-        if item.action == #selector(paste(_:)),
-           NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil) {
-            return isEditable
-        }
-        return super.validateUserInterfaceItem(item)
-    }
-
-    override func keyDown(with event: NSEvent) {
-        if (event.keyCode == 36 || event.keyCode == 76), !hasMarkedText(), isEditable {
-            if event.modifierFlags.contains(.shift) {
-                insertNewlineIgnoringFieldEditor(nil)
-            } else if event.modifierFlags.contains(.command) {
-                onSteerSubmit?()
-            } else {
-                onSubmit?()
-            }
-            return
-        }
-        super.keyDown(with: event)
-    }
-
-    override func paste(_ sender: Any?) {
-        guard isEditable else { return }
-        let pasteboard = NSPasteboard.general
-        // Prefer the original image bytes. AppKit's NSImage object reader can
-        // reject large clipboard representations before the composer gets a
-        // chance to resize them for the 10 MB payload limit.
-        if let data = pasteboard.data(forType: .png)
-                    ?? pasteboard.data(forType: .tiff) {
-            onPasteImage?(data)
-        } else if let image = pasteboard.readObjects(forClasses: [NSImage.self])?.first as? NSImage {
-            if let data = image.tiffRepresentation {
-                onPasteImage?(data)
-            } else {
-                super.paste(sender)
-            }
-        } else {
-            super.paste(sender)
-        }
-    }
-}
 
 private struct SelectableAnnotationText: NSViewRepresentable {
     let text: String
@@ -8287,108 +8026,6 @@ private struct SelectableAnnotationText: NSViewRepresentable {
             }
             onSelection(range, text, bounds)
         }
-    }
-}
-
-/// A discrete effort slider whose knob is an opaque white disc, so it stays solid over any track or popover background.
-/// An undrawn native slider over the drawn effort track, so pointer clicks,
-/// drags, and arrow keys behave exactly as a macOS slider's do.
-private struct EffortAccessibilitySlider: NSViewRepresentable {
-    @Binding var selection: ConversationEffort
-    let choices: [ConversationEffort]
-
-    final class InputSlider: NSSlider {
-        // EffortStepSlider draws the control; this one only takes input.
-        override func draw(_ dirtyRect: NSRect) {}
-        // Clicking the effort track lets the arrow keys step it, as with the
-        // visible slider, regardless of the Full Keyboard Access setting.
-        override var acceptsFirstResponder: Bool { true }
-        override func mouseDown(with event: NSEvent) {
-            window?.makeFirstResponder(self)
-            super.mouseDown(with: event)
-        }
-    }
-
-    final class Coordinator: NSObject {
-        var parent: EffortAccessibilitySlider
-        init(_ parent: EffortAccessibilitySlider) { self.parent = parent }
-        @objc func changed(_ sender: NSSlider) {
-            let index = min(max(Int(sender.doubleValue.rounded()), 0), parent.choices.count - 1)
-            parent.selection = parent.choices[index]
-        }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    func makeNSView(context: Context) -> InputSlider {
-        let slider = InputSlider(value: 0, minValue: 0, maxValue: 1, target: context.coordinator, action: #selector(Coordinator.changed(_:)))
-        slider.allowsTickMarkValuesOnly = true
-        slider.focusRingType = .none
-        // The SwiftUI representation around it is what accessibility reads.
-        slider.setAccessibilityElement(false)
-        return slider
-    }
-
-    func updateNSView(_ slider: InputSlider, context: Context) {
-        context.coordinator.parent = self
-        slider.maxValue = Double(choices.count - 1)
-        slider.numberOfTickMarks = choices.count
-        slider.doubleValue = Double(choices.firstIndex(of: selection) ?? 0)
-    }
-}
-
-private struct EffortStepSlider: View {
-    @Binding var selection: ConversationEffort
-    let choices: [ConversationEffort]
-
-    private let knobDiameter: CGFloat = 20
-    private let trackHeight: CGFloat = 6
-
-    private var selectedIndex: Int { choices.firstIndex(of: selection) ?? 0 }
-    private var stepCount: Int { max(choices.count - 1, 1) }
-
-    var body: some View {
-        GeometryReader { proxy in
-            let travel = max(proxy.size.width - knobDiameter, 1)
-            let knobX = travel * CGFloat(selectedIndex) / CGFloat(stepCount)
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.primary.opacity(0.2))
-                    .frame(height: trackHeight)
-                Capsule()
-                    .fill(Color.accentColor)
-                    .frame(width: knobX + knobDiameter / 2, height: trackHeight)
-                ForEach(choices.indices, id: \.self) { index in
-                    Circle()
-                        .fill(Color.primary.opacity(0.35))
-                        .frame(width: 4, height: 4)
-                        .offset(x: travel * CGFloat(index) / CGFloat(stepCount) + knobDiameter / 2 - 2)
-                }
-                Circle()
-                    .fill(Color.white)
-                    .frame(width: knobDiameter, height: knobDiameter)
-                    .offset(x: knobX)
-            }
-            .frame(width: proxy.size.width, height: knobDiameter, alignment: .leading)
-            .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                guard !choices.isEmpty else { return }
-                let fraction = (value.location.x - knobDiameter / 2) / travel
-                let index = min(Int((min(max(fraction, 0), 1) * CGFloat(stepCount)).rounded()), choices.count - 1)
-                selection = choices[index]
-            })
-        }
-        .frame(height: knobDiameter)
-        .focusable()
-        .focusEffectDisabled()
-        .onKeyPress(.leftArrow) { moveSelection(by: -1) }
-        .onKeyPress(.rightArrow) { moveSelection(by: 1) }
-    }
-
-    private func moveSelection(by delta: Int) -> KeyPress.Result {
-        guard !choices.isEmpty else { return .ignored }
-        selection = choices[min(max(selectedIndex + delta, 0), choices.count - 1)]
-        return .handled
     }
 }
 

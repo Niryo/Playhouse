@@ -93,9 +93,14 @@ enum AtomRegistry {
             })
         }
         register(.textField) { node, runtime in
-            AnyView(AtomTextField(props: try .decode(node.props), common: try .decode(node.props)) { text in
+            // Return and the arrows stay the field's own unless the plugin handles them.
+            AnyView(AtomTextField(props: try .decode(node.props), common: try .decode(node.props), onChange: { text in
                 runtime.dispatch(nodeID: node.id, event: "onChange", value: .string(text))
-            })
+            }, onSubmit: node.events.contains("onSubmit") ? {
+                runtime.dispatch(nodeID: node.id, event: "onSubmit")
+            } : nil, onArrow: node.events.contains("onArrow") ? { direction in
+                runtime.dispatch(nodeID: node.id, event: "onArrow", value: .string(direction))
+            } : nil))
         }
         register(.segmented) { node, runtime in
             AnyView(AtomSegmented(props: try .decode(node.props), common: try .decode(node.props)) { value in
@@ -114,6 +119,46 @@ enum AtomRegistry {
                 runtime.dispatch(nodeID: node.id, event: "onLongPress")
             }) {
                 PluginChildren(node: node, runtime: runtime)
+            })
+        }
+        register(.editor) { node, runtime in
+            AnyView(AtomEditor(props: try .decode(node.props), common: try .decode(node.props), onChange: { text in
+                runtime.dispatch(nodeID: node.id, event: "onChange", value: .string(text))
+            }, onSubmit: {
+                runtime.dispatch(nodeID: node.id, event: "onSubmit")
+            }, onSteerSubmit: {
+                runtime.dispatch(nodeID: node.id, event: "onSteerSubmit")
+            }, onFocusChange: { focused in
+                runtime.dispatch(nodeID: node.id, event: "onFocusChange", value: .bool(focused))
+            }))
+        }
+        register(.popover) { node, runtime in
+            let children = node.children.filter { $0.type != PluginNode.textType }
+            return AnyView(AtomPopover(props: try .decode(node.props), common: try .decode(node.props), onDismiss: {
+                runtime.dispatch(nodeID: node.id, event: "onDismiss")
+            }, anchor: {
+                if let anchor = children.first { PluginNodeView(node: anchor, runtime: runtime) }
+            }, content: {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(children.dropFirst()) { child in
+                        PluginNodeView(node: child, runtime: runtime)
+                    }
+                }
+            }))
+        }
+        register(.stepSlider) { node, runtime in
+            AnyView(AtomStepSlider(props: try .decode(node.props), common: try .decode(node.props)) { value in
+                runtime.dispatch(nodeID: node.id, event: "onChange", value: .string(value))
+            })
+        }
+        register(.overlay) { node, runtime in
+            let children = node.children.filter { $0.type != PluginNode.textType }
+            return AnyView(AtomOverlay(props: try .decode(node.props), common: try .decode(node.props)) {
+                if let base = children.first { PluginNodeView(node: base, runtime: runtime) }
+            } overlay: {
+                ForEach(children.dropFirst()) { child in
+                    PluginNodeView(node: child, runtime: runtime)
+                }
             })
         }
         assert(Set(builders.keys) == Set(AtomType.allCases.map(\.rawValue)), "Every atom needs exactly one registry entry.")
