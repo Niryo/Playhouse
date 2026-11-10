@@ -747,6 +747,10 @@ private struct NativeRepositoryChipsDemo: View {
                         select: { path in
                             open = false
                             lastAction = "select \(name(path, in: repositoryNames))"
+                        },
+                        replace: { path in
+                            open = false
+                            lastAction = "replace \(name(path, in: repositoryNames))"
                         }
                     ))
                 }

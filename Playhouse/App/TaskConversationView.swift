@@ -3117,7 +3117,8 @@ struct TaskConversationView: View {
                 repositories: available,
                 highlighted: repositorySuggestionIndex,
                 focusesSearch: isNewTask,
-                canSubmit: isUsingSavedRepositoryDefault || available.indices.contains(repositorySuggestionIndex)
+                canSubmit: isUsingSavedRepositoryDefault || available.indices.contains(repositorySuggestionIndex),
+                canReplace: !task.repositoryWorktrees.isEmpty
             ),
             actions: RepositoryPickerActions(
                 chooseParent: { chooseRepositoryParentFolder() },
@@ -3143,9 +3144,37 @@ struct TaskConversationView: View {
                 select: { path in
                     guard let repository = pickerRepositories.first(where: { $0.path == path }) else { return }
                     selectRepositorySuggestion(repository)
+                },
+                replace: { path in
+                    guard let repository = pickerRepositories.first(where: { $0.path == path }) else { return }
+                    replaceRepositories(with: repository)
                 }
             )
         )
+    }
+
+    private func replaceRepositories(with repository: URL) {
+        didOverrideRepositoryDefault = true
+        isShowingRepositoryPicker = false
+        repositorySearch = ""
+        Task { @MainActor in
+            do {
+                let path = repository.standardizedFileURL.path
+                _ = try await WorkspaceManager(
+                    taskManager: BoardTaskManager(modelContext: modelContext)
+                ).replaceRepositories([path], on: task.id)
+                repositoryBeingEdited = nil
+                errorMessage = nil
+                if FileManager.default.fileExists(atPath: URL(fileURLWithPath: path).appendingPathComponent(".git").path) {
+                    try WorkspaceSettingsManager().setLastSelectedRepositories([path])
+                }
+                loadRecentRepositories()
+                await refreshWorkspaceChanges()
+            } catch {
+                errorMessage = "Couldn't replace repositories: \(error.localizedDescription)"
+                isShowingRepositoryPicker = true
+            }
+        }
     }
 
     private var repositorySearchPlaceholder: String {

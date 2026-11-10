@@ -61,12 +61,14 @@ struct RepositoryPickerModel: Codable, Equatable {
     var focusesSearch: Bool
     /// Return adds something: the saved repositories or the highlighted row.
     var canSubmit: Bool
+    /// The task already has repositories, so each row offers Replace.
+    var canReplace: Bool
 }
 
 extension RepositoryPickerModel {
     init(
         parentFolder: String?, isChoosingParent: Bool, placeholder: String, search: String, isListingRecent: Bool,
-        repositories: [URL], highlighted: Int, focusesSearch: Bool, canSubmit: Bool
+        repositories: [URL], highlighted: Int, focusesSearch: Bool, canSubmit: Bool, canReplace: Bool
     ) {
         prefix = ""
         self.parentFolder = parentFolder
@@ -80,6 +82,7 @@ extension RepositoryPickerModel {
         self.highlighted = highlighted
         self.focusesSearch = focusesSearch
         self.canSubmit = canSubmit
+        self.canReplace = canReplace
     }
 }
 
@@ -99,7 +102,10 @@ struct RepositoryPickerActions {
     var search: (String) -> Void = { _ in }
     var arrow: (String) -> Void = { _ in }
     var submit: () -> Void = {}
+    /// The row or its + button: adds the repository next to the others.
     var select: (String) -> Void = { _ in }
+    /// Removes every selected repository and adds this one.
+    var replace: (String) -> Void = { _ in }
 }
 
 /// The task header's repository chips and their + button, composed only of
@@ -244,16 +250,36 @@ struct RepositoryPickerView: View {
     }
 
     private func row(_ repository: RepositoryPickerModel.Repository, highlighted: Bool) -> some View {
-        AtomButton(
-            common: AtomCommon(testID: "\(prefix)conversation-repository-\(model.listing)-\(repository.name)", help: "Select repository"),
-            action: { actions.select(repository.path) }
-        ) {
-            AtomPanel(
-                props: PanelProps(spacing: 2, fill: "accent", fillOpacity: highlighted ? 0.16 : 0, cornerRadius: 5),
-                common: AtomCommon(fillWidth: true, padding: 7)
+        let id = "\(prefix)conversation-repository-\(model.listing)-\(repository.name)"
+        return AtomOverlay(props: OverlayProps(align: "trailing", offsetX: -6, revealOnHover: true)) {
+            AtomButton(
+                common: AtomCommon(testID: id, help: "Add \(repository.name) alongside the selected repositories"),
+                action: { actions.select(repository.path) }
             ) {
-                AtomText(props: TextProps(text: repository.name, size: 11, weight: "medium"))
-                AtomText(props: TextProps(text: repository.path, size: 9, color: "secondary", lineLimit: 1))
+                AtomPanel(
+                    props: PanelProps(spacing: 2, fill: "accent", fillOpacity: highlighted ? 0.16 : 0, cornerRadius: 5),
+                    common: AtomCommon(fillWidth: true, padding: 7)
+                ) {
+                    AtomText(props: TextProps(text: repository.name, size: 11, weight: "medium"))
+                    AtomText(props: TextProps(text: repository.path, size: 9, color: "secondary", lineLimit: 1))
+                }
+            }
+        } overlay: {
+            AtomStack(props: StackProps(axis: "h", spacing: 6)) {
+                if model.canReplace {
+                    AtomButton(
+                        common: AtomCommon(testID: "\(id)-replace", label: "Replace with \(repository.name)", help: "Replace the selected repositories with \(repository.name)"),
+                        action: { actions.replace(repository.path) }
+                    ) {
+                        AtomIcon(props: IconProps(name: "arrow.triangle.swap", size: 11, weight: "semibold", color: "secondary"))
+                    }
+                }
+                AtomButton(
+                    common: AtomCommon(testID: "\(id)-add", label: "Add \(repository.name)", help: "Add \(repository.name) alongside the selected repositories"),
+                    action: { actions.select(repository.path) }
+                ) {
+                    AtomIcon(props: IconProps(name: "plus", size: 11, weight: "semibold", color: "secondary"))
+                }
             }
         }
     }
