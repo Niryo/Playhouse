@@ -70,6 +70,8 @@ enum AtomFont {
 
 private struct AtomCommonModifier: ViewModifier {
     let common: AtomCommon
+    /// The atom's type, for the debug highlight.
+    let atom: AtomType
     /// Makes the atom one accessibility container for its children.
     var group = false
     /// Makes the atom one accessibility element whose label joins its children's.
@@ -84,6 +86,7 @@ private struct AtomCommonModifier: ViewModifier {
             .modifier(OptionalHelp(text: common.help))
             .allowsHitTesting(common.passThrough != true)
             .modifier(AtomAccessibility(common: common, group: group, combine: combine))
+            .atomHighlight(atom)
     }
 }
 
@@ -128,8 +131,8 @@ private struct Applied<Modified: View>: ViewModifier {
 }
 
 extension View {
-    func atomCommon(_ common: AtomCommon, group: Bool = false, combine: Bool = false, frame: Bool = true) -> some View {
-        modifier(AtomCommonModifier(common: common, group: group, combine: combine, frame: frame))
+    func atomCommon(_ common: AtomCommon, atom: AtomType, group: Bool = false, combine: Bool = false, frame: Bool = true) -> some View {
+        modifier(AtomCommonModifier(common: common, atom: atom, group: group, combine: combine, frame: frame))
     }
 
     /// The common size, fill and padding props, each applied only when set.
@@ -203,7 +206,7 @@ struct AtomStack<Content: View>: View {
                 VStack(alignment: horizontalAlignment, spacing: props.spacing.map { CGFloat($0) }, content: content)
             }
         }
-        .atomCommon(common, group: props.group == true, combine: props.combine == true)
+        .atomCommon(common, atom: .stack, group: props.group == true, combine: props.combine == true)
     }
 
     private var verticalAlignment: VerticalAlignment {
@@ -242,7 +245,7 @@ struct AtomText: View {
             .contentTransition(props.numeric == true ? .numericText() : .identity)
             .animation(props.numeric == true ? .default : nil, value: string)
             .fixedSize(horizontal: false, vertical: props.wrap == true)
-            .atomCommon(common)
+            .atomCommon(common, atom: .text)
     }
 
     private var truncationMode: Text.TruncationMode {
@@ -271,7 +274,7 @@ struct AtomIcon: View {
             }
         }
         .atomForeground(props.color)
-        .atomCommon(common)
+        .atomCommon(common, atom: .icon)
     }
 }
 
@@ -283,7 +286,7 @@ struct AtomLabel: View {
         Label(props.text, systemImage: props.icon)
             .atomFont(AtomFont.font(size: props.size, weight: props.weight))
             .atomForeground(props.color)
-            .atomCommon(common)
+            .atomCommon(common, atom: .label)
     }
 }
 
@@ -301,7 +304,7 @@ struct AtomButton<Content: View>: View {
             .padding(.horizontal, overhangs ? -CGFloat((props.emphasis ?? 0) + (common.paddingX ?? 0)) : 0)
             .padding(.vertical, overhangs ? -CGFloat(props.emphasis ?? 0) : 0)
             .disabled(props.disabled == true)
-            .atomCommon(common, frame: false)
+            .atomCommon(common, atom: .button, frame: false)
     }
 
     private var isFixedSize: Bool { common.width != nil || common.height != nil }
@@ -359,10 +362,10 @@ struct AtomLink<Content: View>: View {
                 .buttonStyle(.borderless)
                 .atomEmphasis(props.emphasis)
                 .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
-                .atomCommon(common)
+                .atomCommon(common, atom: .link)
                 .contentShape(Rectangle())
         } else {
-            content().atomCommon(common)
+            content().atomCommon(common, atom: .link)
         }
     }
 }
@@ -374,7 +377,7 @@ struct AtomSpinner: View {
     var body: some View {
         ProgressView()
             .controlSize(props.size == "mini" ? .mini : props.size == "regular" ? .regular : .small)
-            .atomCommon(common)
+            .atomCommon(common, atom: .spinner)
     }
 }
 
@@ -383,6 +386,7 @@ struct AtomSpacer: View {
 
     var body: some View {
         Spacer(minLength: props.minLength.map { CGFloat($0) })
+            .atomHighlight(.spacer)
     }
 }
 
@@ -453,6 +457,7 @@ struct AtomPillPicker: View {
             try? await Task.sleep(for: .seconds(5))
             chosen = nil
         }
+        .atomHighlight(.pillPicker)
     }
 
     private func optionButton(_ option: PillPickerProps.Option) -> some View {
@@ -553,6 +558,7 @@ struct AtomCard<Content: View>: View {
                     .accessibilityIdentifier(item.testID ?? "")
                 }
             }
+            .atomHighlight(.card)
     }
 }
 
@@ -595,7 +601,7 @@ struct AtomDisclosure<Content: View>: View {
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
         }
-        .atomCommon(common, group: true)
+        .atomCommon(common, atom: .disclosure, group: true)
     }
 }
 
@@ -616,7 +622,7 @@ struct AtomPanel<Content: View>: View {
                     shape.strokeBorder(stroke.opacity(props.strokeOpacity ?? 1))
                 }
             }
-            .atomCommon(common, group: true, frame: false)
+            .atomCommon(common, atom: .panel, group: true, frame: false)
     }
 }
 
@@ -640,7 +646,7 @@ struct AtomMeter: View {
                 }
             }
             .accessibilityHidden(common.label == nil)
-            .atomCommon(common)
+            .atomCommon(common, atom: .meter)
     }
 }
 
@@ -665,7 +671,7 @@ struct AtomScroll<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .modifier(Applied(when: props.maxHeight != nil) { $0.frame(maxHeight: CGFloat(props.maxHeight ?? 0)) })
-        .atomCommon(common)
+        .atomCommon(common, atom: .scroll)
     }
 }
 
@@ -674,7 +680,7 @@ struct AtomDivider: View {
 
     var body: some View {
         Divider()
-            .atomCommon(common)
+            .atomCommon(common, atom: .divider)
     }
 }
 
@@ -710,7 +716,7 @@ struct AtomChoiceBar: View {
         }
         .padding(2)
         .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
-        .atomCommon(common, group: true)
+        .atomCommon(common, atom: .choiceBar, group: true)
     }
 }
 
@@ -728,7 +734,7 @@ struct AtomToggle: View {
             .labelsHidden()
             .disabled(props.disabled == true)
             .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
-            .atomCommon(common)
+            .atomCommon(common, atom: .toggle)
     }
 
     private var controlSize: ControlSize {
@@ -762,7 +768,7 @@ struct AtomTextField: View {
             .onChange(of: props.text) { _, owned in
                 if owned != text { text = owned }
             }
-            .atomCommon(common)
+            .atomCommon(common, atom: .textField)
     }
 }
 
@@ -783,7 +789,7 @@ struct AtomSegmented: View {
         .labelsHidden()
         .modifier(Applied(when: common.width == nil) { $0.fixedSize() })
         .disabled(props.disabled == true)
-        .atomCommon(common)
+        .atomCommon(common, atom: .segmented)
     }
 }
 
@@ -822,7 +828,7 @@ struct AtomMenu: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
-        .atomCommon(common, frame: false)
+        .atomCommon(common, atom: .menu, frame: false)
     }
 }
 
@@ -842,7 +848,7 @@ struct AtomPressArea<Content: View>: View {
             .overlay {
                 PressAreaView(showsPointingHand: props.pointer == true, onClick: onPress, onLongPress: onLongPress)
             }
-            .atomCommon(common, group: true)
+            .atomCommon(common, atom: .pressArea, group: true)
     }
 }
 

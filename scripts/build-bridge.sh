@@ -161,7 +161,7 @@ xcrun --sdk macosx swiftc \
   -target "${architecture}-apple-macosx${deployment_target}" \
   -sdk "${sdk}" \
   -O \
-  "${debug_flags[@]}" \
+  ${debug_flags[@]+"${debug_flags[@]}"} \
   -framework Foundation \
   -framework AppKit \
   -framework SwiftUI \
@@ -181,7 +181,7 @@ xcrun --sdk macosx swiftc \
   -target "${architecture}-apple-macosx${deployment_target}" \
   -sdk "${sdk}" \
   -O \
-  "${debug_flags[@]}" \
+  ${debug_flags[@]+"${debug_flags[@]}"} \
   -framework Foundation \
   "${repository_root}/Playhouse/Bridge/BridgeContract.swift" \
   "${repository_root}/Playhouse/Bridge/BridgeSocket.swift" \

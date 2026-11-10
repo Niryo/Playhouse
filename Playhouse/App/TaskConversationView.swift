@@ -7171,7 +7171,7 @@ struct TaskConversationView: View {
     /// conversation. Claude Code runs it as a slash command; Codex receives the
     /// skill itself alongside the message.
     private func useSkill(_ skill: SkillRecord) {
-        let token = "/" + skill.name
+        let token = skill.invocationToken
         let rest = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         if !rest.hasPrefix(token + " "), rest != token {
             draft = rest.isEmpty ? token + " " : token + " " + rest

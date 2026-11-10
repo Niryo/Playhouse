@@ -1272,7 +1272,9 @@ def auth_command(arguments):
 def fixture_commands():
     """Mirrors Claude Code's initialize commands: its built-ins, plus the skills it
     finds in `.claude/skills` of the working folder and of each --add-dir folder,
-    leaving out any `--settings` skillOverrides turn off."""
+    leaving out any `--settings` skillOverrides turn off. Like Claude Code
+    v2.1.309+, an --add-dir skill whose name an earlier skill already uses is
+    named `<folder name>:<skill name>`."""
     commands = [
         {"name": "simplify", "description": "Review the changed code for reuse.", "builtin": True},
         {"name": "compact", "description": "Free up context by summarizing the conversation so far", "builtin": True},
@@ -1280,11 +1282,14 @@ def fixture_commands():
     arguments = sys.argv[1:]
     folders = [os.getcwd()] + [arguments[index + 1] for index, value in enumerate(arguments[:-1]) if value == "--add-dir"]
     overrides = json.loads(argument("--settings") or "{}").get("skillOverrides", {})
-    for folder in folders:
+    seen = {command["name"] for command in commands}
+    for index, folder in enumerate(folders):
         skills = Path(folder) / ".claude" / "skills"
         for entry in sorted(skills.iterdir()) if skills.is_dir() else []:
             if (entry / "SKILL.md").is_file() and overrides.get(entry.name) != "off":
-                commands.append({"name": entry.name, "description": f"{entry.name} ({folder})"})
+                name = f"{Path(folder).name}:{entry.name}" if index > 0 and entry.name in seen else entry.name
+                seen.add(entry.name)
+                commands.append({"name": name, "description": f"{entry.name} ({folder})"})
     return commands
 
 
