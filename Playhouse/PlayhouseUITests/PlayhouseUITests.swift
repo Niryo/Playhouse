@@ -477,7 +477,7 @@ final class PlayhouseUITests: XCTestCase {
         }
     }
 
-    // case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a compact fixed Kanban sidebar under 200 points wide and left of the columns while they scroll, and places its Scheduled Tasks button inside the sidebar below the full logo header. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
+    // case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a fixed standard-width (200-point) Kanban sidebar and left of the columns while they scroll, and places its Scheduled Tasks button inside the sidebar below the full logo header. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
     func test_service_reports_bridge_version() throws {
         launchApp(defaultParent: fixture.parent.path)
         XCTAssertEqual(app.windows.count, 1, "Playhouse should open one board window on launch.")
@@ -487,7 +487,7 @@ final class PlayhouseUITests: XCTestCase {
         let sidebar = element(withAccessibilityLabel: "Kanban sidebar")
         let scheduledTasksButton = element("scheduled-tasks-button")
         XCTAssertTrue(sidebar.waitToExist(timeout: 5), "The Kanban sidebar should be visible.")
-        XCTAssertLessThan(sidebar.frame.width, 200, "The Kanban sidebar should stay compact beside the board columns.")
+        XCTAssertEqual(sidebar.frame.width, 200, accuracy: 2, "The Kanban sidebar should use the standard 200-point macOS sidebar width.")
         XCTAssertTrue(scheduledTasksButton.isHittable, "The Scheduled Tasks button should be hittable.")
         XCTAssertTrue(sidebar.frame.contains(scheduledTasksButton.frame), "The Scheduled Tasks button should be inside the sidebar.")
         XCTAssertGreaterThanOrEqual(
