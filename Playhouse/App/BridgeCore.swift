@@ -9143,7 +9143,7 @@ final class PlayhouseBridgeRuntime {
             }
             func skillScope() throws -> SkillScope {
                 guard let scope = SkillScope(rawValue: try request.requiredString("scope")), scope != .builtin else {
-                    throw BridgeCommandError(code: "invalid_argument", message: "Scope must be 'repo' or 'global'.")
+                    throw BridgeCommandError(code: "invalid_argument", message: "Scope must be 'repo', 'private' or 'global'.")
                 }
                 return scope
             }
@@ -9745,7 +9745,7 @@ final class PlayhouseBridgeRuntime {
                     body: request.arguments["body"]?.string ?? "",
                     fields: try skillFields(),
                     scope: scope,
-                    root: scope == .repo ? try skillRoot(in: roots) : nil,
+                    root: scope == .global ? nil : try skillRoot(in: roots),
                     roots: roots
                 ))
             case "skills.update":
@@ -9782,7 +9782,7 @@ final class PlayhouseBridgeRuntime {
                 let scope = try skillScope()
                 result = try Self.value(skills.move(
                     id: request.requiredString("skillID"), to: scope,
-                    root: scope == .repo ? try skillRoot(in: roots) : nil, roots: roots
+                    root: scope == .global ? nil : try skillRoot(in: roots), roots: roots
                 ))
             case "skills.enable":
                 let roots = try skillRoots()

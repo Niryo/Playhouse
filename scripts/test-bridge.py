@@ -5562,6 +5562,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
             stale_tracking = self.run_git(self.primary, "rev-parse", "refs/remotes/origin/main").strip()
             task = self.create_repo_task("Default branch-from from origin", [self.primary])
             task_id = task["id"]
+            # Publishing on Review would set the branch's upstream itself and hide a tracked base.
+            self.assert_success(self.call_cli("task", "pr", "mode", task_id, "manual")[0])
             pending = task["repositoryWorktrees"][0]
             self.assertTrue(pending["isPending"])
             self.assertEqual(pending["branchFrom"], "origin/main")
@@ -13125,6 +13127,222 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(resumed_disabled, disabled_real, "The resumed thread gets the same per-thread skill config.")
         later = [turn for turn in history["turns"] if turn["userMessage"] == "Complete this task again."][-1]
         self.assertEqual(later["skillInputs"], [], "A turn that names no skill sends none.")
+
+    # case-contract: test_skills_private_create_list_convert_and_delete | A repository skill created with Private on is written only to Playhouse's private skill store, in a folder keyed by the source repository and laid out as .claude/skills/<name>/SKILL.md, with nothing written to the repository or the task worktree, whose git status stays clean. It is listed under its repository with scope private and a Private badge, every task on that repository sees it from its own worktree, and a task on another repository does not. A private skill cannot take a name that the committed skills of any of the task's repositories, the global skills, or the built-in skills already use, and a committed skill of the same name that appears later in a worktree takes precedence there: the private one is shown as Shadowed and used by neither provider. Editing saves the store's SKILL.md, a private skill cannot be linked outside Playhouse, Convert to Repository Skill moves it into the worktree's .agents/skills as a repository skill ready to commit, Make Private moves a repository skill back into the store and out of the worktree, Make Private to a repository moves a global skill into that repository's store, and Delete removes only its store folder.
+    def test_skills_private_create_list_convert_and_delete(self):
+        repository = self.make_skill_repository("skills-private-repo", {
+            ".agents/skills/committed/SKILL.md": self.skill_manifest("committed", "A committed repository skill"),
+        })
+        other = self.make_skill_repository("skills-private-other", {})
+        self.write_skill(self.skills_home / ".agents" / "skills", "global-taken", "A global skill")
+        task = self.create_skills_task("Private skills", [repository])
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        digest = hashlib.sha256(str(repository).encode("utf-8")).hexdigest()[:12]
+        store = self.data_directory / "private-skills" / f"skills-private-repo-{digest}"
+        private_id = f"private:{repository}#deploy-notes"
+
+        def create(*arguments, expected_status=0):
+            return self.call_cli("skills", "create", "--task", task["id"], "--scope", "private", *arguments, expected_status=expected_status)[0]
+
+        def section(task_id=task["id"]):
+            return self.skills_by_name(self.skill_catalog(task_id=task_id)["repositories"][0]["skills"])
+
+        for taken in ["committed", "global-taken"]:
+            self.assert_failure(create("--name", taken, "--description", "Taken", expected_status=1), "already_exists")
+        self.write_skill(self.skills_codex_home / "skills" / ".system", "codex-system-skill", "Bundled with Codex")
+        self.assert_failure(create("--name", "codex-system-skill", "--description", "Taken", expected_status=1), "already_exists")
+        both = self.create_skills_task("Private skills two repositories", [repository, other])
+        self.assert_failure(self.call_cli("skills", "create", "--task", both["id"], "--scope", "private", "--root", str(other),
+                                          "--name", "committed", "--description", "Taken in the other repository", expected_status=1)[0], "already_exists")
+        self.assertFalse(store.exists(), "A rejected private skill writes nothing.")
+
+        created = self.assert_success(create("--name", "deploy-notes", "--description", "Write deploy notes", "--body", "List the deploy steps."))
+        self.assertEqual(created["id"], private_id)
+        self.assertEqual(created["scope"], "private")
+        self.assertEqual(created["repositoryPath"], str(repository))
+        self.assertEqual(created["providers"], ["claude", "codex"])
+        self.assertEqual([location["layout"] for location in created["locations"]], ["playhousePrivate"])
+        folder = store / ".claude" / "skills" / "deploy-notes"
+        self.assertSamePath(created["folderPath"], folder)
+        self.assertEqual((folder / "SKILL.md").read_text(encoding="utf-8"),
+                         '---\nname: deploy-notes\ndescription: "Write deploy notes"\n---\n\nList the deploy steps.\n')
+        self.assertEqual((store / "repository").read_text(encoding="utf-8").strip(), str(repository),
+                         "The store folder records the repository it belongs to.")
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain"), "", "Creating a private skill writes nothing into the worktree.")
+        self.assertEqual(self.run_git(repository, "status", "--porcelain"), "", "Creating a private skill writes nothing into the repository.")
+        self.assertFalse((worktree / ".agents" / "skills" / "deploy-notes").exists())
+        self.assert_failure(create("--name", "deploy-notes", "--description", "Again", expected_status=1), "already_exists")
+
+        listed = section()
+        self.assertEqual(sorted(listed), ["committed", "deploy-notes"], "The private skill is listed with the repository's skills.")
+        self.assertEqual(listed["deploy-notes"]["scope"], "private")
+        self.assertEqual(listed["committed"]["scope"], "repo")
+        self.assertIsNone(listed["deploy-notes"].get("issue"))
+        self.assertTrue(listed["deploy-notes"]["enabled"])
+
+        again = self.create_skills_task("Private skills again", [repository])
+        again_worktree = Path(again["repositoryWorktrees"][0]["worktreePath"])
+        self.assertNotEqual(os.path.realpath(again_worktree), os.path.realpath(worktree))
+        self.assertEqual(section(again["id"])["deploy-notes"]["id"], private_id, "Every task on the repository sees its private skills.")
+        other_task = self.create_skills_task("Private skills elsewhere", [other])
+        self.assertEqual(self.skill_catalog(task_id=other_task["id"])["repositories"][0]["skills"], [], "A task on another repository does not.")
+
+        edited = self.skill_manifest("deploy-notes", "Write short deploy notes", "Name each deployed service.")
+        edit_file = self.data_directory / "private-skill-edit.md"
+        edit_file.write_text(edited, encoding="utf-8")
+        self.assertEqual(self.assert_success(self.call_cli("skills", "update", "--task", task["id"], "--skill", private_id, "--content-file", edit_file)[0])["description"],
+                         "Write short deploy notes")
+        self.assertEqual((folder / "SKILL.md").read_text(encoding="utf-8"), edited, "Editing saves the store's SKILL.md.")
+        self.assert_failure(self.call_cli("skills", "link", "--task", task["id"], "--skill", private_id, expected_status=2)[0], "invalid_argument")
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain"), "", "Editing a private skill writes nothing into the worktree.")
+
+        # A committed skill of the same name takes precedence in the worktree it appears in.
+        self.write_skill(worktree / ".claude" / "skills", "deploy-notes", "A committed copy")
+        shadowed = section()
+        private = next(skill for skill in self.skill_catalog(task_id=task["id"])["repositories"][0]["skills"] if skill["id"] == private_id)
+        self.assertEqual(private["providers"], [], "A shadowed private skill is used by neither provider.")
+        self.assertIn("takes precedence", private["issue"])
+        self.assertEqual(private["shadowedBy"], "skills-private-repo's committed skills")
+        self.assertIn("deploy-notes", shadowed)
+        self.assertEqual(section(again["id"])["deploy-notes"]["providers"], ["claude", "codex"], "Another worktree without the copy still uses the private skill.")
+        shutil.rmtree(worktree / ".claude")
+
+        converted = self.assert_success(self.call_cli("skills", "move", "--task", task["id"], "--skill", private_id, "--scope", "repo")[0])
+        self.assertEqual(converted["id"], f"repo:{repository}#deploy-notes")
+        self.assertEqual(converted["scope"], "repo")
+        self.assertEqual((worktree / ".agents" / "skills" / "deploy-notes" / "SKILL.md").read_text(encoding="utf-8"), edited,
+                         "Converting moves the private skill into the worktree's Agent Skills folder.")
+        self.assertFalse(folder.exists(), "Converting removes the skill from the store.")
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain").strip(), "?? .agents/skills/deploy-notes/", "The converted skill is ready to commit.")
+        self.assertEqual(sorted(section(again["id"])), ["committed"], "A converted skill is no longer private to the repository's other tasks.")
+
+        made_private = self.assert_success(self.call_cli("skills", "move", "--task", task["id"], "--skill", converted["id"], "--scope", "private")[0])
+        self.assertEqual(made_private["id"], private_id)
+        self.assertEqual((folder / "SKILL.md").read_text(encoding="utf-8"), edited, "Make Private moves the skill back into the store.")
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain"), "", "Make Private takes the skill out of the worktree.")
+        self.assert_failure(self.call_cli("skills", "move", "--task", task["id"], "--skill", private_id, "--scope", "private", expected_status=2)[0], "invalid_argument")
+
+        self.assertEqual(self.assert_success(self.call_cli("skills", "delete", "--task", task["id"], "--skill", private_id)[0]), {"deleted": True})
+        self.assertFalse(folder.exists(), "Deleting removes the private skill's store folder.")
+        self.assertEqual(sorted(section()), ["committed"])
+        self.assertTrue((worktree / ".agents" / "skills" / "committed" / "SKILL.md").is_file(), "Deleting a private skill leaves committed skills alone.")
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain"), "")
+
+        # A global skill can be made private to one of the task's repositories.
+        global_private = self.assert_success(self.call_cli("skills", "move", "--task", task["id"], "--skill", "global:global-taken",
+                                                           "--scope", "private", "--root", str(repository))[0])
+        self.assertEqual(global_private["id"], f"private:{repository}#global-taken")
+        self.assertTrue((store / ".claude" / "skills" / "global-taken" / "SKILL.md").is_file(), "The global skill moves into the repository's store.")
+        self.assertFalse((self.skills_home / ".agents" / "skills" / "global-taken").exists(), "It leaves the global skills folder.")
+        self.assertEqual(sorted(section()), ["committed", "global-taken"])
+        self.assertEqual(self.skill_catalog(task_id=task["id"])["global"], [])
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain"), "", "Making a global skill private writes nothing into the worktree.")
+
+    # case-contract: test_skills_private_bridge_reaches_claude_and_codex_for_its_repository | A turn on a repository with private skills gets them as native skills, and a task on any other repository gets no extra folder, flag, or skill. Claude Code gets one more --add-dir, a Playhouse-owned wrapper named after the repository whose .claude/skills links to the store, so it lists the private skill and a /skill message reaches it unchanged; the link shows later edits, and a turned-off private skill is left out of the next turn without a skillOverrides entry and hidden from Codex threads. In a task with two repositories whose private skills share a name, each repository's wrapper is passed, and the later one is listed and invoked as /<repository>:<name>. Codex gets the repository's private wrapper among the shared app-server's extra skill roots, with other repositories' private skills disabled for its thread, and a /skill message, plain or namespaced, sends a structured skill input naming the private SKILL.md.
+    def test_skills_private_bridge_reaches_claude_and_codex_for_its_repository(self):
+        repository = self.make_skill_repository("skills-private-bridge", {
+            ".claude/skills/repo-claude/SKILL.md": self.skill_manifest("repo-claude", "Claude reads this natively"),
+        })
+        second = self.make_skill_repository("skills-private-second", {})
+        plain = self.make_skill_repository("skills-private-plain", {})
+        environment = self.install_claude_fixture("claude-fixture-private-skills")
+        history_path = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".history")
+        task_id = self.create_skills_task("Private Claude skills", [repository], provider="claude")["id"]
+        worktree = Path(self.assert_success(self.call_cli("task", "get", task_id)[0])["repositoryWorktrees"][0]["worktreePath"])
+
+        def create(target_task, root, name, description):
+            return self.assert_success(self.call_cli("skills", "create", "--task", target_task, "--scope", "private", "--root", str(root),
+                                                     "--name", name, "--description", description)[0])
+
+        release = create(task_id, repository, "release-check", "Check a release")
+        shared = create(task_id, repository, "shared-name", "The first repository's copy")
+
+        def turn(text):
+            return [entry for entry in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if entry.get("userText") == text][-1]
+
+        def directories(entry):
+            arguments = entry["arguments"]
+            return [arguments[index + 1] for index, value in enumerate(arguments) if value == "--add-dir"]
+
+        plain_id = self.create_skills_task("Plain Claude skills", [plain], provider="claude")["id"]
+        self.assert_success(self.call_cli("conversation", "send", plain_id, "--message", "Hello plain.", extra_environment=environment)[0])
+        plain_turn = turn("Hello plain.")
+        self.assertEqual(directories(plain_turn), [], "A repository without private skills adds no folder.")
+        self.assertNotIn("--settings", plain_turn["arguments"])
+        self.assertNotIn("release-check", plain_turn["skills"], "A task on another repository does not see the private skill.")
+
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "/release-check Run it.", extra_environment=environment)[0])
+        first = turn("/release-check Run it.")
+        added = directories(first)
+        self.assertEqual(len(added), 1, f"One private wrapper should be added: {first['arguments']}")
+        wrapper = Path(added[0])
+        self.assertEqual(wrapper.name, "skills-private-bridge", "The wrapper is named after the repository.")
+        self.assertSamePath(wrapper.parent.parent, self.data_directory / "skill-bridge" / "claude")
+        links = wrapper / ".claude" / "skills"
+        self.assertEqual(sorted(entry.name for entry in links.iterdir()), ["release-check", "shared-name"])
+        self.assertSamePath(links / "release-check", release["folderPath"])
+        self.assertEqual(first["userText"], "/release-check Run it.", "The skill invocation reaches Claude Code unchanged.")
+        self.assertIn("release-check", first["skills"], "Claude Code lists the private skill natively.")
+        self.assertIn("shared-name", first["skills"])
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain"), "", "The worktree is not written to.")
+
+        edited = self.skill_manifest("release-check", "Check a release carefully", "Compare the changelog.")
+        edit_file = self.data_directory / "private-skill-edit.md"
+        edit_file.write_text(edited, encoding="utf-8")
+        self.assert_success(self.call_cli("skills", "update", "--task", task_id, "--skill", release["id"], "--content-file", edit_file)[0])
+        self.assertEqual((links / "release-check" / "SKILL.md").read_text(encoding="utf-8"), edited, "The wrapper shows the edited skill.")
+        enabled_bridge = self.assert_success(self.call_cli("skills", "bridge", "--task", task_id)[0])
+        old_codex_release = next(Path(link["link"]) for link in enabled_bridge["codexLinks"] if link["name"] == "release-check")
+        self.assert_success(self.call_cli("skills", "disable", "--task", task_id, "--skill", release["id"])[0])
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Run it again.", extra_environment=environment)[0])
+        resumed = turn("Run it again.")
+        self.assertTrue(resumed["resumed"])
+        self.assertNotIn("release-check", resumed["skills"], "A turned-off private skill is left out of the next turn.")
+        self.assertIn("shared-name", resumed["skills"])
+        self.assertIn("repo-claude", resumed["skills"], "Turning a private skill off leaves other skills alone.")
+        self.assertNotIn("--settings", resumed["arguments"], "A private skill is turned off without a skillOverrides entry.")
+        self.assertEqual(sorted(entry.name for entry in (Path(directories(resumed)[0]) / ".claude" / "skills").iterdir()), ["shared-name"])
+
+        both_id = self.create_skills_task("Two private repositories", [repository, second], provider="claude")["id"]
+        namespaced = create(both_id, second, "shared-name", "The second repository's copy")
+        catalog = self.skill_catalog(task_id=both_id)["repositories"]
+        self.assertIsNone(self.skills_by_name(catalog[0]["skills"])["shared-name"].get("invocationName"), "The first repository keeps the plain name.")
+        self.assertEqual(self.skills_by_name(catalog[1]["skills"])["shared-name"]["invocationName"], "skills-private-second:shared-name")
+        self.assert_success(self.call_cli("conversation", "send", both_id, "--message", "/skills-private-second:shared-name Go.", extra_environment=environment)[0])
+        both = turn("/skills-private-second:shared-name Go.")
+        self.assertEqual([Path(path).name for path in directories(both)][-2:], ["skills-private-bridge", "skills-private-second"],
+                         "Each repository's private wrapper is passed.")
+        self.assertIn("shared-name", both["skills"])
+        self.assertIn("skills-private-second:shared-name", both["skills"], "Claude Code namespaces the later repository's skill.")
+        bridged = self.assert_success(self.call_cli("skills", "bridge", "--task", both_id, "--message", "/skills-private-second:shared-name Go.")[0])
+        self.assertEqual(len(bridged["invocations"]), 1)
+        self.assertEqual(bridged["invocations"][0]["name"], "shared-name")
+        self.assertSamePath(bridged["invocations"][0]["path"], Path(namespaced["folderPath"]) / "SKILL.md")
+        second_wrapper = next(Path(link["link"]).parent for link in bridged["codexLinks"] if os.path.realpath(link["source"]) == os.path.realpath(namespaced["folderPath"]))
+
+        codex = self.create_skills_task("Private Codex skills", [repository])
+        self.complete_fixture_turn(codex["id"], executable_name="codex-fixture-private-skills", message="/shared-name Complete this task.")
+        history = json.loads((self.data_directory / "codex-fixture-private-skills.history").read_text(encoding="utf-8"))
+        codex_bridge = self.assert_success(self.call_cli("skills", "bridge", "--task", codex["id"])[0])
+        own = [Path(link["link"]).parent for link in codex_bridge["codexLinks"] if link["name"] == "shared-name"]
+        self.assertEqual(len(own), 1)
+        self.assertSamePath(own[0] / "shared-name", shared["folderPath"])
+        roots = {os.path.realpath(root) for root in history["skillExtraRoots"]}
+        self.assertIn(os.path.realpath(own[0]), roots, "The app-server gets the repository's private wrapper as an extra root.")
+        disabled = {os.path.realpath(entry["path"]) for entry in history["threadStartConfig"]["skills"]["config"] if entry["enabled"] is False}
+        self.assertIn(os.path.realpath(second_wrapper / "shared-name" / "SKILL.md"), disabled, "Another repository's private skill is hidden from this thread.")
+        self.assertIn(os.path.realpath(old_codex_release / "SKILL.md"), disabled, "A turned-off private skill is hidden from the Codex thread.")
+        self.assertNotIn("release-check", [link["name"] for link in codex_bridge["codexLinks"]], "A turned-off private skill is left out of the Codex wrapper.")
+        self.assertFalse(any(path.startswith(os.path.realpath(own[0]) + "/") for path in disabled), "The thread's own private skills stay on.")
+        inputs = history["turns"][0]["skillInputs"]
+        self.assertEqual([entry["name"] for entry in inputs], ["shared-name"])
+        self.assertSamePath(inputs[0]["path"], Path(shared["folderPath"]) / "SKILL.md")
+        self.assertFalse((self.skills_codex_home / "config.toml").exists(), "Codex's config.toml is not written.")
+
+        plain_bridge = self.assert_success(self.call_cli("skills", "bridge", "--task", plain_id, "--message", "/shared-name Go.")[0])
+        self.assertEqual(plain_bridge["claudeAddDirectories"], [], "A repository without private skills adds no folder.")
+        self.assertEqual(plain_bridge["codexLinks"], [])
+        self.assertEqual(plain_bridge["invocations"], [], "Another repository's private skill cannot be invoked.")
 
     # Rules
 

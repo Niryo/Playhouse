@@ -1037,9 +1037,9 @@ enum PlayhouseCLI {
       playhouse usage get [--refresh|--watch]|login <codex|claude>|switch-account <codex|claude>
       playhouse skills list [--task <task-id>] [--include-bundled true]
       playhouse skills get --skill <skill-id> [--task <task-id>]
-      playhouse skills create --scope <repo|global> --name <name> --description <text> [--body <text>] [--field <name>=<value>...] [--task <task-id>] [--root <repo-path>]
+      playhouse skills create --scope <repo|private|global> --name <name> --description <text> [--body <text>] [--field <name>=<value>...] [--task <task-id>] [--root <repo-path>]
       playhouse skills update --skill <skill-id> (--content <text>|--content-file <path>|[--description <text>] [--body <text>] [--field <name>=<value>...]) [--task <task-id>]
-      playhouse skills move --skill <skill-id> --scope <repo|global> [--root <repo-path>] [--task <task-id>]
+      playhouse skills move --skill <skill-id> --scope <repo|private|global> [--root <repo-path>] [--task <task-id>]
       playhouse skills enable|disable|link|unlink --skill <skill-id> [--task <task-id>]
       playhouse skills delete --skill <skill-id> [--skill <skill-id>...] [--task <task-id>]
       playhouse skills fix --task <task-id> --skill <skill-id> [--skill <skill-id>...]

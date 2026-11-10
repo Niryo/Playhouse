@@ -12,8 +12,8 @@ struct SkillsPageModel: Codable, Equatable {
         var label: String
     }
 
-    /// A capsule beside a skill's name: a provider that can use it, Linked,
-    /// Conflict or Invalid. `testID` is unprefixed.
+    /// A capsule beside a skill's name: a provider that can use it, Private,
+    /// its namespaced name, Linked, Conflict, Shadowed or Invalid. `testID` is unprefixed.
     struct Badge: Codable, Equatable {
         var text: String
         var icon: String
@@ -23,7 +23,7 @@ struct SkillsPageModel: Codable, Equatable {
 
     /// One action in a skill's menu; `testID` is unprefixed.
     struct MenuItem: Codable, Equatable {
-        /// edit, reveal, move-global, move-repo:<root path>, unlink, link or delete.
+        /// edit, reveal, move-global, move-repo:<root path>, move-private:<root path>, unlink, link or delete.
         var id: String
         var title: String
         var help: String
@@ -142,7 +142,7 @@ extension SkillsPageModel {
         tabs = [
             Tab(
                 value: "repo", label: "Repo",
-                intro: "Skills in the task's repositories. They live in .agents/skills or .claude/skills, and Playhouse shares each one with both Claude and Codex.",
+                intro: "Skills in the task's repositories. They live in .agents/skills or .claude/skills, and Playhouse shares each one with both Claude and Codex. A Private skill belongs to its repository but is stored by Playhouse, never in the repository, and reaches only this repository's Claude and Codex sessions.",
                 loading: false,
                 empty: repositories.isEmpty ? Empty(key: "repo", text: "This task has no repositories.") : nil,
                 sections: repositories.map { section in
@@ -184,11 +184,20 @@ extension SkillsPageModel {
         var badges = ConversationProvider.allCases.filter(skill.providers.contains).map { provider in
             Badge(text: provider.displayName, icon: "checkmark", color: "green", testID: "skill-provider-\(name)-\(provider.rawValue)")
         }
+        let isPrivate = skill.scope == .privateRepo
+        if isPrivate {
+            badges.append(Badge(text: "Private", icon: "lock.fill", color: "purple", testID: "skill-private-\(name)"))
+            if let namespaced = skill.invocationName {
+                badges.append(Badge(text: "/" + namespaced, icon: "number", color: "purple", testID: "skill-namespaced-\(name)"))
+            }
+        }
         if skill.availableOutsidePlayhouse {
             badges.append(Badge(text: "Linked", icon: "link", color: "blue", testID: "skill-linked-\(name)"))
         }
         if skill.conflict {
             badges.append(Badge(text: "Conflict", icon: "exclamationmark.triangle", color: "orange", testID: "skill-conflict-\(name)"))
+        } else if skill.shadowedBy != nil {
+            badges.append(Badge(text: "Shadowed", icon: "eye.slash", color: "orange", testID: "skill-shadowed-\(name)"))
         } else if skill.issue != nil {
             badges.append(Badge(text: "Invalid", icon: "exclamationmark.triangle", color: "red", testID: "skill-invalid-\(name)"))
         }
@@ -196,7 +205,9 @@ extension SkillsPageModel {
             id: skill.id, name: name, badges: badges,
             description: skill.description.isEmpty ? nil : skill.description,
             issue: skill.issue,
-            location: skill.locations.map(\.layout.displayPath).joined(separator: " · "),
+            location: isPrivate
+                ? "Private to \(skill.repositoryPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "its repository") · stored by Playhouse, not in the repository"
+                : skill.locations.map(\.layout.displayPath).joined(separator: " · "),
             editable: skill.editable,
             opensOnClick: skill.folderPath != nil,
             fixable: isFixable(skill),
@@ -217,7 +228,14 @@ extension SkillsPageModel {
         }
         guard skill.editable else { return [open] }
         var moves: [MenuItem] = []
-        if skill.scope == .repo {
+        if let section = repositories.first(where: { $0.rootPath == skill.rootPath }), skill.scope == .privateRepo {
+            moves.append(MenuItem(
+                id: "move-repo:\(section.rootPath)", title: "Convert to Repository Skill",
+                help: "Move the skill into \(section.name)'s .agents/skills, so it can be committed and shared",
+                testID: "skill-convert-repo-\(name)"
+            ))
+        }
+        if skill.scope != .global {
             moves.append(MenuItem(id: "move-global", title: "Move to Global", help: "Make the skill available in every repository", testID: "skill-move-global-\(name)"))
         }
         for section in repositories where skill.scope == .global || skill.rootPath != section.rootPath {
@@ -225,6 +243,18 @@ extension SkillsPageModel {
                 id: "move-repo:\(section.rootPath)", title: "Move to \(section.name)", help: "Keep the skill only in \(section.name)",
                 testID: "skill-move-repo-\(name)-\(section.name)"
             ))
+        }
+        for section in repositories where skill.scope != .privateRepo || skill.rootPath != section.rootPath {
+            let own = skill.scope == .repo && skill.rootPath == section.rootPath
+            moves.append(MenuItem(
+                id: "move-private:\(section.rootPath)", title: own ? "Make Private" : "Make Private to \(section.name)",
+                help: "Move the skill out of the repository into Playhouse's private store; only \(section.name)'s sessions see it",
+                testID: own ? "skill-make-private-\(name)" : "skill-make-private-\(name)-\(section.name)"
+            ))
+        }
+        guard skill.scope != .privateRepo else {
+            let delete = [MenuItem(id: "delete", title: "Delete…", help: "Delete the private skill from Playhouse's store", destructive: true, testID: "skill-delete-\(name)")]
+            return [open, moves, delete]
         }
         var link: [MenuItem] = []
         if skill.locations.contains(where: \.isSymlink) {
