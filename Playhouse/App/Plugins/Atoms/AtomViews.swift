@@ -269,7 +269,7 @@ struct AtomIcon: View {
             if let asset = props.asset {
                 Image(asset)
                     .resizable()
-                    .renderingMode(.template)
+                    .renderingMode(props.original == true ? .original : .template)
                     .scaledToFit()
             } else {
                 Image(systemName: props.name ?? "questionmark")
@@ -302,6 +302,7 @@ struct AtomButton<Content: View>: View {
     var body: some View {
         styled
             .modifier(Applied(when: props.controlSize == "small") { $0.controlSize(.small) })
+            .modifier(Applied(when: props.controlSize == "large") { $0.controlSize(.large) })
             .modifier(Applied(when: props.shortcut == "default") { $0.keyboardShortcut(.defaultAction) })
             .modifier(Applied(when: props.shortcut == "cancel") { $0.keyboardShortcut(.cancelAction) })
             .padding(.horizontal, overhangs ? -CGFloat((props.emphasis ?? 0) + (common.paddingX ?? 0)) : 0)
@@ -345,6 +346,10 @@ struct AtomButton<Content: View>: View {
         case "prominent":
             Button(role: role, action: action) { label }
                 .buttonStyle(.borderedProminent)
+                .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
+        case "link":
+            Button(role: role, action: action) { label }
+                .buttonStyle(.link)
                 .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
         case "automatic":
             Button(role: role, action: action) { label }
@@ -648,6 +653,8 @@ struct AtomPanel<Content: View>: View {
                         stroke.opacity(props.strokeOpacity ?? 1),
                         style: StrokeStyle(lineWidth: CGFloat(props.strokeWidth ?? 1), dash: (props.dash ?? []).map { CGFloat($0) })
                     )
+                    // A border never takes the clicks meant for the controls it frames.
+                    .allowsHitTesting(false)
                 }
             }
             .atomCommon(common, atom: .panel, group: props.combine != true, combine: props.combine == true, frame: false)
@@ -880,6 +887,7 @@ struct AtomMenu: View {
                             Text(verbatim: item.title)
                         }
                     }
+                    .disabled(item.disabled == true)
                     .buttonHoverPointer()
                     .help(item.help ?? item.title)
                     .modifier(Applied(when: item.testID != nil) { $0.accessibilityIdentifier(item.testID ?? "") })

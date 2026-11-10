@@ -1000,6 +1000,8 @@ final class PlayhouseUITests: XCTestCase {
         let submittedPrompt = app.textViews.matching(NSPredicate(format: "value == %@", standalonePrompt)).firstMatch
         XCTAssertTrue(submittedPrompt.waitToExist(timeout: 10), "The UI should submit a standalone conversation after the root is configured.")
         let mainHistoryURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
+        // The fixture writes its history once the thread starts, which can trail the prompt showing in the transcript.
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: mainHistoryURL.path) }, timeout: 10), "The standalone send should reach the provider.")
         let mainHistory = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: mainHistoryURL)) as? [String: Any])
         let instructions = try XCTUnwrap(mainHistory["threadStartDeveloperInstructions"] as? String)
         XCTAssertTrue(instructions.contains("read-only inspection of returned source paths"))
@@ -10004,8 +10006,7 @@ final class PlayhouseUITests: XCTestCase {
         let commentHint = element("response-comment-hover-card")
         XCTAssertTrue(commentHint.waitToExist(timeout: 5), "Hovering the first comment number should open its details hint.")
         attachScreenshot(named: "First response comment hover popover")
-        XCTAssertGreaterThanOrEqual(commentHint.frame.width, 300, "The details hint should be wide enough to read both fields.")
-        XCTAssertLessThanOrEqual(commentHint.frame.width, 360, "The details hint should stay medium-sized.")
+        XCTAssertEqual(commentHint.frame.width, 320, accuracy: 2, "The details hint is 320 points wide: wide enough to read both fields, still medium-sized.")
         XCTAssertTrue(commentHint.label.contains(userSelection),
                       "The hint should identify the highlighted text.")
         XCTAssertTrue(commentHint.label.contains("Explain this phrase"),
@@ -20903,7 +20904,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(switched["conversationProvider"] as? String, liveProvider)
     }
 
-    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips and Composer examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
+    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips and Composer examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors. The Button page also shows a link-style Button and a large one (taller than a regular Button), each running onPress, the Menu page's disabled Run Now item is shown but can't be chosen, and the Icon page draws the app logo asset in its own colors (original) in a 50-point frame with its accessibility label; a mistyped original or Menu item disabled is reported with its path.
     func test_plugin_renderer_commits_minimal_ops_and_runs_handlers() throws {
         executionTimeAllowance = 360 // It opens and checks every atom's catalog page, then exercises each control.
         launchApp(defaultParent: fixture.parent.path)
@@ -20955,6 +20956,30 @@ final class PlayhouseUITests: XCTestCase {
         element("button-disabled").click()
         XCTAssertFalse(waitUntil({ self.pluginText(pressCount) != "Pressed 1 times" }, timeout: 2), "A disabled Button doesn't call its handler.")
         XCTAssertTrue(pluginText(commit).hasPrefix("Commit 2: "), "No commit followed the disabled tap: \(pluginText(commit))")
+        let linkStyled = element("button-link")
+        let large = element("button-large")
+        XCTAssertTrue(linkStyled.exists && large.exists, "The Button page shows a link-style and a large button.")
+        XCTAssertGreaterThan(large.frame.height, element("button-automatic").frame.height, "A large Button is taller than a regular one.")
+        linkStyled.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(pressCount) == "Pressed 2 times" }, timeout: 5), "The link-style Button runs its onPress.")
+        large.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(pressCount) == "Pressed 3 times" }, timeout: 5), "The large Button runs its onPress.")
+        attachScreenshot(named: "Button atom link style and large control size")
+
+        catalogSidebarRow("plugin-catalog-atom-Icon").click()
+        let logo = element("icon-asset-original")
+        XCTAssertTrue(logo.waitToExist(timeout: 10), "The Icon page draws the app logo in its own colors.")
+        // The logo keeps its aspect ratio inside its 50-point frame, the board header's size.
+        XCTAssertEqual(max(logo.frame.width, logo.frame.height), 50, accuracy: 1)
+        XCTAssertEqual(logo.label, "Playhouse logo")
+        // The logo's own blue, purple and pink, which a template (single-tint) image can't show. Only its opaque
+        // spots are sampled: the catalog is light, and the board header's check assumes the dark board behind it.
+        let logoImage = logo.screenshot().image
+        assertPixel(logoImage, normalizedX: 0.20, normalizedY: 0.50, rgb: (71, 176, 235), accuracy: 30)
+        assertPixel(logoImage, normalizedX: 0.80, normalizedY: 0.50, rgb: (148, 41, 121), accuracy: 30)
+        assertPixel(logoImage, normalizedX: 0.20, normalizedY: 0.80, rgb: (177, 54, 171), accuracy: 35)
+        assertPixel(logoImage, normalizedX: 0.80, normalizedY: 0.80, rgb: (240, 82, 121), accuracy: 30)
+        attachScreenshot(named: "Icon atom with an original-color asset")
 
         catalogSidebarRow("plugin-catalog-atom-Disclosure").click()
         let disclosureToggle = element("disclosure-toggle")
@@ -21048,6 +21073,9 @@ final class PlayhouseUITests: XCTestCase {
         let delete = app.menuItems.matching(identifier: "menu-delete").firstMatch
         XCTAssertTrue(delete.waitToExist(timeout: 5), "The Menu opens its items.")
         XCTAssertTrue(app.menuItems["Reveal in Finder"].exists)
+        let disabledItem = app.menuItems.matching(identifier: "menu-disabled").firstMatch
+        XCTAssertTrue(disabledItem.exists, "The Menu shows its disabled item.")
+        XCTAssertFalse(disabledItem.isEnabled, "A disabled Menu item can't be chosen.")
         attachScreenshot(named: "Menu atom open with its groups")
         delete.click()
         XCTAssertTrue(waitUntil({ self.pluginText(self.element("menu-chosen")) == "Chosen: delete" }, timeout: 5), "onMenu received the item's id.")

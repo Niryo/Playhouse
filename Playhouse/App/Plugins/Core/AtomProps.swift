@@ -258,15 +258,17 @@ struct TextProps: AtomPropsDecodable, Equatable {
     }
 }
 
-/// An SF Symbol (`name`) or a template image from the app's assets (`asset`).
+/// An SF Symbol (`name`) or a template image from the app's assets (`asset`);
+/// `original` draws the asset in its own colors (the app logo) instead.
 struct IconProps: AtomPropsDecodable, Equatable {
     var name: String?
     var asset: String?
     var size: Double?
     var weight: String?
     var color: String?
+    var original: Bool?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case name, asset, size, weight, color }
+    enum CodingKeys: String, CodingKey, CaseIterable { case name, asset, size, weight, color, original }
 }
 
 /// An SF Symbol beside a string.
@@ -282,9 +284,9 @@ struct LabelProps: AtomPropsDecodable, Equatable {
 
 /// A button whose label is its children. `style` is plain (default),
 /// borderless, bordered (a push button), prominent (the accent-filled
-/// push button) or automatic (the platform's default for where it sits); `emphasis` is the padding of the hover capsule, if any, and
+/// push button), link (accent text like a hyperlink) or automatic (the platform's default for where it sits); `emphasis` is the padding of the hover capsule, if any, and
 /// `overhang` lets that capsule spill past the button's layout size.
-/// `controlSize` "small" makes it a small control (it inherits the size
+/// `controlSize` "small" or "large" makes it a small or large control (it inherits the size
 /// otherwise); `shortcut` "default" makes Return press it and "cancel"
 /// makes Escape press it, window-wide, so only a window's primary or
 /// dismissing action should set one. `destructive` gives it the destructive
@@ -510,6 +512,8 @@ struct MenuProps: AtomPropsDecodable, Equatable {
         var checked: Bool?
         /// An SF Symbol shown before the title.
         var icon: String?
+        /// Shown dimmed and can't be chosen.
+        var disabled: Bool?
     }
 
     var icon: String?

@@ -30,62 +30,51 @@ struct ScheduledTasksPageView: View {
         (lhs.scheduledAt ?? .distantFuture) < (rhs.scheduledAt ?? .distantFuture)
     }
 
+    /// Composed of plugin atoms (Plugins/Atoms); only the delete alert is native.
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider()
+            AtomDivider()
             if let errorMessage {
-                Text(errorMessage)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("scheduled-tasks-error")
+                AtomText(
+                    props: TextProps(text: errorMessage, size: 12, color: "red"),
+                    common: AtomCommon(testID: "scheduled-tasks-error", fillWidth: true, paddingX: 20, paddingY: 8)
+                )
             }
             if SchedulerAgent.requiresApproval {
-                HStack(spacing: 6) {
-                    Text("Allow Playhouse in Login Items so scheduled tasks run while it's closed.")
-                    Button("Open Settings") { SMAppService.openSystemSettingsLoginItems() }
-                        .buttonStyle(.link)
-                        .buttonHoverPointer()
-                        .nativeHelp("Open Login Items in System Settings")
-                        .accessibilityIdentifier("scheduled-tasks-login-items-button")
+                AtomStack(props: StackProps(axis: "h", spacing: 6), common: AtomCommon(paddingX: 20)) {
+                    AtomText(props: TextProps(text: "Allow Playhouse in Login Items so scheduled tasks run while it's closed.", size: 10, color: "secondary"))
+                    AtomButton(
+                        props: ButtonProps(style: "link"),
+                        common: AtomCommon(testID: "scheduled-tasks-login-items-button", help: "Open Login Items in System Settings"),
+                        action: { SMAppService.openSystemSettingsLoginItems() }
+                    ) {
+                        AtomText(props: TextProps(text: "Open Settings", size: 10))
+                    }
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 20)
                 .padding(.top, 10)
             }
             if scheduledTasks.isEmpty {
-                VStack(spacing: 6) {
-                    VStack(spacing: 6) {
-                        Text("No scheduled tasks")
-                            .font(.headline)
-                        Text("Write a task, then use the clock beside Send to schedule it.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                AtomStack(props: StackProps(spacing: 6, group: true), common: AtomCommon(testID: "scheduled-tasks-empty")) {
+                    AtomStack(props: StackProps(spacing: 6, combine: true)) {
+                        AtomText(props: TextProps(text: "No scheduled tasks", size: 13, weight: "semibold"))
+                        AtomText(props: TextProps(text: "Write a task, then use the clock beside Send to schedule it.", size: 12, color: "secondary"))
                     }
-                    .accessibilityElement(children: .combine)
-                    Button(action: onNewTask) { Label("New Task", systemImage: "plus") }
-                        .controlSize(.large)
-                        .padding(.top, 8)
-                        .buttonHoverPointer()
-                        .nativeHelp("Write a task and choose when it runs")
-                        .accessibilityIdentifier("scheduled-tasks-empty-new-task-button")
+                    AtomButton(
+                        props: ButtonProps(style: "automatic", controlSize: "large"),
+                        common: AtomCommon(testID: "scheduled-tasks-empty-new-task-button", help: "Write a task and choose when it runs"),
+                        action: onNewTask
+                    ) {
+                        AtomLabel(props: LabelProps(text: "New Task", icon: "plus"))
+                    }
+                    .padding(.top, 8)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("scheduled-tasks-empty")
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        section("Recurring", tasks: recurring, identifier: "scheduled-tasks-recurring")
-                        section("One-time", tasks: oneTime, identifier: "scheduled-tasks-one-time")
-                    }
-                    .padding(20)
+                AtomScroll(props: ScrollProps(spacing: 10, inset: 20, lazy: true), common: AtomCommon(testID: "scheduled-tasks-list")) {
+                    section("Recurring", tasks: recurring, identifier: "scheduled-tasks-recurring")
+                    section("One-time", tasks: oneTime, identifier: "scheduled-tasks-one-time")
                 }
-                .accessibilityIdentifier("scheduled-tasks-list")
             }
         }
         .background(WorkspaceTheme.windowBackground)
@@ -111,126 +100,103 @@ struct ScheduledTasksPageView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            Button(action: onClose) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 26, height: 26)
-                    .background(Color.primary.opacity(0.07), in: Circle())
+        AtomStack(props: StackProps(axis: "h", spacing: 12), common: AtomCommon(paddingX: 20, paddingY: 12)) {
+            AtomButton(
+                props: ButtonProps(shortcut: pendingDelete == nil ? "cancel" : nil),
+                common: AtomCommon(testID: "scheduled-tasks-back-button", label: "Back to the board", help: "Back to the board"),
+                action: onClose
+            ) {
+                AtomPanel(props: PanelProps(fillOpacity: 0.07, capsule: true, align: "center"), common: AtomCommon(width: 26, height: 26)) {
+                    AtomIcon(props: IconProps(name: "chevron.left", size: 13, weight: "semibold"))
+                }
             }
-            .buttonStyle(.plain)
-            .keyboardShortcut(pendingDelete == nil ? .cancelAction : nil)
-            .buttonHoverPointer()
-            .nativeHelp("Back to the board")
-            .accessibilityLabel("Back to the board")
-            .accessibilityIdentifier("scheduled-tasks-back-button")
 
-            Text("Scheduled Tasks")
-                .font(.title2.weight(.semibold))
-                .accessibilityIdentifier("scheduled-tasks-title")
+            AtomText(props: TextProps(text: "Scheduled Tasks", size: 17, weight: "semibold"), common: AtomCommon(testID: "scheduled-tasks-title"))
 
-            Spacer()
+            AtomSpacer()
 
-            Button(action: onNewTask) { Label("New Task", systemImage: "plus") }
-                .buttonHoverPointer()
-                .nativeHelp("Write a task and choose when it runs")
-                .accessibilityIdentifier("scheduled-new-task-button")
+            AtomButton(
+                props: ButtonProps(style: "automatic"),
+                common: AtomCommon(testID: "scheduled-new-task-button", help: "Write a task and choose when it runs"),
+                action: onNewTask
+            ) {
+                AtomLabel(props: LabelProps(text: "New Task", icon: "plus"))
+            }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
     }
 
     @ViewBuilder
     private func section(_ title: String, tasks: [BoardTask], identifier: String) -> some View {
         if !tasks.isEmpty {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
+            AtomText(props: TextProps(text: title.uppercased(), size: 10, weight: "semibold", color: "secondary"), common: AtomCommon(testID: identifier))
                 .padding(.top, 6)
-                .accessibilityIdentifier(identifier)
             ForEach(tasks) { row($0) }
         }
     }
 
     private func row(_ task: BoardTask) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(Self.displayTitle(task))
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(task.schedulePaused ? Color.secondary : Color.primary)
-                    .lineLimit(1)
-                    .accessibilityIdentifier("scheduled-task-title-\(task.id.uuidString)")
-                Text(Self.summary(task))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .accessibilityIdentifier("scheduled-task-summary-\(task.id.uuidString)")
-                let repositories = task.repositoryWorktrees.map { URL(fileURLWithPath: $0.repositoryPath).lastPathComponent }
-                if !repositories.isEmpty {
-                    Text(repositories.joined(separator: " · "))
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
+        let id = task.id.uuidString
+        let repositories = task.repositoryWorktrees.map { URL(fileURLWithPath: $0.repositoryPath).lastPathComponent }
+        return AtomPanel(
+            props: PanelProps(fill: "panel", fillOpacity: 1, cornerRadius: 10),
+            common: AtomCommon(testID: "scheduled-task-row-\(id)", paddingX: 14, paddingY: 10)
+        ) {
+            AtomStack(props: StackProps(axis: "h", spacing: 12)) {
+                // A press area rather than a Button: a Button folds its label into one element,
+                // which would hide the title and summary from accessibility. The press area
+                // covers its column, so the full-width title makes the whole row clickable.
+                AtomPressArea(
+                    props: PressAreaProps(spacing: 4, pointer: true),
+                    common: AtomCommon(testID: "scheduled-task-open-\(id)", help: "Edit this scheduled task", fillWidth: true),
+                    onPress: { onOpenTask(task) },
+                    onLongPress: { onOpenTask(task) }
+                ) {
+                    AtomText(
+                        props: TextProps(text: Self.displayTitle(task), size: 13, weight: "semibold", color: task.schedulePaused ? "secondary" : "primary", lineLimit: 1),
+                        common: AtomCommon(testID: "scheduled-task-title-\(id)", fillWidth: true)
+                    )
+                    AtomText(props: TextProps(text: Self.summary(task), size: 12, color: "secondary", lineLimit: 1), common: AtomCommon(testID: "scheduled-task-summary-\(id)"))
+                    if !repositories.isEmpty {
+                        AtomText(props: TextProps(text: repositories.joined(separator: " · "), size: 10, color: "tertiary", lineLimit: 1))
+                    }
                 }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            // A tap target rather than a Button: a Button folds its label into one element,
-            // which would hide the title and summary from accessibility.
-            .onTapGesture { onOpenTask(task) }
-            .buttonHoverPointer()
-            .nativeHelp("Edit this scheduled task")
-            .accessibilityElement(children: .contain)
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction { onOpenTask(task) }
-            .accessibilityIdentifier("scheduled-task-open-\(task.id.uuidString)")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { onOpenTask(task) }
 
-            if task.scheduleKind == .recurring {
-                Toggle("Active", isOn: Binding(get: { !task.schedulePaused }, set: { setPaused(task, !$0) }))
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .labelsHidden()
-                    .buttonHoverPointer()
-                    .nativeHelp(task.schedulePaused ? "Resume this schedule" : "Pause this schedule")
-                    .accessibilityLabel("\(task.title) active")
-                    .accessibilityIdentifier("scheduled-task-active-\(task.id.uuidString)")
-            }
-
-            Menu {
-                Button("Run Now") { runNow(task) }
-                    .disabled(runningTaskIDs.contains(task.id))
-                    .buttonHoverPointer()
-                    .help("Start a run now")
-                    .accessibilityIdentifier("scheduled-task-run-now-\(task.id.uuidString)")
-                if let lastRun = task.lastScheduledRunTaskID {
-                    Button("Open Last Run") { onOpenRunTask(lastRun) }
-                        .buttonHoverPointer()
-                        .help("Open the task the last run created")
-                        .accessibilityIdentifier("scheduled-task-last-run-\(task.id.uuidString)")
+                if task.scheduleKind == .recurring {
+                    AtomToggle(
+                        props: ToggleProps(isOn: !task.schedulePaused, size: "mini"),
+                        common: AtomCommon(
+                            testID: "scheduled-task-active-\(id)", label: "\(task.title) active",
+                            help: task.schedulePaused ? "Resume this schedule" : "Pause this schedule"
+                        ),
+                        onToggle: { setPaused(task, !task.schedulePaused) }
+                    )
                 }
-                Divider()
-                Button("Delete…", role: .destructive) { pendingDelete = task }
-                    .buttonHoverPointer()
-                    .help("Delete this scheduled task")
-                    .accessibilityIdentifier("scheduled-task-delete-\(task.id.uuidString)")
-            } label: {
-                Image(systemName: "ellipsis")
-                    .frame(width: 22, height: 22)
+
+                AtomMenu(
+                    props: MenuProps(icon: "ellipsis", items: [
+                        [
+                            MenuProps.Item(
+                                id: "run-now", title: "Run Now", help: "Start a run now",
+                                testID: "scheduled-task-run-now-\(id)", disabled: runningTaskIDs.contains(task.id)
+                            ),
+                        ] + (task.lastScheduledRunTaskID == nil ? [] : [
+                            MenuProps.Item(id: "last-run", title: "Open Last Run", help: "Open the task the last run created", testID: "scheduled-task-last-run-\(id)"),
+                        ]),
+                        [MenuProps.Item(id: "delete", title: "Delete…", destructive: true, help: "Delete this scheduled task", testID: "scheduled-task-delete-\(id)")],
+                    ]),
+                    common: AtomCommon(testID: "scheduled-task-actions-\(id)", label: "More actions", help: "More actions", width: 22, height: 22),
+                    onMenu: { choice in
+                        switch choice {
+                        case "run-now": runNow(task)
+                        case "last-run": if let lastRun = task.lastScheduledRunTaskID { onOpenRunTask(lastRun) }
+                        default: pendingDelete = task
+                        }
+                    }
+                )
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .buttonHoverPointer()
-            .nativeHelp("More actions")
-            .accessibilityLabel("More actions")
-            .accessibilityIdentifier("scheduled-task-actions-\(task.id.uuidString)")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 10))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("scheduled-task-row-\(task.id.uuidString)")
     }
 
     static func displayTitle(_ task: BoardTask) -> String {
