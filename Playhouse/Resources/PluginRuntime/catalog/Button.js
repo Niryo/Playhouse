@@ -15,7 +15,8 @@ function Demo() {
     h(Stack, { axis: "h", spacing: 12 },
       h(Button, { style: "bordered", testID: "button-bordered", onPress: press }, h(Label, { text: "Bordered", icon: "doc.text.magnifyingglass" })),
       h(Button, { style: "bordered", controlSize: "small", testID: "button-bordered-small", onPress: press }, h(Text, null, "Small")),
-      h(Button, { style: "prominent", shortcut: "default", help: "Return presses it", testID: "button-prominent", onPress: press }, h(Text, null, "Prominent"))),
+      h(Button, { style: "prominent", shortcut: "default", help: "Return presses it", testID: "button-prominent", onPress: press }, h(Text, null, "Prominent")),
+      h(Button, { style: "automatic", testID: "button-automatic", onPress: press }, h(Text, null, "Automatic"))),
     h(Text, { size: 11, color: "secondary", testID: "button-press-count" }, "Pressed ", String(count[0]), " times"));
 }
 

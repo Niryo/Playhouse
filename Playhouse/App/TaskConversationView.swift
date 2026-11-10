@@ -922,10 +922,6 @@ struct TaskConversationView: View {
         let dataURL: String
         let image: NSImage
     }
-    private struct RepositoryBadgeEditID: Identifiable, Equatable {
-        let path: String
-        var id: String { path }
-    }
 
     /// An outlined pencil with a wide body, drawn on a 24-point grid. The SF Symbol pencil
     /// stays a thin stick at small sizes, which does not read as an edit button.
@@ -1159,7 +1155,6 @@ struct TaskConversationView: View {
     @State private var recentRepositoryPaths: [String] = []
     @FocusState private var focusedRepositoryField: String?
     @FocusState private var isComposerFocused: Bool
-    @FocusState private var isRepositorySearchFocused: Bool
 
     private var isSendDisabled: Bool {
         !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isLoadingHistory || userInputRequest != nil
@@ -2917,81 +2912,50 @@ struct TaskConversationView: View {
     private var repositoryBadges: some View {
         let suggestedRepositoryPaths = suggestedRepositories.map(\.path)
         let attachedRepositoryPaths = task.repositoryWorktrees.map(\.repositoryPath)
-        return HStack(spacing: 10) {
-            ForEach(task.repositoryWorktrees, id: \.repositoryPath) { repository in
-                repositoryChip(repository)
-            }
-            Button {
-                if isShowingRepositoryPicker { isShowingRepositoryPicker = false } else { showRepositoryPicker() }
-            } label: {
-                Image(systemName: "plus").font(.system(size: 12, weight: .semibold))
-                    .frame(width: 28, height: 28).background(Color.primary.opacity(0.07), in: Circle())
-            }
-            .buttonHoverPointer()
-            .buttonStyle(.plain).nativeHelp("Add a repository").accessibilityLabel("Add repository")
-            .accessibilityIdentifier("add-conversation-repository-button")
+        return RepositoryChipsView(
+            model: RepositoryChipsModel(repositoryPaths: attachedRepositoryPaths, readOnly: isReadOnly),
+            actions: RepositoryChipsActions(
+                edit: { path in
+                    guard let repository = task.repositoryWorktrees.first(where: { $0.repositoryPath == path }) else { return }
+                    repositoryBeingEdited = repository
+                    resetRepositoryEdits(to: repository)
+                    editingRepositoryField = nil
+                },
+                remove: { path in
+                    guard let repository = task.repositoryWorktrees.first(where: { $0.repositoryPath == path }) else { return }
+                    removeConversationRepository(repository)
+                },
+                add: {
+                    if isShowingRepositoryPicker { isShowingRepositoryPicker = false } else { showRepositoryPicker() }
+                }
+            ),
+            isPickerPresented: $isShowingRepositoryPicker,
+            editingPath: Binding(
+                get: { repositoryBeingEdited?.repositoryPath },
+                set: { if $0 == nil { repositoryBeingEdited = nil } }
+            ),
             // The popover content only refreshes with this view, so key it to the suggestions it lists.
-            .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker.id(suggestedRepositoryPaths + recentRepositoryPaths) }
-            .disabled(isReadOnly)
-        }
+            picker: { repositoryPicker.id(suggestedRepositoryPaths + recentRepositoryPaths) },
+            settings: { chip in
+                if let repository = task.repositoryWorktrees.first(where: { $0.repositoryPath == chip.path }) {
+                    repositorySettingsPopover(repository, name: chip.name)
+                }
+            }
+        )
         .onAppear { loadRecentRepositories() }
         .onChange(of: attachedRepositoryPaths) { _, _ in loadRecentRepositories() }
+        .onChange(of: repositorySearch) { _, value in
+            repositorySuggestionIndex = 0
+            if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                didOverrideRepositoryDefault = true
+            }
+        }
     }
 
     private func showRepositoryPicker() {
         isShowingRepositoryPicker = true
         loadRecentRepositories()
         if suggestedRepositories.isEmpty { loadSuggestedRepositories() }
-    }
-
-    private func repositoryChip(_ repository: RepositoryWorktreeRecord) -> some View {
-        let name = URL(fileURLWithPath: repository.repositoryPath).lastPathComponent
-        return Button {
-            repositoryBeingEdited = repository
-            resetRepositoryEdits(to: repository)
-            editingRepositoryField = nil
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.triangle.branch")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(WorkspaceTheme.accent)
-                Text(name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                    .foregroundStyle(.primary)
-            }
-            .padding(.leading, 11).padding(.trailing, 14).padding(.vertical, 7)
-            .background(Color.primary.opacity(0.08), in: Capsule())
-            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.14), lineWidth: 1))
-        }
-        .buttonHoverPointer()
-        .nativeHelp("Edit repository settings for \(name)")
-        .buttonStyle(.plain)
-        .disabled(isReadOnly)
-        .popover(item: Binding(
-            get: { repositoryBeingEdited?.repositoryPath == repository.repositoryPath ? RepositoryBadgeEditID(path: repository.repositoryPath) : nil },
-            set: { if $0 == nil { repositoryBeingEdited = nil } }
-        )) { _ in
-            repositorySettingsPopover(repository, name: name)
-        }
-        .accessibilityIdentifier("conversation-repository-badge-\(name)")
-        .overlay(alignment: .topTrailing) {
-            if !isReadOnly {
-                Button { removeConversationRepository(repository) } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 20, height: 20)
-                        .background(WorkspaceTheme.panelBackground, in: Circle())
-                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.16), lineWidth: 1))
-                        .contentShape(Circle())
-                }
-                .buttonHoverPointer()
-                .buttonStyle(.plain)
-                .nativeHelp("Remove \(name) from this task")
-                .accessibilityLabel("Remove \(name)")
-                .accessibilityIdentifier("remove-conversation-repository-\(name)")
-                .offset(x: 6, y: -6)
-            }
-        }
     }
 
     private func repositorySettingsPopover(_ repository: RepositoryWorktreeRecord, name: String) -> some View {
@@ -3024,107 +2988,46 @@ struct TaskConversationView: View {
     }
 
     private var repositoryPicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let parentFolderURL = WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) {
-                HStack(spacing: 5) {
-                    Text("Suggestions from \(parentFolderURL.path)")
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .nativeHelp(parentFolderURL.path)
-                    Spacer(minLength: 0)
-                    Button("Change…") { chooseRepositoryParentFolder() }
-                        .buttonHoverPointer()
-                        .nativeHelp("Choose a different repository suggestion folder")
-                        .disabled(isChoosingRepositoryParent)
-                        .accessibilityIdentifier("choose-repository-suggestion-parent-button")
-                }
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-            } else {
-                Text("Choose a parent folder to find Git repositories.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                Button("Choose suggestion folder…") { chooseRepositoryParentFolder() }
-                    .buttonHoverPointer()
-                    .nativeHelp("Choose a folder to find repository suggestions")
-                    .disabled(isChoosingRepositoryParent)
-                    .accessibilityIdentifier("choose-repository-suggestion-parent-button")
-            }
-            TextField(repositorySearchPlaceholder, text: $repositorySearch)
-                .textFieldStyle(.roundedBorder)
-                .focused($isRepositorySearchFocused)
-                .onChange(of: repositorySearch) { _, value in
-                    repositorySuggestionIndex = 0
-                    if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        didOverrideRepositoryDefault = true
-                    }
-                }
-                .onKeyPress { press in
+        let available = pickerRepositories
+        return RepositoryPickerView(
+            model: RepositoryPickerModel(
+                parentFolder: WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath)?.path,
+                isChoosingParent: isChoosingRepositoryParent,
+                placeholder: repositorySearchPlaceholder,
+                search: repositorySearch,
+                isListingRecent: isShowingRecentRepositories,
+                repositories: available,
+                highlighted: repositorySuggestionIndex,
+                focusesSearch: isNewTask,
+                canSubmit: isUsingSavedRepositoryDefault || available.indices.contains(repositorySuggestionIndex)
+            ),
+            actions: RepositoryPickerActions(
+                chooseParent: { chooseRepositoryParentFolder() },
+                search: { repositorySearch = $0 },
+                arrow: { direction in
                     let available = pickerRepositories
-                    switch press.key {
-                    case .downArrow:
-                        guard !available.isEmpty else { return .ignored }
-                        didOverrideRepositoryDefault = true
-                        repositorySuggestionIndex = min(repositorySuggestionIndex + 1, available.count - 1)
-                        return .handled
-                    case .upArrow:
-                        guard !available.isEmpty else { return .ignored }
-                        didOverrideRepositoryDefault = true
-                        repositorySuggestionIndex = max(repositorySuggestionIndex - 1, 0)
-                        return .handled
-                    case .return:
-                        if isUsingSavedRepositoryDefault {
-                            let savedRepositories = validLastSelectedRepositoryURLs
-                            guard !savedRepositories.isEmpty else { return .handled }
-                            selectRepositories(savedRepositories)
-                        } else if available.indices.contains(repositorySuggestionIndex) {
-                            selectRepositorySuggestion(available[repositorySuggestionIndex])
-                        } else {
-                            return .ignored
-                        }
-                        return .handled
-                    default:
-                        return .ignored
+                    guard !available.isEmpty else { return }
+                    didOverrideRepositoryDefault = true
+                    repositorySuggestionIndex = direction == "down"
+                        ? min(repositorySuggestionIndex + 1, available.count - 1)
+                        : max(repositorySuggestionIndex - 1, 0)
+                },
+                submit: {
+                    let available = pickerRepositories
+                    if isUsingSavedRepositoryDefault {
+                        let savedRepositories = validLastSelectedRepositoryURLs
+                        guard !savedRepositories.isEmpty else { return }
+                        selectRepositories(savedRepositories)
+                    } else if available.indices.contains(repositorySuggestionIndex) {
+                        selectRepositorySuggestion(available[repositorySuggestionIndex])
                     }
+                },
+                select: { path in
+                    guard let repository = pickerRepositories.first(where: { $0.path == path }) else { return }
+                    selectRepositorySuggestion(repository)
                 }
-                .accessibilityIdentifier("conversation-repository-search")
-            let available = pickerRepositories
-            let isListingRecent = isShowingRecentRepositories
-            if isListingRecent {
-                Text("Recent")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("conversation-repository-recent-header")
-            }
-            if !isListingRecent, WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) == nil {
-                EmptyView()
-            } else if available.isEmpty {
-                Text("No matching repositories.").font(.system(size: 10)).foregroundStyle(.secondary)
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(available.enumerated()), id: \.element.path) { index, repository in
-                            Button {
-                                selectRepositorySuggestion(repository)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(repository.lastPathComponent).font(.system(size: 11, weight: .medium))
-                                    Text(repository.path).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
-                                }.frame(maxWidth: .infinity, alignment: .leading).padding(7).contentShape(Rectangle())
-                            }
-                            .buttonHoverPointer()
-                            .nativeHelp("Select repository")
-                            .buttonStyle(.plain)
-                            .background(index == repositorySuggestionIndex ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
-                            .accessibilityIdentifier("conversation-repository-\(isListingRecent ? "recent" : "suggestion")-\(repository.lastPathComponent)")
-                        }
-                    }
-                }.frame(width: 280, height: min(CGFloat(available.count * 42), 180))
-            }
-        }
-        .padding(12)
-        .frame(width: 304)
-        .defaultFocus($isRepositorySearchFocused, isNewTask)
+            )
+        )
     }
 
     private var repositorySearchPlaceholder: String {

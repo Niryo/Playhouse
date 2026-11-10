@@ -2,7 +2,7 @@ import SwiftUI
 
 // The atoms' SwiftUI views. Plugins reach them through `AtomRegistry`, and
 // native composites (the task item, the Agents info section, the Token
-// Stats modal, the Skills page) build them directly with the same props
+// Stats modal, the Skills page, the repository chips and picker) build them directly with the same props
 // structs, so both share one implementation.
 
 /// Colors a prop may name: primary, secondary, tertiary, accent, text (the
@@ -343,6 +343,10 @@ struct AtomButton<Content: View>: View {
             Button(role: role, action: action) { label }
                 .buttonStyle(.borderedProminent)
                 .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
+        case "automatic":
+            Button(role: role, action: action) { label }
+                .buttonStyle(.automatic)
+                .buttonHoverPointer() // no-tooltip: the atom's help prop sets it, through atomCommon.
         default:
             Button(role: role, action: action) { label }
                 .buttonStyle(.plain)
@@ -613,7 +617,14 @@ struct AtomPanel<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: CGFloat(props.cornerRadius ?? 8), style: .continuous)
+        if props.capsule == true {
+            panel(Capsule())
+        } else {
+            panel(RoundedRectangle(cornerRadius: CGFloat(props.cornerRadius ?? 8), style: .continuous))
+        }
+    }
+
+    private func panel(_ shape: some InsettableShape) -> some View {
         VStack(alignment: .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
             .atomFrame(common)
             .background((AtomColor.style(props.fill) ?? AnyShapeStyle(.primary)).opacity(props.fillOpacity ?? 0.05), in: shape)
@@ -748,23 +759,55 @@ struct AtomToggle: View {
 
 /// A rounded one-line text field. It edits its own copy of `text` so typing
 /// never waits on the owner, reports each edit through `onChange`, and takes
-/// the owner's `text` whenever that changes.
+/// the owner's `text` whenever that changes. Only real edits reach the owner:
+/// ending editing as the field goes away (a popover closing) sets the same
+/// text again, which must not undo a reset the owner just made. Return goes to `onSubmit` and
+/// the Up and Down arrows to `onArrow` only when they are given; otherwise
+/// the field handles those keys as usual.
 struct AtomTextField: View {
     var props: TextFieldProps
     var common = AtomCommon()
     let onChange: (String) -> Void
+    var onSubmit: (() -> Void)?
+    var onArrow: ((String) -> Void)?
     @State private var text: String
+    @FocusState private var isFocused: Bool
 
-    init(props: TextFieldProps, common: AtomCommon = AtomCommon(), onChange: @escaping (String) -> Void) {
+    init(
+        props: TextFieldProps, common: AtomCommon = AtomCommon(), onChange: @escaping (String) -> Void,
+        onSubmit: (() -> Void)? = nil, onArrow: ((String) -> Void)? = nil
+    ) {
         self.props = props
         self.common = common
         self.onChange = onChange
+        self.onSubmit = onSubmit
+        self.onArrow = onArrow
         _text = State(initialValue: props.text)
     }
 
     var body: some View {
-        TextField(props.placeholder ?? "", text: Binding(get: { text }, set: { text = $0; onChange($0) }))
+        TextField(props.placeholder ?? "", text: Binding(get: { text }, set: { edited in
+            guard edited != text else { return }
+            text = edited
+            onChange(edited)
+        }))
             .textFieldStyle(.roundedBorder)
+            .focused($isFocused)
+            .defaultFocus($isFocused, props.autoFocus == true)
+            .onKeyPress { press in
+                switch press.key {
+                case .downArrow, .upArrow:
+                    guard let onArrow else { return .ignored }
+                    onArrow(press.key == .downArrow ? "down" : "up")
+                    return .handled
+                case .return:
+                    guard let onSubmit else { return .ignored }
+                    onSubmit()
+                    return .handled
+                default:
+                    return .ignored
+                }
+            }
             .onChange(of: props.text) { _, owned in
                 if owned != text { text = owned }
             }
@@ -906,6 +949,39 @@ struct PressAreaView: NSViewRepresentable {
                 if !held, bounds.contains(convert(next.locationInWindow, from: nil)) { onClick() }
                 return
             }
+        }
+    }
+}
+
+/// Its base laid out as usual, with `overlay` drawn over it at `align` and
+/// moved by the offsets, so the overlay never changes the base's size. It is
+/// one accessibility container, so its identifier never replaces theirs.
+struct AtomOverlay<Base: View, Over: View>: View {
+    var props = OverlayProps()
+    var common = AtomCommon()
+    @ViewBuilder var base: () -> Base
+    @ViewBuilder var overlay: () -> Over
+
+    var body: some View {
+        base()
+            .overlay(alignment: alignment) {
+                overlay()
+                    .offset(x: CGFloat(props.offsetX ?? 0), y: CGFloat(props.offsetY ?? 0))
+            }
+            .atomCommon(common, atom: .overlay, group: true)
+    }
+
+    private var alignment: Alignment {
+        switch props.align {
+        case "top": .top
+        case "bottom": .bottom
+        case "leading": .leading
+        case "trailing": .trailing
+        case "topLeading": .topLeading
+        case "topTrailing": .topTrailing
+        case "bottomLeading": .bottomLeading
+        case "bottomTrailing": .bottomTrailing
+        default: .center
         }
     }
 }
