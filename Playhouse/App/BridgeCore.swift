@@ -1656,6 +1656,26 @@ final class BoardTaskManager {
         }
     }
 
+    /// Runs `operation` holding the task's turn reservation only if no one holds it now;
+    /// returns nil, without waiting, when another send or process does.
+    func withConversationTurnReservationIfFree<T>(
+        _ id: UUID,
+        operation: @MainActor () async throws -> T
+    ) async throws -> T? {
+        guard let conversationTurnLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for the conversation-turn reservation.")
+        }
+        guard try !hasConversationTurnReservation(id) else { return nil }
+        let lockURL = conversationTurnLockDirectory.appendingPathComponent("\(id.uuidString).lock")
+        do {
+            return try await withExclusiveFileLocks(at: [lockURL], purpose: "conversation-turn", waitingForHolder: false) {
+                try await operation()
+            }
+        } catch is FileLockHeldError {
+            return nil
+        }
+    }
+
     func hasConversationTurnReservation(_ id: UUID) throws -> Bool {
         guard let conversationTurnLockDirectory else {
             throw BridgeFileLockError(message: "Couldn't determine the task-store location for the conversation-turn reservation.")
@@ -1798,9 +1818,13 @@ final class BoardTaskManager {
         }
     }
 
+    /// Thrown instead of waiting when a lock taken with `waitingForHolder: false` is held.
+    private struct FileLockHeldError: Error {}
+
     private func withExclusiveFileLocks<T>(
         at lockURLs: [URL],
         purpose: String,
+        waitingForHolder: Bool = true,
         operation: @MainActor () async throws -> T
     ) async throws -> T {
         let orderedURLs = Array(Set(lockURLs.map { $0.standardizedFileURL }))
@@ -1831,6 +1855,10 @@ final class BoardTaskManager {
                         lock.l_whence = Int16(SEEK_SET)
                         while Darwin.fcntl(descriptor, F_SETLK, &lock) != 0 {
                             if errno == EACCES || errno == EAGAIN {
+                                guard waitingForHolder else {
+                                    _ = Darwin.close(descriptor)
+                                    throw FileLockHeldError()
+                                }
                                 usleep(50_000)
                                 continue
                             }
@@ -4375,6 +4403,10 @@ final class BoardTaskManager {
     /// chat never has to exist as a task to hold a conversation.
     func conversationSubject(_ id: UUID) throws -> any ConversationSubject {
         try requireSubject(id)
+    }
+
+    func standaloneChatIDs() -> [UUID] {
+        (try? modelContext.fetch(FetchDescriptor<StandaloneChat>()).map(\.id)) ?? []
     }
 
     /// The standalone chat with this ID, or nil when the ID belongs to a board task.
@@ -7005,7 +7037,13 @@ final class ConversationManager {
                                 message: "A previous chat page classification is still pending. Retry sending after it resolves."
                             )
                         }
+                        // A turn no daemon lived to file (it was in flight when its daemon
+                        // died) is filed before this turn seeds a page session from the archive.
+                        await self.recoverUnfiledStandaloneChatTurns(taskID: taskID, reason: "send")
                         signalBefore = (try? standaloneChatManager.signalSequence()) ?? 0
+                        // Durable, unlike `signalBefore`: a daemon that takes this turn over after
+                        // a restart reads when it began from here.
+                        try? standaloneChatManager.beginTurn()
                     }
                     let result = try await self.sendReserved(
                         taskID: taskID,
@@ -7037,17 +7075,21 @@ final class ConversationManager {
                     try? await self.tasks.clearPendingSubmittedPrompt(taskID)
                     if let standaloneChatManager, let signalBefore,
                        let latestTurnID = result.messages.last?.turnID {
+                        let signalAfter = (try? standaloneChatManager.signalSequence()) ?? signalBefore
                         self.recordStandaloneChatTurn(
                             task: task,
                             chatManager: standaloneChatManager,
                             history: result,
                             latestTurnID: latestTurnID,
-                            signalBefore: signalBefore,
+                            missedSignal: signalAfter == signalBefore,
                             onUpdate: onUpdate
                         )
                     }
+                    try? standaloneChatManager?.endTurn()
                     return result
                 } catch {
+                    // This daemon saw the send fail, so nothing is left for a later one to file.
+                    if signalBefore != nil { try? standaloneChatManager?.endTurn() }
                     try? await self.tasks.clearPendingSubmittedPrompt(taskID)
                     throw error
                 }
@@ -7098,6 +7140,7 @@ final class ConversationManager {
                 entry.server.removeFiles(socketPath: entry.manifest.socketPath)
             }
         }
+        var followed = Set<UUID>()
         for taskID in tasks.tasksWithCutOffTurns() {
             guard let task = try? tasks.conversationSubject(taskID) else {
                 tasks.clearConversationTurnOutcome(taskID)
@@ -7111,8 +7154,9 @@ final class ConversationManager {
             } else if task.conversationProvider == .claude, let sessionID = task.claudeSessionID {
                 attached = await reattachTurn(taskID: taskID, client: clients.claude, threadID: sessionID)
             }
-            if !attached { await settleTurnLostInRestart(taskID: taskID) }
+            if attached { followed.insert(taskID) } else { await settleTurnLostInRestart(taskID: taskID) }
         }
+        await recoverUnfiledStandaloneChatTurnsAtStartup(skipping: followed)
         for live in liveServers {
             await CodexAppServerClient.sharedClient(for: live.server, runDirectory: storeDirectory)?.adoptSharedServer()
         }
@@ -7285,6 +7329,10 @@ final class ConversationManager {
             fields["taskID"] = taskID.uuidString
             fields["phase"] = phase
             PlayhouseDiagnostics.record("conversation.reattached_turn.failed", fields: fields)
+            // A chat turn whose agent died with no daemon following it is filed with what it
+            // wrote, on the page its close-turn named, so its page doesn't start empty.
+            // Its question is filed even with no answer saved: its in-flight record says it ran.
+            await recoverUnfiledStandaloneChatTurns(taskID: taskID, reason: "reattach-lost")
             onUpdate(ConversationUpdate(type: "completed", history: try? await history(taskID: taskID, includesImageData: true)))
             return false
         }
@@ -7303,10 +7351,11 @@ final class ConversationManager {
             taskID: taskID, client: client, threadID: threadID, recording: recording,
             deferMissingOutcomeStatus: true, phase: &phase
         )
-        // A chat's nudge exists to classify its turn's page, which only a sent turn files
-        // (`recordStandaloneChatTurn`); a reattached chat turn leaves a missed page decision to
-        // the background classifier, as it did before the chat joined this loop.
-        if (try? tasks.conversationSubject(taskID))?.isStandaloneChat != true {
+        // A chat gets no nudge here: the daemon that sent the turn is gone, and with it the
+        // signal count it took at the start, so a reattached chat turn leaves a missed page
+        // decision to the background classifier, which the filing below schedules.
+        let chat = (try? tasks.conversationSubject(taskID)).flatMap { $0.isStandaloneChat ? $0 : nil }
+        if chat == nil {
             try await driveUnsettledTurns(
                 taskID: taskID, isStandaloneChat: false, mode: .code, modelID: nil,
                 client: client, onUpdate: onUpdate, onUserInput: { _ in }
@@ -7315,6 +7364,13 @@ final class ConversationManager {
         lastReportedTurnOutcomeByTaskID.removeValue(forKey: taskID)
         try? await tasks.clearPendingSubmittedPrompt(taskID)
         let finalHistory = try await history(taskID: taskID, includesImageData: true)
+        // The followed turn may be the chat's close-turn nudge, which is never filed: the turn
+        // it belongs to is the newest one the user sent.
+        if let chat, let turnID = finalHistory.messages.last(where: {
+            $0.role == .user && !PrivateOutcomeNudgeMarker.matches($0.text) && !ProviderAutomaticNotice.matches($0.text)
+        })?.turnID {
+            fileReattachedStandaloneChatTurn(chat: chat, history: finalHistory, turnID: turnID, onUpdate: onUpdate)
+        }
         onUpdate(ConversationUpdate(type: "completed", history: standaloneChatDisplayHistory(taskID: taskID, finalHistory)))
         return true
     }
@@ -7467,18 +7523,22 @@ final class ConversationManager {
         )
     }
 
+    /// Files a finished chat turn and settles its page decision. Both GUI and CLI sends pass
+    /// through here, and so does a turn this daemon took over after a restart. `page` is where
+    /// the turn's close-turn put it (nil: the active page); `missedSignal` says no close-turn
+    /// ran, so the background classifier decides the page.
     private func recordStandaloneChatTurn(
         task: any ConversationSubject,
         chatManager: StandaloneChatManager,
         history: ConversationHistory,
         latestTurnID: String,
-        signalBefore: Int,
+        page targetPage: StandaloneChatPage? = nil,
+        missedSignal: Bool,
         onUpdate: @escaping (ConversationUpdate) -> Void
     ) {
-        // Both GUI and CLI sends pass through this shared method. Persist messages and
-        // schedule classification before releasing the turn reservation, so a following
-        // send can wait for the page decision without overtaking it.
-        let page: StandaloneChatPage? = {
+        // Persist messages and schedule classification before releasing the turn reservation,
+        // so a following send can wait for the page decision without overtaking it.
+        let page: StandaloneChatPage? = targetPage ?? {
             if let existing = try? chatManager.activePage() { return existing }
             return try? chatManager.createPage(
                 title: "New conversation",
@@ -7489,12 +7549,22 @@ final class ConversationManager {
         if let page {
             // Only the turn's own conversation is filed: a provider's automatic notice stays in
             // the transcript but never in a page or the context a page replays.
-            for message in Self.withoutNudgeTurns(history.messages) where message.turnID == latestTurnID {
-                _ = try? chatManager.appendMessage(pageID: page.id, turnID: latestTurnID, role: message.role.rawValue, text: message.text)
+            let turnMessages = Self.withoutNudgeTurns(history.messages).filter { $0.turnID == latestTurnID }
+            // Nothing to file leaves no page decision to make, and a pending one with no
+            // question could never resolve.
+            guard !turnMessages.isEmpty else { return }
+            do {
+                // A turn already filed (by startup recovery, say) keeps its page decision.
+                guard try chatManager.fileTurn(
+                    pageID: page.id, turnID: latestTurnID, messages: Self.standaloneChatTurnMessages(turnMessages)
+                ) else { return }
+            } catch {
+                var fields = PlayhouseDiagnostics.errorFields(error)
+                fields["taskID"] = task.id.uuidString
+                fields["turnID"] = latestTurnID
+                PlayhouseDiagnostics.record("chat.page.turn_file_failed", fields: fields)
             }
         }
-        let signalAfter = (try? chatManager.signalSequence()) ?? signalBefore
-        let missedSignal = signalAfter == signalBefore
         guard missedSignal else {
             try? chatManager.setLastTurnMissedSignal(false)
             return
@@ -7559,6 +7629,229 @@ final class ConversationManager {
             "clientCount": String(classifierClients.count),
             "turnID": latestTurnID
         ])
+    }
+
+    /// What a page keeps of a turn's messages.
+    static func standaloneChatTurnMessages(_ messages: [ConversationMessage]) -> [StandaloneChatTurnMessage] {
+        messages.map { StandaloneChatTurnMessage(role: $0.role.rawValue, text: $0.text, createdAt: $0.createdAt) }
+    }
+
+    /// Files a chat turn this daemon followed to its end after a restart. The daemon that sent
+    /// it died before it could, and took the signal count it captured at the start with it, so
+    /// the page comes from the close-turn signals kept since the turn began (its in-flight
+    /// record, else its first message's time): the last one names the page, and none means a
+    /// missed signal, which schedules the background classifier just as a sent turn does.
+    private func fileReattachedStandaloneChatTurn(
+        chat: any ConversationSubject,
+        history: ConversationHistory,
+        turnID: String,
+        onUpdate: @escaping (ConversationUpdate) -> Void
+    ) {
+        guard let chatManager = try? tasks.standaloneChatManager() else { return }
+        let startedAt = ((try? chatManager.inflightTurnStartedAt()) ?? nil)
+            ?? history.messages.filter { $0.turnID == turnID }.compactMap(\.createdAt).min()
+        let signal = startedAt.flatMap { (try? chatManager.turnSignals(from: $0))?.last }
+        let page = signal.flatMap { try? chatManager.page(id: $0.pageID) }
+        recordStandaloneChatTurn(
+            task: chat,
+            chatManager: chatManager,
+            history: history,
+            latestTurnID: turnID,
+            page: page,
+            missedSignal: signal == nil,
+            onUpdate: onUpdate
+        )
+        try? chatManager.endTurn()
+        let filedPage = (try? chatManager.pageAssignmentsByTurnID())?[turnID]
+        PlayhouseDiagnostics.record("chat.page.reattached_turn.filed", fields: [
+            "taskID": chat.id.uuidString,
+            "turnID": turnID,
+            "pageID": filedPage?.id ?? "",
+            "signal": signal == nil ? "missed" : "close-turn",
+        ])
+        onUpdate(ConversationUpdate(type: "chat_page_updated"))
+    }
+
+    /// A finished chat turn that no page holds.
+    struct UnfiledStandaloneChatTurn {
+        let turnID: String
+        /// The turn's messages as a page keeps them: nudges and automatic notices left out.
+        let messages: [ConversationMessage]
+        let startedAt: Date?
+        /// When the user's next turn started; nil for the newest turn.
+        let nextTurnStartedAt: Date?
+        let laterTurnIDs: Set<String>
+        let precedingFiledTurnID: String?
+    }
+
+    /// The answered turns of a chat transcript that no page holds. Turns from before the chat
+    /// filed anything are left alone: a chat that predates pages never filed them, so only a turn
+    /// after a filed one was lost. A turn with no answer was a failed send, which no page ever
+    /// held. `inFlightSince` is the chat's in-flight record: the newest turn then really ran (its
+    /// daemon died before filing it), so it is kept even when it is the chat's first turn or its
+    /// agent died before Playhouse saved an answer, and that record is its start time, which a
+    /// provider's messages may not carry (Codex). A nudge turn is never a turn of its own: its
+    /// time belongs to the turn it reminded, whose close-turn it may have run.
+    static func unfiledStandaloneChatTurns(
+        _ messages: [ConversationMessage],
+        filedTurnIDs: Set<String>,
+        inFlightSince: Date? = nil
+    ) -> [UnfiledStandaloneChatTurn] {
+        var order: [String] = []
+        var raw: [String: [ConversationMessage]] = [:]
+        for message in messages {
+            guard let turnID = message.turnID else { continue }
+            if raw[turnID] == nil { order.append(turnID) }
+            raw[turnID, default: []].append(message)
+        }
+        var kept: [String: [ConversationMessage]] = [:]
+        for message in withoutNudgeTurns(messages) {
+            guard let turnID = message.turnID else { continue }
+            kept[turnID, default: []].append(message)
+        }
+        let userTurns = order.filter { turnID in
+            !(raw[turnID] ?? []).contains { $0.role == .user && PrivateOutcomeNudgeMarker.matches($0.text) }
+        }
+        let inFlightTurnID = inFlightSince == nil ? nil : userTurns.last
+        func startedAt(_ turnID: String) -> Date? {
+            turnID == inFlightTurnID ? inFlightSince : raw[turnID]?.compactMap(\.createdAt).min()
+        }
+        guard let start = userTurns.firstIndex(where: filedTurnIDs.contains)
+            ?? (inFlightTurnID == nil ? nil : userTurns.count - 1) else { return [] }
+        var precedingFiled: String?
+        var result: [UnfiledStandaloneChatTurn] = []
+        for index in userTurns.indices where index >= start {
+            let turnID = userTurns[index]
+            if filedTurnIDs.contains(turnID) {
+                precedingFiled = turnID
+                continue
+            }
+            let turnMessages = kept[turnID] ?? []
+            guard turnID == inFlightTurnID || turnMessages.contains(where: { $0.role == .assistant }),
+                  !turnMessages.isEmpty else { continue }
+            let next = userTurns.indices.contains(index + 1) ? userTurns[index + 1] : nil
+            result.append(UnfiledStandaloneChatTurn(
+                turnID: turnID,
+                messages: turnMessages,
+                startedAt: startedAt(turnID),
+                nextTurnStartedAt: next.flatMap(startedAt),
+                laterTurnIDs: Set(userTurns[(index + 1)...]),
+                precedingFiledTurnID: precedingFiled
+            ))
+        }
+        return result
+    }
+
+    /// The chat's turns with their messages. Playhouse keeps Claude turns itself, so they read
+    /// without any provider; Codex keeps its turns in its own thread, read only on request.
+    private func standaloneChatTranscriptMessages(taskID: UUID, readingProviderThread: Bool) async -> [ConversationMessage] {
+        if readingProviderThread, (try? tasks.conversationSubject(taskID))?.conversationProvider == .codex {
+            return (try? await history(taskID: taskID).messages) ?? []
+        }
+        let turns = (try? transcripts.read(taskID, turns: .all, includeImages: false).turns) ?? []
+        return turns.flatMap { turn in
+            turn.messages.map { message in
+                var message = message
+                message.turnID = turn.id
+                return message
+            }
+        }
+    }
+
+    /// The page an unfiled turn belongs on: the page its last close-turn named; for a turn from
+    /// before signals were kept, the page its `--continues false` opened while it ran; otherwise
+    /// the page of the turn before it, and failing that the active page.
+    private func standaloneChatRecoveryPage(
+        chatManager: StandaloneChatManager,
+        turn: UnfiledStandaloneChatTurn,
+        assignments: [String: StandaloneChatPage]
+    ) -> (page: StandaloneChatPage, source: String)? {
+        if let start = turn.startedAt {
+            if let signal = (try? chatManager.turnSignals(from: start, to: turn.nextTurnStartedAt))?.last,
+               let page = try? chatManager.page(id: signal.pageID) {
+                return (page, "close-turn")
+            }
+            let lastMessageAt = turn.messages.compactMap(\.createdAt).max() ?? start
+            let end = min(turn.nextTurnStartedAt ?? .distantFuture, lastMessageAt.addingTimeInterval(120))
+            if let page = (try? chatManager.pagesCreated(from: start, to: end))?.last {
+                return (page, "page-opened-in-turn")
+            }
+        }
+        if let preceding = turn.precedingFiledTurnID, let page = assignments[preceding] {
+            return (page, "preceding-turn-page")
+        }
+        if let page = (try? chatManager.activePage()) ?? nil { return (page, "active-page") }
+        return nil
+    }
+
+    /// Files the chat turns no daemon lived to file: a turn in flight when its daemon died, whose
+    /// agent then finished or died with no daemon following it. Run while holding the chat's turn
+    /// reservation, so no turn is in flight. Filing is idempotent, so a later run files nothing.
+    /// The chat's in-flight record is cleared once its turn is on a page.
+    @discardableResult
+    func recoverUnfiledStandaloneChatTurns(
+        taskID: UUID,
+        reason: String,
+        readingProviderThread: Bool = true
+    ) async -> Int {
+        guard (try? tasks.conversationSubject(taskID))?.isStandaloneChat == true,
+              let chatManager = try? tasks.standaloneChatManager(),
+              let filed = try? chatManager.filedTurnIDs() else { return 0 }
+        let messages = await standaloneChatTranscriptMessages(taskID: taskID, readingProviderThread: readingProviderThread)
+        let inFlightSince = (try? chatManager.inflightTurnStartedAt()) ?? nil
+        defer {
+            // The record names the newest turn; once that turn is filed it has done its job.
+            if inFlightSince != nil, let newest = messages.last(where: { $0.role == .user && !PrivateOutcomeNudgeMarker.matches($0.text) })?.turnID,
+               (try? chatManager.filedTurnIDs())?.contains(newest) == true {
+                try? chatManager.endTurn()
+            }
+        }
+        let unfiled = Self.unfiledStandaloneChatTurns(messages, filedTurnIDs: filed, inFlightSince: inFlightSince)
+        guard !unfiled.isEmpty else { return 0 }
+        let assignments = (try? chatManager.pageAssignmentsByTurnID()) ?? [:]
+        var recovered = 0
+        for turn in unfiled {
+            guard let target = standaloneChatRecoveryPage(chatManager: chatManager, turn: turn, assignments: assignments) else { continue }
+            do {
+                guard try chatManager.fileTurn(
+                    pageID: target.page.id,
+                    turnID: turn.turnID,
+                    messages: Self.standaloneChatTurnMessages(turn.messages),
+                    laterTurnIDs: turn.laterTurnIDs
+                ) else { continue }
+                recovered += 1
+                PlayhouseDiagnostics.record("chat.page.turn_recovered", fields: [
+                    "taskID": taskID.uuidString,
+                    "turnID": turn.turnID,
+                    "pageID": target.page.id,
+                    "source": target.source,
+                    "reason": reason,
+                    "messageCount": String(turn.messages.count),
+                ])
+            } catch {
+                var fields = PlayhouseDiagnostics.errorFields(error)
+                fields["taskID"] = taskID.uuidString
+                fields["turnID"] = turn.turnID
+                fields["reason"] = reason
+                PlayhouseDiagnostics.record("chat.page.turn_recovery_failed", fields: fields)
+            }
+        }
+        if recovered > 0 { Self.bumpVisibleRevision(taskID) }
+        return recovered
+    }
+
+    /// Recovers each chat's unfiled turns when a daemon starts, before it answers any request.
+    /// A chat whose cut-off turn this daemon is following is skipped (that turn files itself when
+    /// it ends), as is one whose turn another process holds. Only Playhouse's own transcript is
+    /// read here, so a start never waits on a provider.
+    private func recoverUnfiledStandaloneChatTurnsAtStartup(skipping followed: Set<UUID>) async {
+        for chatID in tasks.standaloneChatIDs() where !followed.contains(chatID) {
+            // Every request waits for this scan, so a chat whose turn is running (a window's own
+            // send, say) is left to that send's own recovery rather than waited for.
+            _ = try? await tasks.withConversationTurnReservationIfFree(chatID) {
+                await self.recoverUnfiledStandaloneChatTurns(taskID: chatID, reason: "startup", readingProviderThread: false)
+            }
+        }
     }
 
     func resolvePendingStandalonePageFallback(
@@ -9649,7 +9942,9 @@ final class PlayhouseBridgeRuntime {
                     continues: continues,
                     newTitle: request.arguments["newTitle"]?.string
                 )
-                try chatManager.recordSignal()
+                // Kept with its page and time, so the turn it settles can still be filed on
+                // that page by a daemon that took the turn over after a restart.
+                try chatManager.recordTurnSignal(pageID: page.id)
                 if let summaryHint = request.arguments["summaryHint"]?.string, !summaryHint.isEmpty {
                     try chatManager.setSummary(pageID: page.id, summary: summaryHint)
                 }

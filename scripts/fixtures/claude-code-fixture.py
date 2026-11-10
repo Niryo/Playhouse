@@ -1302,7 +1302,13 @@ def run_reattach_turn():
     `.reattach-late-reply` writes a reply to Playhouse's first control request again,
     `.reattach-release` finishes with "After restart." and the turn's outcome,
     `.reattach-release-quiet` finishes with no outcome report, and `.reattach-exit` exits
-    without a result. Every input line is logged to `.reattach-stdin`."""
+    without a result. For a standalone chat, `.reattach-close-turn` runs the turn's real
+    `chat page close-turn` without ending the turn (a new page titled by the marker's text, or
+    `--continues true` when it is empty), logging the command's result to
+    `.reattach-close-turn-output`; a page classifier prompt is answered at once with a new
+    page titled `Restart fallback`; with `.reattach-hold-nudge`, a Playhouse nudge is held
+    like any turn (writing "Nudge before restart.") instead of being answered at once.
+    Every input line is logged to `.reattach-stdin`."""
     base = str(sys.argv[0])
     instructions = argument("--append-system-prompt") or ""
     turn_uuid = None
@@ -1347,7 +1353,18 @@ def run_reattach_turn():
         elif kind == "user":
             content = message.get("message", {}).get("content", [])
             user_text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
-            if turn_uuid is None and "playhouse internal outcome nudge" in user_text.lower():
+            if turn_uuid is None and user_text.startswith("Classify the latest user message for Playhouse's continuous chat page index."):
+                turn_uuid = message.get("uuid")
+                text("msg_reattach_classification", '{"continues":false,"title":"Restart fallback"}')
+                finish()
+            elif turn_uuid is None and "playhouse internal outcome nudge" in user_text.lower() \
+                    and Path(f"{base}.reattach-hold-nudge").exists():
+                Path(f"{base}.reattach-hold-nudge").unlink()
+                turn_uuid = message.get("uuid")
+                write({"type": "system", "subtype": "init", "session_id": argument("--session-id") or argument("--resume")})
+                text("msg_reattach_nudge_before", "Nudge before restart.")
+                Path(f"{base}.reattach-ready").write_text(user_text, encoding="utf-8")
+            elif turn_uuid is None and "playhouse internal outcome nudge" in user_text.lower():
                 # A status nudge is answered at once with the outcome.
                 turn_uuid = message.get("uuid")
                 text("msg_reattach_nudge", "Waiting for your review.")
@@ -1388,10 +1405,26 @@ def run_reattach_turn():
                     "question": "Which color?", "header": "Color",
                     "options": [{"label": "red"}, {"label": "blue"}], "multiSelect": False}]}}})
             Path(f"{base}.reattach-asked").write_text("asked\n", encoding="utf-8")
+        close_turn_marker = Path(f"{base}.reattach-close-turn")
+        if close_turn_marker.exists():
+            title = close_turn_marker.read_text(encoding="utf-8").strip()
+            close_turn_marker.unlink()
+            command = report_command(instructions, " chat page close-turn ")
+            if command and title:
+                command = command.replace("--continues true", f"--continues false --new-title {shlex.quote(title)}")
+            # Like a tool call, it runs inside the turn, which keeps going after it returns.
+            completed = subprocess.run(shlex.split(command), capture_output=True, text=True) if command else None
+            log("reattach-close-turn-output", {
+                "command": command,
+                "returncode": completed.returncode if completed else None,
+                "output": completed.stdout if completed else "",
+            })
         if Path(f"{base}.reattach-late-reply").exists():
             Path(f"{base}.reattach-late-reply").unlink()
             write({"type": "control_response", "response": {"subtype": "success", "request_id": "playhouse-1", "response": {}}})
         if Path(f"{base}.reattach-exit").exists():
+            # Consumed, so a later turn of the same fixture runs normally.
+            Path(f"{base}.reattach-exit").unlink(missing_ok=True)
             os._exit(3)
         if reporting is None and Path(f"{base}.reattach-release-quiet").exists():
             Path(f"{base}.reattach-release-quiet").unlink()

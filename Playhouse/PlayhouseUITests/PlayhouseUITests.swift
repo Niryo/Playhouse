@@ -8540,6 +8540,267 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: run.path.deletingLastPathComponent().path) }, timeout: 10))
     }
 
+    // case-contract: test_standalone_chat_turn_filed_after_daemon_restart | A standalone chat turn that is still running when its daemon dies is followed by the next daemon, and when it ends with close-turn --continues false that daemon files the turn's question and answers on the new titled page the close-turn opened, exactly once, leaving the earlier page as it was and no page decision pending. The page's first session is seeded with that turn, so the next question reaches the provider with the turn's question and answer. Filing reads Playhouse's own close-turn record and turn transcript, shared by Claude and Codex once a reattached turn ends, so one representative provider (Claude) covers this case.
+    func test_standalone_chat_turn_filed_after_daemon_restart() throws {
+        let (executable, environment, chatID) = try launchRestartFixtureChat()
+        _ = sendFiledRestartChatTurn(executable, "Name a moon of Mars.", environment: environment)
+        let earlierID = try XCTUnwrap((restartChatStatus(environment)?["activePage"] as? [String: Any])?["id"] as? String)
+        let earlierTexts = ["Name a moon of Mars.", "Before restart.", "After restart."]
+        XCTAssertEqual(restartChatPageTexts(earlierID, environment: environment), earlierTexts, "The daemon that sent the first turn files it.")
+
+        let question = "Could the Android build be split into parallel steps?"
+        startRestartChatTurn(executable, question)
+        try killDaemon(environment: environment)
+        attachScreenshot(named: "standalone-chat-restart-1-turn-in-flight")
+        // The window reconnects to the next daemon, which follows the turn: its agent opens a
+        // new page with close-turn and finishes the answer.
+        closeHeldChatTurn(executable, newTitle: "Parallel Android build")
+        touch(executable + ".reattach-release-quiet")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Parallel Android build") }, timeout: 30),
+                      "The reattached turn shows under the page its close-turn opened.")
+        XCTAssertTrue(waitUntil({ self.chatTranscriptShows("After restart.", belowPage: "Parallel Android build") }, timeout: 20),
+                      "The window shows the reattached turn's answer under its new page.")
+        var pageID = ""
+        var pageTexts: [String] = []
+        XCTAssertTrue(waitUntil({
+            guard let status = self.restartChatStatus(environment), status["missedPreviousPageSignal"] as? Bool == false,
+                  let page = status["activePage"] as? [String: Any], page["title"] as? String == "Parallel Android build",
+                  let id = page["id"] as? String else { return false }
+            pageID = id
+            pageTexts = self.restartChatPageTexts(id, environment: environment)
+            return pageTexts == [question, "Before restart.", "After restart."]
+        }, timeout: 20), "The reattached turn is filed once on the page its close-turn opened: \(pageTexts)")
+        XCTAssertEqual(restartChatPageTexts(earlierID, environment: environment), earlierTexts, "The earlier page keeps only its own turn.")
+        let filed = try diagnosticEvents().filter { $0["event"] as? String == "chat.page.reattached_turn.filed" && $0["taskID"] as? String == chatID }
+        XCTAssertEqual(filed.map { [$0["pageID"] as? String ?? "", $0["signal"] as? String ?? ""] }, [[pageID, "close-turn"]],
+                       "The reattached filing is recorded in diagnostics.")
+        attachScreenshot(named: "standalone-chat-restart-2-turn-filed-on-new-page")
+
+        // The new page's first session is seeded with the turn that opened it.
+        let seeded = sendFiledRestartChatTurn(executable, "Which step would be slowest?", environment: environment)
+        XCTAssertTrue(seeded.contains(question), "The new page's session carries the reattached turn's question.")
+        XCTAssertTrue(seeded.contains("After restart."), "The new page's session carries the reattached turn's answer.")
+        XCTAssertFalse(seeded.contains("Name a moon of Mars."), "An earlier page never reaches the new page's session.")
+        XCTAssertEqual(Array(restartChatPageTexts(pageID, environment: environment).prefix(3)), [question, "Before restart.", "After restart."],
+                       "A later turn never files the reattached turn again.")
+        XCTAssertTrue(transcriptMessage("Which step would be slowest?").waitToExist(timeout: 10))
+        attachScreenshot(named: "standalone-chat-restart-3-next-turn-seeded")
+    }
+
+    // case-contract: test_standalone_chat_orphaned_turn_recovered_on_startup | A standalone chat turn that ran close-turn --continues false and then lost both its daemon and its agent before it was filed is filed, question included, by the next daemon on the page that close-turn opened, found from Playhouse's durable close-turn record. An answered turn that an earlier build left unfiled after its close-turn opened a new page, with no close-turn record, is filed by the next daemon as it starts onto the page opened while that turn ran. Both recoveries are recorded in diagnostics, a further daemon restart files nothing again, and the next question's fresh page session is seeded with the recovered turn. Recovery reads only Playhouse's own transcript, close-turn record and page store, so provider selection cannot change it; one representative provider (Claude) covers this case.
+    func test_standalone_chat_orphaned_turn_recovered_on_startup() throws {
+        let (executable, environment, chatID) = try launchRestartFixtureChat()
+        _ = sendFiledRestartChatTurn(executable, "Name a moon of Mars.", environment: environment)
+        let earlierID = try XCTUnwrap((restartChatStatus(environment)?["activePage"] as? [String: Any])?["id"] as? String)
+        let earlierTexts = ["Name a moon of Mars.", "Before restart.", "After restart."]
+        func recoveries(_ reason: String) -> [[String]] {
+            ((try? diagnosticEvents()) ?? []).filter {
+                $0["event"] as? String == "chat.page.turn_recovered" && $0["taskID"] as? String == chatID && $0["reason"] as? String == reason
+            }.map { [$0["pageID"] as? String ?? "", $0["source"] as? String ?? ""] }
+        }
+        func pageID(titled title: String) throws -> String {
+            let pages = (try runCLI(["chat", "page", "list"], extraEnvironment: environment)["result"] as? [String: Any])?["pages"] as? [[String: Any]] ?? []
+            return try XCTUnwrap(pages.first { $0["title"] as? String == title }?["id"] as? String)
+        }
+        func openChat() {
+            launchApp(defaultParent: nil, environmentOverrides: environment)
+            element("chat-sidebar-button").click()
+            XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        }
+
+        // The turn opens a new page with close-turn; then the window closes, its daemon dies,
+        // and its agent too.
+        let question = "Could the iOS build run its tests in parallel?"
+        startRestartChatTurn(executable, question)
+        closeHeldChatTurn(executable, newTitle: "Parallel iOS tests")
+        let agent = try XCTUnwrap(agentManifest(kind: "claude", service: environment)?.manifest["process"] as? [String: Any])
+        attachScreenshot(named: "standalone-chat-orphan-1-turn-in-flight")
+        XCTAssertTrue(terminateAppAndWait(app))
+        try killDaemon(environment: environment)
+        touch(executable + ".reattach-exit")
+        XCTAssertTrue(waitUntil({ !self.agentIsAlive(agent) }, timeout: 15), "The chat turn's agent exits without a result.")
+        openChat()
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Parallel iOS tests") }, timeout: 20),
+                      "The next daemon files the lost turn on the page its close-turn opened.")
+        let lostPageID = try pageID(titled: "Parallel iOS tests")
+        XCTAssertTrue(waitUntil({ self.restartChatPageTexts(lostPageID, environment: environment) == [question] }, timeout: 10))
+        XCTAssertTrue(waitUntil({ !recoveries("reattach-lost").isEmpty }, timeout: 10), "The lost turn's filing is recorded.")
+        XCTAssertEqual(recoveries("reattach-lost"), [[lostPageID, "close-turn"]])
+        attachScreenshot(named: "standalone-chat-orphan-2-lost-turn-filed")
+
+        // An answered turn an earlier build left unfiled, as in the incident: its close-turn
+        // opened a page, but no page holds the turn and no close-turn record names it.
+        let legacyQuestion = "Could the Android build be split into parallel steps?"
+        startRestartChatTurn(executable, legacyQuestion)
+        closeHeldChatTurn(executable, newTitle: "Parallel Android build")
+        touch(executable + ".reattach-release-quiet")
+        XCTAssertTrue(waitUntil({ self.agentManifest(kind: "claude", service: environment) == nil }, timeout: 30))
+        let legacyPageID = try pageID(titled: "Parallel Android build")
+        let legacyTexts = [legacyQuestion, "Before restart.", "After restart."]
+        XCTAssertTrue(waitUntil({ self.restartChatPageTexts(legacyPageID, environment: environment) == legacyTexts }, timeout: 10))
+        XCTAssertTrue(terminateAppAndWait(app))
+        try killDaemon(environment: environment)
+        try unfileChatPageForLegacyState(legacyPageID)
+        openChat()
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Parallel Android build") }, timeout: 20),
+                      "The starting daemon files the unfiled turn on the page opened while it ran.")
+        XCTAssertEqual(restartChatPageTexts(legacyPageID, environment: environment), legacyTexts)
+        XCTAssertTrue(waitUntil({ !recoveries("startup").isEmpty }, timeout: 10), "The startup recovery is recorded.")
+        XCTAssertEqual(recoveries("startup"), [[legacyPageID, "page-opened-in-turn"]])
+        XCTAssertEqual(restartChatPageTexts(earlierID, environment: environment), earlierTexts, "The earlier page keeps only its own turn.")
+        XCTAssertEqual(restartChatPageTexts(lostPageID, environment: environment), [question])
+        attachScreenshot(named: "standalone-chat-orphan-3-recovered-on-startup")
+
+        // Another restart recovers nothing more.
+        XCTAssertTrue(terminateAppAndWait(app))
+        try killDaemon(environment: environment)
+        openChat()
+        XCTAssertEqual(restartChatPageTexts(legacyPageID, environment: environment), legacyTexts,
+                       "A later daemon never files the recovered turn twice.")
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertEqual(recoveries("startup").count + recoveries("reattach-lost").count, 2, "Recovery is idempotent across restarts.")
+
+        let seeded = sendFiledRestartChatTurn(executable, "Which step would be slowest?", environment: environment)
+        XCTAssertTrue(seeded.contains(legacyQuestion) && seeded.contains("After restart."), "The recovered turn seeds its page's first session.")
+        XCTAssertFalse(seeded.contains(question), "Another page's turn never reaches this page's session.")
+        XCTAssertEqual(Array(restartChatPageTexts(legacyPageID, environment: environment).prefix(3)), legacyTexts)
+        attachScreenshot(named: "standalone-chat-orphan-4-next-turn-seeded")
+    }
+
+    // case-contract: test_standalone_chat_codex_turns_survive_daemon_restart | A Codex standalone chat turn survives daemon restarts even though Codex's own history carries no message times. A turn still running in its shared app-server when its daemon dies is followed by the next daemon, and when it ends with close-turn --continues false that daemon files its question and answers once on the new titled page, found from the turn's durable in-flight record and close-turn record, with no page decision left pending. A turn whose daemon and app-server both die after its close-turn opened a new page is filed on that page, with what its thread saved, by the next send, which reads the Codex thread before seeding; that send's fresh page session carries the recovered turn, and the recovery is recorded in diagnostics.
+    func test_standalone_chat_codex_turns_survive_daemon_restart() throws {
+        let (executable, environment, chatID) = try launchRestartFixtureChat(provider: "codex")
+        _ = sendFiledRestartChatTurn(executable, "Name a moon of Mars.", environment: environment)
+        let earlierID = try XCTUnwrap((restartChatStatus(environment)?["activePage"] as? [String: Any])?["id"] as? String)
+        // Codex history joins a turn's consecutive agent messages into one.
+        let answer = "Before restart.\n\nAfter restart."
+        let earlierTexts = ["Name a moon of Mars.", answer]
+        XCTAssertEqual(restartChatPageTexts(earlierID, environment: environment), earlierTexts, "The daemon that sent the first turn files it.")
+
+        // The window reconnects to the next daemon, which follows the running turn; its agent
+        // opens a new page with close-turn and finishes.
+        let question = "Could the Android build be split into parallel steps?"
+        startRestartChatTurn(executable, question)
+        try killDaemon(environment: environment)
+        attachScreenshot(named: "standalone-chat-codex-restart-1-turn-in-flight")
+        closeHeldChatTurn(executable, newTitle: "Parallel Android build")
+        touch(executable + ".reattach-release-quiet")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Parallel Android build") }, timeout: 40),
+                      "The reattached Codex turn shows under the page its close-turn opened.")
+        XCTAssertTrue(waitUntil({ self.chatTranscriptShows("After restart.", belowPage: "Parallel Android build") }, timeout: 20),
+                      "The window shows the reattached turn's answer under its new page.")
+        var pageID = ""
+        XCTAssertTrue(waitUntil({
+            guard let status = self.restartChatStatus(environment), status["missedPreviousPageSignal"] as? Bool == false,
+                  let page = status["activePage"] as? [String: Any], page["title"] as? String == "Parallel Android build",
+                  let id = page["id"] as? String else { return false }
+            pageID = id
+            return self.restartChatPageTexts(id, environment: environment) == [question, answer]
+        }, timeout: 20), "The daemon that followed the Codex turn files it once on the page its close-turn opened.")
+        XCTAssertEqual(restartChatPageTexts(earlierID, environment: environment), earlierTexts, "The earlier page keeps only its own turn.")
+        let filed = try diagnosticEvents().filter { $0["event"] as? String == "chat.page.reattached_turn.filed" && $0["taskID"] as? String == chatID }
+        XCTAssertEqual(filed.map { [$0["pageID"] as? String ?? "", $0["signal"] as? String ?? ""] }, [[pageID, "close-turn"]],
+                       "The reattached filing is recorded in diagnostics.")
+        attachScreenshot(named: "standalone-chat-codex-restart-2-turn-filed-on-new-page")
+
+        // A turn opens a new page with close-turn; then the window closes, its daemon dies, and
+        // its app-server too.
+        let lostQuestion = "Could the iOS build run its tests in parallel?"
+        startRestartChatTurn(executable, lostQuestion)
+        closeHeldChatTurn(executable, newTitle: "Parallel iOS tests")
+        let server = try XCTUnwrap(agentManifest(kind: "codex", service: environment)?.manifest["process"] as? [String: Any])
+        XCTAssertTrue(terminateAppAndWait(app))
+        try killDaemon(environment: environment)
+        touch(executable + ".reattach-die")
+        XCTAssertTrue(waitUntil({ !self.agentIsAlive(server) }, timeout: 15), "The Codex app-server exits with the turn unfinished.")
+        launchApp(defaultParent: nil, environmentOverrides: environment)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        let pages = (try runCLI(["chat", "page", "list"], extraEnvironment: environment)["result"] as? [String: Any])?["pages"] as? [[String: Any]] ?? []
+        let lostPageID = try XCTUnwrap(pages.first { $0["title"] as? String == "Parallel iOS tests" }?["id"] as? String)
+
+        // The next send reads the Codex thread, files the lost turn, then seeds its page's session.
+        let seeded = sendFiledRestartChatTurn(executable, "Which suite is slowest?", environment: environment)
+        XCTAssertEqual(Array(restartChatPageTexts(lostPageID, environment: environment).prefix(2)), [lostQuestion, "Before restart."],
+                       "The lost Codex turn is filed on the page its close-turn opened.")
+        XCTAssertTrue(seeded.contains(lostQuestion) && seeded.contains("Before restart."), "The recovered turn seeds its page's first session.")
+        XCTAssertFalse(seeded.contains(question), "Another page's turn never reaches this page's session.")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Parallel iOS tests") }, timeout: 20),
+                      "The recovered turn shows under the page its close-turn opened.")
+        XCTAssertTrue(waitUntil({ self.chatTranscriptShows(lostQuestion, belowPage: "Parallel iOS tests") }, timeout: 20))
+        let recovered = try diagnosticEvents().filter { $0["event"] as? String == "chat.page.turn_recovered" && $0["taskID"] as? String == chatID }
+        XCTAssertEqual(recovered.map { [$0["pageID"] as? String ?? "", $0["source"] as? String ?? "", $0["reason"] as? String ?? ""] },
+                       [[lostPageID, "close-turn", "send"]], "The send-time recovery is recorded once.")
+        attachScreenshot(named: "standalone-chat-codex-restart-3-lost-turn-recovered")
+    }
+
+    // case-contract: test_standalone_chat_reattached_turn_without_close_turn_uses_fallback | A standalone chat turn that is still running when its daemon dies and then ends without close-turn is filed by the daemon that followed it on the active page, marked as a missed page signal, and handed to the background page classifier, which moves it to the new page it titles; the earlier page keeps only its own turn and nothing stays pending. When the daemon instead dies during the close-turn nudge that follows a turn without close-turn, the daemon that follows the nudge files the user's turn, never the nudge, hands it to the classifier the same way, and the chat keeps accepting sends. The missed-signal and classifier path is shared by Claude and Codex once a reattached turn ends, so one representative provider (Claude) covers this case.
+    func test_standalone_chat_reattached_turn_without_close_turn_uses_fallback() throws {
+        let (executable, environment, chatID) = try launchRestartFixtureChat()
+        _ = sendFiledRestartChatTurn(executable, "Name a moon of Mars.", environment: environment)
+        let earlierID = try XCTUnwrap((restartChatStatus(environment)?["activePage"] as? [String: Any])?["id"] as? String)
+
+        let question = "How do I rotate a signing key?"
+        startRestartChatTurn(executable, question)
+        try killDaemon(environment: environment)
+        attachScreenshot(named: "standalone-chat-restart-fallback-1-turn-in-flight")
+        touch(executable + ".reattach-release-quiet")
+        var pageTexts: [String] = []
+        XCTAssertTrue(waitUntil({
+            guard let status = self.restartChatStatus(environment), status["missedPreviousPageSignal"] as? Bool == false,
+                  let page = status["activePage"] as? [String: Any], page["title"] as? String == "Restart fallback",
+                  let id = page["id"] as? String else { return false }
+            pageTexts = self.restartChatPageTexts(id, environment: environment)
+            return pageTexts == [question, "Before restart.", "After restart."]
+        }, timeout: 40), "The background classifier moves the reattached turn to its new page: \(pageTexts)")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Restart fallback") }, timeout: 20),
+                      "The transcript shows the classifier's page above the reattached turn.")
+        XCTAssertTrue(waitUntil({ self.chatTranscriptShows("After restart.", belowPage: "Restart fallback") }, timeout: 20),
+                      "The window shows the reattached turn's answer under the classifier's page.")
+        XCTAssertEqual(restartChatPageTexts(earlierID, environment: environment), ["Name a moon of Mars.", "Before restart.", "After restart."])
+        let events = try diagnosticEvents()
+        let filed = events.filter { $0["event"] as? String == "chat.page.reattached_turn.filed" && $0["taskID"] as? String == chatID }
+        XCTAssertEqual(filed.compactMap { $0["signal"] as? String }, ["missed"], "No close-turn ran, so the filing marks a missed signal.")
+        XCTAssertTrue(events.contains { $0["event"] as? String == "chat.page.fallback.scheduled" && $0["taskID"] as? String == chatID },
+                      "The missed signal schedules the background classifier.")
+        attachScreenshot(named: "standalone-chat-restart-fallback-2-classified")
+
+        // The next turn skips close-turn in a live daemon, which then dies during the nudge.
+        let firstFallbackID = try XCTUnwrap((restartChatStatus(environment)?["activePage"] as? [String: Any])?["id"] as? String)
+        let nudgedQuestion = "Which key size should I use?"
+        touch(executable + ".reattach-hold-nudge")
+        startRestartChatTurn(executable, nudgedQuestion)
+        try? FileManager.default.removeItem(atPath: executable + ".reattach-ready")
+        touch(executable + ".reattach-release-quiet")
+        XCTAssertTrue(waitUntil({
+            ((try? String(contentsOfFile: executable + ".reattach-ready", encoding: .utf8)) ?? "").lowercased().contains("outcome nudge")
+        }, timeout: 20), "The turn without close-turn gets its nudge, which holds.")
+        try killDaemon(environment: environment)
+        attachScreenshot(named: "standalone-chat-restart-fallback-3-nudge-in-flight")
+        touch(executable + ".reattach-release-quiet")
+        var nudgedPageID = ""
+        var nudgedTexts: [String] = []
+        XCTAssertTrue(waitUntil({
+            guard let status = self.restartChatStatus(environment), status["missedPreviousPageSignal"] as? Bool == false,
+                  let page = status["activePage"] as? [String: Any], page["title"] as? String == "Restart fallback",
+                  let id = page["id"] as? String, id != firstFallbackID else { return false }
+            nudgedPageID = id
+            nudgedTexts = self.restartChatPageTexts(id, environment: environment)
+            return nudgedTexts == [nudgedQuestion, "Before restart.", "After restart."]
+        }, timeout: 40), "The user's turn behind the followed nudge is filed and classified, never the nudge: \(nudgedTexts)")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparators("Restart fallback").count == 2 }, timeout: 20),
+                      "The window shows the classifier's second page as its own separator.")
+        XCTAssertTrue(waitUntil({ self.chatTranscriptShows(nudgedQuestion, belowPage: "Restart fallback") }, timeout: 20),
+                      "The user's turn shows under the new page, below its separator.")
+        let signals = try diagnosticEvents().filter { $0["event"] as? String == "chat.page.reattached_turn.filed" && $0["taskID"] as? String == chatID }
+            .compactMap { $0["signal"] as? String }
+        XCTAssertEqual(signals, ["missed", "missed"])
+        _ = sendFiledRestartChatTurn(executable, "Thanks, that settles it.", environment: environment)
+        XCTAssertEqual(Array(restartChatPageTexts(nudgedPageID, environment: environment).suffix(3)),
+                       ["Thanks, that settles it.", "Before restart.", "After restart."], "The chat keeps accepting sends.")
+        attachScreenshot(named: "standalone-chat-restart-fallback-4-chat-keeps-sending")
+    }
+
     // case-contract: test_agent_died_without_result_is_marked_interrupted | When a Codex app-server or a Claude Code run exits without finishing its turn while no daemon is connected, the next daemon settles the task as Waiting Response with 'The agent stopped while Playhouse was restarting. Your conversation is saved; send a follow-up to continue.', keeps the conversation up to the restart, and removes the dead agent's files.
     func test_agent_died_without_result_is_marked_interrupted() throws {
         for (provider, marker) in [("codex", ".reattach-die"), ("claude", ".reattach-exit")] {
@@ -23108,6 +23369,84 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ kill(pid_t(pid), 0) != 0 }, timeout: 10), "The killed daemon should exit.")
     }
 
+    /// Opens the chat sidebar on a private service whose chat turns run in the restart fixture.
+    private func launchRestartFixtureChat(provider: String = "claude") throws -> (executable: String, environment: [String: String], chatID: String) {
+        let executable = WorkspaceFixture.root.appendingPathComponent("\(provider)-fixture-reattach").path
+        if provider == "codex" { codexFixtureExecutable = executable } else { claudeFixtureExecutable = executable }
+        clearReattachMarkers(executable)
+        let environment = restartServiceEnvironment()
+        // Set up through the runner's service, as the other restart cases do: the private
+        // service's daemon starts with the window that uses it.
+        _ = try runCLI(["settings", "set-default-provider", provider])
+        _ = try runCLI(["settings", "clear-parent"])
+        let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
+        launchApp(defaultParent: nil, environmentOverrides: environment)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        return (executable, environment, chatID)
+    }
+
+    private func restartChatStatus(_ environment: [String: String]) -> [String: Any]? {
+        (try? runCLI(["chat", "status"], extraEnvironment: environment))?["result"] as? [String: Any]
+    }
+
+    private func restartChatPageTexts(_ pageID: String, environment: [String: String]) -> [String] {
+        let page = (try? runCLI(["chat", "page", "read", pageID], extraEnvironment: environment))?["result"] as? [String: Any]
+        return (page?["messages"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+    }
+
+    /// Sends a chat message from the sidebar composer and waits for the restart fixture to hold its turn.
+    private func startRestartChatTurn(_ executable: String, _ text: String) {
+        try? FileManager.default.removeItem(atPath: executable + ".reattach-ready")
+        sendFromComposer(text)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable + ".reattach-ready") }, timeout: 20),
+                      "The chat turn \(text) runs.")
+    }
+
+    /// Has the restart fixture's held chat turn run its real close-turn (a new titled page when
+    /// `newTitle` is set) and waits for it; the turn itself keeps running.
+    private func closeHeldChatTurn(_ executable: String, newTitle: String? = nil) {
+        let output = executable + ".reattach-close-turn-output"
+        let before = jsonLines(output).count
+        FileManager.default.createFile(atPath: executable + ".reattach-close-turn", contents: Data((newTitle ?? "").utf8))
+        XCTAssertTrue(waitUntil({ self.jsonLines(output).count > before }, timeout: 20), "The held chat turn runs close-turn.")
+        let result = jsonLines(output).last as? [String: Any]
+        XCTAssertEqual(result?["returncode"] as? Int, 0, "close-turn succeeds: \(String(describing: result))")
+    }
+
+    /// One ordinary chat turn that runs close-turn (opening a new page titled `newTitle` when
+    /// set) and is filed by the daemon that sent it. Returns the text the provider received.
+    private func sendFiledRestartChatTurn(
+        _ executable: String, _ text: String, newTitle: String? = nil, environment: [String: String]
+    ) -> String {
+        startRestartChatTurn(executable, text)
+        let ready = (try? String(contentsOfFile: executable + ".reattach-ready", encoding: .utf8)) ?? ""
+        // Claude's ready file holds the prompt itself, Codex's a JSON record with it.
+        let received = ((try? JSONSerialization.jsonObject(with: Data(ready.utf8))) as? [String: Any])?["text"] as? String ?? ready
+        closeHeldChatTurn(executable, newTitle: newTitle)
+        touch(executable + ".reattach-release-quiet")
+        XCTAssertTrue(waitUntil({
+            let runtime = (try? self.runCLI(["conversation", "runtime"], extraEnvironment: environment))?["result"] as? [String: Any]
+            return runtime != nil && (runtime?["activeThreadIDs"] as? [String] ?? []).isEmpty
+                && self.agentManifest(kind: "claude", service: environment) == nil
+        }, timeout: 30), "The chat turn finishes.")
+        return received
+    }
+
+    /// Puts a filed chat page back in the state an earlier build left after losing its turn:
+    /// no message on the page and no close-turn record naming it.
+    private func unfileChatPageForLegacyState(_ pageID: String) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [
+            dataDirectory.appendingPathComponent("StandaloneChat-v1.sqlite").path,
+            "DELETE FROM chat_messages WHERE page_id = '\(pageID)'; UPDATE chat_pages SET message_count = 0 WHERE id = '\(pageID)'; DELETE FROM chat_turn_signals WHERE page_id = '\(pageID)';",
+        ]
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0, "The legacy page state is seeded.")
+    }
+
     private func clearReattachMarkers(_ executable: String) {
         let folder = URL(fileURLWithPath: executable).deletingLastPathComponent()
         let name = URL(fileURLWithPath: executable).lastPathComponent
@@ -23540,6 +23879,32 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(response["ok"] as? Bool, false, file: file, line: line)
         let error = response["error"] as? [String: Any]
         XCTAssertEqual(error?["code"] as? String, code, file: file, line: line)
+    }
+
+    /// The chat sidebar's separators for pages titled `title`, top to bottom.
+    private func chatPageSeparators(_ title: String) -> [XCUIElement] {
+        element("chat-sidebar")
+            .descendants(matching: .scrollView)
+            .matching(identifier: "conversation-scroll-view")
+            .firstMatch
+            .staticTexts
+            .matching(identifier: "chat-page-separator")
+            .allElementsBoundByIndex
+            .filter { $0.label == title || $0.value as? String == title }
+            .sorted { $0.frame.minY < $1.frame.minY }
+    }
+
+    /// Whether the chat sidebar shows a message containing `text` below the separator of the
+    /// newest page titled `title`, so an identical message of an earlier page can't stand in for it.
+    private func chatTranscriptShows(_ text: String, belowPage title: String) -> Bool {
+        guard let separator = chatPageSeparators(title).last else { return false }
+        return element("chat-sidebar")
+            .descendants(matching: .scrollView)
+            .matching(identifier: "conversation-scroll-view")
+            .firstMatch
+            .groups.matching(NSPredicate(format: "label CONTAINS %@ OR identifier == %@", text, text))
+            .allElementsBoundByIndex
+            .contains { $0.frame.minY > separator.frame.minY }
     }
 
     private func chatPageSeparatorIsVisible(_ title: String) -> Bool {

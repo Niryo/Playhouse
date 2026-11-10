@@ -644,9 +644,14 @@ def run_reattach_server():
     A turn writes "Before restart." and then holds, so the test can kill Playhouse's daemon
     while it runs. Marker files beside the executable drive it from there:
     `.reattach-raise` raises an approval and a question (left pending until a client answers),
-    `.reattach-release` finishes the turn with "After restart." and its outcome, and
-    `.reattach-die` makes the server exit with the turn unfinished. Every reply a client sends
-    to a server request is logged to `.reattach-replies`, steers to `.reattach-steers`."""
+    `.reattach-release` finishes the turn with "After restart." and its outcome,
+    `.reattach-release-quiet` finishes it with "After restart." and no outcome report, and
+    `.reattach-die` makes the server exit with the turn unfinished. For a standalone chat,
+    `.reattach-close-turn` runs the turn's real `chat page close-turn` without ending the turn
+    (a new page titled by the marker's text, or `--continues true` when it is empty), logging
+    the command's result to `.reattach-close-turn-output`. `.reattach-ready` holds the running
+    turn's thread, turn and prompt text. Every reply a client sends to a server request is
+    logged to `.reattach-replies`, steers to `.reattach-steers`."""
     base = str(sys.argv[0])
     threads_path = Path(f"{base}.reattach-threads")
     active = {}
@@ -755,7 +760,7 @@ def run_reattach_server():
                 return
             emit_message(thread_id, turn_id, f"item_{turn_id}_before", "Before restart.")
             active[thread_id] = {"turn": turn_id}
-            Path(f"{base}.reattach-ready").write_text(json.dumps({"threadId": thread_id, "turnId": turn_id}), encoding="utf-8")
+            Path(f"{base}.reattach-ready").write_text(json.dumps({"threadId": thread_id, "turnId": turn_id, "text": text}), encoding="utf-8")
         elif method == "turn/steer":
             thread_id = params.get("threadId")
             turn = active.get(thread_id)
@@ -810,8 +815,37 @@ def run_reattach_server():
                     "questions": [{"id": "color", "header": "Color", "question": "Which color?", "isOther": False,
                                    "isSecret": False, "options": [{"label": "red"}, {"label": "blue"}]}]}})
                 Path(f"{base}.reattach-raised").write_text("raised\n", encoding="utf-8")
+            close_turn_marker = Path(f"{base}.reattach-close-turn")
+            if close_turn_marker.exists():
+                title = close_turn_marker.read_text(encoding="utf-8").strip()
+                close_turn_marker.unlink()
+                instructions = threads[thread_id].get("instructions") or ""
+                command = next((line.strip() for line in instructions.splitlines()
+                                if " chat page close-turn " in line and "--continues true" in line), None)
+                if command and title:
+                    command = command.replace("--continues true", f"--continues false --new-title {shlex.quote(title)}")
+                # Like a tool call, it runs while the server keeps answering: with no daemon up,
+                # the command starts one, which resumes this thread first.
+                turn["closing"] = (command, subprocess.Popen(shlex.split(command), stdout=subprocess.PIPE,
+                                                             stderr=subprocess.DEVNULL, text=True) if command else None)
+            if turn.get("closing") and (turn["closing"][1] is None or turn["closing"][1].poll() is not None):
+                command, process = turn.pop("closing")
+                log("reattach-close-turn-output", {
+                    "command": command,
+                    "returncode": process.returncode if process else None,
+                    "output": process.stdout.read() if process else "",
+                })
             if Path(f"{base}.reattach-die").exists():
+                # Consumed, so a later server of the same fixture runs normally.
+                Path(f"{base}.reattach-die").unlink(missing_ok=True)
                 os._exit(3)
+            quiet = Path(f"{base}.reattach-release-quiet")
+            if quiet.exists() and "reporting" not in turn:
+                quiet.unlink()
+                emit_message(thread_id, turn["turn"], f"item_{turn['turn']}_after", "After restart.")
+                turn["reporting"] = None
+                complete(thread_id)
+                continue
             release = Path(f"{base}.reattach-release")
             if release.exists() and "reporting" not in turn:
                 release.unlink()

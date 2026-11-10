@@ -1075,6 +1075,285 @@ class PlayhouseBridgeTests(unittest.TestCase):
                 if provider == "codex":
                     self.assertIn("Before restart.", texts, "Codex keeps the output its thread saved before the agent died.")
 
+    def start_reattach_chat(self, name, provider="claude"):
+        """A chat on a private service whose turns run in the provider's daemon-restart fixture."""
+        executable = self.install_provider_fixture(provider, name)
+        environment = self.restart_service_environment(provider, executable)
+        self.assert_success(self.call_cli("settings", "set-default-provider", provider, extra_environment=environment)[0])
+        self.assert_success(self.call_cli("settings", "clear-parent", extra_environment=environment)[0])
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+        return executable, environment, chat_id
+
+    def close_held_chat_turn(self, executable, new_title=None):
+        """Has the held chat turn run its real close-turn (a new titled page when `new_title` is
+        set) and returns that command's logged result; the turn itself keeps running."""
+        output = Path(str(executable) + ".reattach-close-turn-output")
+        before = len(self.jsonl(output))
+        Path(str(executable) + ".reattach-close-turn").write_text(new_title or "", encoding="utf-8")
+        self.wait_for(lambda: len(self.jsonl(output)) > before, "The held chat turn runs close-turn.")
+        result = self.jsonl(output)[-1]
+        self.assertEqual(result["returncode"], 0, result)
+        self.assertTrue(json.loads(result["output"].splitlines()[-1])["ok"], result)
+        return result
+
+    def send_filed_chat_turn(self, executable, environment, chat_id, message, new_title=None):
+        """One ordinary chat turn that runs close-turn (opening a new page titled `new_title` when
+        set) and is filed by the daemon that sent it. Returns the text the provider received."""
+        ready = Path(str(executable) + ".reattach-ready")
+        ready.unlink(missing_ok=True)
+        sender = self.start_cli("conversation", "send", chat_id, "--message", message, extra_environment=environment)
+        self.wait_for(ready.is_file, f"The chat turn {message!r} runs.")
+        received = self.reattach_prompt_text(ready)
+        self.close_held_chat_turn(executable, new_title)
+        Path(str(executable) + ".reattach-release-quiet").touch()
+        self.assert_success(self.finish_cli(sender, "conversation send", timeout=60)[0])
+        if "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE" in environment:
+            self.wait_for(lambda: not self.claude_runs(environment), "The finished chat turn's run is removed.")
+        return received
+
+    @staticmethod
+    def reattach_prompt_text(ready):
+        """The prompt the restart fixture's running turn received: Claude's ready file holds the
+        text itself, Codex's a JSON record with it."""
+        text = ready.read_text(encoding="utf-8")
+        try:
+            return json.loads(text)["text"]
+        except (ValueError, KeyError, TypeError):
+            return text
+
+    def reattach_agent(self, environment):
+        """The process running the private service's agent: the Claude run, or the Codex server."""
+        if "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE" in environment:
+            return self.claude_runs(environment)[0][1]["process"]
+        return next(m["process"] for kind, _, m in self.agent_manifests()
+                    if kind == "codex" and m["serviceName"] == environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"])
+
+    def start_chat_turn_and_kill_daemon(self, executable, environment, chat_id, message, close_turn_title=None):
+        """Sends a chat turn, optionally has it run close-turn, then kills the daemon mid-turn."""
+        ready = Path(str(executable) + ".reattach-ready")
+        ready.unlink(missing_ok=True)
+        sent = {}
+        sender = threading.Thread(target=lambda: sent.setdefault("turn", self.call_cli(
+            "conversation", "send", chat_id, "--message", message,
+            expected_status=69, timeout=60, extra_environment=environment)), daemon=True)
+        sender.start()
+        self.wait_for(ready.is_file, "The chat turn should be running before the daemon dies.")
+        if close_turn_title:
+            self.close_held_chat_turn(executable, close_turn_title)
+        agent = self.reattach_agent(environment)
+        self.kill_daemon(environment)
+        sender.join(timeout=20)
+        self.assert_failure(sent["turn"][0], "service_unavailable")
+        self.assertTrue(self.agent_process_alive(agent), "The agent outlives the daemon that started the chat turn.")
+        return agent
+
+    def chat_page_texts(self, page_id, environment):
+        page = self.assert_success(self.call_cli("chat", "page", "read", page_id, extra_environment=environment)[0])
+        return [message["text"] for message in page["messages"]]
+
+    def chat_pages(self, environment):
+        return self.assert_success(self.call_cli("chat", "page", "list", extra_environment=environment)[0])["pages"]
+
+    # case-contract: test_standalone_chat_turn_filed_after_daemon_restart | A standalone chat turn that is still running when its daemon dies is followed by the next daemon, and when it ends with close-turn --continues false that daemon files the turn's question and answers on the new titled page the close-turn opened, exactly once, leaving the earlier page as it was and no page decision pending. The page's first session is seeded with that turn, so the next question reaches the provider with the turn's question and answer. Filing reads Playhouse's own close-turn record and turn transcript, shared by Claude and Codex once a reattached turn ends, so one representative provider (Claude) covers this case.
+    def test_standalone_chat_turn_filed_after_daemon_restart(self):
+        executable, environment, chat_id = self.start_reattach_chat("claude-fixture-reattach-chat-filed")
+        self.send_filed_chat_turn(executable, environment, chat_id, "Name a moon of Mars.")
+        earlier = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])["activePage"]
+        self.assertEqual(self.chat_page_texts(earlier["id"], environment), ["Name a moon of Mars.", "Before restart.", "After restart."],
+                         "The daemon that sent the first turn files it.")
+
+        question = "Could the Android build be split into parallel steps?"
+        self.start_chat_turn_and_kill_daemon(executable, environment, chat_id, question)
+        # The next daemon follows the turn; its agent opens a new page and finishes the answer.
+        self.close_held_chat_turn(executable, "Parallel Android build")
+        Path(str(executable) + ".reattach-release-quiet").touch()
+        self.wait_for(lambda: "After restart." in self.history_texts(chat_id, environment)[0], "The reattached turn finishes.", timeout=40)
+        self.wait_for(lambda: self.chat_page_texts(
+            self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])["activePage"]["id"], environment)[-1:] == ["After restart."],
+            "The daemon that followed the turn files it.")
+        status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        self.assertEqual(status["activePage"]["title"], "Parallel Android build", "close-turn opened the new page.")
+        self.assertFalse(status["missedPreviousPageSignal"], "The reattached turn's close-turn settles its page decision.")
+        page = status["activePage"]
+        self.assertEqual(self.chat_page_texts(page["id"], environment), [question, "Before restart.", "After restart."],
+                         "The reattached turn is filed once on the page its close-turn opened.")
+        self.assertEqual(self.chat_page_texts(earlier["id"], environment), ["Name a moon of Mars.", "Before restart.", "After restart."],
+                         "The earlier page keeps only its own turn.")
+        filed = self.wait_for(lambda: [event for event in self.diagnostic_events()
+                                       if event.get("event") == "chat.page.reattached_turn.filed" and event.get("taskID") == chat_id],
+                              "The reattached filing is recorded in diagnostics.")
+        self.assertEqual([(event["pageID"], event["signal"]) for event in filed], [(page["id"], "close-turn")])
+
+        # The new page's first session is seeded with the turn that opened it.
+        seeded = self.send_filed_chat_turn(executable, environment, chat_id, "Which step would be slowest?")
+        self.assertIn(question, seeded, "The new page's session carries the reattached turn's question.")
+        self.assertIn("After restart.", seeded, "The new page's session carries the reattached turn's answer.")
+        self.assertNotIn("Name a moon of Mars.", seeded, "An earlier page never reaches the new page's session.")
+        self.assertEqual(self.chat_page_texts(page["id"], environment)[:3], [question, "Before restart.", "After restart."],
+                         "A later turn never files the reattached turn again.")
+
+    # case-contract: test_standalone_chat_orphaned_turn_recovered_on_startup | A standalone chat turn that ran close-turn --continues false and then lost both its daemon and its agent before it was filed is filed, question included, by the next daemon on the page that close-turn opened, found from Playhouse's durable close-turn record. An answered turn that an earlier build left unfiled after its close-turn opened a new page, with no close-turn record, is filed by the next daemon as it starts onto the page opened while that turn ran. Both recoveries are recorded in diagnostics, a further daemon restart files nothing again, and the next question's fresh page session is seeded with the recovered turn. Recovery reads only Playhouse's own transcript, close-turn record and page store, so provider selection cannot change it; one representative provider (Claude) covers this case.
+    def test_standalone_chat_orphaned_turn_recovered_on_startup(self):
+        executable, environment, chat_id = self.start_reattach_chat("claude-fixture-reattach-chat-orphan")
+        self.send_filed_chat_turn(executable, environment, chat_id, "Name a moon of Mars.")
+        earlier = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])["activePage"]
+        earlier_texts = ["Name a moon of Mars.", "Before restart.", "After restart."]
+
+        def recoveries(reason):
+            return [(event["pageID"], event["source"]) for event in self.diagnostic_events()
+                    if event.get("event") == "chat.page.turn_recovered" and event.get("taskID") == chat_id and event.get("reason") == reason]
+
+        # The turn opens a new page with close-turn; then its daemon dies, and its agent too.
+        question = "Could the iOS build run its tests in parallel?"
+        agent = self.start_chat_turn_and_kill_daemon(executable, environment, chat_id, question, close_turn_title="Parallel iOS tests")
+        Path(str(executable) + ".reattach-exit").touch()
+        self.wait_for(lambda: not self.agent_process_alive(agent), "The chat turn's agent exits without a result.")
+        lost_page = next(page for page in self.chat_pages(environment) if page["title"] == "Parallel iOS tests")
+        self.wait_for(lambda: self.chat_page_texts(lost_page["id"], environment) == [question],
+                      "The next daemon files the lost turn's question on the page its close-turn opened.")
+        self.assertEqual(self.wait_for(lambda: recoveries("reattach-lost"), "The lost turn's filing is recorded."),
+                         [(lost_page["id"], "close-turn")])
+
+        # An answered turn an earlier build left unfiled, as in the incident: its close-turn opened
+        # a page, but no page holds the turn and no close-turn record names it.
+        legacy_question = "Could the Android build be split into parallel steps?"
+        self.send_filed_chat_turn(executable, environment, chat_id, legacy_question, new_title="Parallel Android build")
+        legacy_page = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])["activePage"]
+        self.assertEqual(legacy_page["title"], "Parallel Android build")
+        legacy_texts = [legacy_question, "Before restart.", "After restart."]
+        self.assertEqual(self.chat_page_texts(legacy_page["id"], environment), legacy_texts)
+        self.kill_daemon(environment)
+        with sqlite3.connect(self.data_directory / "StandaloneChat-v1.sqlite") as store:
+            store.execute("DELETE FROM chat_messages WHERE page_id = ?", (legacy_page["id"],))
+            store.execute("UPDATE chat_pages SET message_count = 0 WHERE id = ?", (legacy_page["id"],))
+            store.execute("DELETE FROM chat_turn_signals WHERE page_id = ?", (legacy_page["id"],))
+        self.assertEqual(self.chat_page_texts(legacy_page["id"], environment), legacy_texts,
+                         "The starting daemon files the unfiled turn on the page opened while it ran.")
+        self.assertEqual(self.wait_for(lambda: recoveries("startup"), "The startup recovery is recorded."),
+                         [(legacy_page["id"], "page-opened-in-turn")])
+        self.assertEqual(self.chat_page_texts(earlier["id"], environment), earlier_texts, "The earlier page keeps only its own turn.")
+        self.assertEqual(self.chat_page_texts(lost_page["id"], environment), [question])
+
+        # Another restart recovers nothing more.
+        self.kill_daemon(environment)
+        self.assertEqual(self.chat_page_texts(legacy_page["id"], environment), legacy_texts,
+                         "A later daemon never files the recovered turn twice.")
+        time.sleep(1)
+        self.assertEqual(len(recoveries("startup")) + len(recoveries("reattach-lost")), 2, "Recovery is idempotent across restarts.")
+
+        seeded = self.send_filed_chat_turn(executable, environment, chat_id, "Which step would be slowest?")
+        self.assertIn(legacy_question, seeded, "The recovered turn seeds its page's first session.")
+        self.assertIn("After restart.", seeded)
+        self.assertNotIn(question, seeded, "Another page's turn never reaches this page's session.")
+        self.assertEqual(self.chat_page_texts(legacy_page["id"], environment)[:3], legacy_texts)
+
+    # case-contract: test_standalone_chat_codex_turns_survive_daemon_restart | A Codex standalone chat turn survives daemon restarts even though Codex's own history carries no message times. A turn still running in its shared app-server when its daemon dies is followed by the next daemon, and when it ends with close-turn --continues false that daemon files its question and answers once on the new titled page, found from the turn's durable in-flight record and close-turn record, with no page decision left pending. A turn whose daemon and app-server both die after its close-turn opened a new page is filed on that page, with what its thread saved, by the next send, which reads the Codex thread before seeding; that send's fresh page session carries the recovered turn, and the recovery is recorded in diagnostics.
+    def test_standalone_chat_codex_turns_survive_daemon_restart(self):
+        executable, environment, chat_id = self.start_reattach_chat("codex-fixture-reattach-chat", provider="codex")
+        self.send_filed_chat_turn(executable, environment, chat_id, "Name a moon of Mars.")
+        earlier = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])["activePage"]
+        # Codex history joins a turn's consecutive agent messages into one.
+        answer = "Before restart.\n\nAfter restart."
+        earlier_texts = ["Name a moon of Mars.", answer]
+        self.assertEqual(self.chat_page_texts(earlier["id"], environment), earlier_texts, "The daemon that sent the first turn files it.")
+
+        # The next daemon follows the running turn, whose agent opens a new page and finishes.
+        question = "Could the Android build be split into parallel steps?"
+        self.start_chat_turn_and_kill_daemon(executable, environment, chat_id, question)
+        self.close_held_chat_turn(executable, "Parallel Android build")
+        Path(str(executable) + ".reattach-release-quiet").touch()
+        self.wait_for(lambda: self.chat_page_texts(
+            self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])["activePage"]["id"], environment)
+            == [question, answer],
+            "The daemon that followed the Codex turn files it once on the page its close-turn opened.", timeout=40)
+        status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        self.assertEqual(status["activePage"]["title"], "Parallel Android build")
+        self.assertFalse(status["missedPreviousPageSignal"], "The reattached turn's close-turn settles its page decision.")
+        self.assertEqual(self.chat_page_texts(earlier["id"], environment), earlier_texts, "The earlier page keeps only its own turn.")
+        filed = self.wait_for(lambda: [event for event in self.diagnostic_events()
+                                       if event.get("event") == "chat.page.reattached_turn.filed" and event.get("taskID") == chat_id],
+                              "The reattached filing is recorded in diagnostics.")
+        self.assertEqual([(event["pageID"], event["signal"]) for event in filed], [(status["activePage"]["id"], "close-turn")])
+
+        # A turn opens a new page with close-turn; then its daemon dies, and its app-server too.
+        lost_question = "Could the iOS build run its tests in parallel?"
+        server = self.start_chat_turn_and_kill_daemon(executable, environment, chat_id, lost_question, close_turn_title="Parallel iOS tests")
+        Path(str(executable) + ".reattach-die").touch()
+        self.wait_for(lambda: not self.agent_process_alive(server), "The Codex app-server exits with the turn unfinished.")
+        lost_page = next(page for page in self.chat_pages(environment) if page["title"] == "Parallel iOS tests")
+        # The next send reads the Codex thread, files the lost turn, then seeds its page's session.
+        seeded = self.send_filed_chat_turn(executable, environment, chat_id, "Which suite is slowest?")
+        self.assertEqual(self.chat_page_texts(lost_page["id"], environment)[:2], [lost_question, "Before restart."],
+                         "The lost Codex turn is filed on the page its close-turn opened.")
+        self.assertIn(lost_question, seeded, "The recovered turn seeds its page's first session.")
+        self.assertIn("Before restart.", seeded)
+        self.assertNotIn(question, seeded, "Another page's turn never reaches this page's session.")
+        recovered = [(event["pageID"], event["source"], event["reason"]) for event in self.diagnostic_events()
+                     if event.get("event") == "chat.page.turn_recovered" and event.get("taskID") == chat_id]
+        self.assertEqual(recovered, [(lost_page["id"], "close-turn", "send")], "The send-time recovery is recorded once.")
+
+    # case-contract: test_standalone_chat_reattached_turn_without_close_turn_uses_fallback | A standalone chat turn that is still running when its daemon dies and then ends without close-turn is filed by the daemon that followed it on the active page, marked as a missed page signal, and handed to the background page classifier, which moves it to the new page it titles; the earlier page keeps only its own turn and nothing stays pending. When the daemon instead dies during the close-turn nudge that follows a turn without close-turn, the daemon that follows the nudge files the user's turn, never the nudge, hands it to the classifier the same way, and the chat keeps accepting sends. The missed-signal and classifier path is shared by Claude and Codex once a reattached turn ends, so one representative provider (Claude) covers this case.
+    def test_standalone_chat_reattached_turn_without_close_turn_uses_fallback(self):
+        executable, environment, chat_id = self.start_reattach_chat("claude-fixture-reattach-chat-fallback")
+        self.send_filed_chat_turn(executable, environment, chat_id, "Name a moon of Mars.")
+        earlier = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])["activePage"]
+
+        question = "How do I rotate a signing key?"
+        self.start_chat_turn_and_kill_daemon(executable, environment, chat_id, question)
+        # The next daemon follows the turn, which ends with no close-turn.
+        self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        Path(str(executable) + ".reattach-release-quiet").touch()
+
+        status = self.wait_for(lambda: (lambda value: value if value["activePage"]["title"] == "Restart fallback"
+                                        and not value["missedPreviousPageSignal"] else None)(
+            self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])),
+            "The background classifier decides the reattached turn's page.", timeout=40)
+        self.assertEqual(self.chat_page_texts(status["activePage"]["id"], environment), [question, "Before restart.", "After restart."],
+                         "The classifier moves the reattached turn to its new page.")
+        self.assertEqual(self.chat_page_texts(earlier["id"], environment), ["Name a moon of Mars.", "Before restart.", "After restart."])
+        events = self.diagnostic_events()
+        filed = [event for event in events if event.get("event") == "chat.page.reattached_turn.filed" and event.get("taskID") == chat_id]
+        self.assertEqual([event["signal"] for event in filed], ["missed"], "No close-turn ran, so the filing marks a missed signal.")
+        self.assertTrue(any(event.get("event") == "chat.page.fallback.scheduled" and event.get("taskID") == chat_id for event in events),
+                        "The missed signal schedules the background classifier.")
+
+        # The next turn skips close-turn in a live daemon, which then dies during the nudge.
+        first_fallback = status["activePage"]
+        nudged_question = "Which key size should I use?"
+        ready = Path(str(executable) + ".reattach-ready")
+        ready.unlink(missing_ok=True)
+        Path(str(executable) + ".reattach-hold-nudge").touch()
+        sent = {}
+        sender = threading.Thread(target=lambda: sent.setdefault("turn", self.call_cli(
+            "conversation", "send", chat_id, "--message", nudged_question,
+            expected_status=69, timeout=60, extra_environment=environment)), daemon=True)
+        sender.start()
+        self.wait_for(ready.is_file, "The chat turn runs.")
+        ready.unlink()
+        Path(str(executable) + ".reattach-release-quiet").touch()
+        self.wait_for(lambda: ready.is_file() and "outcome nudge" in ready.read_text(encoding="utf-8").lower(),
+                      "The turn without close-turn gets its nudge, which holds.")
+        self.kill_daemon(environment)
+        sender.join(timeout=20)
+        self.assert_failure(sent["turn"][0], "service_unavailable")
+        self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        Path(str(executable) + ".reattach-release-quiet").touch()
+        nudged = self.wait_for(lambda: (lambda value: value if value["activePage"]["id"] != first_fallback["id"]
+                                        and value["activePage"]["title"] == "Restart fallback"
+                                        and not value["missedPreviousPageSignal"] else None)(
+            self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])),
+            "The classifier decides the page of the user's turn behind the followed nudge.", timeout=40)
+        self.assertEqual(self.chat_page_texts(nudged["activePage"]["id"], environment),
+                         [nudged_question, "Before restart.", "After restart."],
+                         "The user's turn is filed, never the nudge or its reply.")
+        filed = [event["signal"] for event in self.diagnostic_events()
+                 if event.get("event") == "chat.page.reattached_turn.filed" and event.get("taskID") == chat_id]
+        self.assertEqual(filed, ["missed", "missed"])
+        self.send_filed_chat_turn(executable, environment, chat_id, "Thanks, that settles it.")
+        self.assertEqual(self.chat_page_texts(nudged["activePage"]["id"], environment)[-3:],
+                         ["Thanks, that settles it.", "Before restart.", "After restart."],
+                         "The chat keeps accepting sends.")
+
     # case-contract: test_stop_kills_reattached_agent | Stop works on a turn a fresh daemon reattached: for Codex it sends turn/interrupt over the reconnected socket and leaves the shared server running; for Claude it sends the interrupt with a request number past the old daemon's and then kills the run by its verified process identity and removes its folder. Either way the task settles in Waiting Response without a restart notice.
     def test_stop_kills_reattached_agent(self):
         for provider in ("codex", "claude"):
