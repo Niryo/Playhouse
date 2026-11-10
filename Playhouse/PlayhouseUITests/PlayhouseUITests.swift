@@ -1831,7 +1831,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "A task keeps its resolved branch when another task already used the slug")
     }
 
-    // case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
+    // case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable archive, whose conversation keeps its composer for follow-up questions; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
     func test_task_done_removes_worktree_and_preserves_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture().merging(Self.prCheckCooldownEnvironment) { $1 }
@@ -2060,15 +2060,15 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(archiveResult.waitToExist(timeout: 10))
         XCTAssertFalse(titleMatchResult.exists)
         archiveResult.click()
-        XCTAssertTrue(element("archived-conversation-read-only").waitToExist(timeout: 10))
+        XCTAssertTrue(element("archived-conversation-follow-up-hint").waitToExist(timeout: 10))
         let archivedAnswer = app.descendants(matching: .any).matching(
             NSPredicate(format: "label == %@", "Answers received: Blue / fixture-secret.")
         ).firstMatch
         XCTAssertTrue(archivedAnswer.waitToExist(timeout: 10))
-        XCTAssertFalse(element("message-composer").exists, "Archived conversations must not expose the composer.")
+        XCTAssertTrue(element("message-composer").exists, "Archived conversations keep the composer for follow-up questions.")
         element("back-to-board-button").click()
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done", "Leaving the read-only conversation must not alter the archived task.")
-        attachScreenshot(named: "Completed task opens from the searchable read-only archive")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done", "Leaving the archived conversation must not alter the archived task.")
+        attachScreenshot(named: "Completed task opens from the searchable archive with its composer")
     }
 
     // case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 20 seconds, with focus events during cooldown coalesced into one trailing refresh. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
@@ -2987,6 +2987,258 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertNil((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"])
         let finalRecord = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
         XCTAssertNil(finalRecord["pullRequestNumber"])
+    }
+
+    // case-contract: test_done_task_accepts_follow_up_conversation | A Done task keeps its conversation open: the UI shows the composer with an archived hint naming the merge target instead of a read-only notice, and its changes read reports no changes rather than a Git error for the removed worktree; and a follow-up sent from a Done task runs a real provider turn in the source repository of its removed worktree. The turn is told the task is archived, that a question-only turn leaves it Done, that it has no worktree for edits, and to run `task repository renew` before any Git change; its completed outcome leaves the task Done with no new worktree, the follow-up and its reply persist in the history across fresh reads, and switching the Done task's provider is still rejected.
+    func test_done_task_accepts_follow_up_conversation() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Archived follow-up UI", "--prompt", "Fixture task description.",
+            "--repo", fixture.primary.path, "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Archived follow-up UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Archived follow-up UI")
+        let record = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let worktreePath = try XCTUnwrap(record["worktreePath"] as? String)
+        let repositoryPath = try XCTUnwrap(record["repositoryPath"] as? String)
+        element("back-to-board-button").click()
+        moveTaskToDone(taskID: taskID)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktreePath), "Moving to Done removes the managed worktree before the follow-up.")
+        element("done-archive-button").click()
+        let archived = element("done-archive-task-\(taskID)")
+        XCTAssertTrue(archived.waitToExist(timeout: 10))
+        archived.click()
+        let hint = element("archived-conversation-follow-up-hint")
+        XCTAssertTrue(hint.waitToExist(timeout: 10), "A Done task shows the archived follow-up hint above its composer.")
+        let hintText = accessibleLabelOrValue(of: hint)
+        XCTAssertTrue(hintText.contains("follow-up changes open a fresh worktree from main"), "The hint names the merge target: \(hintText)")
+        XCTAssertTrue(element("workspace-changes-empty").waitToExist(timeout: 10), "A Done task's changes load as no changes.")
+        XCTAssertFalse(element("workspace-changes-error").exists, "A Done task shows no Git error for its removed worktree.")
+        XCTAssertFalse(element("archived-conversation-read-only").exists, "A Done task's conversation is no longer read only.")
+        XCTAssertTrue(element("message-composer").waitToExist(timeout: 10), "A Done task keeps its composer for follow-up questions.")
+        let providerMenu = element("conversation-provider-menu")
+        XCTAssertTrue(providerMenu.waitToExist(timeout: 10))
+        XCTAssertFalse(providerMenu.isEnabled, "A Done task still offers no provider switch.")
+        attachScreenshot(named: "Done task keeps its composer with the archived follow-up hint")
+
+        let question = "Which files did this archived task change?"
+        try completeCurrentTaskWithFixtureAnswers(
+            taskTitle: "Archived follow-up UI",
+            prompt: question,
+            expectedFinalStatus: "Done",
+            runningStatus: "Done"
+        )
+        let sentQuestion = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", question)).firstMatch
+        XCTAssertTrue(sentQuestion.waitToExist(timeout: 10), "The follow-up question stays in the Done task's conversation.")
+        let replies = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label == %@", "assistant-message-", "Answers received: Blue / fixture-secret."
+        ))
+        // The transcript renders lazily, so the first turn's reply may be scrolled out; the
+        // follow-up's own reply is the one below the follow-up question.
+        let followUpReplyBelowQuestion = {
+            replies.allElementsBoundByIndex.contains { $0.frame.minY > sentQuestion.frame.maxY }
+        }
+        XCTAssertTrue(waitUntil(followUpReplyBelowQuestion, timeout: 10), "The follow-up's reply appears below the follow-up question.")
+        let history = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))) as? [String: Any]
+        let followUp = try XCTUnwrap((history?["turns"] as? [[String: Any]])?.last)
+        XCTAssertTrue((followUp["userMessage"] as? String ?? "").contains(question))
+        XCTAssertEqual(followUp["cwd"] as? String, repositoryPath, "The follow-up runs in the source repository of the removed worktree.")
+        let instructions = try XCTUnwrap((history?["threadResumeDeveloperInstructions"] as? [Any])?.last as? String)
+        XCTAssertTrue(instructions.contains("This task is Done (archived)"))
+        XCTAssertTrue(instructions.contains("A question-only turn leaves the task Done"))
+        XCTAssertTrue(instructions.contains("task repository renew \(taskID) --repo <path>"))
+        XCTAssertTrue(instructions.contains("Active task worktrees for edits: none"))
+        let current = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertEqual(current["status"] as? String, "Done", "The follow-up's completed outcome leaves the task Done.")
+        XCTAssertEqual((current["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String, worktreePath, "A question-only turn creates no worktree.")
+        XCTAssertTrue(element("archived-conversation-follow-up-hint").exists)
+        attachScreenshot(named: "Done task answers the follow-up and stays Done")
+        let doneSwitch = try runCLI(["conversation", "provider", taskID, "set", "claude"], expectedStatus: 2)
+        XCTAssertTrue(((doneSwitch["error"] as? [String: Any])?["message"] as? String ?? "").contains("Done tasks are closed"))
+        element("back-to-board-button").click()
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
+        // A fresh history load keeps the follow-up and both replies.
+        element("done-archive-button").click()
+        let reopened = element("done-archive-task-\(taskID)")
+        XCTAssertTrue(reopened.waitToExist(timeout: 10))
+        reopened.click()
+        XCTAssertTrue(element("archived-conversation-follow-up-hint").waitToExist(timeout: 10))
+        XCTAssertTrue(sentQuestion.waitToExist(timeout: 10), "The follow-up persists in the reopened conversation.")
+        XCTAssertTrue(element("workspace-changes-empty").waitToExist(timeout: 10), "The reopened Done task still loads no changes.")
+        XCTAssertFalse(element("workspace-changes-error").exists)
+        XCTAssertTrue(waitUntil(followUpReplyBelowQuestion, timeout: 10), "The follow-up's reply persists below it in the reopened conversation.")
+        attachScreenshot(named: "Reopened Done task keeps the follow-up and its reply")
+        element("back-to-board-button").click()
+    }
+
+    // case-contract: test_merged_task_renew_opens_fresh_worktree_and_new_pr | `task repository renew` starts follow-up Git work after a pull request merged. It is rejected while the repository has no linked pull request, while the linked pull request is unmerged, and while the merged worktree has uncommitted changes, leaving the task unchanged. A merged PR status read persists that it merged, and the next turn is told the merged branch is finished and to renew before Git changes. Renewing from inside the agent's turn retires the record with its merged PR to the task's past repositories, keeps the merged branch, removes the old worktree once that turn ends, and creates a fresh worktree on a new suffixed branch based on the merge target as just fetched from the remote, so it holds the merged commits even when the local target is stale. A new pull request then opens from the fresh worktree, and the card shows the merged PR in purple beside the new one; once the task is Done, the archive row lists both. A Done task renews too, from inside its follow-up turn: it returns to In Progress with a fresh worktree for every repository whose worktree was removed (a past link only for records that had a pull request), and that turn's completed outcome moves it to Review, keeping both merged PRs on fresh reads.
+    func test_merged_task_renew_opens_fresh_worktree_and_new_pr() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
+        let stateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STATE_PATH"]))
+        let remoteRoot = dataDirectory.appendingPathComponent("renew-remotes", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remoteRoot.path), "Each case must start with an isolated remote.")
+        try FileManager.default.createDirectory(at: remoteRoot, withIntermediateDirectories: true)
+        try WorkspaceFixture.ownerContents.write(to: remoteRoot.appendingPathComponent(WorkspaceFixture.ownerMarker), atomically: true, encoding: .utf8)
+        XCTAssertFalse(try runGitOutput(fixture.primary, "remote").split(whereSeparator: \.isNewline).contains("origin"), "The isolated source fixture must not already have an origin remote.")
+        addTeardownBlock { [self] in try? runGit(fixture.primary, "remote", "remove", "origin") }
+        let remote = remoteRoot.appendingPathComponent("primary.git", isDirectory: true)
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        try runGit(remote, "init", "--bare")
+        try runGit(fixture.primary, "remote", "add", "origin", remote.path)
+        try runGit(fixture.primary, "push", "origin", "main")
+
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Renew merged work UI", "--prompt", "Fixture task description.",
+            "--repo", fixture.primary.path, "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Renew merged work UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Renew merged work UI")
+        element("back-to-board-button").click()
+        let old = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let oldBranch = try XCTUnwrap(old["branch"] as? String)
+        let oldWorktree = URL(fileURLWithPath: try XCTUnwrap(old["worktreePath"] as? String))
+        let renew = ["task", "repository", "renew", taskID, "--repo", fixture.primary.path]
+        let noPullRequest = try runCLI(renew, expectedStatus: 1, extraEnvironment: ghEnvironment)
+        XCTAssertTrue(((noPullRequest["error"] as? [String: Any])?["message"] as? String ?? "").contains("no merged pull request"))
+
+        XCTAssertTrue(terminateAppAndWait(app), "Close Playhouse before seeding the linked pull request.")
+        try seedTaskPullRequest(taskID: taskID, number: 123, url: "https://github.com/playhouse-test/fixture/pull/123")
+        try "123=unmerged\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let unmerged = try runCLI(renew, expectedStatus: 1, extraEnvironment: ghEnvironment)
+        XCTAssertTrue(((unmerged["error"] as? [String: Any])?["message"] as? String ?? "").contains("#123 isn't merged yet"))
+
+        // GitHub merges the PR: the remote target gains the merged commit while the local target stays stale.
+        let merger = remoteRoot.appendingPathComponent("merger", isDirectory: true)
+        try runGit(remoteRoot, "clone", "--quiet", "--branch", "main", remote.path, merger.path)
+        try "Merged pull request #123.\n".write(to: merger.appendingPathComponent("merged-on-github.txt"), atomically: true, encoding: .utf8)
+        try runGit(merger, "add", "merged-on-github.txt")
+        try runGit(merger, "-c", "user.name=Playhouse Test", "-c", "user.email=test@playhouse.invalid", "commit", "-m", "Merge pull request #123")
+        try runGit(merger, "push", "origin", "HEAD:main")
+        let mergedHead = try runGitOutput(merger, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines)
+        try "123=merged\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        _ = try runCLI(["task", "pr", "status", taskID], extraEnvironment: ghEnvironment)
+        XCTAssertEqual((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["isPullRequestMerged"] as? Bool, true)
+        openTask(named: "Renew merged work UI")
+        var renewedRecord: [String: Any]?
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Renew merged work UI", prompt: "Can you follow up on the merged change?", whileTurnHeld: { [self] in
+            // The agent renews from inside its own turn, as the instructions tell it to.
+            try "uncommitted\n".write(to: oldWorktree.appendingPathComponent("left-behind.txt"), atomically: true, encoding: .utf8)
+            let dirty = try runCLI(renew, expectedStatus: 1, extraEnvironment: ghEnvironment)
+            XCTAssertTrue(((dirty["error"] as? [String: Any])?["message"] as? String ?? "").contains("uncommitted changes"))
+            try FileManager.default.removeItem(at: oldWorktree.appendingPathComponent("left-behind.txt"))
+            renewedRecord = try runCLI(renew, extraEnvironment: ghEnvironment)["result"] as? [String: Any]
+            Thread.sleep(forTimeInterval: 0.5)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: oldWorktree.path), "The merged worktree stays while the turn that renewed it still runs.")
+        })
+        let history = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))) as? [String: Any]
+        // Later resumes carry the renewed mapping; the turn itself started with the merged guidance.
+        let instructions = ((history?["threadResumeDeveloperInstructions"] as? [Any]) ?? []).compactMap { $0 as? String }
+            .first { $0.contains("Merged pull requests:") } ?? ""
+        let repositoryPath = try XCTUnwrap(old["repositoryPath"] as? String)
+        XCTAssertTrue(instructions.contains("Merged pull requests: #123 for \(repositoryPath) (branch \(oldBranch))"), "The next turn is told which PR merged.")
+        XCTAssertTrue(instructions.contains("do not commit or push to it"))
+        XCTAssertTrue(instructions.contains("task repository renew \(taskID) --repo <path>"))
+        element("back-to-board-button").click()
+
+        let renewed = try XCTUnwrap(renewedRecord)
+        XCTAssertEqual(renewed["status"] as? String, "In Progress", "Renewing mid-turn leaves the running turn's status alone.")
+        let fresh = try XCTUnwrap((renewed["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let freshBranch = try XCTUnwrap(fresh["branch"] as? String)
+        XCTAssertNotEqual(freshBranch, oldBranch)
+        XCTAssertTrue(freshBranch.range(of: "^renew-merged-work-ui-[a-z0-9]{4}$", options: .regularExpression) != nil, "Unexpected fresh branch \(freshBranch)")
+        XCTAssertEqual(fresh["branchFrom"] as? String, "origin/main")
+        let freshWorktree = URL(fileURLWithPath: try XCTUnwrap(fresh["worktreePath"] as? String))
+        XCTAssertEqual(try runGitOutput(freshWorktree, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines), mergedHead, "The fresh worktree starts from the merge target as just fetched.")
+        let past = try XCTUnwrap(renewed["pastRepositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual(past.compactMap { $0["pullRequestNumber"] as? Int }, [123])
+        XCTAssertEqual(past.first?["branch"] as? String, oldBranch)
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: oldWorktree.path) }, timeout: 20), "The merged worktree is removed once the turn that renewed it ends.")
+        XCTAssertFalse(try runGitOutput(fixture.primary, "branch", "--list", oldBranch).isEmpty, "Renewing keeps the merged branch.")
+
+        let mergedLink = app.links["task-pr-link-\(taskID)-123"]
+        XCTAssertTrue(mergedLink.waitToExist(timeout: 10), "The merged PR stays on the card after renewing.")
+        XCTAssertEqual(mergedLink.value as? String, "merged", "The retired PR reads as merged (purple).")
+        let createPRButton = element("task-create-pr-\(taskID)")
+        XCTAssertTrue(createPRButton.waitToExist(timeout: 10), "The fresh worktree offers a new pull request beside the merged one.")
+        revealOnBoard(createPRButton)
+        attachScreenshot(named: "Renewed task keeps the merged PR beside a new PR action")
+        try "Follow-up after the merge.\n".write(to: freshWorktree.appendingPathComponent("follow-up.txt"), atomically: true, encoding: .utf8)
+        createPRButton.click()
+        let newLink = app.links["task-pr-link-\(taskID)-501"]
+        XCTAssertTrue(newLink.waitToExist(timeout: 30), "The new pull request opens from the fresh worktree.")
+        XCTAssertTrue(mergedLink.exists, "The merged PR stays beside the new one.")
+        XCTAssertEqual(mergedLink.value as? String, "merged")
+        let createLog = try String(contentsOfFile: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CREATE_LOG"]), encoding: .utf8)
+        let createTargets = createLog.components(separatedBy: "\n").filter { $0.hasPrefix("create\t") }
+            .compactMap { $0.split(separator: "\t", maxSplits: 2).dropFirst().first.map(String.init) }
+            .map { $0.replacingOccurrences(of: "/private/tmp/", with: "/tmp/") }
+        XCTAssertEqual(createTargets, [freshWorktree.resolvingSymlinksInPath().path.replacingOccurrences(of: "/private/tmp/", with: "/tmp/")])
+        attachScreenshot(named: "Merged PR in purple beside the new PR")
+
+        try "123=merged\n501=merged\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        XCTAssertEqual((try runCLI(["task", "move", taskID, "Done"], extraEnvironment: ghEnvironment)["result"] as? [String: Any])?["status"] as? String, "Done")
+        element("done-archive-button").click()
+        XCTAssertTrue(element("done-archive-task-\(taskID)").waitToExist(timeout: 10))
+        let archivedMerged = app.links["done-archive-pr-link-\(taskID)-123"]
+        let archivedNew = app.links["done-archive-pr-link-\(taskID)-501"]
+        XCTAssertTrue(archivedMerged.waitToExist(timeout: 10), "The Done archive row keeps the PR merged before the renew.")
+        XCTAssertTrue(archivedNew.waitToExist(timeout: 10), "The Done archive row lists the new PR beside it.")
+        XCTAssertLessThan(archivedMerged.frame.minX, archivedNew.frame.minX, "The earlier merged PR comes first.")
+        attachScreenshot(named: "Done archive lists the merged PR beside the new one")
+        element("done-archive-task-\(taskID)").click()
+        XCTAssertTrue(element("archived-conversation-follow-up-hint").waitToExist(timeout: 10))
+        var reopenedRecord: [String: Any]?
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Renew merged work UI", prompt: "Please make one more change.", whileTurnHeld: { [self] in
+            reopenedRecord = try runCLI(renew, extraEnvironment: ghEnvironment)["result"] as? [String: Any]
+            XCTAssertEqual(reopenedRecord?["status"] as? String, "In Progress", "Renewing a Done task moves it back to In Progress.")
+        })
+        XCTAssertFalse(element("archived-conversation-follow-up-hint").exists, "The reopened task is no longer archived.")
+        element("back-to-board-button").click()
+        let reopened = try XCTUnwrap(reopenedRecord)
+        XCTAssertEqual((reopened["pastRepositoryWorktrees"] as? [[String: Any]])?.compactMap { $0["pullRequestNumber"] as? Int }, [123, 501])
+        assertTaskVisible("Renew merged work UI", inColumn: "Review")
+        let reopenedFirst = app.links["task-pr-link-\(taskID)-123"]
+        let reopenedSecond = app.links["task-pr-link-\(taskID)-501"]
+        XCTAssertTrue(reopenedFirst.waitToExist(timeout: 10) && reopenedSecond.waitToExist(timeout: 10), "The reopened card keeps both merged PRs.")
+        XCTAssertEqual(reopenedFirst.value as? String, "merged")
+        XCTAssertEqual(reopenedSecond.value as? String, "merged")
+        revealOnBoard(reopenedSecond)
+        attachScreenshot(named: "Reopened Done task keeps both merged PRs")
+        let persisted = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertEqual(persisted["status"] as? String, "Review", "The reopening turn's completed outcome moves the task to Review, not back to Done.")
+        XCTAssertEqual((persisted["pastRepositoryWorktrees"] as? [[String: Any]])?.compactMap { $0["pullRequestNumber"] as? Int }, [123, 501])
+
+        // Reopening a multi-repository Done task renews every repository whose worktree was removed.
+        let multi = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Renew both repositories UI", "--prompt", "Fixture task description.",
+            "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
+        ])["result"] as? [String: Any])
+        let multiID = try XCTUnwrap(multi["id"] as? String)
+        openTask(named: "Renew both repositories UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Renew both repositories UI")
+        element("back-to-board-button").click()
+        let before = try XCTUnwrap(try taskRecord(id: multiID)?["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual((try runCLI(["task", "move", multiID, "Done"])["result"] as? [String: Any])?["status"] as? String, "Done")
+        let both = try XCTUnwrap(try runCLI(["task", "repository", "renew", multiID, "--repo", fixture.primary.path], extraEnvironment: ghEnvironment)["result"] as? [String: Any])
+        XCTAssertEqual(both["status"] as? String, "In Progress")
+        let after = try XCTUnwrap(both["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual(after.count, 2)
+        for (old, new) in zip(before, after) {
+            XCTAssertEqual(new["repositoryPath"] as? String, old["repositoryPath"] as? String)
+            XCTAssertNotEqual(new["worktreePath"] as? String, old["worktreePath"] as? String)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(new["worktreePath"] as? String)), "Each repository of the reopened task gets a fresh worktree.")
+        }
+        XCTAssertEqual((both["pastRepositoryWorktrees"] as? [[String: Any]])?.count, 0, "Records without a pull request leave no past link.")
+        assertTaskVisible("Renew both repositories UI", inColumn: "In Progress")
+        openTask(named: "Renew both repositories UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Renew both repositories UI", prompt: "Change both repositories.")
+        element("back-to-board-button").click()
     }
 
     // case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows exact PR numbers on the active task and Done archive, including four-digit values without grouping separators, each with a hit target at least 30 points wide and tall. Hovering the outer padded edge of each PR link triggers its feedback.
@@ -8209,8 +8461,9 @@ final class PlayhouseUITests: XCTestCase {
         let archived = element("done-archive-task-\(doneTaskID)")
         XCTAssertTrue(archived.waitToExist(timeout: 10))
         archived.click()
-        XCTAssertTrue(element("archived-conversation-read-only").waitToExist(timeout: 10))
-        XCTAssertFalse(element("conversation-provider-menu").exists, "A Done task's read-only conversation offers no provider switch.")
+        XCTAssertTrue(element("archived-conversation-follow-up-hint").waitToExist(timeout: 10))
+        XCTAssertTrue(element("conversation-provider-menu").waitToExist(timeout: 10))
+        XCTAssertFalse(element("conversation-provider-menu").isEnabled, "A Done task's conversation offers no provider switch.")
         let doneSwitch = try runCLI(["conversation", "provider", doneTaskID, "set", "claude"], expectedStatus: 2)
         XCTAssertTrue(((doneSwitch["error"] as? [String: Any])?["message"] as? String ?? "").contains("Done tasks are closed"))
         XCTAssertEqual(try taskRecord(id: doneTaskID)?["conversationProvider"] as? String, "codex")
@@ -12244,11 +12497,11 @@ final class PlayhouseUITests: XCTestCase {
         let archivedGoal = element("done-archive-task-\(taskID)")
         XCTAssertTrue(archivedGoal.waitToExist(timeout: 10), "The completed Goal task should be available in the Done archive.")
         archivedGoal.click()
-        XCTAssertTrue(element("archived-conversation-read-only").waitToExist(timeout: 10))
+        XCTAssertTrue(element("archived-conversation-follow-up-hint").waitToExist(timeout: 10))
         let reopenedConversation = element("conversation-scroll-view")
         let restoredBanner = reopenedConversation.descendants(matching: .any)
             .matching(identifier: "goal-achieved-banner").firstMatch
-        XCTAssertTrue(restoredBanner.waitToExist(timeout: 10), "A completed Goal should remain visible in the read-only conversation after archiving its task.")
+        XCTAssertTrue(restoredBanner.waitToExist(timeout: 10), "A completed Goal should remain visible in the archived conversation after archiving its task.")
         XCTAssertTrue(accessibleLabelOrValue(of: restoredBanner).contains("Goal achieved in"))
         let restoredAchievementRows = reopenedConversation.descendants(matching: .any)
             .matching(identifier: "goal-achievement-timeline-row")
@@ -20450,7 +20703,8 @@ final class PlayhouseUITests: XCTestCase {
         reportCompletedOutcome: Bool = true,
         expectedFinalStatus: String? = nil,
         settleTimeout: TimeInterval = 10,
-        whileTurnHeld: (() throws -> Void)? = nil
+        whileTurnHeld: (() throws -> Void)? = nil,
+        runningStatus: String = "In Progress"
     ) throws {
         let taskID = try taskID(named: taskTitle)
         let executablePath = try XCTUnwrap(codexFixtureExecutable, "The task fixture has no Codex executable.")
@@ -20478,8 +20732,8 @@ final class PlayhouseUITests: XCTestCase {
         try whileTurnHeld?()
         if reportCompletedOutcome {
             XCTAssertTrue(waitUntil({
-                (try? self.taskRecord(id: taskID)?["status"] as? String) == "In Progress"
-            }, timeout: 10), "The task should be In Progress before reporting the fixture outcome.")
+                (try? self.taskRecord(id: taskID)?["status"] as? String) == runningStatus
+            }, timeout: 10), "The task should be \(runningStatus) before reporting the fixture outcome.")
             let outcome = try runCLI(["task", "outcome", taskID, "completed"])
             XCTAssertEqual((outcome["result"] as? [String: Any])?["outcome"] as? String, "completed")
         }

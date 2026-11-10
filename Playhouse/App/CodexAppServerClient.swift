@@ -2761,6 +2761,7 @@ enum TaskThreadDeveloperInstructions {
         contextFolders: [String] = [],
         repositoryRootPath: String? = nil,
         isStandaloneChat: Bool = false,
+        isArchived: Bool = false,
         missedPreviousPageSignal: Bool = false
     ) -> String {
         let executable = cliExecutableURL().path
@@ -2812,7 +2813,7 @@ enum TaskThreadDeveloperInstructions {
 
         Repository context for this task:
         - Selected repositories (source identity): \(repositories.isEmpty ? "none" : repositories.map(\.repositoryPath).joined(separator: ", "))
-        - Active task worktrees for edits: \(repositories.isEmpty ? "none" : repositories.map { "\($0.repositoryPath) -> \($0.worktreePath)" }.joined(separator: "; "))
+        - Active task worktrees for edits: \(repositories.isEmpty || isArchived ? "none" : repositories.map { "\($0.repositoryPath) -> \($0.worktreePath)" }.joined(separator: "; "))
         - Additional context folders: \(contextFolders.isEmpty ? "none" : contextFolders.joined(separator: ", "))
         - Configured repository root: \(repositoryRootPath ?? "not available")
         A task may intentionally have no selected repository. Decide whether it is standalone or needs repository context. For read-only inspection, you do not need to attach a repository or create a worktree: call \(quotedExecutable) workspace repos list, then inspect a clearly matching returned repository path read-only. Never edit files in those source paths. If the request is standalone, proceed without repository context.
@@ -2820,12 +2821,13 @@ enum TaskThreadDeveloperInstructions {
         For already selected repositories, make changes in their corresponding active task worktrees above. For folder-only tasks, use the selected additional context folder; with no repository or folder context, treat the task as standalone unless the user asks for files that clearly belong in a repository. Playhouse starts the provider conversation with the active task worktree as cwd and runtime workspace root. Temporary files under /tmp and other non-repository directories remain available when useful.
         Use the workspace repos list API for repository discovery; do not search the configured root to find repositories yourself. Once the API returns a repository path, you may inspect that repository's contents read-only without adding it. For read-only inspection of returned source paths, you do not need to add a repository.
         A selected repository can be a sticky default from an earlier task, and the user may have forgotten to change it. Do not interrupt the user or ask them to confirm the selection merely because the task appears unrelated. Use workspace repos list to discover alternatives when needed. Read-only inspection of returned source paths does not require adding repositories. Add a repository only when you intend to make or commit changes there, and use its task worktreePath for every edit. Do not replace or remove selected repositories unless the user explicitly asks; adding a worktree for a change is sufficient. Never silently edit a source repository path.
-        Repository context commands for this task:
+        \(mergedWorkInstructions(id: id, executable: quotedExecutable, repositories: repositories, isArchived: isArchived))Repository context commands for this task:
         \(quotedExecutable) task get \(id)
         \(quotedExecutable) task repository add \(id) --repo <path>
         \(quotedExecutable) task repository add-batch \(id) --repo <path> [--repo <path>...]
         \(quotedExecutable) task repository replace \(id) --repo <path> [--repo <path>...]
         \(quotedExecutable) task repository remove \(id) --repo <path>
+        \(quotedExecutable) task repository renew \(id) --repo <path>   (only after the repository's pull request merged)
         \(quotedExecutable) settings get
         \(quotedExecutable) workspace repos list
 
@@ -2834,6 +2836,25 @@ enum TaskThreadDeveloperInstructions {
         Use completed only when all work for this turn is finished and no user decision or response is needed; Playhouse moves the task to Review. Use waiting-response when you need the user to answer, choose between options, provide missing information, or take another action before you can continue. Use in-progress when this turn is ending but the work is not done and you need nothing from the user: Playhouse keeps the task In Progress and immediately sends you a private continuation turn so you can carry on. Never end a turn mid-work without an outcome — report in-progress instead. The outcome call must be your final CLI action for the turn.
         Reporting an outcome is required for every successful turn. If you end a turn without one, Playhouse privately nudges you to report your current status, up to \(TurnOutcome.maxContinuations) times per request. Answer a nudge with an outcome call rather than by repeating finished work. If the nudges run out without the work settling, Playhouse marks the task Blocked.
         """
+    }
+
+    /// Guidance for follow-up work after a pull request merged: the merged branch is
+    /// finished, so Git work starts again from a fresh worktree off the merge target.
+    private static func mergedWorkInstructions(
+        id: String,
+        executable: String,
+        repositories: [RepositoryWorktreeRecord],
+        isArchived: Bool
+    ) -> String {
+        let renew = "\(executable) task repository renew \(id) --repo <path>"
+        let outcome = "Make every edit in the returned worktreePath. When the work is ready, Playhouse opens a new pull request for that worktree, and the merged pull request stays on the task card."
+        if isArchived {
+            return "This task is Done (archived) and its task worktrees were removed. You can still answer follow-up questions, using this conversation as context and inspecting the source repository paths read-only. A question-only turn leaves the task Done. Before any change that involves Git (editing repository files, committing, or opening a pull request), run \(renew) for a repository you will change. It gives every repository of this task a fresh worktree on a new branch from the latest merge target (for example origin/master), moves the task back to In Progress, and returns the source-to-worktree mapping. \(outcome)\n"
+        }
+        let merged = repositories.filter { $0.isPullRequestMerged && $0.pullRequestNumber != nil }
+        guard !merged.isEmpty else { return "" }
+        let list = merged.map { "#\($0.pullRequestNumber ?? 0) for \($0.repositoryPath) (branch \($0.branch))" }.joined(separator: ", ")
+        return "Merged pull requests: \(list). A merged branch is finished: do not commit or push to it. Follow-up questions need no Git work. Before any further change that involves Git in such a repository, run \(renew). It creates a fresh worktree on a new branch from the latest merge target (for example origin/master) and returns the source-to-worktree mapping. \(outcome)\n"
     }
 
     private static func cliExecutableURL() -> URL {

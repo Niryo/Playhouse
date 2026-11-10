@@ -198,18 +198,24 @@ extension TaskItemModel {
                 pullRequests.conflictsHelp = "Resolve pull request conflicts with \(task.conversationProvider.displayName)"
             }
             pullRequests.links = linked.compactMap { record in
-                guard let number = record.pullRequestNumber, let url = record.pullRequestURL, URL(string: url) != nil else { return nil }
-                let health = pullRequestHealth[number]
-                return PullRequestLink(
-                    number: number,
-                    url: url,
-                    color: Self.healthColor(health),
-                    help: URL(fileURLWithPath: record.repositoryPath).lastPathComponent + (health.map { " · \(Self.healthDescription($0))" } ?? ""),
-                    health: health?.rawValue ?? "unknown"
-                )
+                Self.pullRequestLink(record, health: pullRequestHealth[record.pullRequestNumber ?? 0] ?? (record.isPullRequestMerged ? .merged : nil))
             }
         }
+        // Pull requests from before the task renewed its worktree stay on the card (merged
+        // ones in purple), ahead of the current ones.
+        pullRequests.links = task.pastRepositoryWorktrees.compactMap { Self.pullRequestLink($0, health: $0.isPullRequestMerged ? .merged : nil) } + pullRequests.links
         self.pullRequests = pullRequests
+    }
+
+    private static func pullRequestLink(_ record: RepositoryWorktreeRecord, health: PullRequestHealth?) -> PullRequestLink? {
+        guard let number = record.pullRequestNumber, let url = record.pullRequestURL, URL(string: url) != nil else { return nil }
+        return PullRequestLink(
+            number: number,
+            url: url,
+            color: healthColor(health),
+            help: URL(fileURLWithPath: record.repositoryPath).lastPathComponent + (health.map { " · \(healthDescription($0))" } ?? ""),
+            health: health?.rawValue ?? "unknown"
+        )
     }
 }
 

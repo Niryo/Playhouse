@@ -1229,6 +1229,11 @@ struct TaskConversationView: View {
         conversationRuntime.isTurnActive(threadID: task.activeConversationID ?? "")
     }
 
+    private var archivedFollowUpHint: String {
+        let target = task.repositoryWorktrees.compactMap(\.mergeTarget).first
+        return "Archived · follow-up changes open a fresh worktree from \(target ?? "the merge target")"
+    }
+
     /// Provider switches wait for active turns and queued follow-ups to settle.
     private var canSwitchProvider: Bool {
         !isReadOnly && !isResponding && !isLoadingHistory && !isPreparingSubmittedMessage && !isSwitchingProvider
@@ -2488,6 +2493,15 @@ struct TaskConversationView: View {
                         .padding(.vertical, 18)
                         .accessibilityIdentifier("archived-conversation-read-only")
                 } else {
+                    if task.status == .done {
+                        // A Done task keeps its conversation; Git work renews a worktree first.
+                        Label(archivedFollowUpHint, systemImage: "archivebox")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 8)
+                            .accessibilityIdentifier("archived-conversation-follow-up-hint")
+                    }
                     ComposerDraftScope { composer }
                 }
             }

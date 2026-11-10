@@ -858,6 +858,8 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let hasUnsentDraft: Bool
     let workspaceRoots: [String]
     let repositoryWorktrees: [RepositoryWorktreeRecord]
+    /// Records retired by `task repository renew`; their merged PRs stay on the card.
+    let pastRepositoryWorktrees: [RepositoryWorktreeRecord]
     let contextFolders: [String]
     let draftImageDataURLs: [String]?
     let autoCreatePullRequestOnReview: Bool
@@ -890,6 +892,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         hasUnsentDraft = task.hasUnsentDraft
         workspaceRoots = task.workspaceRootPaths
         repositoryWorktrees = task.repositoryWorktrees
+        pastRepositoryWorktrees = boardTask?.pastRepositoryWorktrees ?? []
         contextFolders = task.contextFolderPaths
         draftImageDataURLs = includeDraftImages ? task.draftImageDataURLs : nil
         autoCreatePullRequestOnReview = task.autoCreatePullRequestOnReview
@@ -2253,6 +2256,168 @@ final class BoardTaskManager {
         }
     }
 
+    /// Starts follow-up Git work in a repository whose pull request merged: the merged
+    /// record is retired to `pastRepositoryWorktrees` (keeping its PR link on the card) and a
+    /// fresh worktree on a new branch is created from the merge target as the remote has it
+    /// now. A Done task (whose worktrees are already gone) may always renew: it moves back to
+    /// In Progress with a fresh worktree for every repository whose worktree was removed. The
+    /// old worktree, when still present, is removed once the current turn ends.
+    @discardableResult
+    func renewRepository(_ id: UUID, repositoryPath: String) async throws -> BoardTask {
+        PlayhouseDiagnostics.record("workspace.repository.renew.started", fields: [
+            "taskID": id.uuidString,
+            "repositoryPath": repositoryPath
+        ])
+        let initialTask = try requireTask(id)
+        let initialRecord = try repositoryRecord(repositoryPath, in: initialTask)
+        let wasDone = initialTask.status == .done
+        if !wasDone {
+            guard let number = initialRecord.pullRequestNumber else {
+                throw BridgeCommandError(
+                    code: "invalid_transition",
+                    message: "This repository has no merged pull request, so keep working in its worktree: \(initialRecord.worktreePath)"
+                )
+            }
+            var merged = initialRecord.isPullRequestMerged
+            if !merged {
+                let executable = try pullRequestService.resolveExecutable()
+                merged = try await pullRequestService.isMerged(initialRecord, executable: executable)
+            }
+            guard merged else {
+                throw BridgeCommandError(
+                    code: "invalid_transition",
+                    message: "Pull request #\(number) isn't merged yet, so keep working in its worktree: \(initialRecord.worktreePath)"
+                )
+            }
+        }
+        let oldWorktreeExists = initialRecord.createdByPlayhouse && !initialRecord.isPending
+            && FileManager.default.fileExists(atPath: initialRecord.worktreePath)
+        if oldWorktreeExists, try await worktreeService.hasChanges(initialRecord) {
+            throw BridgeCommandError(
+                code: "operation_failed",
+                message: "The merged worktree has uncommitted changes: \(initialRecord.worktreePath). Carry them over or discard them, then renew again."
+            )
+        }
+        // Moving to Done removed every managed worktree, so reopening a Done task renews
+        // each repository whose worktree is gone, not only the one asked for.
+        let renewed = wasDone
+            ? initialTask.repositoryWorktrees.filter {
+                $0 == initialRecord || (!$0.isPending && !FileManager.default.fileExists(atPath: $0.worktreePath))
+            }
+            : [initialRecord]
+        var replacements: [(old: RepositoryWorktreeRecord, fresh: RepositoryWorktreeRecord)] = []
+        for record in renewed {
+            let base = try await worktreeService.freshMergeTargetBase(
+                repositoryPath: record.repositoryPath,
+                mergeTarget: record.mergeTarget
+            )
+            replacements.append((record, try await worktreeService.pendingRecord(spec: RepositoryWorktreeSpec(
+                repositoryPath: record.repositoryPath,
+                branch: nil,
+                branchFrom: base,
+                mergeTarget: record.mergeTarget
+            ))))
+        }
+        try await withTaskOperationLock(id) {
+            try await withRepositoryAllocationLocks(renewed.map(\.repositoryPath)) {
+                let task = try requireTask(id)
+                guard task.repositoryWorktrees == initialTask.repositoryWorktrees, task.status == initialTask.status else {
+                    throw BridgeCommandError(code: "invalid_transition", message: "The task changed while its repository was being renewed. Try again.")
+                }
+                let repositories = task.repositoryWorktrees.map { record in
+                    replacements.first { $0.old == record }?.fresh ?? record
+                }
+                task.pastRepositoryWorktrees += replacements.map(\.old).filter { $0.pullRequestNumber != nil }.map { record in
+                    var retired = record
+                    // Outside Done, renewing first confirmed the pull request merged.
+                    if !wasDone { retired.isPullRequestMerged = true }
+                    return retired
+                }
+                task.repositoryWorktrees = repositories
+                task.workspaceRootPaths = try Self.normalizeOptionalRoots(
+                    repositories.map { $0.isPending ? $0.repositoryPath : $0.worktreePath } + task.contextFolderPaths
+                )
+                if wasDone {
+                    task.status = .inProgress
+                    task.lifecycleRevision += 1
+                    task.statusMessage = nil
+                }
+                try await saveTaskContext(taskID: id)
+            }
+        }
+        let prepared = try await prepareRepositoryWorktrees(id)
+        if oldWorktreeExists {
+            let intentURL = try queueDeferredRepositoryRemoval(taskID: id, record: initialRecord)
+            scheduleDeferredWorktreeRemoval(taskID: id, record: initialRecord, intentURL: intentURL)
+        }
+        PlayhouseDiagnostics.record("workspace.repository.renew.succeeded", fields: [
+            "taskID": id.uuidString,
+            "repositoryPath": initialRecord.repositoryPath,
+            "retiredBranch": initialRecord.branch,
+            "renewedRepositoryCount": String(renewed.count),
+            "reopened": String(wasDone)
+        ])
+        return prepared
+    }
+
+    /// Removes a worktree the task no longer uses once its current turn ends, because the
+    /// turn's provider may still run in it. A restart picks the intent up through
+    /// `reconcileDeferredRepositoryRemovals`.
+    private func scheduleDeferredWorktreeRemoval(taskID id: UUID, record: RepositoryWorktreeRecord, intentURL deferredIntentURL: URL?) {
+        // Runs after this request returns, once the task's turn ends; keep
+        // this request's environment and diagnostics routing for it.
+        let requestContext = PlayhouseRequestContext.capture()
+        Task.detached { @MainActor in
+            await requestContext.run {
+                do {
+                    PlayhouseDiagnostics.record("workspace.repository.deferred_removal_waiting", fields: [
+                        "taskID": id.uuidString,
+                        "repositoryPath": record.repositoryPath,
+                        "worktreePath": record.worktreePath
+                    ])
+                    try await self.withConversationTurnReservation(id) {
+                        try await self.withTaskOperationLock(id) {
+                            guard let deferredIntentURL,
+                                  FileManager.default.fileExists(atPath: deferredIntentURL.path) else { return }
+                            if try self.isRepositoryAttached(record, to: id) {
+                                try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
+                                return
+                            }
+                            PlayhouseDiagnostics.record("workspace.repository.deferred_removal_reservation_acquired", fields: [
+                                "taskID": id.uuidString,
+                                "repositoryPath": record.repositoryPath,
+                                "worktreePath": record.worktreePath
+                            ])
+                            if try await self.worktreeService.hasChanges(record) {
+                                PlayhouseDiagnostics.record("workspace.repository.deferred_removal_kept_dirty", fields: [
+                                    "taskID": id.uuidString,
+                                    "repositoryPath": record.repositoryPath,
+                                    "worktreePath": record.worktreePath
+                                ])
+                                try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
+                                return
+                            }
+                            try await self.worktreeService.remove(record)
+                            PlayhouseDiagnostics.record("workspace.repository.deferred_removal_succeeded", fields: [
+                                "taskID": id.uuidString,
+                                "repositoryPath": record.repositoryPath,
+                                "worktreePath": record.worktreePath
+                            ])
+                            try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
+                        }
+                    }
+                } catch {
+                    PlayhouseDiagnostics.record("workspace.repository.deferred_removal_failed", fields: [
+                        "taskID": id.uuidString,
+                        "repositoryPath": record.repositoryPath,
+                        "worktreePath": record.worktreePath,
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
+        }
+    }
+
     private func removeRepositoryWhileTurnReserved(
         _ id: UUID,
         repositoryPath: String,
@@ -2307,58 +2472,7 @@ final class BoardTaskManager {
                             "repositoryPath": record.repositoryPath,
                             "worktreePath": record.worktreePath
                         ])
-                        // Runs after this request returns, once the task's turn ends; keep
-                        // this request's environment and diagnostics routing for it.
-                        let requestContext = PlayhouseRequestContext.capture()
-                        Task.detached { @MainActor in
-                            await requestContext.run {
-                                do {
-                                    PlayhouseDiagnostics.record("workspace.repository.deferred_removal_waiting", fields: [
-                                        "taskID": id.uuidString,
-                                        "repositoryPath": record.repositoryPath,
-                                        "worktreePath": record.worktreePath
-                                    ])
-                                    try await self.withConversationTurnReservation(id) {
-                                        try await self.withTaskOperationLock(id) {
-                                            guard let deferredIntentURL,
-                                                  FileManager.default.fileExists(atPath: deferredIntentURL.path) else { return }
-                                            if try self.isRepositoryAttached(record, to: id) {
-                                                try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
-                                                return
-                                            }
-                                            PlayhouseDiagnostics.record("workspace.repository.deferred_removal_reservation_acquired", fields: [
-                                                "taskID": id.uuidString,
-                                                "repositoryPath": record.repositoryPath,
-                                                "worktreePath": record.worktreePath
-                                            ])
-                                            if try await self.worktreeService.hasChanges(record) {
-                                                PlayhouseDiagnostics.record("workspace.repository.deferred_removal_kept_dirty", fields: [
-                                                    "taskID": id.uuidString,
-                                                    "repositoryPath": record.repositoryPath,
-                                                    "worktreePath": record.worktreePath
-                                                ])
-                                                try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
-                                                return
-                                            }
-                                            try await self.worktreeService.remove(record)
-                                            PlayhouseDiagnostics.record("workspace.repository.deferred_removal_succeeded", fields: [
-                                                "taskID": id.uuidString,
-                                                "repositoryPath": record.repositoryPath,
-                                                "worktreePath": record.worktreePath
-                                            ])
-                                            try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
-                                        }
-                                    }
-                                } catch {
-                                    PlayhouseDiagnostics.record("workspace.repository.deferred_removal_failed", fields: [
-                                        "taskID": id.uuidString,
-                                        "repositoryPath": record.repositoryPath,
-                                        "worktreePath": record.worktreePath,
-                                        "error": error.localizedDescription
-                                    ])
-                                }
-                            }
-                        }
+                        scheduleDeferredWorktreeRemoval(taskID: id, record: record, intentURL: deferredIntentURL)
                     } else {
                     do {
                         try await worktreeService.remove(record)
@@ -2455,6 +2569,14 @@ final class BoardTaskManager {
             }
             task.status = .done
             task.statusMessage = nil
+            if !allowUnmergedPullRequests {
+                // Every linked pull request was confirmed merged on the way to Done.
+                task.repositoryWorktrees = task.repositoryWorktrees.map { record in
+                    var record = record
+                    if record.pullRequestNumber != nil { record.isPullRequestMerged = true }
+                    return record
+                }
+            }
             clearProgressReport(task)
             try await saveTaskContext(taskID: id)
             PlayhouseDiagnostics.record("task.move.succeeded", fields: [
@@ -2834,7 +2956,31 @@ final class BoardTaskManager {
     /// that GitHub request because nothing acts on it.
     func reviewPullRequests(_ task: BoardTask) async throws -> [PullRequestReviewState] {
         let records = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil }
-        return try await reviewPullRequests(records, includeReviewThreads: task.pullRequestAutopilot)
+        let states = try await reviewPullRequests(records, includeReviewThreads: task.pullRequestAutopilot)
+        try await recordPullRequestsMerged(task.id, repositoryPaths: states.filter(\.merged).map(\.repositoryPath))
+        return states
+    }
+
+    /// Persists that these repositories' linked pull requests merged, so follow-up turns
+    /// are told to renew the worktree instead of committing to the finished branch.
+    func recordPullRequestsMerged(_ id: UUID, repositoryPaths: [String]) async throws {
+        let paths = Set(repositoryPaths)
+        guard !paths.isEmpty else { return }
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            var changed = false
+            let records = task.repositoryWorktrees.map { record in
+                var record = record
+                if record.pullRequestNumber != nil, !record.isPullRequestMerged, paths.contains(record.repositoryPath) {
+                    record.isPullRequestMerged = true
+                    changed = true
+                }
+                return record
+            }
+            guard changed else { return }
+            task.repositoryWorktrees = records
+            try await saveTaskContext(taskID: id)
+        }
     }
 
     func reviewPullRequests(_ records: [RepositoryWorktreeRecord], includeReviewThreads: Bool = false) async throws -> [PullRequestReviewState] {
@@ -2985,7 +3131,19 @@ final class BoardTaskManager {
                 }
                 // A merged PR's branch is usually deleted on the remote, so there is
                 // nothing left to fetch or push; local work stays committed.
-                if let executable, (try? await pullRequestService.isMerged(record, executable: executable)) == true {
+                var isMerged = record.isPullRequestMerged
+                if !isMerged, let executable {
+                    isMerged = (try? await pullRequestService.isMerged(record, executable: executable)) == true
+                }
+                if isMerged {
+                    if !record.isPullRequestMerged {
+                        task.repositoryWorktrees = task.repositoryWorktrees.map { candidate in
+                            var candidate = candidate
+                            if candidate == record { candidate.isPullRequestMerged = true }
+                            return candidate
+                        }
+                        try await saveTaskContext(taskID: id)
+                    }
                     results.append(TaskBranchSyncResult(repositoryPath: record.repositoryPath, action: "pr-merged"))
                     continue
                 }
@@ -3144,7 +3302,8 @@ final class BoardTaskManager {
                 )
             }
             let task = try requireSubject(id)
-            guard task.status == .inProgress else {
+            // A Done task's follow-up turn reports outcomes too; they leave it Done.
+            guard task.status == .inProgress || task.status == .done else {
                 throw BridgeCommandError(
                     code: "invalid_transition",
                     message: "Turn outcomes can only be reported while a task is In Progress."
@@ -3167,6 +3326,8 @@ final class BoardTaskManager {
         }
         return try await withTaskOperationLock(id) {
             let task = try requireSubject(id)
+            // A Done task's follow-up turn may report progress; the archive shows none.
+            if task.status == .done { return BoardTaskRecord(task: task) }
             guard task.status == .inProgress else {
                 throw BridgeCommandError(code: "invalid_transition", message: "Progress reports can only be published while a task is In Progress.")
             }
@@ -3646,7 +3807,8 @@ final class BoardTaskManager {
                 task.hasUnsentDraft = !submitted && !replacingDraft && (task.savedPrompt != nil || !task.draftImageDataURLs.isEmpty)
             }
             task.pendingSubmittedPrompt = submitted ? prompt : nil
-            if let status {
+            // A follow-up on a Done task leaves it Done until a worktree is renewed.
+            if let status, task.status != .done {
                 task.status = status
                 if status != .inProgress { clearProgressReport(task) }
             }
@@ -4873,6 +5035,12 @@ final class WorkspaceManager {
     }
 
     @discardableResult
+    func renewRepository(_ repositoryPath: String, on taskID: UUID) async throws -> BoardTaskRecord {
+        guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
+        return BoardTaskRecord(task: try await taskManager.renewRepository(taskID, repositoryPath: repositoryPath))
+    }
+
+    @discardableResult
     func removeRepository(_ repositoryPath: String, from taskID: UUID) async throws -> BoardTaskRecord {
         guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
         let record = try await taskManager.removeRepository(
@@ -4972,7 +5140,9 @@ final class WorkspaceManager {
         PlayhouseDiagnostics.record("workspace.changes.read.started", fields: ["taskID": taskID.uuidString])
         let task = try taskManager.taskModel(taskID)
         let branchFrom = Dictionary(task.repositoryWorktrees.map { (URL(fileURLWithPath: $0.worktreePath, isDirectory: true).standardizedFileURL.path, $0.branchFrom) }) { existing, _ in existing }
-        let inventory = try await WorkspaceChangeScanner.inventory(workspaceRoots: roots(for: taskID), branchFromByRepository: branchFrom, viewedChanges: task.viewedWorkspaceChanges)
+        // A Done task's managed worktrees are gone; it has no changes to show until it renews one.
+        let scannedRoots = try roots(for: taskID).filter { task.status != .done || FileManager.default.fileExists(atPath: $0) }
+        let inventory = try await WorkspaceChangeScanner.inventory(workspaceRoots: scannedRoots, branchFromByRepository: branchFrom, viewedChanges: task.viewedWorkspaceChanges)
         PlayhouseDiagnostics.record("workspace.changes.read.succeeded", fields: [
             "taskID": taskID.uuidString,
             "unviewedCount": String(inventory.unviewed.count),
@@ -5217,6 +5387,21 @@ final class ConversationManager {
             workspace.mcpBridge = mcp.bridge(roots: SkillRoot.roots(for: task))
         }
         return workspace
+    }
+
+    /// The roots a turn runs in. Moving a task to Done removes its managed worktrees, so a
+    /// follow-up turn on a Done task runs in each removed worktree's source repository.
+    static func launchRoots(_ task: any ConversationSubject) -> [String] {
+        guard task.status == .done else { return task.workspaceRootPaths }
+        let sources = Dictionary(
+            task.repositoryWorktrees.map { ($0.worktreePath, $0.repositoryPath) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var seen: Set<String> = []
+        return task.workspaceRootPaths.compactMap { root in
+            let path = FileManager.default.fileExists(atPath: root) ? root : (sources[root] ?? root)
+            return seen.insert(path).inserted ? path : nil
+        }
     }
 
     private static func historyRoots(_ task: any ConversationSubject) -> [String] {
@@ -5520,9 +5705,6 @@ final class ConversationManager {
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in }
     ) async throws -> Bool {
         let task = try tasks.conversationSubject(taskID)
-        guard task.status != .done else {
-            throw PlayhouseManagerError.invalidTransition("Done tasks are closed. Create a new task for follow-up work.")
-        }
         guard request.threadID == task.activeConversationID else {
             throw BridgeCommandError(code: "invalid_transition", message: "That question no longer belongs to this conversation.")
         }
@@ -5796,6 +5978,7 @@ final class ConversationManager {
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: repositoryRoot?.path,
                     isStandaloneChat: task.isStandaloneChat,
+                    isArchived: task.status == .done,
                     missedPreviousPageSignal: task.isStandaloneChat ? ((try? tasks.standaloneChatManager().lastTurnMissedSignal()) ?? false) : false
                 ),
                 sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
@@ -8052,6 +8235,9 @@ final class ConversationManager {
                     )
                 }
             }
+        } else if (try? tasks.conversationSubject(taskID).status) == .done {
+            // A follow-up on a Done task that never renewed a worktree has nothing to
+            // sync or review, so every outcome leaves it Done.
         } else if let outcome = reportedOutcome.flatMap(TurnOutcome.init(rawValue:)) {
             switch outcome {
             case .inProgress:
@@ -8125,10 +8311,9 @@ final class ConversationManager {
         guard Self.isValidModelID(modelID) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
         }
-        guard task.status != .done else {
-            throw PlayhouseManagerError.invalidTransition("Done tasks are closed. Create a new task for follow-up work.")
-        }
-        let availableRoots = task.workspaceRootPaths.compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
+        // A Done task keeps its conversation: follow-up questions run against the source
+        // repositories, and Git work first renews a worktree (`task repository renew`).
+        let availableRoots = Self.launchRoots(task).compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
         let validationWorkspace = try ConversationWorkspaceContext(roots: availableRoots)
         let effort = ConversationEffort(rawValue: task.conversationEffort) ?? .medium
         try await client.validateEffort(effort, modelID: modelID, workspace: validationWorkspace)
@@ -8151,7 +8336,7 @@ final class ConversationManager {
         // default-parent setting. Rootless tasks still require that setting,
         // except standalone chat, which has no repository at all and must stay
         // usable even when no default repository parent is configured.
-        let repositoryRoot: URL? = task.isStandaloneChat ? nil : try (task.workspaceRootPaths
+        let repositoryRoot: URL? = task.isStandaloneChat ? nil : try (Self.launchRoots(task)
             .compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
             .first ?? settingsManager.requireRepositoryRootFolder())
         let shouldGenerateTitle = !isPlayhouseNudge
@@ -8216,7 +8401,7 @@ final class ConversationManager {
             if !isPlayhouseNudge, !normalizedText.isEmpty {
                 _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
             }
-            let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            let roots = Self.launchRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) }
             workspace = try launchWorkspace(for: task, roots: roots, message: normalizedText)
             _ = try await tasks.clearProgressReport(taskID)
             if shouldGenerateTitle && !resolveTitleBeforeWorktree {
@@ -8285,6 +8470,7 @@ final class ConversationManager {
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: repositoryRoot?.path,
                     isStandaloneChat: task.isStandaloneChat,
+                    isArchived: task.status == .done,
                     missedPreviousPageSignal: task.isStandaloneChat ? ((try? tasks.standaloneChatManager().lastTurnMissedSignal()) ?? false) : false
                 )
             }
@@ -8405,6 +8591,7 @@ final class ConversationManager {
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: repositoryRoot?.path,
                     isStandaloneChat: task.isStandaloneChat,
+                    isArchived: task.status == .done,
 
                     missedPreviousPageSignal: task.isStandaloneChat ? ((try? tasks.standaloneChatManager().lastTurnMissedSignal()) ?? false) : false
                 ),
@@ -9438,6 +9625,12 @@ final class PlayhouseBridgeRuntime {
                     branch: request.requiredString("branch"),
                     branchFrom: request.requiredString("branchFrom"),
                     mergeTarget: request.arguments["mergeTarget"]?.string
+                ))
+            case "task.repository.renew":
+                try Self.rejectStandaloneChat(taskManager, request.requiredUUID("taskID"))
+                result = try Self.value(await workspaces.renewRepository(
+                    request.requiredString("repositoryPath"),
+                    on: request.requiredUUID("taskID")
                 ))
             case "task.repository.remove":
                 // Removal stays allowed even for standalone chat so any repository mistakenly

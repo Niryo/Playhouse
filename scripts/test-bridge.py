@@ -1286,7 +1286,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         return task
 
-    def complete_fixture_turn(self, task_id, executable_name="codex-fixture", message="Complete this task.", expected_status="Review", extra_environment=None):
+    def complete_fixture_turn(self, task_id, executable_name="codex-fixture", message="Complete this task.", expected_status="Review", extra_environment=None, while_turn_held=None):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / executable_name
         hold_marker = Path(str(executable) + ".hold-release")
@@ -1314,6 +1314,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
             outcome_count = 0
             while process.poll() is None and time.monotonic() < deadline:
                 if active.exists() and not release.exists():
+                    if while_turn_held is not None:
+                        # Runs once while the provider turn holds the task, as an agent's own command would.
+                        held, while_turn_held = while_turn_held, None
+                        held()
                     response, _ = self.call_cli(
                         "task", "outcome", task_id, "completed", extra_environment=environment,
                     )
@@ -3156,7 +3160,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.primary, "rev-parse", stale_slug).strip(), stale_commit)
         self.assertNotIn(f"branch refs/heads/{stale_slug}\n", self.run_git(self.primary, "worktree", "list", "--porcelain") + "\n")
 
-    # case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
+    # case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable archive, whose conversation keeps its composer for follow-up questions; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
     def test_task_done_removes_worktree_and_preserves_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary, self.secondary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
@@ -3298,6 +3302,202 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_before)
         self.assertEqual(self.run_git(self.primary, "rev-parse", branch), branch_head, "The branch must keep its commits without merging.")
         self.assertTrue(self.branch_exists(self.primary, branch))
+
+    # case-contract: test_done_task_accepts_follow_up_conversation | A Done task keeps its conversation open: the UI shows the composer with an archived hint naming the merge target instead of a read-only notice, and its changes read reports no changes rather than a Git error for the removed worktree; and a follow-up sent from a Done task runs a real provider turn in the source repository of its removed worktree. The turn is told the task is archived, that a question-only turn leaves it Done, that it has no worktree for edits, and to run `task repository renew` before any Git change; its completed outcome leaves the task Done with no new worktree, the follow-up and its reply persist in the history across fresh reads, and switching the Done task's provider is still rejected.
+    def test_done_task_accepts_follow_up_conversation(self):
+        task = self.create_repo_task("Archived follow-up", [self.primary], materialize=True)
+        record = task["repositoryWorktrees"][0]
+        worktree = Path(record["worktreePath"])
+        done = self.assert_success(self.call_cli("task", "move", task["id"], "Done")[0])
+        self.assertEqual(done["status"], "Done")
+        self.assertFalse(worktree.exists(), "Moving to Done removes the managed worktree before the follow-up.")
+        changes = self.assert_success(self.call_cli("task", "changes", "list", task["id"])[0])
+        self.assertEqual((changes["unviewed"], changes["viewed"]), ([], []), "A Done task reads no Git changes for its removed worktree instead of failing.")
+        executable = self.data_directory / "codex-fixture"
+        question = "Which files did this archived task change?"
+        self.complete_fixture_turn(task["id"], message=question, expected_status="Done")
+        turn_data = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        follow_up = turn_data["turns"][-1]
+        self.assertIn(question, follow_up["userMessage"])
+        self.assertEqual(follow_up["cwd"], record["repositoryPath"], "A Done task's follow-up runs in the source repository of its removed worktree.")
+        self.assertEqual(follow_up["runtimeWorkspaceRoots"], [record["repositoryPath"]])
+        instructions = turn_data["threadResumeDeveloperInstructions"][-1]
+        self.assertIn("This task is Done (archived)", instructions)
+        self.assertIn("A question-only turn leaves the task Done", instructions)
+        self.assertIn(f"task repository renew {task['id']} --repo <path>", instructions)
+        self.assertIn("Active task worktrees for edits: none", instructions, "An archived task offers no worktree for edits until it renews one.")
+        current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(current["status"], "Done", "The completed outcome of a follow-up leaves the task Done.")
+        self.assertEqual(current["repositoryWorktrees"][0]["worktreePath"], record["worktreePath"], "A question-only turn creates no worktree.")
+        self.assertFalse(worktree.exists())
+        history = self.assert_success(self.call_cli(
+            "conversation", "history", task["id"],
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
+        )[0])["messages"]
+        self.assertTrue(any(message["role"] == "user" and question in message["text"] for message in history), "The follow-up persists in the Done task's history.")
+        self.assertGreaterEqual(sum(1 for message in history if message["role"] == "assistant"), 2, "The follow-up's reply joins the earlier conversation.")
+        done_switch, _ = self.call_cli("conversation", "provider", task["id"], "set", "claude", expected_status=2)
+        self.assert_failure(done_switch, "invalid_argument")
+        self.assertIn("Done tasks are closed", done_switch["error"]["message"])
+
+    # case-contract: test_merged_task_renew_opens_fresh_worktree_and_new_pr | `task repository renew` starts follow-up Git work after a pull request merged. It is rejected while the repository has no linked pull request, while the linked pull request is unmerged, and while the merged worktree has uncommitted changes, leaving the task unchanged. A merged PR status read persists that it merged, and the next turn is told the merged branch is finished and to renew before Git changes. Renewing from inside the agent's turn retires the record with its merged PR to the task's past repositories, keeps the merged branch, removes the old worktree once that turn ends, and creates a fresh worktree on a new suffixed branch based on the merge target as just fetched from the remote, so it holds the merged commits even when the local target is stale. A new pull request then opens from the fresh worktree, and the card shows the merged PR in purple beside the new one; once the task is Done, the archive row lists both. A Done task renews too, from inside its follow-up turn: it returns to In Progress with a fresh worktree for every repository whose worktree was removed (a past link only for records that had a pull request), and that turn's completed outcome moves it to Review, keeping both merged PRs on fresh reads.
+    def test_merged_task_renew_opens_fresh_worktree_and_new_pr(self):
+        remote_root = self.data_directory / "renew-remotes"
+        self.assertFalse(remote_root.exists(), "Each case must start with an isolated remote fixture directory.")
+        remote_root.mkdir()
+        (remote_root / ".playhouse-test-owner").write_text("Playhouse bridge test owns these renew remotes.\n", encoding="utf-8")
+        remote = remote_root / "primary.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+        self.assertNotIn("origin", self.run_git(self.primary, "remote").split())
+
+        def remove_fixture_origin():
+            current = subprocess.run(["git", "-C", str(self.primary), "remote", "get-url", "origin"], check=False, capture_output=True, text=True)
+            if current.returncode == 0 and current.stdout.strip() == str(remote):
+                self.run_git(self.primary, "remote", "remove", "origin")
+
+        self.addCleanup(remove_fixture_origin)
+        self.run_git(self.primary, "remote", "add", "origin", str(remote))
+        self.run_git(self.primary, "push", "origin", "main")
+
+        task = self.create_repo_task("Renew merged work", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        old = task["repositoryWorktrees"][0]
+        old_worktree = Path(old["worktreePath"])
+        no_pr, _ = self.call_cli("task", "repository", "renew", task["id"], "--repo", str(self.primary), expected_status=1)
+        self.assert_failure(no_pr, "invalid_transition")
+        self.assertIn("no merged pull request", no_pr["error"]["message"])
+
+        gh_directory = self.data_directory / "renew-gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_state = gh_directory / "state"
+        create_log = gh_directory / "create-calls"
+        gh_environment = {
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "PLAYHOUSE_E2E_GH_STATE_PATH": str(gh_state),
+            "PLAYHOUSE_E2E_GH_CALL_LOG": str(gh_directory / "calls"),
+            "PLAYHOUSE_E2E_GH_CREATE_LOG": str(create_log),
+            "PLAYHOUSE_E2E_GH_CREATE_FIRST_NUMBER": "501",
+        }
+        self.seed_done_task_pull_request(task["id"], number=123)
+        gh_state.write_text("123=unmerged\n", encoding="utf-8")
+        unmerged, _ = self.call_cli("task", "repository", "renew", task["id"], "--repo", str(self.primary), expected_status=1, extra_environment=gh_environment)
+        self.assert_failure(unmerged, "invalid_transition")
+        self.assertIn("#123 isn't merged yet", unmerged["error"]["message"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0]["worktreePath"], old["worktreePath"])
+
+        # GitHub merges the PR: the remote target gains the merged commit while the local target stays stale.
+        merger = remote_root / "merger"
+        subprocess.run(["git", "clone", "--quiet", "--branch", "main", str(remote), str(merger)], check=True, capture_output=True, text=True)
+        (merger / "merged-on-github.txt").write_text("Merged pull request #123.\n", encoding="utf-8")
+        self.run_git(merger, "add", "merged-on-github.txt")
+        self.run_git(merger, "-c", "user.name=Playhouse Test", "-c", "user.email=test@playhouse.invalid", "commit", "-m", "Merge pull request #123")
+        self.run_git(merger, "push", "origin", "HEAD:main")
+        merged_head = self.run_git(merger, "rev-parse", "HEAD").strip()
+        self.assertNotEqual(self.run_git(self.primary, "rev-parse", "main").strip(), merged_head, "The local merge target must be stale.")
+        gh_state.write_text("123=merged\n", encoding="utf-8")
+        status = self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual([item["health"] for item in status], ["merged"])
+        flagged = self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0]
+        self.assertTrue(flagged["isPullRequestMerged"], "Reading a merged PR's status persists that it merged.")
+
+        executable = self.data_directory / "codex-fixture"
+        renew_command = ("task", "repository", "renew", task["id"], "--repo", str(self.primary))
+        renewal = {}
+
+        def renew_during_turn():
+            # The agent renews from inside its own turn, as the instructions tell it to.
+            (old_worktree / "left-behind.txt").write_text("uncommitted\n", encoding="utf-8")
+            dirty, _ = self.call_cli(*renew_command, expected_status=1, extra_environment=gh_environment)
+            self.assert_failure(dirty, "operation_failed")
+            self.assertIn("uncommitted changes", dirty["error"]["message"])
+            (old_worktree / "left-behind.txt").unlink()
+            renewal["record"] = self.assert_success(self.call_cli(*renew_command, extra_environment=gh_environment)[0])
+            time.sleep(0.5)
+            self.assertTrue(old_worktree.exists(), "The merged worktree stays while the turn that renewed it still runs.")
+
+        self.complete_fixture_turn(task["id"], message="Can you follow up on the merged change?", extra_environment=gh_environment, while_turn_held=renew_during_turn)
+        turn_data = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        # Later resumes carry the renewed mapping; the turn itself started with the merged guidance.
+        instructions = next((item for item in turn_data["threadResumeDeveloperInstructions"] if item and "Merged pull requests:" in item), "")
+        self.assertIn(f"Merged pull requests: #123 for {old['repositoryPath']} (branch {old['branch']})", instructions)
+        self.assertIn("do not commit or push to it", instructions)
+        self.assertIn(f"task repository renew {task['id']} --repo <path>", instructions)
+
+        renewed = renewal["record"]
+        self.assertEqual(renewed["status"], "In Progress", "Renewing a reviewed task mid-turn leaves the running turn's status alone.")
+        fresh = renewed["repositoryWorktrees"][0]
+        self.assertFalse(fresh["isPending"])
+        self.assertTrue(fresh["createdByPlayhouse"])
+        self.assertNotEqual(fresh["branch"], old["branch"])
+        self.assertRegex(fresh["branch"], r"^renew-merged-work-[a-z0-9]{4}$", "The fresh branch is named like the task with a suffix because the merged branch keeps the slug.")
+        self.assertNotEqual(fresh["worktreePath"], old["worktreePath"])
+        self.assertEqual(fresh["branchFrom"], "origin/main")
+        self.assertEqual(fresh["mergeTarget"], "main")
+        self.assertIsNone(fresh.get("pullRequestNumber"))
+        self.assertFalse(fresh["isPullRequestMerged"])
+        fresh_worktree = Path(fresh["worktreePath"])
+        self.assertEqual(self.run_git(fresh_worktree, "rev-parse", "HEAD").strip(), merged_head, "The fresh worktree starts from the merge target as just fetched.")
+        self.assertTrue((fresh_worktree / "merged-on-github.txt").exists())
+        self.assertEqual(renewed["workspaceRoots"], [fresh["worktreePath"]])
+        past = renewed["pastRepositoryWorktrees"]
+        self.assertEqual([(item["pullRequestNumber"], item["branch"], item["isPullRequestMerged"]) for item in past], [(123, old["branch"], True)])
+        self.assertTrue(self.branch_exists(self.primary, old["branch"]), "Renewing keeps the merged branch.")
+        deadline = time.monotonic() + 20
+        while old_worktree.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertFalse(old_worktree.exists(), "The merged worktree is removed once the turn that renewed it ends.")
+
+        (fresh_worktree / "follow-up.txt").write_text("Follow-up after the merge.\n", encoding="utf-8")
+        created = self.assert_success(self.call_cli(
+            "task", "pr", "create", task["id"],
+            extra_environment={**gh_environment, "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
+        )[0])
+        self.assertEqual(created["repositoryWorktrees"][0]["pullRequestNumber"], 501)
+        self.assertEqual([item["pullRequestNumber"] for item in created["pastRepositoryWorktrees"]], [123])
+        create_targets = [line.split("\t", 2)[1] for line in create_log.read_text(encoding="utf-8").splitlines() if line.startswith("create\t")]
+        self.assertEqual(create_targets, [str(fresh_worktree.resolve())], "The new pull request opens from the fresh worktree.")
+
+        gh_state.write_text("123=merged\n501=merged\n", encoding="utf-8")
+        self.assertEqual(self.assert_success(self.call_cli("task", "move", task["id"], "Done", extra_environment=gh_environment)[0])["status"], "Done")
+        self.assertFalse(fresh_worktree.exists())
+        archived = next(item for item in self.assert_success(self.call_cli("board", "list")[0])["tasks"] if item["id"] == task["id"])
+        self.assertEqual([item["pullRequestNumber"] for item in archived["pastRepositoryWorktrees"]], [123], "The Done archive keeps the PR merged before the renew.")
+        self.assertEqual(archived["repositoryWorktrees"][0]["pullRequestNumber"], 501)
+        self.assertTrue(archived["repositoryWorktrees"][0]["isPullRequestMerged"])
+
+        def reopen_during_turn():
+            reopened = self.assert_success(self.call_cli(*renew_command, extra_environment=gh_environment)[0])
+            self.assertEqual(reopened["status"], "In Progress", "Renewing a Done task moves it back to In Progress.")
+            renewal["reopened"] = reopened
+
+        self.complete_fixture_turn(task["id"], message="Please make one more change.", expected_status="Review", extra_environment=gh_environment, while_turn_held=reopen_during_turn)
+        reopened = renewal["reopened"]
+        self.assertEqual([item["pullRequestNumber"] for item in reopened["pastRepositoryWorktrees"]], [123, 501])
+        self.assertTrue(all(item["isPullRequestMerged"] for item in reopened["pastRepositoryWorktrees"]))
+        third = Path(reopened["repositoryWorktrees"][0]["worktreePath"])
+        self.assertTrue(third.exists())
+        self.assertEqual(self.run_git(third, "rev-parse", "HEAD").strip(), merged_head)
+        persisted = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(persisted["status"], "Review", "The reopening turn's completed outcome moves the task to Review, not back to Done.")
+        self.assertEqual([item["pullRequestNumber"] for item in persisted["pastRepositoryWorktrees"]], [123, 501])
+        self.assertEqual(persisted["repositoryWorktrees"][0]["worktreePath"], str(third))
+
+        # Reopening a multi-repository Done task renews every repository whose worktree was removed.
+        multi = self.create_repo_task("Renew both repositories", [self.primary, self.secondary], materialize=True)
+        self.assertEqual(self.assert_success(self.call_cli("task", "move", multi["id"], "Done")[0])["status"], "Done")
+        self.assertFalse(any(Path(item["worktreePath"]).exists() for item in multi["repositoryWorktrees"]))
+        both = self.assert_success(self.call_cli("task", "repository", "renew", multi["id"], "--repo", str(self.primary), extra_environment=gh_environment)[0])
+        self.assertEqual(both["status"], "In Progress")
+        self.assertEqual(len(both["repositoryWorktrees"]), 2)
+        for before, after in zip(multi["repositoryWorktrees"], both["repositoryWorktrees"]):
+            self.assertEqual(after["repositoryPath"], before["repositoryPath"])
+            self.assertFalse(after["isPending"])
+            self.assertNotEqual(after["worktreePath"], before["worktreePath"])
+            self.assertTrue(Path(after["worktreePath"]).exists(), "Each repository of the reopened task gets a fresh worktree.")
+        self.assertEqual(both["pastRepositoryWorktrees"], [], "Records without a pull request leave no past link.")
+        self.complete_fixture_turn(multi["id"], message="Change both repositories.")
 
     # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own last row below the card title and time row and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover, while hovering the card itself shows no tooltip and the card remains an openable control; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status. The card's PR button shows its full PR label with its hover capsule around it, not a truncated ellipsis; the JavaScript task item composes it the same way, as a borderless 30-point button whose 10-point capsule overhangs it, labelled PR.
     def test_task_pr_create_reports_real_gh_failure(self):
