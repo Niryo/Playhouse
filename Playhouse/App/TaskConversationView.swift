@@ -1013,6 +1013,8 @@ struct TaskConversationView: View {
     @State private var isShowingSkills = false
     @State private var selectedChatImage: NSImage?
     @State private var isGeneratingTitle = false
+    @State private var didCopyTaskTitle = false
+    @State private var taskTitleCopyFeedbackToken = UUID()
     @State private var chatPagesByTurnID: [String: StandaloneChatPage] = [:]
     @State private var conversationMode: ConversationMode = .code
     @State private var isEnteringGoal = false
@@ -2843,10 +2845,26 @@ struct TaskConversationView: View {
                         }
                         .accessibilityIdentifier("task-title-generating")
                     } else {
-                        Text(task.title)
-                            .font(.system(size: 14, weight: .semibold))
-                            .lineLimit(1)
-                            .accessibilityIdentifier("task-view-title")
+                        HStack(spacing: 6) {
+                            Text(task.title)
+                                .font(.system(size: 14, weight: .semibold))
+                                .lineLimit(1)
+                                .accessibilityIdentifier("task-view-title")
+
+                            // The task title becomes the pull request title, so it can be copied as-is.
+                            Button(action: copyTaskTitle) {
+                                Image(systemName: didCopyTaskTitle ? "checkmark" : "doc.on.doc")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .frame(width: 22, height: 22)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonHoverPointer()
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                            .nativeHelp("Copy title")
+                            .accessibilityLabel(didCopyTaskTitle ? "Title copied" : "Copy title")
+                            .accessibilityIdentifier("task-view-title-copy-button")
+                        }
                     }
 
                     Spacer(minLength: 8)
@@ -2883,6 +2901,17 @@ struct TaskConversationView: View {
         .padding(.vertical, 15)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(WorkspaceTheme.windowBackground.opacity(0.96))
+    }
+
+    private func copyTaskTitle() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(task.title, forType: .string)
+        didCopyTaskTitle = true
+        let token = UUID()
+        taskTitleCopyFeedbackToken = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            if taskTitleCopyFeedbackToken == token { didCopyTaskTitle = false }
+        }
     }
 
     private var repositoryBadges: some View {
@@ -4333,7 +4362,7 @@ struct TaskConversationView: View {
                 }
                 let visibleText = accessibleText
                 if isPlayhouseSent {
-                    Label("Automatic message from Playhouse", systemImage: "gearshape.2")
+                    Label(PlayhouseSentMessage.senderLabel(message.text), systemImage: "gearshape.2")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("playhouse-message-label-\(message.id)")
@@ -5173,11 +5202,7 @@ struct TaskConversationView: View {
                     .accessibilityIdentifier("message-composer-scroll-view")
 
                 HStack(spacing: 12) {
-                    Button { isShowingSkills = true } label: { Image(systemName: "sparkles") }
-                    .buttonHoverPointer()
-                    .nativeHelp("Skills")
-                        .buttonStyle(.plain).accessibilityLabel("Skills")
-                        .accessibilityIdentifier("open-skills-button")
+                    SkillsButton(testID: "open-skills-button") { isShowingSkills = true }
                     Menu {
                         if provider.supportsGoals {
                             Button {
@@ -5455,13 +5480,25 @@ struct TaskConversationView: View {
     }
 
     private func userInputForm(_ request: ConversationUserInputRequest) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 16) {
             Text("A few questions")
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 17, weight: .semibold))
                 .accessibilityIdentifier("ai-question-form-title")
             ForEach(request.questions) { question in
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(question.question).font(.system(size: 12, weight: .medium))
+                VStack(alignment: .leading, spacing: 9) {
+                    if !question.header.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(question.header.uppercased())
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .accessibilityIdentifier("ai-question-header-\(question.id)")
+                    }
+                    // Providers write questions in Markdown, as they do replies, so they share the reply
+                    // renderer and size. The renderer sizes only bold, italic and code runs; plain text takes this font.
+                    assistantMarkdownContent(question.question)
+                        .font(.system(size: 16, weight: .regular))
+                        .foregroundStyle(WorkspaceTheme.conversationText)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("ai-question-text-\(question.id)")
                     if question.options.isEmpty {
                         Group {
                             if question.isSecret {
@@ -5477,21 +5514,35 @@ struct TaskConversationView: View {
                             }
                         }
                         .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 15))
+                        .controlSize(.large)
                         .accessibilityIdentifier("ai-question-answer-\(question.id)")
                     } else {
                         ForEach(question.options) { option in
                             let isSelected = (userInputAnswers[question.id] ?? []).first == option.label
-                            Button {
-                                userInputAnswers[question.id] = [option.label]
-                                userInputOtherSelected.remove(question.id)
-                            } label: {
-                                Label(option.label, systemImage: isSelected ? "largecircle.fill.circle" : "circle")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Button {
+                                    userInputAnswers[question.id] = [option.label]
+                                    userInputOtherSelected.remove(question.id)
+                                } label: {
+                                    Label(option.label, systemImage: isSelected ? "largecircle.fill.circle" : "circle")
+                                        .font(.system(size: 15))
+                                }
+                                .buttonHoverPointer()
+                                .nativeHelp("Select answer: \(option.label)")
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("ai-question-option-\(question.id)-\(option.label)")
+                                .accessibilityValue(isSelected ? "selected" : "not selected")
+                                if let description = option.description?.trimmingCharacters(in: .whitespacesAndNewlines), !description.isEmpty {
+                                    Text(description)
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        // Aligns with the option label, past the radio symbol.
+                                        .padding(.leading, 24)
+                                        .accessibilityIdentifier("ai-question-option-description-\(question.id)-\(option.label)")
+                                }
                             }
-                            .buttonHoverPointer()
-                            .nativeHelp("Select answer: \(option.label)")
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("ai-question-option-\(question.id)-\(option.label)")
-                            .accessibilityValue(isSelected ? "selected" : "not selected")
                         }
                         if question.allowsOther {
                             Button {
@@ -5499,6 +5550,7 @@ struct TaskConversationView: View {
                                 userInputOtherSelected.insert(question.id)
                             } label: {
                                 Label("Other", systemImage: userInputOtherSelected.contains(question.id) ? "largecircle.fill.circle" : "circle")
+                                    .font(.system(size: 15))
                             }
                             .buttonHoverPointer()
                             .nativeHelp("Select a free-text answer")
@@ -5513,6 +5565,8 @@ struct TaskConversationView: View {
                                 }
                             ))
                             .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 15))
+                            .controlSize(.large)
                         }
                     }
                 }
@@ -5523,6 +5577,7 @@ struct TaskConversationView: View {
             .buttonHoverPointer()
             .nativeHelp("Submit answers")
                 .buttonStyle(.borderedProminent)
+                .controlSize(.large)
                 .disabled(request.questions.contains { question in
                     let selections = userInputAnswers[question.id] ?? []
                     return selections.isEmpty && (!userInputOtherSelected.contains(question.id) || (userInputOther[question.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

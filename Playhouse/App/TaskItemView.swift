@@ -162,7 +162,10 @@ extension TaskItemModel {
         guard task.status != .backlog, !task.repositoryWorktrees.isEmpty else { return }
         let linked = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
         let started = task.repositoryWorktrees.filter { !$0.isPending }
-        let plural = started.count > 1
+        // Repositories PR creation found unchanged drop out of the count, so a
+        // two-repository task that changed one offers a single "PR".
+        let awaiting = task.repositoryWorktrees.filter(\.awaitsPullRequest)
+        let plural = (awaiting.isEmpty ? started : awaiting).count > 1
         // While the task is still being worked on, the mode pill replaces the
         // manual create button: once it reaches Review, PR and Auto modes
         // create the pull request themselves.
@@ -185,7 +188,7 @@ extension TaskItemModel {
                 busy: isCreatingPullRequests
             )
         } else {
-            if task.repositoryWorktrees.contains(where: { !$0.isPending && ($0.pullRequestNumber == nil || $0.pullRequestURL == nil) }) {
+            if !awaiting.isEmpty {
                 pullRequests.create = CreateButton(
                     title: plural ? "PRs" : "PR",
                     label: plural ? "PRs. Create pull requests for repositories without a linked pull request" : "PR. Create a pull request for the repository without a linked pull request",

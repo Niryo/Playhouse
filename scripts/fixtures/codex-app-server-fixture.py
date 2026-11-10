@@ -1479,7 +1479,10 @@ def main():
                     or ((saved.get("threadResumeDeveloperInstructions") or [None])[-1])
                     or ""
                 )
-                outcome_line = next((line.strip() for line in instructions.splitlines() if " task outcome " in line), None)
+                # Command lines start with the quoted CLI path; prose (such as a chat's note
+                # that task outcomes don't apply to it) may mention the same words.
+                outcome_line = next((line.strip() for line in instructions.splitlines()
+                                     if line.strip().startswith("'") and " task outcome " in line), None)
                 if outcome_line:
                     outcome_command = outcome_line.replace("<completed|in-progress|waiting-response>", "waiting-response")
                     completed = subprocess.run(shlex.split(outcome_command), capture_output=True, text=True, timeout=60)

@@ -2448,6 +2448,8 @@ final class PlayhouseUITests: XCTestCase {
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
+        // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
+        _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
         XCTAssertEqual(created["status"] as? String, "Backlog")
         XCTAssertTrue(element("task-card-\(taskID)").waitToExist(timeout: 5), "The backlog task card should render before checking its PR controls.")
         XCTAssertFalse(element("task-create-pr-\(taskID)").exists, "Backlog cards must not expose a PR action.")
@@ -2528,7 +2530,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(current["status"] as? String, "Done")
     }
 
-    // case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to Manual; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. The last switch choice is remembered: tasks created after turning it on start on, and tasks created after turning it off start off. Toggling Auto PR for an unknown task is rejected.
+    // case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to PR; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. Every new task starts in PR mode, whatever mode the previous task was left in; changing one task's mode never changes the default for later tasks. Toggling Auto PR for an unknown task is rejected.
     func test_task_auto_pr_toggle_creates_pull_request_on_review() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
@@ -2570,11 +2572,11 @@ final class PlayhouseUITests: XCTestCase {
                 let text = self.pluginText(duration)
                 return duration.frame.width >= ceil(text.size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width) - 1
             }, timeout: 3), "The working time, grown from \(firstDuration), should keep its full width: \(self.pluginText(duration)) in \(duration.frame.width) pt")
-            XCTAssertEqual(pill.value as? String, "manual", "The closed pill shows the current mode, defaulting to Manual.")
+            XCTAssertEqual(pill.value as? String, "pr", "The closed pill shows the current mode, defaulting to PR.")
             XCTAssertFalse(self.element("task-pr-mode-merge-\(taskID)").exists, "A closed pill shows only the current mode.")
-            XCTAssertFalse(try XCTUnwrap(self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool), "Auto PR must default to off.")
-            XCTAssertEqual(try self.taskRecord(id: taskID)?["pullRequestMode"] as? String, "manual")
-            self.attachScreenshot(named: "Working task shows the closed mode pill on Manual", fullScreen: true)
+            XCTAssertTrue(try XCTUnwrap(self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool), "Auto PR must default to on.")
+            XCTAssertEqual(try self.taskRecord(id: taskID)?["pullRequestMode"] as? String, "pr")
+            self.attachScreenshot(named: "Working task shows the closed mode pill on PR", fullScreen: true)
 
             pill.click()
             for mode in ["manual", "pr", "autopilot", "merge"] {
@@ -2582,13 +2584,13 @@ final class PlayhouseUITests: XCTestCase {
                 XCTAssertTrue(option.waitToExist(timeout: 5), "The open pill should offer \(mode).")
                 XCTAssertGreaterThanOrEqual(option.frame.height, 30, "Each mode should keep a comfortable hit target.")
             }
-            XCTAssertEqual(self.element("task-pr-mode-manual-\(taskID)").value as? String, "selected")
+            XCTAssertEqual(self.element("task-pr-mode-pr-\(taskID)").value as? String, "selected")
             _ = self.settledPillOption("merge", taskID: taskID)
             self.attachScreenshot(named: "Clicking the pill slides out Manual, PR, Green, and Merge", fullScreen: true)
             // Choosing the current mode again just folds the pill.
-            self.settledPillOption("manual", taskID: taskID).click()
-            XCTAssertTrue(self.waitUntil({ pill.exists && (pill.value as? String) == "manual" && !self.element("task-pr-mode-merge-\(taskID)").exists }, timeout: 5), "Choosing the current mode should fold the pill.")
-            XCTAssertEqual(try self.taskRecord(id: taskID)?["pullRequestMode"] as? String, "manual")
+            self.settledPillOption("pr", taskID: taskID).click()
+            XCTAssertTrue(self.waitUntil({ pill.exists && (pill.value as? String) == "pr" && !self.element("task-pr-mode-merge-\(taskID)").exists }, timeout: 5), "Choosing the current mode should fold the pill.")
+            XCTAssertEqual(try self.taskRecord(id: taskID)?["pullRequestMode"] as? String, "pr")
 
             pill.click()
             self.settledPillOption("autopilot", taskID: taskID).click()
@@ -2630,29 +2632,31 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(element("task-pr-mode-\(taskID)").value as? String, "pr")
         attachScreenshot(named: "Auto PR created the pull request automatically once the task reached Review", fullScreen: true)
 
-        let stickyOn = try XCTUnwrap(try runCLI(["task", "create", "--title", "Sticky Auto PR on UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
-        XCTAssertEqual(stickyOn["autoCreatePullRequestOnReview"] as? Bool, true, "A task created after turning the switch on in the UI should start on.")
-        let stickyOnID = try XCTUnwrap(stickyOn["id"] as? String)
-        let autopilot = try XCTUnwrap(try runCLI(["task", "pr", "mode", stickyOnID, "autopilot"])["result"] as? [String: Any])
+        let defaultPR = try XCTUnwrap(try runCLI(["task", "create", "--title", "Default PR mode UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
+        XCTAssertEqual(defaultPR["autoCreatePullRequestOnReview"] as? Bool, true, "A new task should start in PR mode.")
+        XCTAssertEqual(defaultPR["pullRequestMode"] as? String, "pr")
+        let pullRequestTaskID = try XCTUnwrap(defaultPR["id"] as? String)
+        let autopilot = try XCTUnwrap(try runCLI(["task", "pr", "mode", pullRequestTaskID, "autopilot"])["result"] as? [String: Any])
         XCTAssertEqual(autopilot["pullRequestMode"] as? String, "autopilot")
         XCTAssertEqual(autopilot["autoCreatePullRequestOnReview"] as? Bool, true, "Autopilot opens the pull request too.")
-        let invalidMode = try runCLI(["task", "pr", "mode", stickyOnID, "sometimes"], expectedStatus: 2)
+        let invalidMode = try runCLI(["task", "pr", "mode", pullRequestTaskID, "sometimes"], expectedStatus: 2)
         XCTAssertEqual((invalidMode["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
-        XCTAssertEqual(try taskRecord(id: stickyOnID)?["pullRequestMode"] as? String, "autopilot", "A rejected mode must not change the task.")
-        _ = try runCLI(["task", "pr", "auto", stickyOnID, "off"])
-        let stickyOff = try XCTUnwrap(try runCLI(["task", "create", "--title", "Sticky Auto PR off UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
-        XCTAssertEqual(stickyOff["autoCreatePullRequestOnReview"] as? Bool, false, "A task created after turning the switch off should start off.")
+        XCTAssertEqual(try taskRecord(id: pullRequestTaskID)?["pullRequestMode"] as? String, "autopilot", "A rejected mode must not change the task.")
+        _ = try runCLI(["task", "pr", "auto", pullRequestTaskID, "off"])
+        let afterOff = try XCTUnwrap(try runCLI(["task", "create", "--title", "Default PR mode after off UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
+        XCTAssertEqual(afterOff["autoCreatePullRequestOnReview"] as? Bool, true, "A task created after switching another task off should still start in PR mode.")
 
         let manualCreated = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Manual PR toggle default UI", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path,
+            "task", "create", "--title", "Manual PR toggle UI", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path,
             "--merge-target", "\(fixture.secondary.path)=main",
         ])["result"] as? [String: Any])
         let manualTaskID = try XCTUnwrap(manualCreated["id"] as? String)
-        XCTAssertFalse(manualCreated["autoCreatePullRequestOnReview"] as? Bool ?? true, "Auto PR must default to off so existing manual tasks are unaffected.")
+        XCTAssertEqual(manualCreated["autoCreatePullRequestOnReview"] as? Bool, true, "New tasks start in PR mode.")
+        _ = try runCLI(["task", "pr", "mode", manualTaskID, "manual"])
         let missing = try runCLI(["task", "pr", "auto", "00000000-0000-0000-0000-000000000000", "on"], expectedStatus: 3)
         XCTAssertEqual((missing["error"] as? [String: Any])?["code"] as? String, "not_found")
-        openTask(named: "Manual PR toggle default UI")
-        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Manual PR toggle default UI")
+        openTask(named: "Manual PR toggle UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Manual PR toggle UI")
         element("back-to-board-button").click()
         XCTAssertEqual(try taskRecord(id: manualTaskID)?["status"] as? String, "Review")
         XCTAssertNil((try taskRecord(id: manualTaskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"], "With Auto PR off, reaching Review must not create a pull request by itself.")
@@ -2926,6 +2930,8 @@ final class PlayhouseUITests: XCTestCase {
             "--merge-target", "\(fixture.primary.path)=main",
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
+        // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
+        _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
         _ = try XCTUnwrap((created["repositoryWorktrees"] as? [[String: Any]])?.first)
         openTask(named: "PR conflict choice UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "PR conflict choice UI")
@@ -3265,6 +3271,8 @@ final class PlayhouseUITests: XCTestCase {
             "task", "create", "--title", "Active linked PR UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
         ])["result"] as? [String: Any])
         let activeTaskID = try XCTUnwrap(activeCreated["id"] as? String)
+        // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
+        _ = try runCLI(["task", "pr", "mode", activeTaskID, "manual"])
         openTask(named: "Active linked PR UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Active linked PR UI")
         element("back-to-board-button").click()
@@ -3374,22 +3382,30 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Done archive shows the linked pull request")
     }
 
-    // case-contract: test_task_pr_create_skips_unchanged_repositories | PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error. A task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert.
+    // case-contract: test_task_pr_create_skips_unchanged_repositories | PR creation opens a pull request only for repositories whose task branch has commits its merge target lacks: in a two-repository task where only the primary worktree changed, gh create runs once, against the primary worktree, the primary saves its PR number on a fresh read, and the unchanged secondary keeps no PR link instead of failing the whole operation with GitHub's no-commits error and is remembered as skipped at its branch head, so the card offers no further create action; a review sync with no change keeps the skip, and once the primary's pull request merges and the task moves to Done, the Done archive shows the primary's PR link and no create action either. A two-repository task whose every repository is unchanged is rejected with a message saying no repository has changes to open a pull request for, with no gh create call and no PR link saved, and both repositories are remembered as skipped. After the task changes one of them, the review sync clears only that repository's skip, the card's create action counts it alone as a single PR, and creating it opens exactly one more pull request, for that repository. A later change to the still-skipped repository beside that linked PR brings back a single create action for the repository without a linked pull request, and creating it links that repository too. The UI shows the primary's PR link after clicking the PRs action and reports the all-unchanged message in the failure alert.
     func test_task_pr_create_skips_unchanged_repositories() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
-        let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Skip unchanged UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
-            "--merge-target", "\(fixture.primary.path)=main", "--merge-target", "\(fixture.secondary.path)=main",
-        ])["result"] as? [String: Any])
-        let taskID = try XCTUnwrap(created["id"] as? String)
-        openTask(named: "Skip unchanged UI")
-        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Skip unchanged UI")
-        element("back-to-board-button").click()
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
-        XCTAssertTrue(terminateAppAndWait(app), "Close Playhouse before clearing the fixture provider session.")
-        try clearTaskProviderSession(taskID: taskID)
+        var taskIDs: [String] = []
+        for title in ["Skip unchanged UI", "Nothing to propose UI"] {
+            let created = try XCTUnwrap(try runCLI([
+                "task", "create", "--title", title, "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
+                "--merge-target", "\(fixture.primary.path)=main", "--merge-target", "\(fixture.secondary.path)=main",
+            ])["result"] as? [String: Any])
+            let taskID = try XCTUnwrap(created["id"] as? String)
+            // Pinned to Manual: this case drives the manual PR path, and new tasks now start in PR mode.
+            _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
+            openTask(named: title)
+            try completeCurrentTaskWithFixtureAnswers(taskTitle: title)
+            element("back-to-board-button").click()
+            XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+            taskIDs.append(taskID)
+        }
+        let taskID = taskIDs[0]
+        let unchangedID = taskIDs[1]
+        XCTAssertTrue(terminateAppAndWait(app), "Close Playhouse before clearing the fixture provider sessions.")
+        for id in taskIDs { try clearTaskProviderSession(taskID: id) }
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
 
         let records = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]]))
@@ -3405,6 +3421,7 @@ final class PlayhouseUITests: XCTestCase {
                 try? runGit(repository, "remote", "remove", "origin")
             }
         }
+        // Remotes live in the source repositories' shared config, so the second task's worktrees see them too.
         for (index, record) in records.enumerated() {
             let remote = remoteRoot.appendingPathComponent("repository-\(index).git", isDirectory: true)
             try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
@@ -3414,6 +3431,7 @@ final class PlayhouseUITests: XCTestCase {
             try runGit(worktree, "push", "origin", "main")
         }
         let primaryWorktree = URL(fileURLWithPath: try XCTUnwrap(records[0]["worktreePath"] as? String), isDirectory: true)
+        let secondaryWorktree = URL(fileURLWithPath: try XCTUnwrap(records[1]["worktreePath"] as? String), isDirectory: true)
         try "Only the primary repository changed.\n".write(to: primaryWorktree.appendingPathComponent("task-change.txt"), atomically: true, encoding: .utf8)
 
         let createPRButton = element("task-create-pr-\(taskID)")
@@ -3422,34 +3440,46 @@ final class PlayhouseUITests: XCTestCase {
         createPRButton.click()
         let primaryLink = app.links["task-pr-link-\(taskID)-501"]
         XCTAssertTrue(primaryLink.waitToExist(timeout: 30), "The changed repository should get its pull request.")
-        // The link can appear while the secondary repository is still being checked; wait for the operation to settle.
-        let remainingPRButton = element("task-create-pr-\(taskID)")
-        XCTAssertTrue(waitUntil({ remainingPRButton.exists && remainingPRButton.isEnabled }, timeout: 30), "The PR operation should finish for every repository.")
-        XCTAssertEqual(remainingPRButton.label, "PRs. Create pull requests for repositories without a linked pull request")
+        // The only repository without a PR is the unchanged one, so no create action remains.
+        XCTAssertTrue(waitUntil({ !createPRButton.exists }, timeout: 30), "The card must not offer a pull request for the unchanged repository.")
         XCTAssertFalse(app.sheets.firstMatch.exists, "An unchanged repository must not fail the PR operation.")
         let createdRecords = try XCTUnwrap(taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])
         XCTAssertEqual(createdRecords[0]["pullRequestNumber"] as? Int, 501)
         XCTAssertNil(createdRecords[1]["pullRequestNumber"], "The unchanged repository must keep no PR link.")
+        let secondaryHead = try runGitOutput(secondaryWorktree, "rev-parse", "HEAD")
+        XCTAssertEqual(createdRecords[1]["pullRequestSkippedHead"] as? String, secondaryHead, "The unchanged repository must be remembered as skipped.")
         let createLogPath = try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CREATE_LOG"])
-        let createTargets = try String(contentsOfFile: createLogPath, encoding: .utf8).components(separatedBy: "\n")
-            .filter { $0.hasPrefix("create\t") }
-            .compactMap { $0.split(separator: "\t", maxSplits: 2).dropFirst().first.map(String.init) }
-            .map { $0.replacingOccurrences(of: "/private/tmp/", with: "/tmp/") }
-        XCTAssertEqual(createTargets, [primaryWorktree.resolvingSymlinksInPath().path.replacingOccurrences(of: "/private/tmp/", with: "/tmp/")], "gh create must run only for the changed repository.")
+        func createTargets() throws -> [String] {
+            try String(contentsOfFile: createLogPath, encoding: .utf8).components(separatedBy: "\n")
+                .filter { $0.hasPrefix("create\t") }
+                .compactMap { $0.split(separator: "\t", maxSplits: 2).dropFirst().first.map(String.init) }
+                .map { $0.replacingOccurrences(of: "/private/tmp/", with: "/tmp/") }
+        }
+        func normalized(_ url: URL) -> String { url.resolvingSymlinksInPath().path.replacingOccurrences(of: "/private/tmp/", with: "/tmp/") }
+        XCTAssertEqual(try createTargets(), [normalized(primaryWorktree)], "gh create must run only for the changed repository.")
         attachScreenshot(named: "Only the changed repository gets a pull request")
 
-        // The secondary source repository keeps the origin its first task worktree added.
-        let unchanged = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Nothing to propose UI", "--prompt", "Fixture task description.", "--repo", fixture.secondary.path,
-            "--merge-target", "\(fixture.secondary.path)=main",
-        ])["result"] as? [String: Any])
-        let unchangedID = try XCTUnwrap(unchanged["id"] as? String)
-        openTask(named: "Nothing to propose UI")
-        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Nothing to propose UI")
-        element("back-to-board-button").click()
-        XCTAssertEqual(try taskRecord(id: unchangedID)?["status"] as? String, "Review")
+        // The review sync keeps the skip while the repository stays unchanged.
+        XCTAssertEqual(try runCLI(["task", "pr", "sync", taskID], extraEnvironment: ghEnvironment)["ok"] as? Bool, true)
+        XCTAssertEqual((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?[1]["pullRequestSkippedHead"] as? String, secondaryHead)
+        XCTAssertFalse(waitUntil({ createPRButton.exists }, timeout: 3), "A sync with no change must keep the create action hidden.")
+
+        // The Done archive reads the same skip, so it offers no create action either.
+        try "501=merged\n".write(toFile: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STATE_PATH"]), atomically: true, encoding: .utf8)
+        revealOnBoard(element("task-card-\(taskID)"))
+        moveTaskToDone(taskID: taskID)
+        element("done-archive-button").click()
+        XCTAssertTrue(app.links["done-archive-pr-link-\(taskID)-501"].waitToExist(timeout: 10), "The archived task should show its pull request.")
+        XCTAssertFalse(element("done-archive-create-pr-\(taskID)").exists, "The archive must not offer a pull request for the unchanged repository.")
+        attachScreenshot(named: "Done archive offers no PR for the unchanged repository")
+        // The open archive panel covers the Review column, so close it before using the board.
+        element("close-done-archive-button").click()
+        XCTAssertTrue(waitUntil({ !self.app.scrollViews["done-archive-list"].exists }, timeout: 10), "The Done archive should close before the board is used again.")
+
+        // A task whose every repository is unchanged explains why no pull request was opened.
         let unchangedButton = element("task-create-pr-\(unchangedID)")
-        XCTAssertTrue(unchangedButton.waitToExist(timeout: 5))
+        XCTAssertTrue(unchangedButton.waitToExist(timeout: 10))
+        XCTAssertEqual(unchangedButton.label, "PRs. Create pull requests for each repository linked to this task")
         revealOnBoard(unchangedButton)
         unchangedButton.click()
         let alertSheet = app.sheets.firstMatch
@@ -3459,8 +3489,42 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 5), app.debugDescription)
         attachScreenshot(named: "A task with no changes explains why no pull request was opened")
         alertSheet.buttons["OK"].click()
-        XCTAssertNil((try taskRecord(id: unchangedID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"])
-        XCTAssertEqual(try String(contentsOfFile: createLogPath, encoding: .utf8).components(separatedBy: "\n").filter { $0.hasPrefix("create\t") }.count, 1, "An all-unchanged task must not call gh create.")
+        let skipped = try XCTUnwrap(try taskRecord(id: unchangedID)?["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertTrue(skipped.allSatisfy { $0["pullRequestNumber"] == nil })
+        XCTAssertTrue(skipped.allSatisfy { ($0["pullRequestSkippedHead"] as? String)?.isEmpty == false }, "Both unchanged repositories must be remembered as skipped.")
+        XCTAssertEqual(try createTargets().count, 1, "An all-unchanged task must not call gh create.")
+
+        // Once the task changes one repository, the review sync offers that one a single PR.
+        let laterWorktree = URL(fileURLWithPath: try XCTUnwrap(skipped[1]["worktreePath"] as? String), isDirectory: true)
+        try "The secondary repository changed later.\n".write(to: laterWorktree.appendingPathComponent("later-change.txt"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(try runCLI(["task", "pr", "sync", unchangedID], extraEnvironment: ghEnvironment)["ok"] as? Bool, true)
+        let singleLabel = "PR. Create a pull request for each repository linked to this task"
+        XCTAssertTrue(waitUntil({ unchangedButton.exists && unchangedButton.label == singleLabel }, timeout: 30), "Only the changed repository should count toward the PR action.")
+        let reopened = try XCTUnwrap(try taskRecord(id: unchangedID)?["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual(reopened[0]["pullRequestSkippedHead"] as? String, skipped[0]["pullRequestSkippedHead"] as? String, "The still-unchanged repository stays skipped.")
+        XCTAssertNil(reopened[1]["pullRequestSkippedHead"], "A changed repository must await a pull request again.")
+        attachScreenshot(named: "A later change to one skipped repository offers a single PR")
+        revealOnBoard(unchangedButton)
+        unchangedButton.click()
+        XCTAssertTrue(app.links["task-pr-link-\(unchangedID)-502"].waitToExist(timeout: 30), "The later-changed repository should get its pull request.")
+        XCTAssertTrue(waitUntil({ !unchangedButton.exists }, timeout: 30), "Every changed repository has a pull request, so no create action remains.")
+        XCTAssertFalse(app.sheets.firstMatch.exists)
+        XCTAssertEqual(try createTargets(), [normalized(primaryWorktree), normalized(laterWorktree)], "The later change must open exactly one more pull request, for the changed repository.")
+        attachScreenshot(named: "Only the later-changed repository gets the new pull request")
+
+        // Beside a linked PR, a later change to the still-skipped repository brings back a single PR action.
+        let laterPrimaryWorktree = URL(fileURLWithPath: try XCTUnwrap(skipped[0]["worktreePath"] as? String), isDirectory: true)
+        try "The primary repository changed later.\n".write(to: laterPrimaryWorktree.appendingPathComponent("later-change.txt"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(try runCLI(["task", "pr", "sync", unchangedID], extraEnvironment: ghEnvironment)["ok"] as? Bool, true)
+        XCTAssertTrue(unchangedButton.waitToExist(timeout: 30), "A repository changed beside a linked PR should be offered a pull request again.")
+        XCTAssertEqual(unchangedButton.label, "PR. Create a pull request for the repository without a linked pull request")
+        XCTAssertTrue(app.links["task-pr-link-\(unchangedID)-502"].exists)
+        attachScreenshot(named: "A later change beside a linked PR offers a single PR")
+        revealOnBoard(unchangedButton)
+        unchangedButton.click()
+        XCTAssertTrue(app.links["task-pr-link-\(unchangedID)-503"].waitToExist(timeout: 30), "The repository changed beside a linked PR should get its pull request.")
+        XCTAssertTrue(waitUntil({ !unchangedButton.exists }, timeout: 30), "Both repositories now have pull requests, so no create action remains.")
+        XCTAssertEqual(try createTargets(), [normalized(primaryWorktree), normalized(laterWorktree), normalized(laterPrimaryWorktree)])
     }
 
     // case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
@@ -3888,7 +3952,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A status nudge Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while showing the nudge replies.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. They place the outcome call, still the final CLI action, before the user-visible final reply, which ends the turn so it never ends on a tool call, and they tell the agent not to repeat an answer after a no-visible-output notice. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A status nudge Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while showing the nudge replies.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -4118,6 +4182,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(instructions.contains("Never end a turn mid-work without an outcome"))
         XCTAssertTrue(instructions.contains("waiting-response"))
         XCTAssertTrue(instructions.contains("final CLI action"))
+        XCTAssertTrue(instructions.contains("before you write your final reply, make exactly one definitive outcome call"))
+        XCTAssertTrue(instructions.contains("Write your user-visible final reply after the outcome call returns"))
+        XCTAssertTrue(instructions.contains("never end a turn on a tool call"))
+        XCTAssertTrue(instructions.contains("previous response had no visible output but you already answered in this turn, do not repeat the answer"))
         XCTAssertEqual(turn["threadStartCount"] as? Int, 1, "The follow-up should reuse the thread created with progress instructions.")
         XCTAssertGreaterThanOrEqual(turn["threadResumeCount"] as? Int ?? 0, 1)
         let turns = try XCTUnwrap(turn["turns"] as? [[String: Any]])
@@ -4615,6 +4683,30 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Renamed task remains unchanged after rejected blank rename")
     }
 
+    // case-contract: test_task_title_copy_button_copies_persisted_title | The conversation title's copy button places the task's exact persisted title on the pasteboard, including spaces, an ampersand and non-ASCII text, after a rename; the button confirms the copy with a checkmark and its 'Title copied' label, and fresh CLI/XPC reads report the same title the copy produced.
+    func test_task_title_copy_button_copies_persisted_title() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Before copy", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Before copy")
+        let title = "Café & tea: ready ✓"
+        _ = try runCLI(["task", "rename", taskID, "--title", title])
+        let card = element("task-card-\(taskID.uppercased())")
+        XCTAssertTrue(waitUntil({ card.exists }, timeout: 10), "The renamed task should appear on the board.")
+        clickTaskCardTitle(card)
+        XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10), "Opening the renamed task should show its conversation.")
+
+        let copyTitleButton = app.buttons["task-view-title-copy-button"]
+        XCTAssertTrue(copyTitleButton.waitToExist(timeout: 10), "The conversation title should have a copy button.")
+        XCTAssertTrue(waitUntil({ accessibleLabelOrValue(of: element("task-view-title")) == title }, timeout: 10), "The header should show the persisted title.")
+        NSPasteboard.general.clearContents()
+        copyTitleButton.click()
+        XCTAssertTrue(waitUntil({ copyTitleButton.label == "Title copied" }, timeout: 3), "The copy button should confirm the copy while the checkmark is shown.")
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), title, "Copying the title should place its exact persisted text on the pasteboard.")
+        attachScreenshot(named: "Conversation title copied to the pasteboard")
+        XCTAssertTrue(waitUntil({ copyTitleButton.label == "Copy title" }, timeout: 4), "The copy button should return to its idle label after the confirmation window.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["title"] as? String, title, "The copied title should match the persisted title.")
+    }
+
     // case-contract: test_task_roots_set_get_order_deduplication_and_validation | Root editing preserves order, removes duplicates, rejects an empty list, and waits for an active conversation turn; a stale Git-folder validation is rejected after a newer folder edit, and the newer roots remain saved.
     func test_task_roots_set_get_order_deduplication_and_validation() throws {
         launchApp(defaultParent: fixture.parent.path)
@@ -4997,7 +5089,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(final["isPending"] as? Bool, false)
     }
 
-    // case-contract: test_task_repository_branch_from_fetches_remote_branch | A branch-from that exists only on a Git remote and was never fetched is fetched when repository settings are saved, and the pending record stores its remote-tracking branch; a branch-from missing locally and on every remote is rejected without changing the saved settings; a remote that can't be reached reports the fetch failure instead of a missing branch and also keeps the saved settings; starting the task creates its worktree from the fetched remote commit without making the remote branch the task branch's upstream.
+    // case-contract: test_task_repository_branch_from_fetches_remote_branch | A branch-from that exists only on a Git remote and was never fetched is fetched when repository settings are saved, and the pending record stores its remote-tracking branch; a branch-from missing locally and on every remote is rejected without changing the saved settings; a remote that can't be reached reports the fetch failure instead of a missing branch and also keeps the saved settings; starting the task fetches the remote branch again, so its worktree starts from the remote's latest commit even after the remote branch moved ahead, without making the remote branch the task branch's upstream.
     func test_task_repository_branch_from_fetches_remote_branch() throws {
         let remoteBranch = "remote-only/branch-from"
         let trackingRef = "refs/remotes/origin/\(remoteBranch)"
@@ -5084,15 +5176,125 @@ final class PlayhouseUITests: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(waitForDisappearance(branchFromValue), "Dismissing the editor should close it before the turn starts.")
 
+        // The remote branch moves ahead after it was fetched; starting must use the newer commit.
+        let newerCommit = try runGitOutput(
+            fixture.primary, "commit-tree", "main^{tree}", "-p", remoteCommit, "-m", "Advance remote-only branch-from fixture"
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        try runGit(fixture.primary, "push", "--quiet", "origin", "\(newerCommit):refs/heads/\(remoteBranch)")
+        try runGit(fixture.primary, "update-ref", trackingRef, remoteCommit)
+
         try completeCurrentTaskWithFixtureAnswers(taskTitle: title)
         let started = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
         XCTAssertEqual(started["isPending"] as? Bool, false)
         XCTAssertEqual(started["branchFrom"] as? String, "origin/\(remoteBranch)")
         let worktree = URL(fileURLWithPath: try XCTUnwrap(started["worktreePath"] as? String), isDirectory: true)
         let taskBranch = try XCTUnwrap(started["branch"] as? String)
-        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines), remoteCommit)
+        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines), newerCommit)
         let upstream = try runGitOutput(worktree, "config", "--default", "", "--get", "branch.\(taskBranch).remote")
         XCTAssertEqual(upstream.trimmingCharacters(in: .whitespacesAndNewlines), "", "The remote branch-from must not become the task branch's upstream.")
+    }
+
+    // case-contract: test_task_repository_default_branch_from_uses_fresh_origin | With no branch-from given, a repository without an origin remote keeps its local default branch, while a repository whose origin has the default branch stores origin's remote-tracking branch as the pending branch-from. Starting the task fetches origin first, so the worktree starts from origin's latest commit even when the local default branch and its remote-tracking ref are stale and the local branch holds unpushed commits, without making the remote branch the task branch's upstream. When origin can't be reached at start, the task still starts from the last fetched origin commit.
+    func test_task_repository_default_branch_from_uses_fresh_origin() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        launchApp(defaultParent: fixture.parent.path)
+        let badge = element("conversation-repository-badge-primary")
+        let branchFromValue = element("conversation-repository-branch-from-value")
+        func showBranchFrom(taskTitle: String, expected: String, screenshot: String) {
+            openTask(named: taskTitle)
+            XCTAssertTrue(badge.waitToExist(timeout: 5))
+            badge.click()
+            XCTAssertTrue(branchFromValue.waitToExist(timeout: 5), app.debugDescription)
+            XCTAssertEqual(accessibleLabelOrValue(of: branchFromValue), expected, app.debugDescription)
+            attachScreenshot(named: screenshot)
+            app.typeKey(.escape, modifierFlags: [])
+            XCTAssertTrue(waitForDisappearance(branchFromValue), "Dismissing the editor should close it before the turn starts.")
+        }
+
+        let localTitle = "Default branch-from without origin"
+        let localTask = try runCLI([
+            "task", "create", "--title", localTitle, "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+        ])["result"] as? [String: Any]
+        let localTaskID = try XCTUnwrap(localTask?["id"] as? String)
+        XCTAssertEqual(try repositoryRecord(taskID: localTaskID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, "main")
+        showBranchFrom(taskTitle: localTitle, expected: "main", screenshot: "Without an origin the default branch-from stays local")
+
+        let remote = runDirectory.appendingPathComponent("default-branch-from-origin.git", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remote.path), "Each UI case should use a fresh owned bare remote.")
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        try runGit(remote, "init", "--bare")
+        try runGit(fixture.primary, "remote", "add", "origin", remote.path)
+        addTeardownBlock { [self] in try? runGit(fixture.primary, "remote", "remove", "origin") }
+        try runGit(fixture.primary, "push", "--quiet", "origin", "main")
+        let staleTracking = try runGitOutput(fixture.primary, "rev-parse", "refs/remotes/origin/main").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let title = "Default branch-from from origin"
+        let created = try runCLI([
+            "task", "create", "--title", title, "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+        ])["result"] as? [String: Any]
+        let taskID = try XCTUnwrap(created?["id"] as? String)
+        let pending = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
+        XCTAssertEqual(pending["isPending"] as? Bool, true)
+        XCTAssertEqual(pending["branchFrom"] as? String, "origin/main")
+        showBranchFrom(taskTitle: title, expected: "origin/main", screenshot: "With an origin the default branch-from is origin's branch")
+
+        // Origin moves ahead without this repository fetching, and local main gains an unpushed commit.
+        let clone = runDirectory.appendingPathComponent("default-branch-from-clone", isDirectory: true)
+        _ = try runGitOutput(runDirectory, "clone", "--quiet", "--branch", "main", remote.path, clone.path)
+        try "Landed on origin after the task was created.\n".write(to: clone.appendingPathComponent("origin-only.txt"), atomically: true, encoding: .utf8)
+        try runGit(clone, "add", "origin-only.txt")
+        try runGit(clone, "commit", "-m", "Origin-only commit")
+        try runGit(clone, "push", "--quiet", "origin", "main")
+        let originHead = try runGitOutput(clone, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines)
+        try "Unpushed local commit.\n".write(to: fixture.primary.appendingPathComponent("local-only.txt"), atomically: true, encoding: .utf8)
+        try runGit(fixture.primary, "add", "local-only.txt")
+        try runGit(fixture.primary, "commit", "-m", "Local-only commit")
+        let localHead = try runGitOutput(fixture.primary, "rev-parse", "main").trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(
+            try runGitOutput(fixture.primary, "rev-parse", "refs/remotes/origin/main").trimmingCharacters(in: .whitespacesAndNewlines),
+            staleTracking
+        )
+
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: title)
+        let started = try XCTUnwrap(repositoryRecord(taskID: taskID, repositoryPath: fixture.primary.path))
+        XCTAssertEqual(started["isPending"] as? Bool, false)
+        XCTAssertEqual(started["branchFrom"] as? String, "origin/main")
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(started["worktreePath"] as? String), isDirectory: true)
+        let taskBranch = try XCTUnwrap(started["branch"] as? String)
+        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines), originHead)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.appendingPathComponent("origin-only.txt").path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: worktree.appendingPathComponent("local-only.txt").path),
+            "The local-only commit must not be the task's base."
+        )
+        XCTAssertEqual(
+            try runGitOutput(fixture.primary, "rev-parse", "refs/remotes/origin/main").trimmingCharacters(in: .whitespacesAndNewlines),
+            originHead
+        )
+        XCTAssertEqual(
+            try runGitOutput(fixture.primary, "rev-parse", "main").trimmingCharacters(in: .whitespacesAndNewlines),
+            localHead,
+            "Starting must not move local main."
+        )
+        let upstream = try runGitOutput(worktree, "config", "--default", "", "--get", "branch.\(taskBranch).remote")
+        XCTAssertEqual(upstream.trimmingCharacters(in: .whitespacesAndNewlines), "", "The origin base must not become the task branch's upstream.")
+        attachScreenshot(named: "Task started from origin's latest commit")
+
+        let offlineTitle = "Default branch-from while offline"
+        let offline = try runCLI([
+            "task", "create", "--title", offlineTitle, "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+        ])["result"] as? [String: Any]
+        let offlineID = try XCTUnwrap(offline?["id"] as? String)
+        XCTAssertEqual(try repositoryRecord(taskID: offlineID, repositoryPath: fixture.primary.path)?["branchFrom"] as? String, "origin/main")
+        try runGit(fixture.primary, "remote", "set-url", "origin", runDirectory.appendingPathComponent("unreachable-origin.git").path)
+        openTask(named: offlineTitle)
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: offlineTitle)
+        let offlineStarted = try XCTUnwrap(repositoryRecord(taskID: offlineID, repositoryPath: fixture.primary.path))
+        XCTAssertEqual(offlineStarted["isPending"] as? Bool, false)
+        XCTAssertEqual(offlineStarted["branchFrom"] as? String, "origin/main")
+        let offlineWorktree = URL(fileURLWithPath: try XCTUnwrap(offlineStarted["worktreePath"] as? String), isDirectory: true)
+        XCTAssertEqual(try runGitOutput(offlineWorktree, "rev-parse", "HEAD").trimmingCharacters(in: .whitespacesAndNewlines), originHead)
+        attachScreenshot(named: "Offline start uses the last fetched origin commit")
     }
 
     // case-contract: test_task_repository_edit_rejects_stale_validation_after_removal | If a pending repository is removed while its settings are being validated, the stale edit is rejected and the newer repository removal and context root remain saved.
@@ -5925,7 +6127,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(reopened?["id"] as? String, legacyID, "Migration must run once, not create a second chat.")
     }
 
-    // case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, the Changes sidebar, and the no-repository-selected banner. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn never triggers the private task-outcome reminders, because the chat is told not to report an outcome; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer. Opening a board task while the chat sidebar is showing replaces it with that task's conversation view instead of showing both at once, and returning to the board reveals the chat sidebar again, with the chat's own model left untouched by the unrelated task. The visible chat panel opens at full board-content height, overlaps the logo header and narrow board sidebar, and hides the covered branding and sidebar controls from accessibility navigation while open; it raises the board's minimum width by the chat panel width, so the window grows to keep the shifted columns visible; it pushes the columns to the panel’s right edge; closing chat reveals the sidebar and moves the columns back beside it while the window keeps its grown width. Dragging the chat sidebar's right border resizes it, between a 320-point minimum and the larger of its default width and the screen width the board's minimum width leaves free, and reopening the sidebar, even after an app relaunch, keeps the dragged width. The border's grab strip extends only out over the board, never over the transcript's scroller along its inner side, so pressing and dragging just inside the border leaves the width unchanged. While the edge moves, the chat keeps the width it was last laid out at, clipped to the panel, and its transcript reflows to the panel's width when the drag ends.
+    // case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, the Changes sidebar, and the no-repository-selected banner. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn that ran close-turn gets no nudge, and a Codex chat turn that skipped it gets exactly one nudge through the shared recovery loop, asking for close-turn on its reply and never for a task outcome, because the chat has no board status; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer. Opening a board task while the chat sidebar is showing replaces it with that task's conversation view instead of showing both at once, and returning to the board reveals the chat sidebar again, with the chat's own model left untouched by the unrelated task. The visible chat panel opens at full board-content height, overlaps the logo header and narrow board sidebar, and hides the covered branding and sidebar controls from accessibility navigation while open; it raises the board's minimum width by the chat panel width, so the window grows to keep the shifted columns visible; it pushes the columns to the panel’s right edge; closing chat reveals the sidebar and moves the columns back beside it while the window keeps its grown width. Dragging the chat sidebar's right border resizes it, between a 320-point minimum and the larger of its default width and the screen width the board's minimum width leaves free, and reopening the sidebar, even after an app relaunch, keeps the dragged width. The border's grab strip extends only out over the board, never over the transcript's scroller along its inner side, so pressing and dragging just inside the border leaves the width unchanged. While the edge moves, the chat keeps the width it was last laid out at, clipped to the panel, and its transcript reflows to the panel's width when the drag ends.
     func test_standalone_chat_separate_model_and_pages_round_trip() throws {
         let fixtureSource = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureSource.path), "The prepared Codex fixture is missing or not executable.")
@@ -6192,9 +6394,7 @@ final class PlayhouseUITests: XCTestCase {
             "The standalone chat must never render as a card on the visible Kanban board."
         )
 
-        // The chat is told never to report a task outcome, so chasing one with private
-        // reminders can only spend extra provider turns and bury the user's next message in
-        // a reminder turn that answers nobody.
+        // A chat turn that ran close-turn is settled, so no nudge follows it.
         let chatFixtureHistory = try XCTUnwrap(
             try JSONSerialization.jsonObject(
                 with: Data(contentsOf: URL(fileURLWithPath: chatFixtureExecutable.path + ".history"))
@@ -6203,8 +6403,8 @@ final class PlayhouseUITests: XCTestCase {
         let chatFixtureTurns = try XCTUnwrap(chatFixtureHistory["turns"] as? [[String: Any]])
         XCTAssertFalse(chatFixtureTurns.isEmpty, "The chat fixture should have recorded its turns.")
         XCTAssertFalse(
-            chatFixtureTurns.contains { (($0["userMessage"] as? String) ?? "").lowercased().contains("outcome reminder") },
-            "A standalone chat turn must not trigger the private task-outcome reminders."
+            chatFixtureTurns.contains { (($0["userMessage"] as? String) ?? "").lowercased().contains("playhouse internal outcome nudge:") },
+            "A standalone chat turn that ran close-turn must not get a nudge."
         )
         // The chat must know it is Playhouse's own chat and own the board through the CLI,
         // instead of reaching for an unrelated task tool that the user can never see.
@@ -6274,6 +6474,16 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("send-message-button").isEnabled, "Standalone chat should send without a configured repository root.")
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: classifierActive.path) }, timeout: 15), "The fallback classifier should run after the primary answer and be held independently.")
+        // The same shared recovery loop nudges a Codex chat turn that skipped close-turn: once,
+        // for the page signal, never for a task outcome.
+        let codexNudges = try XCTUnwrap(
+            (try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: chatFixtureExecutable.path + ".history"))) as? [String: Any])?["turns"] as? [[String: Any]]
+        ).compactMap { $0["userMessage"] as? String }.filter { $0.lowercased().contains("playhouse internal outcome nudge:") }
+        XCTAssertEqual(codexNudges.count, 1, "A Codex chat turn that skipped close-turn gets exactly one nudge.")
+        XCTAssertTrue(codexNudges.first?.contains("chat page close-turn \(chatTaskID)") == true)
+        XCTAssertFalse(codexNudges.first?.contains("task outcome") ?? true)
+        try assertAutomaticMessageBubble(taskID: chatTaskID, containing: "This is the only reminder for that reply.")
+        XCTAssertFalse(element("codex-chat-error").exists, "The Codex chat nudge turn completes without an error.")
         XCTAssertFalse(element("chat-active-page-title").exists, "Page titles should appear in transcript separators, not the header.")
         XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "Page evaluation should stay visually quiet while pending.")
         XCTAssertEqual(element("chat-sidebar").descendants(matching: .progressIndicator).count, 0, "Page evaluation should not show a loader in the chat sidebar.")
@@ -6617,7 +6827,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Standalone chat pages keep separate sessions")
     }
 
-    // case-contract: test_standalone_chat_answer_stays_final_around_close_turn | A standalone chat reports no task outcome, so it ends every turn with Playhouse's own chat page close-turn signal, which Claude runs after its answer and before its closing line. That answer and closing line form one final answer, not commentary, in the streamed final answer, fresh CLI/XPC history, and the visible transcript, so the response is never left buried inside the collapsed Worked for disclosure; text written before an ordinary tool earlier in the same turn still stays commentary there, and the close-turn command really runs and succeeds. This classification is Claude-specific because Playhouse derives each message's phase from Claude's tool stream, while Codex reports the phase in its own protocol and so cannot mis-file an answer on the same turn shape.
+    // case-contract: test_standalone_chat_answer_stays_final_around_close_turn | A standalone chat reports no task outcome, so it ends every turn with Playhouse's own chat page close-turn signal. When Claude runs that signal after its answer and before its closing line, the answer and closing line form one final answer, not commentary, in the streamed final answer, fresh CLI/XPC history, and the visible transcript, so the response is never left buried inside the collapsed Worked for disclosure; text written before an ordinary tool earlier in the same turn still stays commentary there, and the close-turn command really runs and succeeds. The chat instructions ask for close-turn before the final reply, which must end the turn, keep exactly one real close-turn per turn and no page bookkeeping in the answer, and carry no hidden escalation. A turn that runs close-turn first and answers after it shows exactly one final answer, filed onto the active page, with no nudge. When the turn ends on close-turn and Claude Code adds its own no-visible-output notice to the same turn, the notice streams once as a user-side message and stays in fresh history between the answer and what Claude writes after it, rendering as an automatic message from Claude Code rather than the user's bubble; that later text is a separate final message, so no bubble holds the answer twice, and the notice is never filed into a chat page. This classification is Claude-specific because Playhouse derives each message's phase from Claude's tool stream and only Claude Code adds such a notice inside a turn, while Codex reports the phase in its own protocol and never injects a hidden message into a turn.
     func test_standalone_chat_answer_stays_final_around_close_turn() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-close-turn")
         try FileManager.default.copyItem(
@@ -6690,6 +6900,201 @@ final class PlayhouseUITests: XCTestCase {
         let status = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
         XCTAssertEqual(status["missedPreviousPageSignal"] as? Bool, false,
                        "A close-turn signal that really ran must satisfy the page signal instead of falling back to the classifier.")
+
+        let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
+        func fixtureTurns() -> [[String: Any]] {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".history")),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+            return (history["turns"] as? [[String: Any]] ?? []).filter {
+                !((($0["userText"] as? String) ?? "").hasPrefix("Classify the latest user message"))
+            }
+        }
+        func nudgeCount() -> Int {
+            fixtureTurns().filter { (($0["userText"] as? String) ?? "").contains("Playhouse internal outcome nudge:") }.count
+        }
+        func turnMessages(prompt: String) throws -> [(String, String?, String)] {
+            let history = try XCTUnwrap(try runCLI(["conversation", "history", chatID])["result"] as? [String: Any])
+            let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
+            let turnID = try XCTUnwrap(messages.first { ($0["role"] as? String) == "user" && ($0["text"] as? String) == prompt }?["turnID"] as? String)
+            return messages.filter { ($0["turnID"] as? String) == turnID }.map {
+                (($0["role"] as? String) ?? "", $0["phase"] as? String, ($0["text"] as? String) ?? "")
+            }
+        }
+        func send(_ prompt: String) {
+            composer.click()
+            composer.typeText(prompt)
+            element("send-message-button").click()
+            XCTAssertTrue(waitUntil({
+                self.fixtureTurnCount(executable, containing: prompt) > 0 && self.noTurnIsRunning()
+            }, timeout: 30), "The chat turn \(prompt) should finish.")
+        }
+        let arguments = try XCTUnwrap(fixtureTurns().last?["arguments"] as? [String])
+        let instructions = arguments[try XCTUnwrap(arguments.firstIndex(of: "--append-system-prompt")) + 1]
+        XCTAssertTrue(instructions.contains("before you write your final reply"), "The instructions must put close-turn before the final reply.")
+        XCTAssertTrue(instructions.contains("never end a turn on a tool call"))
+        XCTAssertTrue(instructions.contains("Run exactly one close-turn per turn"))
+        XCTAssertTrue(instructions.contains("never just write it as text in your reply"))
+        XCTAssertTrue(instructions.contains("never write the page name"))
+        XCTAssertTrue(instructions.contains("previous response had no visible output but you already answered in this turn, do not repeat the answer"))
+        XCTAssertFalse(instructions.contains("At the end of every single turn"))
+        XCTAssertFalse(instructions.contains("CRITICAL, READ FIRST"), "No hidden escalation is prepended to the chat instructions.")
+
+        // close-turn first, then the reply: one visible final answer, filed, and no nudge.
+        let closeFirstPrompt = "Name the largest moon of Jupiter."
+        let closeFirstAnswer = "Ganymede is the largest moon of Jupiter."
+        send(closeFirstPrompt)
+        XCTAssertTrue(visibleTexts(containing: closeFirstAnswer).firstMatch.waitToExist(timeout: 10),
+                      "The reply written after close-turn is the visible response.")
+        XCTAssertEqual(try turnMessages(prompt: closeFirstPrompt).map { "\($0.0)|\($0.1 ?? "")|\($0.2)" },
+                       ["user||\(closeFirstPrompt)", "assistant|final_answer|\(closeFirstAnswer)"],
+                       "The close-turn-first turn holds exactly one final answer.")
+        XCTAssertEqual(nudgeCount(), 0, "A turn whose close-turn ran is settled, so Playhouse sends it no nudge.")
+        let activePageID = try XCTUnwrap(((try runCLI(["chat", "status"])["result"] as? [String: Any])?["activePage"] as? [String: Any])?["id"] as? String)
+        func pageTexts() throws -> [String] {
+            try XCTUnwrap((try runCLI(["chat", "page", "read", activePageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+                .compactMap { $0["text"] as? String }
+        }
+        XCTAssertTrue(try pageTexts().contains(closeFirstAnswer), "The close-turn-first turn is filed onto the active page.")
+        attachScreenshot(named: "standalone-chat-close-turn-first-single-answer")
+
+        // Claude Code's own no-visible-output notice: an automatic message from Claude Code,
+        // between the answer and a separate reply, never merged into one bubble.
+        let noticePrompt = "Name the largest moon of Saturn."
+        let noticeAnswer = "Titan is the largest moon of Saturn."
+        let noticeReply = "I already answered above."
+        let noticeText = "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
+        send(noticePrompt)
+        XCTAssertTrue(visibleTexts(containing: noticeAnswer).firstMatch.waitToExist(timeout: 10), "The answer stays visible.")
+        XCTAssertTrue(visibleTexts(containing: noticeReply).firstMatch.waitToExist(timeout: 5), "The reply after the notice is visible as its own message.")
+        let noticeBubble = try assertAutomaticMessageBubble(taskID: chatID, containing: noticeText, sender: "Claude Code")
+        XCTAssertLessThan(visibleTexts(containing: noticeAnswer).firstMatch.frame.minY, noticeBubble.frame.minY, "The notice follows the answer.")
+        XCTAssertLessThan(noticeBubble.frame.minY, visibleTexts(containing: noticeReply).firstMatch.frame.minY, "The reply follows the notice.")
+        XCTAssertFalse(transcriptContains("Claude Code automatic notice:"), "The notice's internal marker line is never shown.")
+        XCTAssertEqual(
+            app.groups.matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", noticeAnswer, noticeReply)).count, 0,
+            "No bubble may hold the answer together with what Claude wrote after the notice."
+        )
+        XCTAssertEqual(try turnMessages(prompt: noticePrompt).map { "\($0.0)|\($0.1 ?? "")|\($0.2)" }, [
+            "user||\(noticePrompt)",
+            "assistant|final_answer|\(noticeAnswer)",
+            "user||Claude Code automatic notice:\n\(noticeText)",
+            "assistant|final_answer|\(noticeReply)",
+        ], "Fresh history keeps the answer, the notice and the reply apart, in turn order.")
+        XCTAssertFalse(try pageTexts().contains { $0.contains(noticeText) }, "Claude Code's notice is never filed into a chat page.")
+        XCTAssertTrue(try pageTexts().contains(noticeReply))
+        XCTAssertEqual(nudgeCount(), 0, "The notice turn ran close-turn, so it gets no Playhouse nudge.")
+        attachScreenshot(named: "standalone-chat-claude-code-notice-is-automatic")
+    }
+
+    // case-contract: test_standalone_chat_missed_close_turn_gets_visible_nudge | When a standalone chat turn ends without its chat page close-turn signal, Playhouse sends exactly one follow-up turn through the same unsettled-turn recovery loop task conversations use. Its prompt starts with the Playhouse nudge marker, asks for close-turn on the previous reply and never for a task outcome, and stays in the chat transcript as an automatic message from Playhouse, followed by the agent's reply. A close-turn run in that nudge settles the turn and classifies the user's turn, which moves to the new titled page without the fallback classifier; the nudge turn and its reply are never filed into a chat page or replayed into a page's seeded context. A nudge that goes unanswered is not retried, the background classifier then decides the page, the chat never gets a board status such as Blocked, and task outcome is rejected for the chat. The nudge loop, the close-turn CLI and the turn outcome store are shared by Claude and Codex, so one representative provider (Claude) covers this case, and the round-trip case shows a Codex chat turn reaching the same nudge.
+    func test_standalone_chat_missed_close_turn_gets_visible_nudge() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-close-turn-nudge")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
+        )
+        claudeFixtureExecutable = executable.path
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitToExist(timeout: 10))
+        let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
+        let prompt = "Plan a weekend hiking trip."
+        let answer = "Pick a loop trail under 15 km and start early."
+        func visibleTexts(containing text: String) -> XCUIElementQuery {
+            app.groups.matching(NSPredicate(format: "label CONTAINS %@", text))
+        }
+        func fixtureTurns() -> [[String: Any]] {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".history")),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+            return (history["turns"] as? [[String: Any]] ?? []).filter {
+                !((($0["userText"] as? String) ?? "").hasPrefix("Classify the latest user message"))
+            }
+        }
+        func nudgeTurns() -> [[String: Any]] {
+            fixtureTurns().filter { (($0["userText"] as? String) ?? "").contains("Playhouse internal outcome nudge:") }
+        }
+        func chatStatus() throws -> [String: Any] {
+            try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        }
+        func send(_ text: String) {
+            let composer = element("message-composer")
+            XCTAssertTrue(composer.waitToExist(timeout: 10))
+            composer.click()
+            composer.typeText(text)
+            element("send-message-button").click()
+        }
+
+        // The turn answers but never runs close-turn: one visible nudge follows, which the
+        // agent answers by running close-turn for that reply.
+        send(prompt)
+        XCTAssertTrue(waitUntil({ nudgeTurns().count == 1 && self.noTurnIsRunning() }, timeout: 30),
+                      "A chat turn that skipped close-turn gets exactly one nudge, and the chat settles.")
+        let nudge = try XCTUnwrap(nudgeTurns().first)
+        let nudgeText = (nudge["userText"] as? String) ?? ""
+        XCTAssertTrue(nudgeText.contains("chat page close-turn \(chatID)"), "The chat nudge asks for close-turn on the previous reply.")
+        XCTAssertFalse(nudgeText.contains("task outcome"), "A chat is never asked for a task outcome.")
+        XCTAssertTrue(((nudge["reportCommands"] as? [[String: Any]])?.first?["output"] as? String ?? "").contains("\"ok\":true"))
+        XCTAssertTrue(visibleTexts(containing: answer).firstMatch.waitToExist(timeout: 10), "The answer stays visible above the nudge.")
+        let nudgeBubble = try assertAutomaticMessageBubble(taskID: chatID, containing: "This is the only reminder for that reply.")
+        let replyBubble = visibleTexts(containing: "Filed.").firstMatch
+        XCTAssertTrue(replyBubble.waitToExist(timeout: 5), "The agent's reply to the nudge is visible.")
+        let answerBubble = visibleTexts(containing: answer).firstMatch
+        XCTAssertLessThan(answerBubble.frame.minY, nudgeBubble.frame.minY, "The nudge follows the answer it is about.")
+        XCTAssertLessThan(nudgeBubble.frame.minY, replyBubble.frame.minY, "The agent's reply follows the nudge.")
+        XCTAssertFalse(transcriptContains("Playhouse internal outcome nudge:"), "The nudge's internal marker line is never shown.")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Hiking trip") }, timeout: 10),
+                      "The nudge's close-turn moves the user's turn to its new titled page.")
+        // The turn is filed after the nudge loop, so its page contents can land just after the turn settles.
+        var hikingPage: [String: Any] = [:]
+        var pageTexts: [String] = []
+        XCTAssertTrue(waitUntil({
+            guard let status = try? chatStatus(),
+                  status["missedPreviousPageSignal"] as? Bool == false,
+                  let page = status["activePage"] as? [String: Any],
+                  page["title"] as? String == "Hiking trip",
+                  let pageID = page["id"] as? String,
+                  let messages = (try? self.runCLI(["chat", "page", "read", pageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]] else { return false }
+            hikingPage = page
+            pageTexts = messages.compactMap { $0["text"] as? String }
+            return pageTexts == [prompt, answer]
+        }, timeout: 15), "Only the user's turn is filed on its page, never the nudge or its reply: \(pageTexts)")
+        XCTAssertEqual(hikingPage["title"] as? String, "Hiking trip")
+        let history = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
+        XCTAssertFalse(String(decoding: history, as: UTF8.self).contains("Classify the latest user message"),
+                       "A nudge that got close-turn run leaves nothing for the fallback classifier.")
+        let chatState = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["status"] as? String)
+        XCTAssertTrue(["In Progress", "Waiting Response"].contains(chatState), "A chat nudge never sets a board status such as Blocked.")
+        assertCLIError(try runCLI(["task", "outcome", chatID, "completed"], expectedStatus: 2), code: "invalid_argument")
+        attachScreenshot(named: "standalone-chat-close-turn-nudge-is-visible")
+
+        // A second missed turn whose nudge goes unanswered: one nudge, no Blocked, and the
+        // background classifier decides the page. The new page's session is seeded with its own
+        // turn, never with the nudge or its reply.
+        send("Tell me about volcanoes")
+        XCTAssertTrue(waitUntil({
+            guard nudgeTurns().count == 2, self.noTurnIsRunning(),
+                  let status = try? chatStatus(),
+                  status["missedPreviousPageSignal"] as? Bool == false,
+                  (status["activePage"] as? [String: Any])?["title"] as? String == "Volcanoes" else { return false }
+            return true
+        }, timeout: 45), "An unanswered nudge leaves the page to the fallback classifier.")
+        XCTAssertEqual((nudgeTurns().last?["reportCommands"] as? [Any])?.count, 0, "This nudge goes unanswered.")
+        let seeded = try XCTUnwrap(fixtureTurns().first { (($0["userText"] as? String) ?? "").hasSuffix("Tell me about volcanoes") }?["userText"] as? String)
+        XCTAssertTrue(seeded.contains(prompt) && seeded.contains(answer), "The new page's session is seeded with its own turn.")
+        XCTAssertFalse(seeded.contains("Playhouse internal outcome nudge:"), "A nudge is never replayed into page context.")
+        XCTAssertFalse(seeded.contains("Filed."), "A nudge's reply is never replayed into page context.")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Volcanoes") }, timeout: 10))
+        try assertAutomaticMessageBubble(taskID: chatID, containing: "This is the only reminder for that reply.")
+        XCTAssertEqual(nudgeTurns().count, 2, "An unanswered chat nudge is not retried.")
+        let laterState = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["status"] as? String)
+        XCTAssertTrue(["In Progress", "Waiting Response"].contains(laterState), "An unanswered chat nudge never marks the chat Blocked.")
+        attachScreenshot(named: "standalone-chat-unanswered-nudge-falls-back")
     }
 
     // case-contract: test_standalone_chat_recalls_loaded_pages | When a standalone chat's agent loads an earlier page into its context with `chat page read`, the conversation renders one deterministic "Recalling <page title>" line per loaded page, titled from the page archive rather than from anything the agent wrote, in the order the pages were read. The lines are visible in the turn that read them without opening the Worked for disclosure, stay once the turn settles and after a later turn and a reopen, and the read commands really run and succeed so the history carries each call and the page's own title. The line is derived from Playhouse's own provider-neutral command activity (a shell call titled "Running <command>" for both Claude and Codex) and the page store, so provider selection cannot change it; one representative provider (Claude) covers the shared path.
@@ -14584,7 +14989,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("conversation-user-input-request").exists, "A history failure must leave the unanswered recovery request visible.")
     }
 
-    // case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the UI renders the question inline, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
+    // case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the question's Markdown, header, and option descriptions reach the client, and the UI renders the question inline with its Markdown formatted at the reply text size, its header, and each option's description, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
     func test_claude_questions_can_be_answered_after_switching_conversations() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-question")
         try FileManager.default.copyItem(
@@ -14620,7 +15025,29 @@ final class PlayhouseUITests: XCTestCase {
         assertTaskVisible("Claude question", inColumn: "Waiting Response")
         openTask(named: "Claude question")
         XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
+        // The question renders its Markdown at the reply size, under its header, with each option's description.
+        let questionContainer = element("ai-question-text-question-1")
+        XCTAssertTrue(questionContainer.exists, "The question text should render in its own container.")
+        let questionText = questionContainer.staticTexts["Which color should I use for the primary button?"]
+        XCTAssertTrue(questionText.exists, "The question's bold Markdown should render without its markers.")
+        XCTAssertTrue(questionContainer.staticTexts["It also tints LinkText."].exists, "The question's second paragraph and inline code should render.")
+        XCTAssertFalse(
+            questionContainer.staticTexts.matching(NSPredicate(format: "label CONTAINS '**' OR label CONTAINS '`'")).firstMatch.exists,
+            "Raw Markdown markers must not show in the question."
+        )
+        // Width scales with the font and, unlike height, excludes the paragraph's bottom padding. With its
+        // bold run always 16 points, this line measures about 359 points when its plain text is at the
+        // 16-point reply size and about 324 when that text falls back to the 13-point default.
+        XCTAssertGreaterThanOrEqual(questionText.frame.width, 345, "The question's plain text should use the 16-point reply size.")
+        // A macOS static text reports its string as its value, not its label.
+        func shownText(_ identifier: String) -> String {
+            let text = element(identifier)
+            return text.label + (text.value as? String ?? "")
+        }
+        XCTAssertEqual(shownText("ai-question-header-question-1").uppercased(), "COLOR")
+        XCTAssertEqual(shownText("ai-question-option-description-question-1-Blue"), "Use blue.")
+        XCTAssertEqual(shownText("ai-question-option-description-question-1-Green"), "Use green.")
+        attachScreenshot(named: "Claude question with Markdown, header, and option descriptions")
         selectQuestionOption(identifier: "ai-question-option-question-1-Blue")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(transcriptMessage("Answer received: Blue.").waitToExist(timeout: 10))
@@ -16127,6 +16554,20 @@ final class PlayhouseUITests: XCTestCase {
         composer.typeText(text)
     }
 
+    /// Dismisses an open schedule hint with Escape (its Done button is disabled while the title is empty), then
+    /// returns from the task conversation to the Scheduled Tasks page, which is hidden while a task is open.
+    private func closeScheduleHintAndReturnToPage() {
+        let hint = element("schedule-hint")
+        if hint.exists {
+            app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
+            XCTAssertTrue(waitForDisappearance(hint, timeout: 5), "Escape dismisses the schedule hint.")
+        }
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitForDisappearance(element("back-to-board-button"), timeout: 10), "Going back leaves the task conversation.")
+        XCTAssertTrue(element("scheduled-tasks-empty").waitToExist(timeout: 10), "Going back returns to the empty Scheduled Tasks page.")
+        XCTAssertTrue(waitForStableFrame(element("scheduled-tasks-page")), "The page should finish sliding back in.")
+    }
+
     private func openScheduleHint() -> XCUIElement {
         let button = element("schedule-task-button")
         XCTAssertTrue(waitUntil({ button.exists && button.isHittable }, timeout: 10), "The composer should offer the schedule button beside Send.")
@@ -16392,7 +16833,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("task-card-\(templateID)").waitToExist(timeout: 10), "Clearing the schedule puts the task on the board.")
     }
 
-    // case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
+    // case-contract: test_scheduled_task_edit_and_page_management | The Scheduled Tasks sidebar button opens the Scheduled Tasks page, whose New Task (header, or the button on the empty page) opens a task conversation with the schedule hint already open on Recurring. Opening a scheduled task shows its confirmed prompt with the schedule button on and Send in schedule mode, and its hint shows the saved repeat, day and time; changing its title and repeat in the hint and confirming with Send persists across fresh CLI reads, keeps the time, and starts no turn. Deleting a schedule removes it from schedule list and from the page. Sending a one-time scheduled task by hand ends its schedule, so a later tick sends nothing more; a recurring template rejects a send with invalid_transition; and clearing a schedule keeps its prompt as the task's draft.
     func test_scheduled_task_edit_and_page_management() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-schedule-edit")
         launchApp(defaultParent: fixture.parent.path)
@@ -16401,7 +16842,15 @@ final class PlayhouseUITests: XCTestCase {
         // The page slides in over the board; clicks before it settles land on the board.
         XCTAssertTrue(waitForStableFrame(element("scheduled-tasks-page")), "The Scheduled Tasks page should finish sliding in.")
         XCTAssertTrue(element("scheduled-tasks-empty").exists, "An empty page says so plainly.")
+        XCTAssertTrue(element("scheduled-tasks-empty-new-task-button").exists, "The empty page offers New Task.")
         attachScreenshot(named: "Scheduled Tasks page with no schedules")
+
+        // The empty-state button and the header button both open the same conversation with the hint on Recurring.
+        element("scheduled-tasks-empty-new-task-button").click()
+        XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "The empty-state New Task opens the conversation with the schedule hint open.")
+        XCTAssertTrue(element("schedule-title-field").waitToExist(timeout: 5), "The empty-state New Task starts on Recurring.")
+        attachScreenshot(named: "Empty-state New Task opens the schedule hint")
+        closeScheduleHintAndReturnToPage()
 
         element("scheduled-new-task-button").click()
         XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "New Task opens the conversation with the schedule hint open.")
@@ -16474,6 +16923,16 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(((try runCLI(["schedule", "list"])["result"] as? [String: Any])?["tasks"] as? [Any])?.count, 0)
         XCTAssertTrue(element("scheduled-tasks-empty").waitToExist(timeout: 5))
         attachScreenshot(named: "Scheduled Tasks page after deleting the schedule")
+        element("scheduled-tasks-empty-new-task-button").click()
+        XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "The empty-state New Task still opens the schedule hint on an empty page.")
+        XCTAssertTrue(element("schedule-title-field").waitToExist(timeout: 5), "The empty-state New Task starts on Recurring after a deletion too.")
+        attachScreenshot(named: "Empty page New Task after deleting the schedule")
+        closeScheduleHintAndReturnToPage()
+        element("scheduled-new-task-button").click()
+        XCTAssertTrue(element("schedule-hint").waitToExist(timeout: 10), "The header New Task still opens the schedule hint on an empty page.")
+        XCTAssertTrue(element("schedule-title-field").waitToExist(timeout: 5), "The header New Task starts on Recurring after a deletion too.")
+        attachScreenshot(named: "Header New Task after deleting the schedule opens the schedule hint")
+        closeScheduleHintAndReturnToPage()
 
         // A one-time schedule removed in the hint: Send runs the task now and ends the schedule.
         let onceID = try XCTUnwrap((try runCLI([
@@ -19678,21 +20137,24 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(switched["conversationProvider"] as? String, liveProvider)
     }
 
-    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar) and the Task Item, Agents Info and Token Stats examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
+    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea) and the Task Item, Agents Info, Token Stats and Skills Page examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors.
     func test_plugin_renderer_commits_minimal_ops_and_runs_handlers() throws {
+        executionTimeAllowance = 360 // It opens and checks every atom's catalog page, then exercises each control.
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
         XCTAssertTrue(element("plugin-catalog-atom-Stack").waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog opens the catalog.")
         XCTAssertTrue(element("plugin-catalog-task-item").exists, "The sidebar lists the Task Item example.")
         XCTAssertTrue(element("plugin-catalog-agents-info").exists, "The sidebar lists the Agents Info example.")
         XCTAssertTrue(element("plugin-catalog-token-stats").exists, "The sidebar lists the Token Stats example.")
+        XCTAssertTrue(element("plugin-catalog-skills-page").exists, "The sidebar lists the Skills Page example.")
 
         let rendered = try XCTUnwrap(try runCLI(["plugin", "render", "--page", "Stack"])["result"] as? [String: Any])
         let atoms = try XCTUnwrap(rendered["atoms"] as? [String])
-        XCTAssertEqual(atoms, ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter", "Scroll", "Divider", "ChoiceBar"])
+        XCTAssertEqual(atoms, ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter",
+                               "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea"])
         try assertPluginValuesCrossWithJSONRules()
         for atom in atoms {
-            let row = element("plugin-catalog-atom-\(atom)")
+            let row = catalogSidebarRow("plugin-catalog-atom-\(atom)")
             XCTAssertTrue(row.waitToExist(timeout: 10), "The sidebar lists the \(atom) atom.")
             row.click()
             let title = element("plugin-catalog-title")
@@ -19708,11 +20170,11 @@ final class PlayhouseUITests: XCTestCase {
             attachScreenshot(named: "Plugin Catalog — \(atom)")
         }
 
-        element("plugin-catalog-atom-Text").click()
+        catalogSidebarRow("plugin-catalog-atom-Text").click()
         XCTAssertTrue(element("text-title").waitToExist(timeout: 10), "Text atoms render natively from the JavaScript page.")
         XCTAssertEqual(pluginText(element("text-title")), "Title: 13 semibold, tracking 0.35")
 
-        element("plugin-catalog-atom-Button").click()
+        catalogSidebarRow("plugin-catalog-atom-Button").click()
         let pressCount = element("button-press-count")
         XCTAssertTrue(pressCount.waitToExist(timeout: 10))
         XCTAssertEqual(pluginText(pressCount), "Pressed 0 times")
@@ -19726,7 +20188,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(waitUntil({ self.pluginText(pressCount) != "Pressed 1 times" }, timeout: 2), "A disabled Button doesn't call its handler.")
         XCTAssertTrue(pluginText(commit).hasPrefix("Commit 2: "), "No commit followed the disabled tap: \(pluginText(commit))")
 
-        element("plugin-catalog-atom-Disclosure").click()
+        catalogSidebarRow("plugin-catalog-atom-Disclosure").click()
         let disclosureToggle = element("disclosure-toggle")
         XCTAssertTrue(disclosureToggle.waitToExist(timeout: 10))
         XCTAssertEqual(disclosureToggle.value as? String, "Expanded")
@@ -19742,7 +20204,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("disclosure-first").waitToExist(timeout: 5), "Expanding brings the children back.")
         XCTAssertEqual(disclosureToggle.value as? String, "Expanded")
 
-        element("plugin-catalog-atom-ChoiceBar").click()
+        catalogSidebarRow("plugin-catalog-atom-ChoiceBar").click()
         let overviewChoice = element("choice-overview"), wastersChoice = element("choice-wasters")
         XCTAssertTrue(wastersChoice.waitToExist(timeout: 10))
         XCTAssertTrue(overviewChoice.isSelected, "The selected option carries the selected trait.")
@@ -19756,7 +20218,7 @@ final class PlayhouseUITests: XCTestCase {
         wastersChoice.click()
         XCTAssertFalse(waitUntil({ !self.pluginText(commit).hasPrefix("Commit 2: ") }, timeout: 2), "Clicking the selected option commits nothing: \(pluginText(commit))")
 
-        element("plugin-catalog-atom-Scroll").click()
+        catalogSidebarRow("plugin-catalog-atom-Scroll").click()
         let scroll = element("scroll-demo")
         XCTAssertTrue(scroll.waitToExist(timeout: 10))
         XCTAssertTrue(element("scroll-row-4").waitToExist(timeout: 5))
@@ -19773,6 +20235,56 @@ final class PlayhouseUITests: XCTestCase {
         }
         XCTAssertLessThanOrEqual(lastRow.frame.maxY, scroll.frame.maxY + 1, "Scrolling inside the Scroll brings its last row into view.")
         attachScreenshot(named: "Scroll atom capped at 120 points and scrolled to its last row")
+
+        // The Skills page's controls.
+        catalogSidebarRow("plugin-catalog-atom-Toggle").click()
+        let toggle = element("toggle-demo")
+        XCTAssertTrue(toggle.waitToExist(timeout: 10))
+        XCTAssertTrue(isOn(toggle), "The Toggle page's switch starts on.")
+        toggle.click()
+        XCTAssertTrue(waitUntil({ !self.isOn(toggle) && self.pluginText(self.element("toggle-state")) == "Off" }, timeout: 5), "onToggle flipped the switch off.")
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).hasPrefix("Commit 2: update, text → nodes ") }, timeout: 5),
+                      "Toggling updated only the Toggle's props and the readout: \(pluginText(commit))")
+        attachScreenshot(named: "Toggle atom switched off")
+
+        catalogSidebarRow("plugin-catalog-atom-TextField").click()
+        let field = element("text-field-demo")
+        XCTAssertTrue(field.waitToExist(timeout: 10))
+        field.click()
+        field.typeText("release")
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("text-field-value")) == "Text: release" }, timeout: 5), "onChange received the typed text.")
+        attachScreenshot(named: "TextField atom after typing")
+        element("text-field-clear").click()
+        XCTAssertTrue(waitUntil({ (field.value as? String ?? "") == "" && self.pluginText(self.element("text-field-value")) == "Text: " }, timeout: 5),
+                      "The field shows the text its owner sets.")
+
+        catalogSidebarRow("plugin-catalog-atom-Segmented").click()
+        let segmented = element("segmented-demo")
+        XCTAssertTrue(segmented.waitToExist(timeout: 10))
+        segmented.radioButtons["Global"].click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("segmented-selected")) == "Selected: global" }, timeout: 5), "onChange received the segment's value.")
+        XCTAssertTrue(waitUntil({ self.isOn(segmented.radioButtons["Global"]) }, timeout: 5))
+        attachScreenshot(named: "Segmented atom on Global")
+
+        catalogSidebarRow("plugin-catalog-atom-Menu").click()
+        let menu = element("menu-demo")
+        XCTAssertTrue(menu.waitToExist(timeout: 10))
+        menu.click()
+        let delete = app.menuItems.matching(identifier: "menu-delete").firstMatch
+        XCTAssertTrue(delete.waitToExist(timeout: 5), "The Menu opens its items.")
+        XCTAssertTrue(app.menuItems["Reveal in Finder"].exists)
+        attachScreenshot(named: "Menu atom open with its groups")
+        delete.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("menu-chosen")) == "Chosen: delete" }, timeout: 5), "onMenu received the item's id.")
+
+        catalogSidebarRow("plugin-catalog-atom-PressArea").click()
+        let area = element("press-area-demo")
+        XCTAssertTrue(area.waitToExist(timeout: 10))
+        area.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("press-area-count")) == "Clicked 1 · held 0" }, timeout: 5), "A click runs onPress.")
+        area.press(forDuration: 1.0)
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("press-area-count")) == "Clicked 1 · held 1" }, timeout: 5), "A press and hold runs onLongPress, not onPress.")
+        attachScreenshot(named: "PressArea atom after a click and a press and hold")
     }
 
     /// Commits, props and event values cross as JavaScript values, not JSON
@@ -19852,7 +20364,7 @@ final class PlayhouseUITests: XCTestCase {
     func test_plugin_task_item_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
-        let example = element("plugin-catalog-task-item")
+        let example = catalogSidebarRow("plugin-catalog-task-item")
         XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Task Item example.")
         example.click()
         let jsSide = element("plugin-catalog-js-task-item")
@@ -19937,7 +20449,7 @@ final class PlayhouseUITests: XCTestCase {
     func test_plugin_agents_info_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
-        let example = element("plugin-catalog-agents-info")
+        let example = catalogSidebarRow("plugin-catalog-agents-info")
         XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Agents Info example.")
         example.click()
         let jsSide = element("plugin-catalog-js-agents-info")
@@ -20044,7 +20556,7 @@ final class PlayhouseUITests: XCTestCase {
     func test_plugin_token_stats_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
-        let example = element("plugin-catalog-token-stats")
+        let example = catalogSidebarRow("plugin-catalog-token-stats")
         XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Token Stats example.")
         example.click()
         let jsSide = element("plugin-catalog-js-token-stats")
@@ -20187,6 +20699,220 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: open" }, timeout: 5))
         XCTAssertEqual(pluginText(native("native-last-action")), "Last: section overhead", "The native modal keeps its own state.")
         attachScreenshot(named: "Token Stats: the counter reopened the JavaScript modal")
+    }
+
+    // case-contract: test_plugin_skills_page_renders_from_atoms_like_native | The Plugin Catalog's Skills Page shows the Skills page's header and skill gallery composed in JavaScript from atoms above the native SwiftUI header and gallery the Skills page uses, built from the same atoms and sample data, each opened by the composer's Skills button (the same plain Button atom with the sparkles icon, labelled Skills). Both show the back button, the Skills, Rules & MCP title, the Skills | Rules | MCP and Repo | Global | Built-in segmented pickers, the search field and New Skill, the hint, a repository section whose skill rows show their name, provider, Conflict and Invalid badges, description, issue and location, a small Fix with Agent button on a broken skill, the mini switch, a small Use button that is disabled for a skill no provider can use, and the actions menu, and an empty repository's empty state, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer, Divider, Scroll, Segmented, TextField, Toggle, Menu, PressArea) with the Skills page's identifiers. Choosing Global in the JavaScript source picker runs onChange (Last: tab global) and shows the Linked and switched-off global skills while the native page stays on Repo. Clicking a JavaScript switch runs onToggle (Last: toggle release-notes off), which turns it off and disables its Use button, and Use runs its handler (Last: use release-notes) without re-rendering any row. Clicking a skill's text runs onPress (Last: open release-notes); pressing and holding it runs onLongPress, which starts selecting (Last: select release-notes): its row shows a checked checkbox and the accent highlight, the rows' own controls hide, built-in skills show no checkbox, and the header shows 1 selected with Fix with Agent, Delete and Done; a click on another row adds it (2 selected), and Done ends selecting (Last: done selecting). The actions menu runs onMenu with the chosen item's id (Last: menu release-notes edit), typing in the search runs onChange with the text, choosing Rules hides the source picker and the search, and the back button closes the JavaScript page (Last: back) while the native one stays open, until the Skills button opens it again (Last: open). The search field raises no onPress, so pressing it is refused as invalid_argument.
+    func test_plugin_skills_page_renders_from_atoms_like_native() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Plugin Catalog")
+        let example = catalogSidebarRow("plugin-catalog-skills-page")
+        XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Skills Page example.")
+        example.click()
+        let jsSide = element("plugin-catalog-js-skills-page")
+        let nativeSide = element("plugin-catalog-native-skills-page")
+        XCTAssertTrue(jsSide.waitToExist(timeout: 10), "The page shows the JavaScript Skills page.")
+        XCTAssertTrue(nativeSide.waitToExist(timeout: 10), "The page shows the native Skills page.")
+        XCTAssertFalse(element("plugin-error").exists, "The JavaScript page renders without errors.")
+        XCTAssertFalse(element("plugin-node-error").exists, "Every node on the JavaScript page has a registered atom.")
+
+        func js(_ identifier: String) -> XCUIElement {
+            jsSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func native(_ identifier: String) -> XCUIElement {
+            nativeSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func pair(_ identifier: String) -> (js: XCUIElement, native: XCUIElement) {
+            (js(identifier), native("native-\(identifier)"))
+        }
+        // The pages are as wide as a window (1040 points) and 520 tall, so the
+        // native one sits below the JavaScript one, and the catalog page scrolls
+        // down and across to reach either.
+        let page = app.scrollViews.matching(NSPredicate(format: "identifier != %@", "plugin-catalog-skills-page-scroll"))
+            .containing(.any, identifier: "plugin-catalog-js-skills-page").firstMatch
+        let across = element("plugin-catalog-skills-page-scroll")
+        @discardableResult func reveal(_ element: XCUIElement) -> XCUIElement {
+            XCTAssertTrue(element.waitToExist(timeout: 10), "\(element) should exist before scrolling to it.")
+            // The horizontal scroll view reports its whole content's frame, so both
+            // directions are judged against the visible catalog page.
+            var scrolls = 0
+            while !element.isHittable, scrolls < 20 {
+                let visible = page.frame, target = element.frame
+                if target.midY < visible.minY + 20 || target.midY > visible.maxY - 20 {
+                    page.scroll(byDeltaX: 0, deltaY: target.midY > visible.midY ? -250 : 250)
+                } else if target.midX < visible.minX + 20 || target.midX > visible.maxX - 20 {
+                    across.scroll(byDeltaX: target.midX > visible.midX ? -250 : 250, deltaY: 0)
+                } else {
+                    page.scroll(byDeltaX: 0, deltaY: target.midY > visible.midY ? -100 : 100)
+                }
+                scrolls += 1
+            }
+            XCTAssertTrue(element.isHittable, "\(element) should be on screen after scrolling the catalog page.")
+            return element
+        }
+        func assertSameSize(_ identifier: String) {
+            let (js, native) = pair(identifier)
+            XCTAssertTrue(js.waitToExist(timeout: 10), "The JavaScript page has \(identifier).")
+            XCTAssertTrue(native.waitToExist(timeout: 10), "The native page has \(identifier).")
+            XCTAssertEqual(js.frame.width, native.frame.width, accuracy: 1, "\(identifier) has the same width in both.")
+            XCTAssertEqual(js.frame.height, native.frame.height, accuracy: 1, "\(identifier) has the same height in both.")
+        }
+        let commit = jsSide.descendants(matching: .any).matching(identifier: "plugin-last-commit").firstMatch
+        let lastAction = js("js-last-action")
+
+        // The composer's Skills button opens the page: the same plain Button atom.
+        assertSameSize("open-skills-button")
+        XCTAssertEqual(js("open-skills-button").label, "Skills")
+        XCTAssertEqual(native("native-open-skills-button").label, "Skills")
+
+        for identifier in ["skills-page", "skills-back-button", "skills-title", "skills-kind-picker", "skills-tab-picker", "skills-search", "new-skill-button",
+                           "skills-provider-timing", "skills-repo-section-login-app", "skill-row-release-notes", "skill-row-review-login", "skill-row-broken-skill",
+                           "skill-name-release-notes", "skill-provider-release-notes-claude", "skill-provider-release-notes-codex", "skill-description-release-notes",
+                           "skill-location-release-notes", "skill-toggle-release-notes", "skill-use-release-notes", "skill-actions-release-notes",
+                           "skill-conflict-review-login", "skill-issue-review-login", "skill-fix-review-login", "skill-invalid-broken-skill",
+                           "skill-fix-broken-skill", "skill-use-broken-skill", "skills-repo-section-docs-site", "skills-empty-docs-site"] {
+            assertSameSize(identifier)
+        }
+        XCTAssertEqual(pluginText(pair("skills-title").js), "Skills, Rules & MCP")
+        XCTAssertEqual(pair("skills-page").js.frame.width, 1040, accuracy: 1, "Each page is as wide as a window, 1040 points.")
+        XCTAssertGreaterThan(pair("skills-title").js.frame.width, 100, "The title shows in full on one line.")
+        XCTAssertLessThan(pair("skills-title").js.frame.height, 30)
+        XCTAssertLessThanOrEqual(pair("skills-page").js.frame.maxY, pair("skills-page").native.frame.minY, "The JavaScript page sits above the native one.")
+        for side in [pair("skills-tab-picker").js, pair("skills-tab-picker").native] {
+            XCTAssertTrue(isOn(side.radioButtons["Repo"]), "The page opens on its Repo skills.")
+        }
+        XCTAssertTrue(isOn(pair("skills-kind-picker").js.radioButtons["Skills"]), "The page opens on Skills.")
+        XCTAssertEqual(pluginText(js("skill-description-release-notes")), "Draft release notes from the merged pull requests.")
+        XCTAssertEqual(pluginText(js("skill-location-release-notes")), ".agents/skills")
+        XCTAssertTrue(isOn(pair("skill-toggle-release-notes").js) && isOn(pair("skill-toggle-release-notes").native), "Both switches start on.")
+        XCTAssertTrue(pair("skill-use-release-notes").js.isEnabled)
+        XCTAssertFalse(js("skill-use-broken-skill").isEnabled, "No provider can use an invalid skill.")
+        XCTAssertFalse(native("native-skill-use-broken-skill").isEnabled)
+        XCTAssertFalse(js("skill-provider-broken-skill-claude").exists)
+        XCTAssertEqual(js("skill-actions-release-notes").label, "Actions for release-notes")
+        reveal(js("skills-empty-docs-site"))
+        XCTAssertEqual(pluginText(js("skills-empty-docs-site")), "No skills in docs-site.")
+        reveal(pair("skills-page").js)
+        attachScreenshot(named: "Skills page: JavaScript above native, both on Repo")
+
+        // Each side keeps its own source; the Segmented atom is controlled.
+        reveal(pair("skills-tab-picker").js).radioButtons["Global"].click()
+        XCTAssertTrue(js("skill-row-shared-notes").waitToExist(timeout: 5), "Choosing Global shows the global skills.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: tab global" }, timeout: 5), "The source picker ran onChange with its value.")
+        XCTAssertTrue(js("skill-linked-shared-notes").exists, "A linked skill shows Linked.")
+        XCTAssertFalse(isOn(js("skill-toggle-quiet-skill")), "A switched-off skill shows its switch off.")
+        XCTAssertFalse(js("skill-use-quiet-skill").isEnabled, "A switched-off skill can't be used.")
+        XCTAssertFalse(js("skill-row-release-notes").exists, "Global replaces the repository's skills.")
+        XCTAssertTrue(native("native-skill-row-release-notes").exists, "The native page stays on Repo.")
+        attachScreenshot(named: "Skills page: JavaScript on Global, native still on Repo")
+        reveal(pair("skills-tab-picker").native).radioButtons["Global"].click()
+        XCTAssertTrue(native("native-skill-row-shared-notes").waitToExist(timeout: 5), "The native picker moves its own page.")
+        for identifier in ["skill-row-shared-notes", "skill-linked-shared-notes", "skill-row-quiet-skill", "skill-toggle-quiet-skill"] {
+            assertSameSize(identifier)
+        }
+        reveal(pair("skills-tab-picker").js).radioButtons["Repo"].click()
+        XCTAssertTrue(js("skill-row-release-notes").waitToExist(timeout: 5))
+        reveal(pair("skills-tab-picker").native).radioButtons["Repo"].click()
+        XCTAssertTrue(native("native-skill-row-release-notes").waitToExist(timeout: 5))
+
+        // The switch runs onToggle and turns Use off; Use runs its handler.
+        let jsToggle = reveal(js("skill-toggle-release-notes"))
+        reveal(js("skill-use-release-notes")).click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: use release-notes" }, timeout: 5), "Use ran its JavaScript handler.")
+        XCTAssertTrue(waitUntil({ self.pluginText(commit).contains(": text → node ") }, timeout: 5), "Use changed only the readout: \(pluginText(commit))")
+        jsToggle.click()
+        XCTAssertTrue(waitUntil({ !self.isOn(jsToggle) && self.pluginText(lastAction) == "Last: toggle release-notes off" }, timeout: 5), "onToggle turned the switch off.")
+        XCTAssertTrue(waitUntil({ !js("skill-use-release-notes").isEnabled }, timeout: 5), "Turning a skill off disables Use.")
+        XCTAssertTrue(isOn(native("native-skill-toggle-release-notes")), "The native switch keeps its own state.")
+        attachScreenshot(named: "Skills page: the JavaScript switch turned release-notes off")
+        jsToggle.click()
+        XCTAssertTrue(waitUntil({ self.isOn(jsToggle) }, timeout: 5))
+
+        // A click on a skill's text opens it; a press and hold starts selecting.
+        reveal(js("skill-text-release-notes")).click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: open release-notes" }, timeout: 5), "A click on the skill ran onPress.")
+        js("skill-row-release-notes").press(forDuration: 1.0)
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: select release-notes" }, timeout: 5), "A press and hold ran onLongPress.")
+        XCTAssertTrue(js("skills-selection-count").waitToExist(timeout: 5), "Selecting shows the selection's actions.")
+        XCTAssertEqual(pluginText(js("skills-selection-count")), "1 selected")
+        XCTAssertEqual(js("skill-select-release-notes").label, "Selected", "The pressed skill's checkbox is checked.")
+        XCTAssertEqual(js("skill-select-review-login").label, "Not selected")
+        XCTAssertFalse(js("skill-toggle-release-notes").exists, "Selecting hides a row's own controls.")
+        XCTAssertFalse(js("skills-search").exists, "Selecting replaces the search with the selection's actions.")
+        XCTAssertTrue(js("skills-fix-selected").exists && js("skills-delete-selected").exists && js("skills-selection-done").exists)
+        XCTAssertFalse(js("skills-fix-selected").isEnabled, "Nothing selected is broken, so nothing can be fixed.")
+        XCTAssertFalse(pair("skills-kind-picker").js.isEnabled, "The kind picker is locked while selecting.")
+        XCTAssertTrue(native("native-skill-toggle-release-notes").exists, "The native page isn't selecting.")
+        attachScreenshot(named: "Skills page: selecting in JavaScript")
+        // While selecting, the row's text area is part of the row, so a click on the row's middle lands on it.
+        reveal(js("skill-row-review-login")).click()
+        XCTAssertTrue(waitUntil({ self.pluginText(js("skills-selection-count")) == "2 selected" }, timeout: 5), "A click on another row adds it.")
+        XCTAssertTrue(waitUntil({ js("skills-fix-selected").isEnabled }, timeout: 5), "A selected conflict can be fixed.")
+        reveal(pair("skills-tab-picker").js).radioButtons["Built-in"].click()
+        XCTAssertTrue(js("skill-row-simplify").waitToExist(timeout: 5))
+        XCTAssertFalse(js("skill-select-simplify").exists, "A built-in skill shows no checkbox.")
+        reveal(native("native-skill-row-release-notes")).press(forDuration: 1.0)
+        XCTAssertTrue(native("native-skills-selection-count").waitToExist(timeout: 5), "The native row starts selecting too.")
+        for identifier in ["skills-selection-count", "skills-fix-selected", "skills-delete-selected", "skills-selection-done"] {
+            assertSameSize(identifier)
+        }
+        reveal(pair("skills-tab-picker").js).radioButtons["Repo"].click()
+        XCTAssertTrue(js("skill-select-release-notes").waitToExist(timeout: 5))
+        assertSameSize("skill-row-release-notes")
+        assertSameSize("skill-select-release-notes")
+        reveal(js("skills-selection-done")).click()
+        XCTAssertTrue(waitUntil({ !js("skills-selection-count").exists && self.pluginText(lastAction) == "Last: done selecting" }, timeout: 5), "Done ends selecting.")
+        XCTAssertTrue(js("skill-toggle-release-notes").waitToExist(timeout: 5), "Rows show their controls again.")
+        reveal(native("native-skills-selection-done")).click()
+
+        // The actions menu runs onMenu with the chosen item's id.
+        reveal(js("skill-actions-release-notes")).click()
+        let edit = app.menuItems.matching(identifier: "skill-edit-release-notes").firstMatch
+        XCTAssertTrue(edit.waitToExist(timeout: 5), "The actions menu opens.")
+        XCTAssertTrue(app.menuItems["Move to docs-site"].exists && app.menuItems["Delete…"].exists, "It lists the skill's moves and Delete.")
+        attachScreenshot(named: "Skills page: the JavaScript actions menu open")
+        edit.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: menu release-notes edit" }, timeout: 5), "onMenu received the item's id.")
+
+        // Search runs onChange with the text; Rules hides the source picker and search.
+        let search = reveal(js("skills-search"))
+        search.click()
+        search.typeText("rel")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: search rel" }, timeout: 5), "Typing in the search ran onChange with the text.")
+        reveal(pair("skills-kind-picker").js).radioButtons["Rules"].click()
+        XCTAssertTrue(waitUntil({ !js("skills-tab-picker").exists && !js("skills-search").exists }, timeout: 5), "Rules hides the source picker and the search.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: kind rules" }, timeout: 5))
+        XCTAssertTrue(native("native-skills-tab-picker").exists, "The native page stays on Skills.")
+        attachScreenshot(named: "Skills page: JavaScript on Rules, native on Skills")
+        reveal(pair("skills-kind-picker").js).radioButtons["Skills"].click()
+        XCTAssertTrue(js("skills-tab-picker").waitToExist(timeout: 5))
+
+        // Back closes the JavaScript page; the Skills button opens it again.
+        reveal(js("skills-back-button")).click()
+        XCTAssertTrue(waitUntil({ !pair("skills-page").js.exists }, timeout: 5), "Back closed the JavaScript page.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: back" }, timeout: 5))
+        XCTAssertTrue(pair("skills-page").native.exists, "The native page stays open.")
+        reveal(js("open-skills-button")).click()
+        XCTAssertTrue(pair("skills-page").js.waitToExist(timeout: 5), "The Skills button opened the page again.")
+        XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: open" }, timeout: 5))
+        XCTAssertEqual(pluginText(native("native-last-action")), "Last: done selecting", "The native page keeps its own state.")
+        attachScreenshot(named: "Skills page: the Skills button reopened the JavaScript page")
+    }
+
+    /// A Plugin Catalog sidebar row, scrolled into view: the sidebar lists more
+    /// atoms and examples than fit, and a row scrolled away has no frame to click.
+    /// The sidebar is the scroll view holding the atom rows.
+    private func catalogSidebarRow(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        let row = element(identifier)
+        let sidebar = app.scrollViews.containing(NSPredicate(format: "identifier BEGINSWITH %@", "plugin-catalog-atom-")).firstMatch
+        XCTAssertTrue(sidebar.waitToExist(timeout: 10), "The Plugin Catalog shows its sidebar.", file: file, line: line)
+        // One check per scroll: up first, then down past where it started.
+        var scrolls = 0
+        while !(row.exists && row.isHittable), scrolls < 20 {
+            sidebar.scroll(byDeltaX: 0, deltaY: scrolls < 10 ? 200 : -200)
+            scrolls += 1
+        }
+        XCTAssertTrue(row.exists && row.isHittable, "\(identifier) should be on screen after scrolling the catalog sidebar.", file: file, line: line)
+        return row
     }
 
     private func clickPluginsMenuItem(_ title: String) {
@@ -21057,7 +21783,8 @@ final class PlayhouseUITests: XCTestCase {
 
     /// Playhouse's own prompts render as muted automatic messages: the history entry that holds `text`
     /// is shown under the `playhouse-message-` identifier with its label, never as the user's bubble.
-    private func assertAutomaticMessageBubble(taskID: String, containing text: String, file: StaticString = #filePath, line: UInt = #line) throws {
+    @discardableResult
+    private func assertAutomaticMessageBubble(taskID: String, containing text: String, sender: String = "Playhouse", file: StaticString = #filePath, line: UInt = #line) throws -> XCUIElement {
         let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any], file: file, line: line)
         let messages = try XCTUnwrap(history["messages"] as? [[String: Any]], file: file, line: line)
         let sent = try XCTUnwrap(
@@ -21068,8 +21795,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("playhouse-message-\(id)").waitToExist(timeout: 10), "The message renders as an automatic Playhouse message.", file: file, line: line)
         let label = element("playhouse-message-label-\(id)")
         XCTAssertTrue(label.waitToExist(timeout: 5), "The automatic message carries its label.", file: file, line: line)
-        XCTAssertTrue(label.label.contains("Automatic message from Playhouse") || ((label.value as? String) ?? "").contains("Automatic message from Playhouse"), "The label says the message is automatic: \(label.label)", file: file, line: line)
+        XCTAssertTrue(label.label.contains("Automatic message from \(sender)") || ((label.value as? String) ?? "").contains("Automatic message from \(sender)"), "The label says the message is automatic from \(sender): \(label.label)", file: file, line: line)
         XCTAssertFalse(element("user-message-\(id)").exists, "An automatic message is not rendered as the user's own bubble.", file: file, line: line)
+        return element("playhouse-message-\(id)")
     }
 
     /// The transcript's last row: the newest message, which can be the reply to a status nudge
