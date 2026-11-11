@@ -36,6 +36,47 @@ Principles that made the previous rounds work:
    Record `git status --short` and `git diff --stat`; note any pre-existing staged
    or unstaged paths so they are never swept into the final commit. Confirm the
    Tart VM `playhouse-ui` is available (`export PATH=/opt/homebrew/bin:$PATH; tart list`).
+   Read the whole most recent report, `ls docs/nightly-tests/*.md | sort | tail -1`.
+   Also run `git log --oneline -- docs/nightly-tests/` and list the commits since that
+   report (`git log --oneline <report commit>..HEAD`), so you know what changed after
+   that round.
+
+1a. **Resume from the latest report.** Each round picks up where the previous one
+   stopped instead of starting cold. From the latest report, extract:
+   - **Carried failures:** every case that failed in the report's *final* run (or its
+     last run, if the round ended without a green confirmation) and is not marked
+     fixed. These are this round's first work.
+   - **Uncommitted round work:** if the report says its changes were left unstaged,
+     compare its recorded fingerprint with the current `git diff | shasum` over the
+     listed paths. If they match exactly, treat those paths as this round's changes:
+     they get reviewed, verified and committed with this round. If they do not match,
+     or were already committed, go by what the working tree and `git log` show, and
+     say which case applied in this round's report. Never sweep in paths the report
+     does not list.
+   - **Open items:** the numbered open items, split into two groups. The first group is
+     items about a specific failing or flaky case. The second is everything else
+     (speed, quality, architecture, runner).
+
+   Then, before the full run:
+   1. Run every carried failure in **one** focused invocation,
+      `scripts/test-ui-tart.sh --case <id> [--case <id>...]`, on the current tree. If
+      the report gives an order-dependent reproduction (an alphabetical prefix or a
+      leaking earlier case), include it.
+   2. For each case still red, triage and fix it as in steps 3 and 4. Start from the
+      report's evidence and its "likely cause", and prove or refute that cause instead
+      of assuming it. Rerun the batch until every carried failure is green in a
+      focused run.
+   3. A carried failure that passes at once is still open. It is flaky until its cause
+      is found (step 5), so use the report's evidence to find and fix that cause.
+      Passing this time does not close it.
+   4. If the fixes for carried failures changed source files, run the step 8 review
+      for them now, so the full run starts on a reviewed tree.
+
+   If the latest report has no carried failures, skip straight to step 2. Either way,
+   once the full run is green, work the case-specific open items in steps 5 to 7, then
+   the remaining open items as time allows. This round's report states the outcome of
+   each carried failure and open item: fixed (and how), still open (and why), or no
+   longer applicable.
 
 2. **Full run with instrumentation.** Start the daemon memory sampler in the VM,
    then run the full suite:
@@ -109,7 +150,8 @@ Principles that made the previous rounds work:
    a focused run. Do not start another full run while any known failure is open.
 
 5. **Flakiness.** A case that failed in this run but passed in the previous
-   nightly, or passed alone, is flaky until its cause is found. Typical causes seen
+   nightly, or passed alone, is flaky until its cause is found. The same applies to
+   the carried failures from step 1a that passed on the first try. Typical causes seen
    so far: clicking a control the instant it appears while the transcript appends a
    message and auto-scrolls (`waitForStableFrame` before the click, then assert the
    click registered); counting rows during the transcript reload that follows a
@@ -157,12 +199,17 @@ Principles that made the previous rounds work:
 
 10. **Report and commit.** Write `docs/nightly-tests/<YYYY-MM-DD>.md` with: totals
     and wall time of the first and final runs, the daemon peak, each failure with
-    its proven cause and fix, flaky cases fixed, speed changes with before/after
+    its proven cause and fix, what happened to each carried failure and open item from
+    the previous report (step 1a), flaky cases fixed, speed changes with before/after
     seconds, quality changes, what was deliberately left alone and why, and open
     items for the next night. Then stage only the paths this round changed
     (explicit `git add <path>`), commit with a message that names the round and
     its fixes, and push to the configured upstream. Leave pre-existing staged or
-    unstaged work untouched and mention it in the report.
+    unstaged work untouched and mention it in the report. The only exception is the
+    previous round's uncommitted work that step 1a adopted after its fingerprint
+    matched. The next round resumes from this report, so put the final run's failures
+    and the open items in it, with enough evidence (paths, timestamps, likely cause)
+    to start from.
 
 ## Rules
 
