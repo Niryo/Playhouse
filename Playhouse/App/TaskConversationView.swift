@@ -4874,9 +4874,9 @@ struct TaskConversationView: View {
         var blocks: [AssistantMarkdownBlock] = []
         var paragraphLines: [String] = []
         var paragraphStart: Int?
-        // Only treat digit-dot-space prefixes as an ordered list when they form a sequence that
-        // starts at 1 and increments by one; otherwise a sentence like "3. 5 billion parameters…"
-        // would be mis-parsed as a list item.
+        // Treat digit-dot-space prefixes as an ordered list when they start a block (any number,
+        // as in CommonMark) or start at 1 while a paragraph is open, then increment by one;
+        // otherwise a wrapped sentence like "3. 5 billion parameters…" would be mis-parsed.
         var lastOrderedNumber: Int?
 
         func flushParagraph() {
@@ -4983,8 +4983,9 @@ struct TaskConversationView: View {
             } else if let ordered = orderedListPrefix(line[...]),
                       // As in CommonMark, only a list starting at 1 may interrupt a paragraph,
                       // so a wrapped line that happens to begin "3. " stays part of its paragraph.
+                      // With no paragraph open, a new list may start at any number.
                       paragraphLines.isEmpty || ordered.number == 1,
-                      ordered.number == (lastOrderedNumber.map { $0 + 1 } ?? 1) {
+                      ordered.number == (lastOrderedNumber.map { $0 + 1 } ?? (paragraphLines.isEmpty ? ordered.number : 1)) {
                 flushParagraph()
                 lastOrderedNumber = ordered.number
                 blocks.append(AssistantMarkdownBlock(id: index, kind: .orderedListItem(number: ordered.number), text: String(ordered.rest)))
