@@ -858,6 +858,8 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let savedPrompt: String?
     let pendingSubmittedPrompt: String?
     let hasUnsentDraft: Bool
+    /// Unsent review comments saved with the draft.
+    let pendingCommentCount: Int
     let workspaceRoots: [String]
     let repositoryWorktrees: [RepositoryWorktreeRecord]
     /// Records retired by `task repository renew`; their merged PRs stay on the card.
@@ -892,6 +894,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         savedPrompt = task.savedPrompt
         pendingSubmittedPrompt = task.pendingSubmittedPrompt
         hasUnsentDraft = task.hasUnsentDraft
+        pendingCommentCount = PersistedAnnotations.decode(task.pendingAnnotationsData).count
         workspaceRoots = task.workspaceRootPaths
         repositoryWorktrees = task.repositoryWorktrees
         pastRepositoryWorktrees = boardTask?.pastRepositoryWorktrees ?? []
@@ -2037,6 +2040,7 @@ final class BoardTaskManager {
                 chat.pendingSubmittedPrompt = task.pendingSubmittedPrompt
                 chat.hasUnsentDraft = task.hasUnsentDraft
                 chat.draftImageDataURLsData = task.draftImageDataURLsData
+                chat.pendingAnnotationsData = task.pendingAnnotationsData
                 chat.conversationActivityDurationsData = task.conversationActivityDurationsData
                 chat.answeredAsyncQuestionIDsData = task.answeredAsyncQuestionIDsData
                 modelContext.insert(chat)
@@ -3932,6 +3936,29 @@ final class BoardTaskManager {
                 "taskID": id.uuidString,
                 "status": task.status.rawValue
             ])
+            return BoardTaskRecord(task: task)
+        }
+    }
+
+    /// Saves the unsent review comments with the draft. An empty `data` clears them. Comments
+    /// leave `hasUnsentDraft` alone: that flag says whether `savedPrompt` and the images are a
+    /// draft, and a comment added after a send must not turn the sent prompt back into one.
+    /// `appending` adds only comments not already saved, keeping the rest; a send that ends
+    /// without delivering its comments returns them this way, so it never overwrites comments a
+    /// newer view of the task saved meanwhile.
+    @discardableResult
+    func savePendingAnnotations(_ id: UUID, data: Data?, appending: Bool = false) async throws -> BoardTaskRecord {
+        try await withTaskOperationLock(id) {
+            let task = try requireSubject(id)
+            var annotations = PersistedAnnotations.decode(data)
+            if appending {
+                let saved = PersistedAnnotations.decode(task.pendingAnnotationsData)
+                annotations = saved + annotations.filter { added in !saved.contains { $0.id == added.id } }
+            }
+            let encoded = PersistedAnnotations.encode(annotations)
+            guard task.pendingAnnotationsData != encoded else { return BoardTaskRecord(task: task) }
+            task.pendingAnnotationsData = encoded
+            try await saveTaskContext(taskID: id)
             return BoardTaskRecord(task: task)
         }
     }
@@ -10041,6 +10068,15 @@ final class PlayhouseBridgeRuntime {
                     request.requiredUUID("taskID"),
                     prompt: prompt,
                     imageDataURLs: request.arguments["images"]?.strings ?? []
+                ))
+            case "task.comments.save":
+                // `comments` is a JSON array of pending review comments; an empty array clears them.
+                guard let json = request.arguments["comments"]?.string, let data = json.data(using: .utf8),
+                      (try? JSONDecoder().decode([ConversationAnnotation].self, from: data)) != nil else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Pass comments as a JSON array of comment objects.")
+                }
+                result = try Self.value(try await taskManager.savePendingAnnotations(
+                    request.requiredUUID("taskID"), data: data, appending: request.arguments["append"]?.bool ?? false
                 ))
             case "task.delete":
                 try await taskManager.delete(request.requiredUUID("taskID"), diagnostics: conversationClients().codex.diagnosticFields())

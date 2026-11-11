@@ -279,6 +279,15 @@ enum PlayhouseCLI {
                     "prompt": .string(prompt),
                     "images": .array(try (flags["--image"] ?? []).map(draftImageDataURL))
                 ])
+            case "comments":
+                guard let id = tail.first else { throw CLIError.usage("Use: playhouse task comments <task-id> --json <comments-array> [--append]") }
+                let rest = Array(tail.dropFirst())
+                let flags = try parseFlags(rest.filter { $0 != "--append" }, valueFlags: ["--json"])
+                return BridgeRequest(command: "task.comments.save", arguments: [
+                    "taskID": .string(id),
+                    "comments": .string(try requiredFlag("--json", flags: flags).first!),
+                    "append": .boolean(rest.contains("--append"))
+                ])
             case "delete":
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.delete", arguments: ["taskID": .string(id)])
@@ -1015,6 +1024,7 @@ enum PlayhouseCLI {
       playhouse task repository recent <task-id>
       playhouse task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]
       playhouse task draft <task-id> --text <draft> [--image <path>...]
+      playhouse task comments <task-id> --json <comments-array> [--append]   (save unsent review comments with the draft; [] clears; --append adds only new ones)
       playhouse task roots get <task-id>
       playhouse task roots set <task-id> --root <path> [--root <path>...]
       playhouse task terminal <task-id>
