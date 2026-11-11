@@ -10,8 +10,8 @@ function Header(props) {
     h(Panel, { fill: model.accent, fillOpacity: 1, cornerRadius: 4, width: 8, height: 8 }),
     h(Text, { size: 11, weight: "bold", design: "rounded", color: "primary", tracking: 0.65, testID: prefix + "column-heading-" + model.key }, model.title),
     h(Spacer, { minLength: 4 }),
-    h(Panel, { cornerRadius: 100, fillOpacity: 0.055, padding: 3, paddingX: 4 },
-      h(Text, { size: 11, weight: "semibold", design: "rounded", color: "secondary", testID: prefix + "column-count-" + model.key }, model.count)),
+    h(Panel, { fill: model.tint, fillOpacity: model.tint ? 0.16 : 0.055, cornerRadius: 100, padding: 3, paddingX: 4 },
+      h(Text, { size: 11, weight: "semibold", design: "rounded", color: model.tint || "secondary", testID: prefix + "column-count-" + model.key }, model.count)),
     model.addHelp ? h(Button, {
       style: "bordered", controlSize: "small", testID: prefix + "add-backlog-task-button",
       label: model.addHelp, help: model.addHelp, onPress: props.onAdd
@@ -29,18 +29,31 @@ function EmptyState(props) {
     h(Text, { size: 11, color: "tertiary" }, empty.hint));
 }
 
+// A tinted column (Waiting Response) lays a second Panel in its tint, a soft
+// wash and hairline border, over the first.
 function KanbanColumn(props) {
-  var model = props.model;
+  var model = props.model, tint = model.tint;
+  var content = [
+    h(Header, { key: "header", model: model, onAdd: props.onAdd }),
+    model.notice ? h(Label, {
+      key: "notice", text: model.notice, icon: "hand.raised.fill", size: 10, weight: "semibold", color: "red",
+      paddingX: 3, testID: model.idPrefix + "blocked-waiting-indicator"
+    }) : null,
+    model.empty ? h(EmptyState, { key: "empty", model: model }) : null];
+  if (tint) {
+    return h(Panel, {
+      fill: "panel", fillOpacity: 0.78, cornerRadius: 16,
+      minHeight: props.minHeight, fillWidth: true, testID: model.idPrefix + "column-" + model.key
+    },
+      h(Panel, {
+        spacing: 13, fill: tint, fillOpacity: 0.12, cornerRadius: 16, stroke: tint, strokeOpacity: 0.34,
+        minHeight: props.minHeight, fillWidth: true, padding: 14
+      }, content));
+  }
   return h(Panel, {
     spacing: 13, fill: "panel", fillOpacity: 0.78, cornerRadius: 16, stroke: "primary", strokeOpacity: 0.075,
     minHeight: props.minHeight, fillWidth: true, padding: 14, testID: model.idPrefix + "column-" + model.key
-  },
-    h(Header, { model: model, onAdd: props.onAdd }),
-    model.notice ? h(Label, {
-      text: model.notice, icon: "hand.raised.fill", size: 10, weight: "semibold", color: "red",
-      paddingX: 3, testID: model.idPrefix + "blocked-waiting-indicator"
-    }) : null,
-    model.empty ? h(EmptyState, { model: model }) : null);
+  }, content);
 }
 
 function Example() {

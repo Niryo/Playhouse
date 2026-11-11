@@ -5119,7 +5119,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         notice = json.loads((self.data_directory / "task-lifecycle-v2-notice.json").read_text(encoding="utf-8"))
         self.assertEqual(notice, [str(dirty_path)])
 
-    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize. Each board column is built from plugin atoms: the empty In Progress and Review columns show their empty state while the populated Backlog does not, and the Backlog's Add button opens a new task conversation.
+    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, washes only the Waiting Response column in its purple tint (its pixels read purple where the other columns read neutral), allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize. Each board column is built from plugin atoms: the empty In Progress and Review columns show their empty state while the populated Backlog does not, and the Backlog's Add button opens a new task conversation.
     def test_task_status_transitions_and_rejects_unknown_status(self):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli("task", "move", task_id, "Unknown", expected_status=2)
@@ -15384,7 +15384,7 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.plugin_node(logged_in["tree"], "agents-info-claude-window-five_hour")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "AgentsInfo", "--event", "agents-info:onPress", expected_status=2)[0], "invalid_argument")
 
-    # case-contract: test_plugin_kanban_column_renders_from_atoms_like_native | The Plugin Catalog's Kanban Column page shows the board's columns composed in JavaScript from atoms beside the native SwiftUI columns the board uses, built from the same atoms and sample models (a column's cards are native and not part of the page): each side shows a Backlog column with its Add button and its empty state, an In Progress column with a count of 2 and no empty state, a Blocked column with the Waiting for user intervention notice and its empty state, and a Done column with its empty state, with the board's identifiers (column-heading, column-count, add-backlog-task-button, empty-state, blocked-waiting-indicator), and every one is the same size in both and reads the same text (the uppercased title, the count, No tasks yet with Create a task to get started or Drop a task here). The JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer): each column is a Panel holding the header (a status dot Panel, the title, a Spacer, the count Panel, and for the Backlog the Add button), then the notice and the empty state, which is a dashed Panel with centered content. Pressing the JavaScript Add button runs its onPress in JavaScript (Last: add) as one commit that changes only the readout, and the native Add button runs its own handler without touching the JavaScript side. On the board itself, every column keeps its column-<status>, column-heading-<status> and empty-state-<status> identifiers, the Backlog its Add button and the Blocked column its notice, now built from the same atoms.
+    # case-contract: test_plugin_kanban_column_renders_from_atoms_like_native | The Plugin Catalog's Kanban Column page shows the board's columns composed in JavaScript from atoms beside the native SwiftUI columns the board uses, built from the same atoms and sample models (a column's cards are native and not part of the page): each side shows a Backlog column with its Add button and its empty state, an In Progress column with a count of 2 and no empty state, a Blocked column with the Waiting for user intervention notice and its empty state, a Waiting Response column washed in its purple accent (a tint Panel filling the column with a soft fill and hairline border in the accent, its pixels visibly purple beside the other columns, and its count in the accent) and its empty state, and a Done column with its empty state, with the board's identifiers (column-heading, column-count, add-backlog-task-button, empty-state, blocked-waiting-indicator), and every one is the same size in both and reads the same text (the uppercased title, the count, No tasks yet with Create a task to get started or Drop a task here). The JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer): each column is a Panel holding the header (a status dot Panel, the title, a Spacer, the count Panel, and for the Backlog the Add button), then the notice and the empty state, which is a dashed Panel with centered content; only the tinted column nests that content in its tint Panel. Pressing the JavaScript Add button runs its onPress in JavaScript (Last: add) as one commit that changes only the readout, and the native Add button runs its own handler without touching the JavaScript side. On the board itself, every column keeps its column-<status>, column-heading-<status> and empty-state-<status> identifiers, the Backlog its Add button and the Blocked column its notice, now built from the same atoms.
     def test_plugin_kanban_column_renders_from_atoms_like_native(self):
         rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "KanbanColumn", "--event", "add-backlog-task-button:onPress")[0])
         self.assertEqual(rendered["errors"], [])
@@ -15393,6 +15393,8 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         for test_id in ["column-backlog", "column-heading-backlog", "column-count-backlog", "add-backlog-task-button", "empty-state-backlog",
                         "column-in-progress", "column-heading-in-progress", "column-count-in-progress",
                         "column-blocked", "column-heading-blocked", "column-count-blocked", "blocked-waiting-indicator", "empty-state-blocked",
+                        "column-waiting-response", "column-heading-waiting-response", "column-count-waiting-response",
+                        "empty-state-waiting-response",
                         "column-done", "column-heading-done", "column-count-done", "empty-state-done"]:
             self.plugin_node(tree, test_id)
         types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
@@ -15401,6 +15403,9 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(all_ids.count("add-backlog-task-button"), 1, "Only the Backlog has an Add button.")
         self.assertEqual(all_ids.count("blocked-waiting-indicator"), 1, "Only the Blocked column has the notice.")
         self.assertNotIn("empty-state-in-progress", all_ids, "A column with tasks has no empty state.")
+        tinted = [key for key in ["backlog", "in-progress", "blocked", "waiting-response", "done"]
+                  if self.plugin_node(tree, "column-" + key)["children"][0]["type"] == "Panel"]
+        self.assertEqual(tinted, ["waiting-response"], "Only the Waiting Response column nests its content in a tint Panel.")
 
         backlog = self.plugin_node(tree, "column-backlog")
         self.assertEqual(backlog["type"], "Panel")
@@ -15422,6 +15427,21 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(self.plugin_node(tree, "empty-state-done")["children"][0]["props"]["name"], "checkmark.circle")
         notice = self.plugin_node(tree, "blocked-waiting-indicator")
         self.assertEqual((notice["type"], notice["props"]["text"], notice["props"]["icon"], notice["props"]["color"]), ("Label", "Waiting for user intervention", "hand.raised.fill", "red"))
+
+        # The Waiting Response column lays a tint Panel in its accent over the column's base panel.
+        waiting = self.plugin_node(tree, "column-waiting-response")
+        self.assertEqual((waiting["type"], waiting["props"]["fill"], waiting["props"]["cornerRadius"], waiting["props"]["minHeight"]), ("Panel", "panel", 16, 170))
+        self.assertNotIn("stroke", waiting["props"], "The tint Panel draws the tinted column's border.")
+        self.assertEqual([child["type"] for child in waiting["children"]], ["Panel"], "The column holds only its tint Panel.")
+        tint = waiting["children"][0]
+        self.assertEqual((tint["type"], tint["props"]["fill"], tint["props"]["fillOpacity"], tint["props"]["stroke"], tint["props"]["strokeOpacity"]),
+                         ("Panel", "#A370CC", 0.12, "#A370CC", 0.34), "A soft purple wash with a hairline purple border.")
+        self.assertEqual((tint["props"]["spacing"], tint["props"]["padding"], tint["props"]["cornerRadius"], tint["props"]["minHeight"]), (13, 14, 16, 170))
+        self.assertEqual([child["type"] for child in tint["children"]], ["Stack", "Panel"], "The header, then the empty state, inside the tint.")
+        waiting_count = self.plugin_node(tree, "column-count-waiting-response")
+        self.assertEqual(waiting_count["props"]["color"], "#A370CC", "The tinted column's count reads in its accent.")
+        self.assertEqual(self.plugin_node(tree, "column-count-backlog")["props"]["color"], "secondary")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "column-heading-waiting-response")), "WAITING RESPONSE")
 
         last_action = self.plugin_node(tree, "js-last-action")
         self.assertEqual(self.plugin_text(last_action), "Last: add", "The Add button ran its JavaScript handler.")

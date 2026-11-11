@@ -25,6 +25,9 @@ struct KanbanColumnModel: Codable, Equatable {
     var addHelp: String?
     /// The red line under the header (the Blocked column's).
     var notice: String?
+    /// The color, as #RRGGBB, washing the whole column and its count so it
+    /// stands out on the board (the Waiting Response column's accent).
+    var tint: String?
     var empty: Empty?
 
     init(status: TaskStatus, taskCount: Int, idPrefix: String = "") {
@@ -35,6 +38,7 @@ struct KanbanColumnModel: Codable, Equatable {
         count = "\(taskCount)"
         addHelp = status == .backlog ? "Add task to Backlog" : nil
         notice = status == .blocked ? "Waiting for user intervention" : nil
+        tint = status == .waitingResponse ? accent : nil
         empty = taskCount > 0 ? nil : Empty(
             icon: status == .done ? "checkmark.circle" : "tray",
             title: "No tasks yet",
@@ -46,8 +50,9 @@ struct KanbanColumnModel: Codable, Equatable {
 /// A board column's frame, composed only of plugin atoms (Plugins/Atoms), so a
 /// plugin building it from the same atoms looks identical: a Panel holding the
 /// header (status dot, title, count, the Backlog's Add button), the Blocked
-/// notice, then the cards or the empty state. The cards are native
-/// (`TaskCardView`) and arrive through `cards`.
+/// notice, then the cards or the empty state. A tinted column lays a second
+/// Panel in its tint (a soft wash and hairline border) over the first. The
+/// cards are native (`TaskCardView`) and arrive through `cards`.
 struct KanbanColumnSection<Cards: View>: View {
     let model: KanbanColumnModel
     let minHeight: Double
@@ -60,22 +65,41 @@ struct KanbanColumnSection<Cards: View>: View {
     private var prefix: String { model.idPrefix }
 
     var body: some View {
-        AtomPanel(
-            props: PanelProps(spacing: 13, fill: "panel", fillOpacity: 0.78, cornerRadius: 16, stroke: "primary", strokeOpacity: 0.075),
-            common: AtomCommon(testID: testID, minHeight: minHeight, fillWidth: true, padding: 14)
-        ) {
-            header
-            if let notice = model.notice {
-                AtomLabel(
-                    props: LabelProps(text: notice, icon: "hand.raised.fill", size: 10, weight: "semibold", color: "red"),
-                    common: AtomCommon(testID: "\(prefix)blocked-waiting-indicator", paddingX: 3)
-                )
+        if let tint = model.tint {
+            AtomPanel(
+                props: PanelProps(fill: "panel", fillOpacity: 0.78, cornerRadius: 16),
+                common: AtomCommon(testID: testID, minHeight: minHeight, fillWidth: true)
+            ) {
+                AtomPanel(
+                    props: PanelProps(spacing: 13, fill: tint, fillOpacity: 0.12, cornerRadius: 16, stroke: tint, strokeOpacity: 0.34),
+                    common: AtomCommon(minHeight: minHeight, fillWidth: true, padding: 14)
+                ) {
+                    content
+                }
             }
-            if let empty = model.empty {
-                emptyState(empty)
-            } else {
-                cards()
+        } else {
+            AtomPanel(
+                props: PanelProps(spacing: 13, fill: "panel", fillOpacity: 0.78, cornerRadius: 16, stroke: "primary", strokeOpacity: 0.075),
+                common: AtomCommon(testID: testID, minHeight: minHeight, fillWidth: true, padding: 14)
+            ) {
+                content
             }
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        header
+        if let notice = model.notice {
+            AtomLabel(
+                props: LabelProps(text: notice, icon: "hand.raised.fill", size: 10, weight: "semibold", color: "red"),
+                common: AtomCommon(testID: "\(prefix)blocked-waiting-indicator", paddingX: 3)
+            )
+        }
+        if let empty = model.empty {
+            emptyState(empty)
+        } else {
+            cards()
         }
     }
 
@@ -87,9 +111,9 @@ struct KanbanColumnSection<Cards: View>: View {
                 common: AtomCommon(testID: "\(prefix)column-heading-\(model.key)")
             )
             AtomSpacer(props: SpacerProps(minLength: 4))
-            AtomPanel(props: PanelProps(fillOpacity: 0.055, cornerRadius: 100), common: AtomCommon(padding: 3, paddingX: 4)) {
+            AtomPanel(props: PanelProps(fill: model.tint, fillOpacity: model.tint == nil ? 0.055 : 0.16, cornerRadius: 100), common: AtomCommon(padding: 3, paddingX: 4)) {
                 AtomText(
-                    props: TextProps(text: model.count, size: 11, weight: "semibold", design: "rounded", color: "secondary"),
+                    props: TextProps(text: model.count, size: 11, weight: "semibold", design: "rounded", color: model.tint ?? "secondary"),
                     common: AtomCommon(testID: "\(prefix)column-count-\(model.key)")
                 )
             }

@@ -3686,7 +3686,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
 
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize. Each board column is built from plugin atoms: the empty In Progress and Review columns show their empty state while the populated Backlog does not, and the Backlog's Add button opens a new task conversation.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, washes only the Waiting Response column in its purple tint (its pixels read purple where the other columns read neutral), allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize. Each board column is built from plugin atoms: the empty In Progress and Review columns show their empty state while the populated Backlog does not, and the Backlog's Add button opens a new task conversation.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         let waitingFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: waitingFixture.path))
@@ -3815,6 +3815,12 @@ final class PlayhouseUITests: XCTestCase {
         let blockedColumn = element("column-blocked")
         let backlogColumn = element("column-backlog")
         let waitingResponseColumn = element("column-waiting-response")
+        let waitingResponseTint = try columnPurpleness(waitingResponseColumn, visibleIn: boardViewport)
+        // Review runs past the viewport's right edge; these columns' tops are in view.
+        for key in ["blocked", "backlog", "in-progress"] {
+            let neutral = try columnPurpleness(element("column-\(key)"), visibleIn: boardViewport)
+            XCTAssertGreaterThan(waitingResponseTint, neutral + 0.012, "Only the Waiting Response column is washed purple, not \(key) (\(waitingResponseTint) vs \(neutral)).")
+        }
         XCTAssertLessThan(blockedColumn.frame.maxY, backlogColumn.frame.minY, "Blocked should remain stacked above Backlog.")
         XCTAssertLessThan(waitingResponseColumn.frame.maxY, inProgressColumn.frame.minY, "Waiting Response should remain stacked above In Progress.")
         for topColumn in [blockedColumn, waitingResponseColumn] {
@@ -21456,7 +21462,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(pluginText(native("native-last-action")), "Last: expand", "The native section keeps its own state.")
     }
 
-    // case-contract: test_plugin_kanban_column_renders_from_atoms_like_native | The Plugin Catalog's Kanban Column page shows the board's columns composed in JavaScript from atoms beside the native SwiftUI columns the board uses, built from the same atoms and sample models (a column's cards are native and not part of the page): each side shows a Backlog column with its Add button and its empty state, an In Progress column with a count of 2 and no empty state, a Blocked column with the Waiting for user intervention notice and its empty state, and a Done column with its empty state, with the board's identifiers (column-heading, column-count, add-backlog-task-button, empty-state, blocked-waiting-indicator), and every one is the same size in both and reads the same text (the uppercased title, the count, No tasks yet with Create a task to get started or Drop a task here). The JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer): each column is a Panel holding the header (a status dot Panel, the title, a Spacer, the count Panel, and for the Backlog the Add button), then the notice and the empty state, which is a dashed Panel with centered content. Pressing the JavaScript Add button runs its onPress in JavaScript (Last: add) as one commit that changes only the readout, and the native Add button runs its own handler without touching the JavaScript side. On the board itself, every column keeps its column-<status>, column-heading-<status> and empty-state-<status> identifiers, the Backlog its Add button and the Blocked column its notice, now built from the same atoms.
+    // case-contract: test_plugin_kanban_column_renders_from_atoms_like_native | The Plugin Catalog's Kanban Column page shows the board's columns composed in JavaScript from atoms beside the native SwiftUI columns the board uses, built from the same atoms and sample models (a column's cards are native and not part of the page): each side shows a Backlog column with its Add button and its empty state, an In Progress column with a count of 2 and no empty state, a Blocked column with the Waiting for user intervention notice and its empty state, a Waiting Response column washed in its purple accent (a tint Panel filling the column with a soft fill and hairline border in the accent, its pixels visibly purple beside the other columns, and its count in the accent) and its empty state, and a Done column with its empty state, with the board's identifiers (column-heading, column-count, add-backlog-task-button, empty-state, blocked-waiting-indicator), and every one is the same size in both and reads the same text (the uppercased title, the count, No tasks yet with Create a task to get started or Drop a task here). The JavaScript tree uses only atoms (Panel, Stack, Text, Icon, Label, Button, Spacer): each column is a Panel holding the header (a status dot Panel, the title, a Spacer, the count Panel, and for the Backlog the Add button), then the notice and the empty state, which is a dashed Panel with centered content; only the tinted column nests that content in its tint Panel. Pressing the JavaScript Add button runs its onPress in JavaScript (Last: add) as one commit that changes only the readout, and the native Add button runs its own handler without touching the JavaScript side. On the board itself, every column keeps its column-<status>, column-heading-<status> and empty-state-<status> identifiers, the Backlog its Add button and the Blocked column its notice, now built from the same atoms.
     func test_plugin_kanban_column_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
@@ -21484,23 +21490,34 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertEqual(jsElement.frame.width, nativeElement.frame.width, accuracy: 1, "\(identifier) has the same width in both.")
             XCTAssertEqual(jsElement.frame.height, nativeElement.frame.height, accuracy: 1, "\(identifier) has the same height in both.")
         }
-        for key in ["backlog", "in-progress", "blocked", "done"] {
+        for key in ["backlog", "in-progress", "blocked", "waiting-response", "done"] {
             for identifier in ["column-\(key)", "column-heading-\(key)", "column-count-\(key)"] {
                 assertSameSize(identifier)
             }
         }
-        for identifier in ["add-backlog-task-button", "empty-state-backlog", "blocked-waiting-indicator", "empty-state-blocked", "empty-state-done"] {
+        for identifier in ["add-backlog-task-button", "empty-state-backlog", "blocked-waiting-indicator", "empty-state-blocked",
+                           "empty-state-waiting-response", "empty-state-done"] {
             assertSameSize(identifier)
+        }
+        // Only the Waiting Response column is washed purple, on both sides. It is
+        // second in the sample, so its top and its neighbours' sit in the window.
+        let catalogPage = app.scrollViews.containing(.any, identifier: "plugin-catalog-js-kanban-column").firstMatch
+        for (side, prefix) in [(js, ""), (native, "native-")] {
+            let waitingTint = try columnPurpleness(side("\(prefix)column-waiting-response"), visibleIn: catalogPage)
+            for key in ["backlog", "in-progress"] {
+                let neutral = try columnPurpleness(side("\(prefix)column-\(key)"), visibleIn: catalogPage)
+                XCTAssertGreaterThan(waitingTint, neutral + 0.012, "\(prefix)column-waiting-response reads purple beside \(key) (\(waitingTint) vs \(neutral)).")
+            }
         }
         XCTAssertFalse(js("empty-state-in-progress").exists, "A column with tasks has no empty state.")
         XCTAssertFalse(native("native-empty-state-in-progress").exists)
         XCTAssertEqual(pluginText(js("column-heading-in-progress")), "IN PROGRESS")
         XCTAssertEqual(pluginText(js("column-heading-in-progress")), pluginText(native("native-column-heading-in-progress")), "Both show the same title.")
-        for key in ["backlog", "in-progress", "blocked", "done"] {
+        for key in ["backlog", "in-progress", "blocked", "waiting-response", "done"] {
             XCTAssertEqual(pluginText(js("column-count-\(key)")), pluginText(native("native-column-count-\(key)")), "Both show the same count for \(key).")
         }
         XCTAssertEqual(pluginText(js("column-count-in-progress")), "2")
-        for key in ["backlog", "blocked", "done"] {
+        for key in ["backlog", "blocked", "waiting-response", "done"] {
             let jsLabel = accessibleLabelOrValue(of: js("empty-state-\(key)"))
             XCTAssertTrue(jsLabel.contains("No tasks yet"), "The \(key) empty state reads No tasks yet: \(jsLabel)")
         }
@@ -24550,6 +24567,29 @@ final class PlayhouseUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.05)
         }
         return !element.exists
+    }
+
+    /// How purple a board column's own surface reads: the mean of blue and red
+    /// over green, sampled along a strip just inside its top edge, above its
+    /// header and inside its padding, so only the column's fill shows there. The
+    /// strip must lie within `container` (the scroll area showing the column), so
+    /// a clipped column never samples whatever is drawn beyond it.
+    private func columnPurpleness(_ column: XCUIElement, visibleIn container: XCUIElement) throws -> CGFloat {
+        XCTAssertTrue(column.waitToExist(timeout: 10), "\(column) should exist before sampling its tint.")
+        let strip = CGRect(x: column.frame.minX + column.frame.width * 0.2, y: column.frame.minY + 4, width: column.frame.width * 0.6, height: 6)
+        XCTAssertTrue(container.frame.contains(strip), "\(column)'s sampled strip \(strip) should be visible in \(container.frame).")
+        let image = try XCTUnwrap(column.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil), "Could not read \(column)'s pixels.")
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        let scale = CGFloat(bitmap.pixelsWide) / column.frame.width
+        var total: CGFloat = 0, samples: CGFloat = 0
+        for yPoint in stride(from: CGFloat(4), to: 10, by: 1) {
+            for xFraction in stride(from: 0.2, through: 0.8, by: 0.05) {
+                guard let color = bitmap.colorAt(x: Int(column.frame.width * xFraction * scale), y: Int(yPoint * scale))?.usingColorSpace(.deviceRGB) else { continue }
+                total += (color.blueComponent + color.redComponent) / 2 - color.greenComponent
+                samples += 1
+            }
+        }
+        return try XCTUnwrap(samples > 0 ? total / samples : nil, "No pixels sampled in \(column).")
     }
 
     private func attachScreenshot(named name: String, fullScreen: Bool = false) {
