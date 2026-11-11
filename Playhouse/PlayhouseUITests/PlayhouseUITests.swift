@@ -10230,6 +10230,110 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Restored comment spanning two reply paragraphs")
     }
 
+    // case-contract: test_conversation_persists_unsent_comments | Unsent conversation comments are saved with the task draft. Through CLI/XPC, a saved comment list reports its count on a fresh read, malformed input is rejected with invalid_argument and leaves the saved comments unchanged, a later draft save keeps them, appending a list adds only comments not already saved (how a send that ends without delivering its comments returns them without overwriting newer ones), and an empty list clears them. Saving comments after a sent prompt leaves hasUnsentDraft false, so the sent prompt never returns to the composer as a draft. In the app, comments added to a conversation are saved as they are added and survive switching to another task and back and quitting and relaunching: the composer shows the pending comment count and the highlights are restored. Sending them delivers their source ranges, clears the saved comments, and reopening the task shows no pending comment and no duplicate.
+    func test_conversation_persists_unsent_comments() throws {
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-goal-success").path
+        let fixtureStateDirectory = dataDirectory.appendingPathComponent("unsent-comments-fixture-state", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixtureStateDirectory, withIntermediateDirectories: true)
+        codexFixtureStateDirectory = fixtureStateDirectory
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Unsent comments", roots: [fixture.primary.path])
+        try createTaskFixture(title: "Other task", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Unsent comments")
+        let sourceText = "Comment on these words in a user message."
+        _ = try runCLI(["conversation", "send", taskID, "--message", sourceText])
+        // The fixture turn and its outcome nudge settle before the message ids are read.
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response"
+        }, timeout: 60), "The source turn should finish before it is commented on.")
+        openTask(named: "Unsent comments")
+        let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let messages = try XCTUnwrap(history?["messages"] as? [[String: Any]])
+        // The reply sits below the top of the transcript, so the Add comment hint above it stays clickable.
+        let sourceMessage = try XCTUnwrap(ordinaryMessages(messages).first {
+            $0["role"] as? String == "assistant" && !($0["text"] as? String ?? "").isEmpty
+        })
+        let sourceID = try XCTUnwrap(sourceMessage["id"] as? String)
+        // Looked up on each use: the relaunch below replaces the app instance.
+        var sourceView: XCUIElement { element("assistant-message-\(sourceID)").descendants(matching: .staticText).firstMatch }
+        XCTAssertTrue(sourceView.waitToExist(timeout: 10))
+        XCTAssertTrue(waitForStableFrame(sourceView), "The source message should settle before it is measured.")
+        let orangeBefore = orangePixelCount(in: sourceView.screenshot())
+        let selectedText = (sourceView.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertFalse(selectedText.isEmpty, "The reply should expose its selectable text.")
+        sourceView.click()
+        sourceView.typeKey("a", modifierFlags: .command)
+        let addComment = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
+        XCTAssertTrue(addComment.waitToExist(timeout: 5))
+        addComment.click()
+        let field = element("comment-input-field")
+        XCTAssertTrue(field.waitToExist(timeout: 5))
+        field.typeText("Keep this unsent comment\r")
+        XCTAssertTrue(field.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["pendingCommentCount"] as? Int) == 1
+        }, timeout: 10), "An added comment should be saved with the task draft.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["hasUnsentDraft"] as? Bool, false,
+                       "A comment must not turn the last sent prompt into a draft.")
+        attachScreenshot(named: "Unsent comment added")
+
+        func assertCommentRestored(_ context: String) {
+            XCTAssertTrue(sourceView.waitToExist(timeout: 10), "The source message should render \(context).")
+            XCTAssertTrue(waitUntil({
+                self.accessibleLabelOrValue(of: self.element("pending-comment-count")).contains("1 comment")
+            }, timeout: 10), "The composer should show the restored pending comment \(context).")
+            XCTAssertTrue(waitForStableFrame(sourceView))
+            XCTAssertGreaterThan(orangePixelCount(in: sourceView.screenshot()), orangeBefore + 5,
+                                 "The restored comment should highlight its text \(context).")
+            XCTAssertTrue(element("send-message-button").isEnabled, "A restored comment should be sendable \(context).")
+            XCTAssertTrue((app.textViews["message-composer"].value as? String ?? "").isEmpty,
+                          "The sent prompt must not return to the composer \(context).")
+        }
+
+        element("back-to-board-button").click()
+        openTask(named: "Other task")
+        XCTAssertFalse(element("pending-comment-count").waitToExist(timeout: 2), "Another task should not show these comments.")
+        element("back-to-board-button").click()
+        openTask(named: "Unsent comments")
+        assertCommentRestored("after switching tasks")
+        attachScreenshot(named: "Unsent comment restored after switching tasks")
+
+        app.terminate()
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Unsent comments")
+        assertCommentRestored("after relaunching")
+        attachScreenshot(named: "Unsent comment restored after relaunch")
+
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            guard (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response",
+                  let history = try? self.runCLI(["conversation", "history", taskID])["result"] as? [String: Any],
+                  let messages = history["messages"] as? [[String: Any]] else { return false }
+            return self.ordinaryMessages(messages).contains {
+                ($0["role"] as? String) == "user" && ($0["text"] as? String ?? "").contains("Keep this unsent comment")
+            }
+        }, timeout: 60), "The restored comment should be sent and its turn should finish.")
+        let sentHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let sentMessages = try XCTUnwrap(sentHistory["messages"] as? [[String: Any]])
+        let sentPrompt = try XCTUnwrap(ordinaryMessages(sentMessages).last(where: { ($0["role"] as? String) == "user" })?["text"] as? String)
+        XCTAssertTrue(sentPrompt.contains("\"messageId\":\"\(sourceID)\""), "The restored comment should keep its source message.")
+        XCTAssertTrue(sentPrompt.contains("\"startOffset\":0") && sentPrompt.contains("\"text\":\"\(selectedText.prefix { $0 != "/" })"),
+                      "The restored comment should keep its source range and quoted text.")
+        XCTAssertEqual(sentPrompt.components(separatedBy: "Keep this unsent comment").count - 1, 1, "The comment should be sent once.")
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["pendingCommentCount"] as? Int) == 0
+        }, timeout: 10), "Sending should clear the saved comments.")
+        XCTAssertFalse(element("pending-comment-count").exists, "No pending comment should remain after sending.")
+
+        element("back-to-board-button").click()
+        openTask(named: "Unsent comments")
+        XCTAssertTrue(sourceView.waitToExist(timeout: 10) || revealWholeTranscript())
+        XCTAssertFalse(element("pending-comment-count").waitToExist(timeout: 3),
+                       "Reopening after the send should show no stale pending comment.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["pendingCommentCount"] as? Int, 0)
+        attachScreenshot(named: "Sent comment reopened without a pending duplicate")
+    }
+
     // case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged.
     func test_claude_auto_branch_uses_generated_title_and_fallback() throws {
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")

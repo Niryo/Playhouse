@@ -193,6 +193,8 @@ protocol ConversationSubject: AnyObject, Observable {
     /// rather than the last prompt that was sent.
     var hasUnsentDraft: Bool { get set }
     var draftImageDataURLsData: Data? { get set }
+    /// JSON-encoded review comments written but not yet sent; part of the unsent draft.
+    var pendingAnnotationsData: Data? { get set }
     var conversationActivityDurationsData: Data? { get set }
     var answeredAsyncQuestionIDsData: Data? { get set }
 
@@ -377,6 +379,7 @@ final class StandaloneChat {
     var pendingSubmittedPrompt: String?
     var hasUnsentDraft: Bool = false
     var draftImageDataURLsData: Data?
+    var pendingAnnotationsData: Data?
     var conversationActivityDurationsData: Data?
     var answeredAsyncQuestionIDsData: Data?
     var totalInputTokens: Int = 0
@@ -407,4 +410,61 @@ extension StandaloneChat: ConversationSubject {
 
 extension BoardTask: ConversationSubject {
     var isStandaloneChat: Bool { false }
+}
+
+/// A comment on selected conversation text. It stays pending until a turn sends it.
+struct ConversationAnnotation: Identifiable, Codable, Equatable {
+    let id: UUID
+    let messageID: String
+    /// The comment starts `startOffset` into this block's text and ends `endOffset` into
+    /// `endBlockID`'s, so a comment on prose blocks rendered together can span several of them.
+    let blockID: Int
+    let startOffset: Int
+    let endBlockID: Int
+    let endOffset: Int
+    let text: String
+    let comment: String
+    var pending = true
+
+    /// True when both comments quote the same selection with the same comment, whatever their ids.
+    func sameComment(as other: ConversationAnnotation) -> Bool {
+        messageID == other.messageID && blockID == other.blockID && startOffset == other.startOffset
+            && endBlockID == other.endBlockID && endOffset == other.endOffset
+            && text == other.text && comment == other.comment
+    }
+}
+
+/// Encoding and restore rules for the unsent comments saved with a task's draft.
+enum PersistedAnnotations {
+    static func encode(_ annotations: [ConversationAnnotation]) -> Data? {
+        let pending = annotations.filter(\.pending)
+        return pending.isEmpty ? nil : try? JSONEncoder().encode(pending)
+    }
+
+    /// Missing or unreadable data is an empty list, so tasks stored before the field existed load.
+    static func decode(_ data: Data?) -> [ConversationAnnotation] {
+        guard let data, let decoded = try? JSONDecoder().decode([ConversationAnnotation].self, from: data) else { return [] }
+        return decoded.map { annotation in
+            var pending = annotation
+            pending.pending = true
+            return pending
+        }
+    }
+
+    /// The comments to show after a load: the transcript's sent comments, then the pending ones
+    /// kept in memory and saved with the task. A pending comment already sent (same id, or the
+    /// same quote and text as a sent one) is dropped, so a send interrupted before the save was
+    /// cleared never shows twice.
+    static func restored(sent: [ConversationAnnotation], livePending: [ConversationAnnotation],
+                         persisted: [ConversationAnnotation]) -> [ConversationAnnotation] {
+        var result = sent
+        var pending: [ConversationAnnotation] = []
+        for candidate in livePending + persisted {
+            guard !pending.contains(where: { $0.id == candidate.id }),
+                  !sent.contains(where: { $0.sameComment(as: candidate) }) else { continue }
+            pending.append(candidate)
+        }
+        result.append(contentsOf: pending)
+        return result
+    }
 }

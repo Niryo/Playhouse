@@ -7697,6 +7697,51 @@ class PlayhouseBridgeTests(unittest.TestCase):
             [item for item in ordinary_messages(comment_only_history["messages"]) if item["role"] == "assistant"][-1]["text"],
         )
 
+    # case-contract: test_conversation_persists_unsent_comments | Unsent conversation comments are saved with the task draft. Through CLI/XPC, a saved comment list reports its count on a fresh read, malformed input is rejected with invalid_argument and leaves the saved comments unchanged, a later draft save keeps them, appending a list adds only comments not already saved (how a send that ends without delivering its comments returns them without overwriting newer ones), and an empty list clears them. Saving comments after a sent prompt leaves hasUnsentDraft false, so the sent prompt never returns to the composer as a draft. In the app, comments added to a conversation are saved as they are added and survive switching to another task and back and quitting and relaunching: the composer shows the pending comment count and the highlights are restored. Sending them delivers their source ranges, clears the saved comments, and reopening the task shows no pending comment and no duplicate.
+    def test_conversation_persists_unsent_comments(self):
+        task = self.create_repo_task("Unsent comments", [self.primary])
+        sent_prompt = "Already sent prompt."
+        # The created task's description is its draft; clear it so the submitted prompt is the last sent one.
+        self.assert_success(self.call_cli("task", "draft", task["id"], "--text", "")[0])
+        self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", sent_prompt, "--status", "In Progress", "--submitted", "true")[0])
+        pending = [{
+            "id": "11111111-1111-1111-1111-111111111111", "messageID": "assistant-message", "blockID": 0,
+            "startOffset": 3, "endBlockID": 0, "endOffset": 15, "text": "first phrase", "comment": "Explain this", "pending": True,
+        }, {
+            "id": "22222222-2222-2222-2222-222222222222", "messageID": "assistant-message", "blockID": 0,
+            "startOffset": 22, "endBlockID": 2, "endOffset": 36, "text": "second phrase", "comment": "And this", "pending": True,
+        }]
+        saved = self.assert_success(self.call_cli("task", "comments", task["id"], "--json", json.dumps(pending))[0])
+        self.assertEqual(saved["pendingCommentCount"], 2)
+        self.assertFalse(saved["hasUnsentDraft"], "Comments must not turn the sent prompt back into a draft.")
+        self.assertEqual(saved["savedPrompt"], sent_prompt)
+        reread = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(reread["pendingCommentCount"], 2, "Saved comments persist across a fresh CLI/XPC read.")
+        self.assertFalse(reread["hasUnsentDraft"])
+        rejected, _ = self.call_cli("task", "comments", task["id"], "--json", "not json", expected_status=2)
+        self.assert_failure(rejected, "invalid_argument")
+        rejected, _ = self.call_cli("task", "comments", task["id"], "--json", json.dumps([{"comment": "missing fields"}]), expected_status=2)
+        self.assert_failure(rejected, "invalid_argument")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["pendingCommentCount"], 2,
+                         "Rejected input leaves the saved comments unchanged.")
+        drafted = self.assert_success(self.call_cli("task", "draft", task["id"], "--text", "A typed draft")[0])
+        self.assertEqual(drafted["pendingCommentCount"], 2, "A draft save keeps the saved comments.")
+        self.assertTrue(drafted["hasUnsentDraft"])
+        # A send that ends without delivering its comments appends them back: saved ones are kept,
+        # and a comment already saved is not duplicated.
+        returned = [dict(pending[1]), {
+            "id": "33333333-3333-3333-3333-333333333333", "messageID": "assistant-message", "blockID": 1,
+            "startOffset": 0, "endBlockID": 1, "endOffset": 4, "text": "word", "comment": "Returned", "pending": True,
+        }]
+        appended = self.assert_success(
+            self.call_cli("task", "comments", task["id"], "--json", json.dumps(returned), "--append")[0]
+        )
+        self.assertEqual(appended["pendingCommentCount"], 3, "Appending adds only comments not already saved.")
+        cleared = self.assert_success(self.call_cli("task", "comments", task["id"], "--json", "[]")[0])
+        self.assertEqual(cleared["pendingCommentCount"], 0)
+        self.assertEqual(cleared["savedPrompt"], "A typed draft", "Clearing comments leaves the typed draft alone.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["pendingCommentCount"], 0)
+
     # case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged.
     def test_claude_auto_branch_uses_generated_title_and_fallback(self):
         source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
