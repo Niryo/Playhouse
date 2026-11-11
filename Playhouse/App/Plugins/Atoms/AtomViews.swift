@@ -196,12 +196,31 @@ private struct AtomMinSize: Layout {
     }
 }
 
+/// A row or column, which draws a surface behind its children when it has a
+/// fill, border or shape prop. The frame and padding props then size the
+/// surface, so it covers them, and its minimum size is a plain frame around
+/// the stack rather than `atomFrame`'s, so the children stay at the start of
+/// its axis and at `align` across it, or centered both ways when `align` is
+/// center or unset (the default).
 struct AtomStack<Content: View>: View {
     var props = StackProps()
     var common = AtomCommon()
+    /// The atom it is, for the debug highlight: a composite built on it (a Panel) passes its own.
+    var atom: AtomType = .stack
     @ViewBuilder var content: () -> Content
 
     var body: some View {
+        if !props.hasSurface {
+            stack
+                .atomCommon(common, atom: atom, group: props.group == true, combine: props.combine == true)
+        } else if props.capsule == true {
+            surfaced(Capsule())
+        } else {
+            surfaced(RoundedRectangle(cornerRadius: CGFloat(props.cornerRadius ?? 0), style: .continuous))
+        }
+    }
+
+    private var stack: some View {
         Group {
             if props.axis == "h" {
                 HStack(alignment: verticalAlignment, spacing: props.spacing.map { CGFloat($0) }, content: content)
@@ -209,7 +228,51 @@ struct AtomStack<Content: View>: View {
                 VStack(alignment: horizontalAlignment, spacing: props.spacing.map { CGFloat($0) }, content: content)
             }
         }
-        .atomCommon(common, atom: .stack, group: props.group == true, combine: props.combine == true)
+    }
+
+    private func surfaced(_ shape: some InsettableShape) -> some View {
+        let placement = surfacePlacement
+        let stretchesLeading = placement.horizontal == .leading
+        var framed = common
+        framed.minWidth = nil
+        framed.minHeight = nil
+        if !stretchesLeading { framed.fillWidth = nil }
+        let fill = props.hasFill
+            ? AnyShapeStyle((AtomColor.style(props.fill) ?? AnyShapeStyle(.primary)).opacity(props.fillOpacity ?? 1))
+            : AnyShapeStyle(Color.clear)
+        return stack
+            .atomFrame(framed)
+            .modifier(Applied(when: !stretchesLeading && common.fillWidth == true) {
+                $0.frame(maxWidth: .infinity, alignment: Alignment(horizontal: placement.horizontal, vertical: .center))
+            })
+            .modifier(Applied(when: common.minWidth != nil || common.minHeight != nil) {
+                $0.frame(minWidth: common.minWidth.map { CGFloat($0) }, minHeight: common.minHeight.map { CGFloat($0) }, alignment: placement)
+            })
+            .background(fill, in: shape)
+            .overlay {
+                if props.hasStroke {
+                    shape.strokeBorder(
+                        (AtomColor.style(props.stroke) ?? AnyShapeStyle(.primary)).opacity(props.strokeOpacity ?? 1),
+                        style: StrokeStyle(lineWidth: CGFloat(props.strokeWidth ?? 1), dash: (props.dash ?? []).map { CGFloat($0) })
+                    )
+                    // A border never takes the clicks meant for the controls it frames.
+                    .allowsHitTesting(false)
+                }
+            }
+            .atomCommon(common, atom: atom, group: props.group == true, combine: props.combine == true, frame: false)
+    }
+
+    /// Where the children sit inside the surface: at the start of the axis and
+    /// at `align` across it, or centered both ways when `align` is center or
+    /// unset (the default).
+    private var surfacePlacement: Alignment {
+        if props.axis == "h" {
+            let vertical = verticalAlignment
+            if vertical == .center { return .center }
+            return Alignment(horizontal: .leading, vertical: vertical == .bottom ? .bottom : .top)
+        }
+        let horizontal = horizontalAlignment
+        return horizontal == .center ? .center : Alignment(horizontal: horizontal, vertical: .top)
     }
 
     private var verticalAlignment: VerticalAlignment {
@@ -308,6 +371,7 @@ struct AtomButton<Content: View>: View {
             .padding(.horizontal, overhangs ? -CGFloat((props.emphasis ?? 0) + (common.paddingX ?? 0)) : 0)
             .padding(.vertical, overhangs ? -CGFloat(props.emphasis ?? 0) : 0)
             .disabled(props.disabled == true)
+            .modifier(Applied(when: props.selected == true) { $0.accessibilityAddTraits(.isSelected) })
             .atomCommon(common, atom: .button, frame: false)
     }
 
@@ -617,47 +681,15 @@ struct AtomDisclosure<Content: View>: View {
     }
 }
 
-/// A rounded, filled background behind a leading column of its children.
-/// The frame and padding props size the panel, so the fill covers them. Its
-/// minimum size is a plain frame around the column rather than `atomFrame`'s,
-/// so the children stay at the top (or the center, with `align: "center"`).
+/// A composite atom: the column Stack with a surface that `PanelProps.stack`
+/// describes, drawn by the Stack's own view.
 struct AtomPanel<Content: View>: View {
     var props = PanelProps()
     var common = AtomCommon()
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        let centered = props.align == "center"
-        if props.capsule == true {
-            panel(Capsule(), centered: centered)
-        } else {
-            panel(RoundedRectangle(cornerRadius: CGFloat(props.cornerRadius ?? 8), style: .continuous), centered: centered)
-        }
-    }
-
-    private func panel(_ shape: some InsettableShape, centered: Bool) -> some View {
-        var framed = common
-        framed.minWidth = nil
-        framed.minHeight = nil
-        if centered { framed.fillWidth = nil }
-        return VStack(alignment: centered ? .center : .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
-            .atomFrame(framed)
-            .modifier(Applied(when: centered && common.fillWidth == true) { $0.frame(maxWidth: .infinity) })
-            .modifier(Applied(when: common.minWidth != nil || common.minHeight != nil) {
-                $0.frame(minWidth: common.minWidth.map { CGFloat($0) }, minHeight: common.minHeight.map { CGFloat($0) }, alignment: centered ? .center : .topLeading)
-            })
-            .background((AtomColor.style(props.fill) ?? AnyShapeStyle(.primary)).opacity(props.fillOpacity ?? 0.05), in: shape)
-            .overlay {
-                if let stroke = AtomColor.style(props.stroke) {
-                    shape.strokeBorder(
-                        stroke.opacity(props.strokeOpacity ?? 1),
-                        style: StrokeStyle(lineWidth: CGFloat(props.strokeWidth ?? 1), dash: (props.dash ?? []).map { CGFloat($0) })
-                    )
-                    // A border never takes the clicks meant for the controls it frames.
-                    .allowsHitTesting(false)
-                }
-            }
-            .atomCommon(common, atom: .panel, group: props.combine != true, combine: props.combine == true, frame: false)
+        AtomStack(props: props.stack, common: common, atom: .panel, content: content)
     }
 }
 

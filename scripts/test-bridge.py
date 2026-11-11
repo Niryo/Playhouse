@@ -15247,6 +15247,79 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assert_failure(self.render_plugin(plugin, "--event", "label:onPress", expected_status=2), "invalid_argument")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "NoSuchPage", expected_status=2)[0], "invalid_argument")
 
+    # case-contract: test_plugin_stack_surface_composes_panel_and_choice_bar | The Plugin Catalog's Stack page draws a surface on a Stack in both axes, while its Stacks without surface props draw nothing: a column filled accent at 0.18 with an accent border and an 8-point radius keeps its children at its top leading corner, inside its padding, when its 220-point minWidth and 90-point minHeight are larger than they are; a capsule row filled #2E7D32 with a dashed border lays its icon and text out side by side on that green; and a border-only Stack with align unset (a Stack's default, center) and fillWidth stretches across the page, draws its border and no fill with rounded corners, and keeps its text centered both ways in its 60-point minHeight. The Panel page shows each Panel beside the Stack it is shorthand for (a column Stack with group, fill primary at 0.05 and radius 8 unless set), and each pair is the same size, including the accent Log in Panel and the single decorated row Stack that replaces its nested row. `plugin render` reports the surface props on those nodes with no errors and none on the plain Stacks, and a mistyped surface prop on a Stack (fill, fillOpacity, cornerRadius, capsule, strokeWidth or dash) or an unknown one (shadow, or axis on a Panel) is reported in errors with exit 1, naming the prop and what is wrong. The ChoiceBar page also composes the bar from atoms, a decorated row Stack of Buttons each marked selected (the Button's selected prop) around a decorated Stack with a Text: it is the same size as the ChoiceBar atom beside it, its Overview button carries the selected trait, and clicking Wasters runs its onPress, which moves the selected trait to it (Composed: wasters) while the ChoiceBar atom stays on Overview; a mistyped selected on a Button is reported with its path.
+    def test_plugin_stack_surface_composes_panel_and_choice_bar(self):
+        surface_keys = {"fill", "fillOpacity", "cornerRadius", "capsule", "stroke", "strokeOpacity", "strokeWidth", "dash"}
+        stacks = self.assert_success(self.call_cli("plugin", "render", "--page", "Stack")[0])
+        self.assertEqual(stacks["errors"], [])
+        tree = stacks["tree"]
+        for plain in ["stack-column", "stack-row", "stack-group", "stack-fill"]:
+            self.assertEqual(set(self.plugin_node(tree, plain)["props"]) & surface_keys, set(), f"{plain} draws nothing.")
+        column = self.plugin_node(tree, "stack-surface-column")
+        self.assertEqual((column["type"], column["props"]["axis"], column["props"]["align"], column["props"]["fill"], column["props"]["fillOpacity"],
+                          column["props"]["cornerRadius"], column["props"]["stroke"], column["props"]["minWidth"], column["props"]["minHeight"], column["props"]["padding"]),
+                         ("Stack", "v", "leading", "accent", 0.18, 8, "accent", 220, 90, 8), "A column Stack can be filled, rounded and bordered.")
+        self.assertEqual(column["children"][0]["props"]["testID"], "stack-surface-column-first")
+        row = self.plugin_node(tree, "stack-surface-row")
+        self.assertEqual((row["type"], row["props"]["axis"], row["props"]["fill"], row["props"]["capsule"], row["props"]["dash"], row["props"]["strokeOpacity"]),
+                         ("Stack", "h", "#2E7D32", True, [4, 3], 0.3), "A row Stack can be a filled capsule with a dashed border.")
+        self.assertEqual([child["type"] for child in row["children"]], ["Icon", "Text"], "The row lays its children out itself, with no nested Stack.")
+        center = self.plugin_node(tree, "stack-surface-center")
+        self.assertEqual((center["props"]["strokeWidth"], center["props"]["fillWidth"], center["props"]["minHeight"]), (2, True, 60))
+        self.assertNotIn("align", center["props"], "The border-only Stack leaves align at its default, center.")
+        self.assertNotIn("fill", center["props"], "A border alone draws no fill.")
+
+        panels = self.assert_success(self.call_cli("plugin", "render", "--page", "Panel")[0])
+        self.assertEqual(panels["errors"], [])
+        tree = panels["tree"]
+        panel_defaults = {"fill": "primary", "fillOpacity": 0.05, "cornerRadius": 8}
+        for name in ["panel-default", "panel-capsule"]:
+            panel = self.plugin_node(tree, name)
+            stack = self.plugin_node(tree, f"{name}-stack")
+            self.assertEqual((panel["type"], stack["type"], stack["props"]["axis"], stack["props"]["align"], stack["props"]["group"]), ("Panel", "Stack", "v", "leading", True))
+            expected = {**panel_defaults, **{key: value for key, value in panel["props"].items() if key != "testID"}}
+            if expected.get("capsule"):
+                expected.pop("cornerRadius")
+            actual = {key: value for key, value in stack["props"].items() if key not in ("testID", "axis", "align", "group")}
+            self.assertEqual(actual, expected, f"{name} is the column Stack with the Panel's defaults.")
+            self.assertEqual([self.plugin_text(child) for child in stack["children"]], [self.plugin_text(child) for child in panel["children"]])
+        accent = self.plugin_node(tree, "panel-accent")
+        accent_row = self.plugin_node(tree, "panel-accent-stack")
+        self.assertEqual([child["type"] for child in accent["children"]], ["Stack"], "The Panel needs a nested row.")
+        self.assertEqual((accent_row["props"]["axis"], [child["type"] for child in accent_row["children"]]), ("h", ["Spacer", "Text", "Spacer"]),
+                         "A decorated row Stack lays the Log in row out with no nesting.")
+        self.assertEqual({key: accent_row["props"][key] for key in ("fill", "fillOpacity", "cornerRadius", "width", "padding")},
+                         {key: accent["props"][key] for key in ("fill", "fillOpacity", "cornerRadius", "width", "padding")})
+
+        # The ChoiceBar composite, composed from a decorated row Stack of Buttons marked selected.
+        composed = self.assert_success(self.call_cli("plugin", "render", "--page", "ChoiceBar", "--event", "choice-composed-wasters:onPress")[0])
+        self.assertEqual(composed["errors"], [])
+        bar = self.plugin_node(composed["tree"], "choice-bar-composed")
+        self.assertEqual((bar["type"], bar["props"]["axis"], bar["props"]["fill"], bar["props"]["fillOpacity"], bar["props"]["cornerRadius"], bar["props"]["group"]),
+                         ("Stack", "h", "primary", 0.06, 7, True))
+        buttons = [self.plugin_node(composed["tree"], f"choice-composed-{value}") for value in ("overview", "wasters", "tools")]
+        self.assertEqual([(button["type"], button["props"]["selected"]) for button in buttons], [("Button", False), ("Button", True), ("Button", False)],
+                         "Pressing Wasters marks its Button selected.")
+        self.assertEqual([(button["children"][0]["type"], button["children"][0]["props"]["fillOpacity"]) for button in buttons],
+                         [("Stack", 0), ("Stack", 0.2), ("Stack", 0)], "Each option is drawn on a decorated Stack, highlighted when selected.")
+        self.assertEqual(self.plugin_text(self.plugin_node(composed["tree"], "choice-composed-selected")), "Composed: wasters")
+        self.assertEqual(self.plugin_node(composed["tree"], "choice-bar")["props"]["selected"], "overview", "The ChoiceBar atom keeps its own choice.")
+
+        for source, message in [
+            ('Playhouse.render(h(Stack, { fill: 3 }));', "<Stack> has an invalid prop: fill: expected a string, found 3"),
+            ('Playhouse.render(h(Stack, { axis: "h", fillOpacity: "high" }));', "<Stack> has an invalid prop: fillOpacity: expected a number, found a string"),
+            ('Playhouse.render(h(Stack, { cornerRadius: true }));', "<Stack> has an invalid prop: cornerRadius: expected a number, found a boolean"),
+            ('Playhouse.render(h(Stack, { capsule: "yes" }));', "<Stack> has an invalid prop: capsule: expected a boolean, found a string"),
+            ('Playhouse.render(h(Stack, { strokeWidth: "2" }));', "<Stack> has an invalid prop: strokeWidth: expected a number, found a string"),
+            ('Playhouse.render(h(Stack, { dash: "4" }));', "<Stack> has an invalid prop: dash: expected an array, found a string"),
+            ('Playhouse.render(h(Stack, { dash: [4, "3"] }));', "<Stack> has an invalid prop: dash.1: expected a number, found a string"),
+            ('Playhouse.render(h(Stack, { shadow: 4 }));', '<Stack> has no prop "shadow"'),
+            ('Playhouse.render(h(Panel, { axis: "h" }));', '<Panel> has no prop "axis"'),
+            ('Playhouse.render(h(Button, { selected: "yes" }));', "<Button> has an invalid prop: selected: expected a boolean, found a string"),
+        ]:
+            failed = self.render_plugin(source, expected_status=1)
+            self.assertTrue(any(message in error for error in failed["result"]["errors"]), f"{source} reports {message}: {failed['result']['errors']}")
+
     # case-contract: test_plugin_task_item_renders_from_atoms_like_native | The Plugin Catalog's Task Item page shows the task item composed in JavaScript from atoms beside the native SwiftUI task item built from the same atoms and sample data: both show the same title, progress report, status message, token counter, conflicts button, pull-request mode pill and pull-request link with the same sizes, and the JavaScript tree uses only atoms with the native card's identifiers and context menu. Blocking the JavaScript item changes only its status message and the toggle's label (one commit: text, update, text on three nodes) while the native item keeps its own state, clicking the JavaScript card runs its onPress handler (Opened 1 times, one text op), choosing Merge in its mode pill runs onChange (Last: mode merge) without re-rendering the title or the card, and right-clicking the JavaScript card offers the native card's menu, whose Move to Done runs onMenu with its id (Last: menu done). The time row is one flat row: the clock, the created time and the token counter are siblings in one stack, so the time shows in full (Nov 8, 2026), as wide in the JavaScript item as in the native one and left of the counter.
     def test_plugin_task_item_renders_from_atoms_like_native(self):
         task = self.TASK_ITEM_ID

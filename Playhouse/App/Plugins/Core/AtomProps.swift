@@ -223,14 +223,45 @@ struct AtomCommon: AtomPropsDecodable, Equatable {
 /// first line of text) for a row.
 /// `group` makes it one accessibility container for its children; `combine`
 /// makes it one accessibility element whose label joins theirs.
+///
+/// It draws nothing unless it has a surface prop. `fill` (a color name,
+/// primary by default) at `fillOpacity` (1 by default) fills it when either is
+/// set; a border inside its edge is drawn when any of `stroke` (a color name,
+/// primary by default), `strokeOpacity` (1), `strokeWidth` (1) or `dash` (on,
+/// off lengths; solid by default) is set. The shape is a rectangle rounded by
+/// `cornerRadius` (0 by default), or with `capsule` fully rounded ends (a
+/// circle when it is square). A Stack with a surface sizes the surface with
+/// the frame and padding props, and lays its children out inside it: at the
+/// start of its axis and at `align` across it (a `minHeight` column with
+/// `align` leading keeps its children at the top leading corner), or, with
+/// `align` center or unset (a Stack's default), centered both ways, also when
+/// `fillWidth` stretches it. A fixed `width` or `height` centers them, as it
+/// centers any atom's content. A color name it doesn't know draws primary.
 struct StackProps: AtomPropsDecodable, Equatable {
     var axis: String?
     var spacing: Double?
     var align: String?
     var group: Bool?
     var combine: Bool?
+    var fill: String?
+    var fillOpacity: Double?
+    var cornerRadius: Double?
+    var capsule: Bool?
+    var stroke: String?
+    var strokeOpacity: Double?
+    var strokeWidth: Double?
+    var dash: [Double]?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case axis, spacing, align, group, combine }
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case axis, spacing, align, group, combine, fill, fillOpacity, cornerRadius, capsule, stroke, strokeOpacity, strokeWidth, dash
+    }
+
+    /// Whether it fills its shape.
+    var hasFill: Bool { fill != nil || fillOpacity != nil }
+    /// Whether it draws a border.
+    var hasStroke: Bool { stroke != nil || strokeOpacity != nil || strokeWidth != nil || dash != nil }
+    /// Whether it draws a surface, and so lays its children out inside it.
+    var hasSurface: Bool { hasFill || hasStroke || cornerRadius != nil || capsule != nil }
 }
 
 /// A string, from `text` or the atom's raw string children. Weights: regular,
@@ -290,7 +321,8 @@ struct LabelProps: AtomPropsDecodable, Equatable {
 /// otherwise); `shortcut` "default" makes Return press it and "cancel"
 /// makes Escape press it, window-wide, so only a window's primary or
 /// dismissing action should set one. `destructive` gives it the destructive
-/// role (a push button draws its title red).
+/// role (a push button draws its title red). `selected` marks it selected to
+/// accessibility, the current choice of a row of buttons (a ChoiceBar's).
 struct ButtonProps: AtomPropsDecodable, Equatable {
     var style: String?
     var emphasis: Double?
@@ -299,8 +331,9 @@ struct ButtonProps: AtomPropsDecodable, Equatable {
     var controlSize: String?
     var shortcut: String?
     var destructive: Bool?
+    var selected: Bool?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case style, emphasis, overhang, disabled, controlSize, shortcut, destructive }
+    enum CodingKeys: String, CodingKey, CaseIterable { case style, emphasis, overhang, disabled, controlSize, shortcut, destructive, selected }
 }
 
 /// Opens `url` in the browser; its label is its children.
@@ -376,18 +409,15 @@ struct DisclosureProps: AtomPropsDecodable, Equatable {
     enum CodingKeys: String, CodingKey, CaseIterable { case title, collapsed, spacing, toggleTestID }
 }
 
-/// A rounded, filled background behind its children, which it lays out as a
-/// leading column (an agent's block in Agents info). `fill` is a color name
-/// (primary by default) drawn at `fillOpacity` (0.05 by default); `stroke`
-/// is a color name for a border inside its edge, drawn at `strokeOpacity`
-/// (1 by default), `strokeWidth` points wide (1 by default) and dashed by
-/// `dash` (on, off lengths; solid by default). `capsule` rounds its ends fully
-/// instead of using `cornerRadius` (a circle when it is square). `align` is
-/// `leading` (the default: children at the leading edge, and a `minHeight` keeps
-/// them at the top, as a board column does) or `center` (children centered both
-/// ways, as an empty state's are, with `fillWidth` stretching it without moving
-/// them). It is one accessibility container, or with `combine` one element whose
-/// label joins its children's.
+/// A composite atom: shorthand for a column `Stack` with a surface and
+/// `group` (an agent's block in Agents info), so everything it does a Stack
+/// can do. It differs from a Stack only in its defaults: `fill` primary at
+/// `fillOpacity` 0.05, `cornerRadius` 8, `align` `leading` (children at the
+/// leading edge, and a `minHeight` keeps them at the top, as a board column
+/// does) or `center` (centered both ways, as an empty state's are), and one
+/// accessibility container (or with `combine` one element whose label joins
+/// its children's). Its border is drawn only when it has a `stroke`, at
+/// `strokeOpacity` (1), `strokeWidth` (1) and `dash` (solid).
 struct PanelProps: AtomPropsDecodable, Equatable {
     var spacing: Double?
     var fill: String?
@@ -402,6 +432,18 @@ struct PanelProps: AtomPropsDecodable, Equatable {
     var combine: Bool?
 
     enum CodingKeys: String, CodingKey, CaseIterable { case spacing, fill, fillOpacity, cornerRadius, capsule, stroke, strokeOpacity, strokeWidth, dash, align, combine }
+
+    /// The Stack this Panel stands for.
+    var stack: StackProps {
+        StackProps(
+            axis: "v", spacing: spacing, align: align == "center" ? "center" : "leading", group: true, combine: combine,
+            fill: fill ?? "primary", fillOpacity: fillOpacity ?? 0.05, cornerRadius: cornerRadius ?? 8, capsule: capsule,
+            stroke: stroke,
+            strokeOpacity: stroke == nil ? nil : strokeOpacity,
+            strokeWidth: stroke == nil ? nil : strokeWidth,
+            dash: stroke == nil ? nil : dash
+        )
+    }
 }
 
 /// A horizontal usage bar: a capsule track filled to `fraction` (0...1) in
