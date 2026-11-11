@@ -15519,7 +15519,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("conversation-user-input-request").exists, "A history failure must leave the unanswered recovery request visible.")
     }
 
-    // case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the question's Markdown, header, and option descriptions reach the client, and the UI renders the question inline with its Markdown formatted at the reply text size, its header, and each option's description, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
+    // case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the question's Markdown, including a long paragraph, header, and option descriptions reach the client unchanged, and the UI renders the question inline with its Markdown formatted at the reply text size and its long paragraph wrapped in full across several lines without truncation, its header, and each option's description, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
     func test_claude_questions_can_be_answered_after_switching_conversations() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-question")
         try FileManager.default.copyItem(
@@ -15574,10 +15574,33 @@ final class PlayhouseUITests: XCTestCase {
             let text = element(identifier)
             return text.label + (text.value as? String ?? "")
         }
+        // A truncated Text still reports its whole string to accessibility, so its height shows whether it
+        // wrapped: this paragraph needs about three lines at the form's width, where the one-line first
+        // paragraph above it, measured the same way, would be cut to a single line ending in an ellipsis.
+        let longQuestion = "When the user clicks an \"Add here\" placeholder, which conversation should open: the task's active "
+            + "conversation, a new conversation started just for that placeholder, or the conversation the placeholder "
+            + "was originally added from?"
+        let longQuestionText = questionContainer.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@ OR value BEGINSWITH %@", "When the user clicks", "When the user clicks")
+        ).firstMatch
+        XCTAssertTrue(longQuestionText.exists, "The question's long paragraph should render.")
+        XCTAssertTrue(
+            [longQuestionText.label, longQuestionText.value as? String ?? ""].contains(longQuestion),
+            "The long paragraph should carry its full text."
+        )
+        XCTAssertGreaterThanOrEqual(
+            longQuestionText.frame.height, questionText.frame.height * 2,
+            "The long paragraph should wrap across several lines instead of truncating to one."
+        )
+        XCTAssertGreaterThan(longQuestionText.frame.minY, questionText.frame.maxY, "The long paragraph should sit below the first one.")
+        XCTAssertGreaterThan(
+            element("ai-question-option-question-1-Blue").frame.minY, longQuestionText.frame.maxY,
+            "The options should lay out below the whole multi-line question."
+        )
         XCTAssertEqual(shownText("ai-question-header-question-1").uppercased(), "COLOR")
         XCTAssertEqual(shownText("ai-question-option-description-question-1-Blue"), "Use blue.")
         XCTAssertEqual(shownText("ai-question-option-description-question-1-Green"), "Use green.")
-        attachScreenshot(named: "Claude question with Markdown, header, and option descriptions")
+        attachScreenshot(named: "Claude question with Markdown, a long wrapped paragraph, header, and option descriptions")
         selectQuestionOption(identifier: "ai-question-option-question-1-Blue")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(transcriptMessage("Answer received: Blue.").waitToExist(timeout: 10))

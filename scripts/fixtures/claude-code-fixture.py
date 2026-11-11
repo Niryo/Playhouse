@@ -96,7 +96,12 @@ CHAT_NUDGE_REPLY = "Filed."
 SIMPLE_ANSWER = "OK."
 PENDING_QUESTION_SUCCESS_MARKER = "finish while a structured question remains pending"
 # Claude writes questions in Markdown, as it does replies.
-MARKDOWN_QUESTION = "Which color should I use for **the primary button**?\n\nIt also tints `LinkText`."
+MARKDOWN_QUESTION = (
+    "Which color should I use for **the primary button**?\n\nIt also tints `LinkText`.\n\n"
+    "When the user clicks an \"Add here\" placeholder, which conversation should open: the task's active "
+    "conversation, a new conversation started just for that placeholder, or the conversation the placeholder "
+    "was originally added from?"
+)
 # Playhouse keys each answer by the question it answers.
 QUESTION_TEXTS = ("Which color should I use?", MARKDOWN_QUESTION)
 NUDGE_RACE_STALE_ANSWER = "The task review is approved. Only the UI review is still pending."
