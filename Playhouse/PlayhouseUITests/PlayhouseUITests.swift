@@ -5552,7 +5552,7 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 10), "Removing one pending repository should preserve the other attachment.")
         XCTAssertEqual(try taskRecord(id: soleID)?["workspaceRoots"] as? [String], [fixture.secondary.path])
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.primary.path))
-        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], [fixture.secondary.path])
+        assertLastSelectedRepositories([fixture.secondary.path])
 
         element("back-to-board-button").click()
         element("new-task-button").click()
@@ -6072,7 +6072,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(firstRepositories.map { $0["branch"] as? String }, ["auto", "auto"])
         XCTAssertEqual(firstRepositories.map { $0["branchFrom"] as? String }, ["main", "main"])
         XCTAssertEqual(firstRepositories.map { $0["mergeTarget"] as? String }, ["main", "main"])
-        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], [fixture.secondary.path, fixture.primary.path])
+        assertLastSelectedRepositories([fixture.secondary.path, fixture.primary.path])
         element("back-to-board-button").click()
         assertCLIError(try runCLI(["task", "get", firstTaskID], expectedStatus: 3), code: "not_found")
 
@@ -6088,7 +6088,7 @@ final class PlayhouseUITests: XCTestCase {
         overrideSearch.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(element("conversation-repository-badge-alternate").waitToExist(timeout: 10))
         let expandedSelection = [fixture.secondary.path, fixture.primary.path, fixture.alternate.path]
-        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], expandedSelection)
+        assertLastSelectedRepositories(expandedSelection)
 
         let quickAddTaskID = try XCTUnwrap(tasksFromBoardList().first?["id"] as? String)
         let alternateBadge = element("conversation-repository-badge-alternate")
@@ -6108,7 +6108,7 @@ final class PlayhouseUITests: XCTestCase {
         element("remove-conversation-repository-primary").click()
         XCTAssertTrue(waitForDisappearance(primaryBadge, timeout: 10))
         XCTAssertFalse(element("conversation-recent-repositories").exists, "Removed repositories should not reappear as header chips.")
-        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], [fixture.secondary.path])
+        assertLastSelectedRepositories([fixture.secondary.path])
         XCTAssertEqual(
             (try runCLI(["task", "repository", "recent", quickAddTaskID])["result"] as? [String: Any])?["repositories"] as? [String],
             [fixture.primary.path, fixture.alternate.path]
@@ -15959,7 +15959,9 @@ final class PlayhouseUITests: XCTestCase {
                       "The reopened active history message must retain its accepted-turn model label.")
         XCTAssertTrue(element("async-question-item_playhouse_async_question").exists,
                       "The pending question remains visible after the active history reload.")
-        yesOption.click()
+        XCTAssertEqual(yesOption.value as? String, "not selected", "No async option is chosen before the click.")
+        selectQuestionOption(yesOption, named: "async Yes option", file: #filePath, line: #line)
+        XCTAssertEqual(noOption.value as? String, "not selected", "Choosing one async option leaves the other unselected.")
         XCTAssertFalse(element("submit-async-questions-item_playhouse_async_question").isEnabled,
                        "Every async question needs an answer before submission.")
         let detail = element("async-question-answer-item_playhouse_async_question-1")
@@ -16024,7 +16026,9 @@ final class PlayhouseUITests: XCTestCase {
             ((try? self.taskRecord(id: taskID))?["status"] as? String) == "Waiting Response"
         }, timeout: 10), "The first turn must finish before queueing the answer.")
         _ = FileManager.default.createFile(atPath: executable.path + ".fail-next-turn-start", contents: Data())
-        element("async-question-option-item_playhouse_async_question-0-0").click()
+        // The transcript reloads as the turn ends, so wait for the option to settle and confirm the
+        // click chose it; a click that lands on the neighbouring option would queue the wrong answer.
+        selectQuestionOption(identifier: "async-question-option-item_playhouse_async_question-0-0")
         element("async-question-answer-item_playhouse_async_question-1").click()
         element("async-question-answer-item_playhouse_async_question-1").typeText("Retry this answer.")
         element("submit-async-questions-item_playhouse_async_question").click()
@@ -16077,6 +16081,9 @@ final class PlayhouseUITests: XCTestCase {
         let queuedText = "Follow up after I review the interrupted turn."
         let queued = try runCLI(["conversation", "queue", interruptedID, "--message", queuedText])["result"] as? [String: Any]
         let queuedID = try XCTUnwrap(queued?["id"] as? String)
+        // The queued follow-up bar shortens the transcript; answer once it is in place.
+        // The bar's container is not an accessibility element of its own; its Steer button is.
+        XCTAssertTrue(element("steer-queued-message-\(queuedID.uppercased())").waitToExist(timeout: 10), "The queued follow-up should show above the composer.")
         selectQuestionOption("Blue")
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
@@ -19166,6 +19173,13 @@ final class PlayhouseUITests: XCTestCase {
         }
         func privateRecord(_ id: String = taskID) throws -> [String: Any]? { try section(id).first { $0["id"] as? String == privateID } }
         openTask(named: "Private skills")
+        // Where the composer's Skills button sits, so a later step can click it while the
+        // Skills page is still sliding out and covers it.
+        let skillsButton = element("open-skills-button")
+        XCTAssertTrue(waitUntil({ skillsButton.exists && skillsButton.isHittable }, timeout: 15))
+        let window = app.windows.firstMatch
+        let skillsButtonPoint = window.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: skillsButton.frame.midX - window.frame.minX, dy: skillsButton.frame.midY - window.frame.minY))
         openSkillsPage()
 
         func fillNewSkill(name: String, description: String, body: String?) {
@@ -19259,9 +19273,17 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(shadowed["shadowedBy"] as? String, "skills-private-repo's committed skills")
         XCTAssertEqual(try privateRecord(againID)?["providers"] as? [String], ["claude", "codex"], "Another worktree without the copy still uses the private skill.")
         try FileManager.default.removeItem(at: worktree.appendingPathComponent(".claude"))
+        // Reopen straight away, through the Skills button's recorded position rather than a wait for
+        // it to become hittable: when the VM is slow the click lands while the closing page is
+        // still sliding out, and the page must then be a fresh one that reads the catalog again,
+        // not the closing page revived with what it read before. XCUITest's idle wait after the
+        // back click usually outlasts the slide-out, so this cannot force that timing every run.
         element("skills-back-button").click()
-        openSkillsPage()
-        XCTAssertTrue(waitUntil({ !self.element("skill-shadowed-deploy-notes").exists && self.element("skill-private-deploy-notes").exists }, timeout: 10))
+        skillsButtonPoint.click()
+        XCTAssertTrue(element("skills-page").waitToExist(timeout: 10), "Clicking the Skills button right after closing the page should reopen it.")
+        XCTAssertTrue(waitUntil({ !self.element("skill-shadowed-deploy-notes").exists && self.element("skill-private-deploy-notes").exists }, timeout: 10),
+                      "A Skills page reopened right after closing should show the catalog read after the committed copy was removed.")
+        attachScreenshot(named: "Reopened Skills page shows the private skill no longer shadowed")
 
         clickSkillMenuItem(skill: "deploy-notes", item: "skill-convert-repo-deploy-notes", title: "Convert to Repository Skill")
         let converted = worktree.appendingPathComponent(".agents/skills/deploy-notes/SKILL.md")
@@ -22512,8 +22534,6 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !self.element("conversation-repository-search").exists }, timeout: 5), "The conversation repository picker should close.")
     }
 
-    /// Waits until the element stops moving. The transcript appends messages
-    /// and auto-scrolls as a turn settles, so a click issued the instant a
     /// Clicks a text field once it has settled, confirms it took keyboard focus
     /// (retrying the click once), then types. A click that lands while the
     /// form is still scrolling into place can leave the field unfocused, and
@@ -22547,6 +22567,7 @@ final class PlayhouseUITests: XCTestCase {
     private func selectQuestionOption(_ option: XCUIElement, named label: String, file: StaticString, line: UInt) {
         XCTAssertTrue(option.waitToExist(timeout: 5), "Question option is missing: \(label)", file: file, line: line)
         XCTAssertTrue(waitForStableFrame(option), "Question option should settle in place: \(label)", file: file, line: line)
+        XCTAssertTrue(revealInConversation(option), "Question option should be scrolled into the conversation's visible area: \(label)", file: file, line: line)
         option.click()
         XCTAssertTrue(
             waitUntil({ option.value as? String == "selected" }, timeout: 3),
@@ -22554,6 +22575,29 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
+    /// Scrolls the conversation until `target` lies inside its visible area. The transcript
+    /// follows its newest content, so a layout change below a question form (a queued
+    /// follow-up bar, a live activity row) can push the form's first options above the
+    /// viewport, where a click lands on the header instead. True once it is fully visible.
+    private func revealInConversation(_ target: XCUIElement) -> Bool {
+        let scrollView = element("conversation-scroll-view")
+        guard scrollView.exists else { return true }
+        for _ in 0..<8 {
+            let viewport = scrollView.frame
+            let frame = target.frame
+            if frame.minY >= viewport.minY && frame.maxY <= viewport.maxY { return true }
+            if frame.minY < viewport.minY {
+                scrollView.scroll(byDeltaX: 0, deltaY: min(200, viewport.minY - frame.minY + 24))
+            } else {
+                scrollView.scroll(byDeltaX: 0, deltaY: -min(200, frame.maxY - viewport.maxY + 24))
+            }
+            _ = waitForStableFrame(target, timeout: 2)
+        }
+        let viewport = scrollView.frame
+        return target.frame.minY >= viewport.minY && target.frame.maxY <= viewport.maxY
+    }
+
+    /// Waits until `target`'s frame has stopped changing for 0.4 s. A click sent the instant a
     /// control appears can land where the control was a frame earlier.
     @discardableResult
     private func waitForStableFrame(_ target: XCUIElement, timeout: TimeInterval = 5) -> Bool {
@@ -22575,6 +22619,23 @@ final class PlayhouseUITests: XCTestCase {
         let panel = element(identifier)
         control.click()
         return panel.waitToExist(timeout: timeout) && waitForStableFrame(panel)
+    }
+
+    /// The composer saves the task (which shows its chips) before it writes the remembered
+    /// repositories, so a chip appearing does not mean the setting is saved yet. Waits for the
+    /// saved value instead of reading it once.
+    private func assertLastSelectedRepositories(
+        _ expected: [String],
+        timeout: TimeInterval = 10,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        var saved: [String]?
+        let settled = waitUntil({
+            saved = (try? self.runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String]
+            return saved == expected
+        }, timeout: timeout)
+        XCTAssertTrue(settled, "lastSelectedRepositories should become \(expected), last read \(String(describing: saved)).", file: file, line: line)
     }
 
     private func waitUntil(_ condition: () -> Bool, timeout: TimeInterval) -> Bool {
@@ -24186,8 +24247,9 @@ final class PlayhouseUITests: XCTestCase {
         return value
     }
 
-    /// Hovers the control until its native tooltip becomes visible outside it. Retries with real
-    /// mouse-moved events, because AppKit starts the tooltip delay from a move inside the control.
+    /// Hovers the control until its native tooltip becomes visible outside it. Retries with
+    /// several XCUI hover moves inside it, because AppKit starts the tooltip delay from a move
+    /// inside the control.
     private func assertNativeHelpText(for element: XCUIElement, equals expected: String) {
         for attempt in 0..<3 {
             // Tooltips only show for the active app's key window.
@@ -24200,13 +24262,6 @@ final class PlayhouseUITests: XCTestCase {
             for dx in [0.35, 0.65, 0.45, 0.55] {
                 Thread.sleep(forTimeInterval: 0.15)
                 element.coordinate(withNormalizedOffset: CGVector(dx: dx, dy: 0.5 + CGFloat(attempt) * 0.05)).hover()
-            }
-            // Real mouse-moved events at the control's position, the way a trackpad delivers them.
-            let frame = element.frame
-            for step in 0..<6 {
-                let point = CGPoint(x: frame.midX - 4 + CGFloat(step % 3) * 4, y: frame.midY + CGFloat(step % 2) * 2)
-                CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
-                Thread.sleep(forTimeInterval: 0.1)
             }
             if waitUntil({ self.nativeHelpTextIsVisible(expected) }, timeout: 6) { return }
         }
@@ -24252,11 +24307,12 @@ final class PlayhouseUITests: XCTestCase {
         movePointerToHelpRunway(below: element)
         Thread.sleep(forTimeInterval: 1.5)
         element.hover()
-        let frame = element.frame
-        for step in 0..<6 {
-            let point = CGPoint(x: frame.midX - 4 + CGFloat(step % 3) * 4, y: frame.midY + CGFloat(step % 2) * 2)
-            CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
-            Thread.sleep(forTimeInterval: 0.1)
+        // Keep moving inside the card the way `assertNativeHelpText` does, so a tooltip would get
+        // its delay. The runner may not post CGEvents in the VM (WindowServer logs "Sender is
+        // prohibited from synthesizing events"), so every move goes through XCUITest.
+        for dx in [0.45, 0.55, 0.5, 0.52] {
+            Thread.sleep(forTimeInterval: 0.15)
+            element.coordinate(withNormalizedOffset: CGVector(dx: dx, dy: 0.5)).hover()
         }
         Thread.sleep(forTimeInterval: 2.5)
         XCTAssertFalse(nativeHelpTextIsVisible(text), "Hovering the card should not present a ‘\(text)’ tooltip.")

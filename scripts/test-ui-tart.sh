@@ -250,6 +250,34 @@ guest_shares_artifact_root() {
 	tart exec "$vm_name" /bin/test -d "/Volumes/My Shared Files/artifacts/${run_id}" >/dev/null 2>&1
 }
 
+# Once the guest kernel has restarted its GPU (it writes a .gpuRestart report),
+# WebKit's GPU process keeps hanging until the VM reboots, and a web view's
+# content process can stall for good. A reused VM in that state is rebooted
+# before the run instead of failing WebKit cases partway through it.
+guest_gpu_restarted_since_boot() {
+	tart exec "$vm_name" /bin/bash -c '
+		boot=$(/usr/sbin/sysctl -n kern.boottime | /usr/bin/sed -E "s/^[{] sec = ([0-9]+),.*/\1/")
+		for report in /Library/Logs/DiagnosticReports/*.gpuRestart; do
+			[[ -e "$report" ]] || continue
+			(( $(/usr/bin/stat -f %m "$report") > boot )) && exit 0
+		done
+		exit 1
+	' >/dev/null 2>&1
+}
+
+# The VM lock is held, so no other run is using the VM being restarted.
+restart_vm() {
+	vm_attached=0
+	tart stop "$vm_name" >/dev/null 2>&1 || true
+	start_vm
+	wait_for_guest
+	# A failed stop leaves the old VM answering; never run against its share.
+	if ! guest_shares_artifact_root; then
+		printf 'Tart VM %s still does not share %s after a restart. Stop it with `tart stop %s` and rerun.\n' "$vm_name" "$artifact_root" "$vm_name" >&2
+		exit 74
+	fi
+}
+
 if tart list --format json | python3 -c '
 import json
 import sys
@@ -266,18 +294,13 @@ raise SystemExit(1)
 	# Directory shares are fixed at boot. This run's freshly created artifact
 	# directory is visible in the guest only if the VM shares this artifact root;
 	# otherwise it was booted by an older runner or with a different
-	# PLAYHOUSE_UI_TART_ARTIFACTS. The VM lock is held, so no run is using it.
+	# PLAYHOUSE_UI_TART_ARTIFACTS.
 	if ! guest_shares_artifact_root; then
 		printf 'Running Tart VM %s does not share %s (booted by another runner); restarting it with this artifact root.\n' "$vm_name" "$artifact_root"
-		vm_attached=0
-		tart stop "$vm_name" >/dev/null 2>&1 || true
-		start_vm
-		wait_for_guest
-		# A failed stop leaves the old VM answering; never run against its share.
-		if ! guest_shares_artifact_root; then
-			printf 'Tart VM %s still does not share %s after a restart. Stop it with `tart stop %s` and rerun.\n' "$vm_name" "$artifact_root" "$vm_name" >&2
-			exit 74
-		fi
+		restart_vm
+	elif guest_gpu_restarted_since_boot; then
+		printf 'Running Tart VM %s has restarted its GPU since boot (a .gpuRestart report in /Library/Logs/DiagnosticReports), which leaves WebKit hanging; restarting it.\n' "$vm_name"
+		restart_vm
 	fi
 else
 	start_vm

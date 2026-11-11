@@ -984,6 +984,10 @@ struct TaskConversationView: View {
     @State private var pendingImages: [PendingImage] = []
     /// The task's skill gallery covers the conversation, which keeps its draft underneath.
     @State private var isShowingSkills = false
+    /// Counts Skills page openings. Each opening gets its own page identity, so reopening while
+    /// the previous page is still sliding out builds a fresh page that reloads the catalog
+    /// instead of reviving the closing one with what it read before.
+    @State private var skillsPresentation = 0
     @State private var selectedChatImage: NSImage?
     @State private var isGeneratingTitle = false
     @State private var didCopyTaskTitle = false
@@ -4253,6 +4257,7 @@ struct TaskConversationView: View {
                                 .buttonHoverPointer()
                                 .nativeHelp("Choose this answer for \(question.title)")
                                 .accessibilityIdentifier("async-question-option-\(message.id)-\(index)-\(optionIndex)")
+                                .accessibilityValue(asyncQuestionAnswers[answerKey] == option ? "selected" : "not selected")
                             }
                             TextField("Other answer", text: Binding(
                                 get: {
@@ -5317,7 +5322,10 @@ struct TaskConversationView: View {
                 do { try addImageData(image) }
                 catch { errorMessage = error.localizedDescription }
             },
-            openSkills: { isShowingSkills = true },
+            openSkills: {
+                skillsPresentation += 1
+                isShowingSkills = true
+            },
             modeMenu: { id in
                 if id == "goal" {
                     isEnteringGoal = true
@@ -7073,6 +7081,7 @@ struct TaskConversationView: View {
                     isShowingSkills = false
                     composerDraft.focusRequest += 1
                 }
+                .id(skillsPresentation)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .shadow(color: .black.opacity(0.25), radius: 16, x: -4)
                 .transition(.move(edge: .trailing))
