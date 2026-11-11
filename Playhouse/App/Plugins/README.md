@@ -58,7 +58,8 @@ content as its native `scheduleContent`. Change `ComposerView` and
 `Composer.js` together; `test_plugin_composer_renders_from_atoms_like_native`
 compares them. `catalog/KanbanColumn.js` does the same for `KanbanColumnSection`, a board
 column's header (status dot, title, count, the Backlog's Add button), Blocked
-notice and empty state; the column's cards stay native `TaskCardView`s passed in
+notice, empty state and the Waiting Response column's tint (a second Panel
+washing the column in its accent); the column's cards stay native `TaskCardView`s passed in
 as content. Change it whenever the column's frame changes;
 `test_plugin_kanban_column_renders_from_atoms_like_native` compares the two.
 Smaller native views are also built straight from atoms, with no catalog
