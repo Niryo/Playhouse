@@ -305,8 +305,8 @@ struct SkillsButton: View {
 }
 
 /// The Skills page's header, composed only of plugin atoms: the back button,
-/// the title, the Skills | Rules | MCP picker and, on Skills, the source
-/// picker with the search and New Skill, or the selection's actions.
+/// the title and the Skills | Rules | MCP picker. The source picker, search
+/// and New Skill (or the selection's actions) sit on their own row in the gallery.
 struct SkillsPageHeader: View {
     let model: SkillsPageModel
     var actions = SkillsPageActions()
@@ -331,27 +331,53 @@ struct SkillsPageHeader: View {
                 common: AtomCommon(testID: "\(prefix)skills-kind-picker", label: "Show", help: "Show skills, the rule files agents follow on every turn, or the MCP servers that give them tools"),
                 onChange: actions.selectKind
             )
+        }
+    }
+}
+
+/// The Skills list under the header, composed only of plugin atoms: the
+/// error, the hint, then the selected source's skills in a lazy scroll view,
+/// one row each with its badges, switch, Use button and actions menu.
+struct SkillGalleryView: View {
+    let model: SkillsPageModel
+    var actions = SkillsPageActions()
+
+    private var prefix: String { model.prefix }
+    private var isSelecting: Bool { model.selection != nil }
+
+    var body: some View {
+        AtomStack(props: StackProps(axis: "v", spacing: 0, align: "leading")) {
             if model.kind == "skills" {
-                AtomSegmented(
-                    props: SegmentedProps(options: model.tabs.map { .init(value: $0.value, label: $0.label) }, selected: model.tab),
-                    common: AtomCommon(testID: "\(prefix)skills-tab-picker", label: "Skill source", width: 260),
-                    onChange: actions.selectTab
-                )
-            }
-            AtomSpacer()
-            if model.kind == "skills" {
-                if model.selection != nil {
-                    selectionActions
-                } else {
-                    AtomTextField(props: TextFieldProps(text: model.search, placeholder: "Search skills"), common: AtomCommon(testID: "\(prefix)skills-search", width: 200), onChange: actions.search)
-                    AtomButton(
-                        props: ButtonProps(style: "bordered"),
-                        common: AtomCommon(testID: "\(prefix)new-skill-button", help: "Create a skill that both Claude and Codex can use"),
-                        action: actions.newSkill
-                    ) {
-                        AtomLabel(props: LabelProps(text: "New Skill", icon: "plus"))
+                AtomStack(props: StackProps(axis: "h", spacing: 12), common: AtomCommon(padding: 10, paddingX: 20)) {
+                    AtomSegmented(
+                        props: SegmentedProps(options: model.tabs.map { .init(value: $0.value, label: $0.label) }, selected: model.tab),
+                        common: AtomCommon(testID: "\(prefix)skills-tab-picker", label: "Skill source", width: 260),
+                        onChange: actions.selectTab
+                    )
+                    AtomSpacer()
+                    if model.selection != nil {
+                        selectionActions
+                    } else {
+                        AtomTextField(props: TextFieldProps(text: model.search, placeholder: "Search skills"), common: AtomCommon(testID: "\(prefix)skills-search", width: 200), onChange: actions.search)
+                        AtomButton(
+                            props: ButtonProps(style: "bordered"),
+                            common: AtomCommon(testID: "\(prefix)new-skill-button", help: "Create a skill that both Claude and Codex can use"),
+                            action: actions.newSkill
+                        ) {
+                            AtomLabel(props: LabelProps(text: "New Skill", icon: "plus"))
+                        }
                     }
                 }
+            }
+            if let error = model.error {
+                AtomText(props: TextProps(text: error, size: 12, color: "red"), common: AtomCommon(testID: "\(prefix)skills-error", fillWidth: true, padding: 8, paddingX: 12))
+            }
+            AtomText(
+                props: TextProps(text: isSelecting ? model.selectingHint : model.hint, size: 10, color: "secondary"),
+                common: AtomCommon(testID: "\(prefix)skills-provider-timing", padding: 8, paddingX: 12)
+            )
+            AtomScroll(props: ScrollProps(spacing: 10, inset: 20, lazy: true), common: AtomCommon(testID: "\(prefix)skills-list")) {
+                content
             }
         }
     }
@@ -382,32 +408,6 @@ struct SkillsPageHeader: View {
                 action: actions.endSelection
             ) {
                 AtomText(props: TextProps(text: "Done"))
-            }
-        }
-    }
-}
-
-/// The Skills list under the header, composed only of plugin atoms: the
-/// error, the hint, then the selected source's skills in a lazy scroll view,
-/// one row each with its badges, switch, Use button and actions menu.
-struct SkillGalleryView: View {
-    let model: SkillsPageModel
-    var actions = SkillsPageActions()
-
-    private var prefix: String { model.prefix }
-    private var isSelecting: Bool { model.selection != nil }
-
-    var body: some View {
-        AtomStack(props: StackProps(axis: "v", spacing: 0, align: "leading")) {
-            if let error = model.error {
-                AtomText(props: TextProps(text: error, size: 12, color: "red"), common: AtomCommon(testID: "\(prefix)skills-error", fillWidth: true, padding: 8, paddingX: 12))
-            }
-            AtomText(
-                props: TextProps(text: isSelecting ? model.selectingHint : model.hint, size: 10, color: "secondary"),
-                common: AtomCommon(testID: "\(prefix)skills-provider-timing", padding: 8, paddingX: 12)
-            )
-            AtomScroll(props: ScrollProps(spacing: 10, inset: 20, lazy: true), common: AtomCommon(testID: "\(prefix)skills-list")) {
-                content
             }
         }
     }

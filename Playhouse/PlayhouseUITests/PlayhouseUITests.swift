@@ -21842,6 +21842,15 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(pair("skills-page").js.frame.width, 1040, accuracy: 1, "Each page is as wide as a window, 1040 points.")
         XCTAssertGreaterThan(pair("skills-title").js.frame.width, 100, "The title shows in full on one line.")
         XCTAssertLessThan(pair("skills-title").js.frame.height, 30)
+        for side in [(pair("skills-title").js, pair("skills-kind-picker").js, pair("skills-tab-picker").js, pair("skills-search").js, pair("new-skill-button").js),
+                     (pair("skills-title").native, pair("skills-kind-picker").native, pair("skills-tab-picker").native, pair("skills-search").native, pair("new-skill-button").native)] {
+            let (title, kinds, tabs, search, newSkill) = side
+            XCTAssertEqual(kinds.frame.midY, title.frame.midY, accuracy: 6, "The Skills | Rules | MCP picker stays in the title row.")
+            for control in [tabs, search, newSkill] {
+                XCTAssertGreaterThanOrEqual(control.frame.minY, title.frame.maxY, "The source picker, search and New Skill sit on their own row below the title.")
+                XCTAssertEqual(control.frame.midY, tabs.frame.midY, accuracy: 8, "The source picker, search and New Skill share one row.")
+            }
+        }
         XCTAssertLessThanOrEqual(pair("skills-page").js.frame.maxY, pair("skills-page").native.frame.minY, "The JavaScript page sits above the native one.")
         for side in [pair("skills-tab-picker").js, pair("skills-tab-picker").native] {
             XCTAssertTrue(isOn(side.radioButtons["Repo"]), "The page opens on its Repo skills.")
@@ -21905,6 +21914,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(js("skill-toggle-release-notes").exists, "Selecting hides a row's own controls.")
         XCTAssertFalse(js("skills-search").exists, "Selecting replaces the search with the selection's actions.")
         XCTAssertTrue(js("skills-fix-selected").exists && js("skills-delete-selected").exists && js("skills-selection-done").exists)
+        XCTAssertGreaterThanOrEqual(js("skills-selection-done").frame.minY, js("skills-title").frame.maxY, "While selecting, the actions replace search on the source row below the title.")
         XCTAssertFalse(js("skills-fix-selected").isEnabled, "Nothing selected is broken, so nothing can be fixed.")
         XCTAssertFalse(pair("skills-kind-picker").js.isEnabled, "The kind picker is locked while selecting.")
         XCTAssertTrue(native("native-skill-toggle-release-notes").exists, "The native page isn't selecting.")

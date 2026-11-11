@@ -38,23 +38,28 @@ function Header(props) {
       options: model.kinds, selected: model.kind, disabled: selecting || model.panelOpen,
       testID: prefix + "skills-kind-picker", label: "Show",
       help: "Show skills, the rule files agents follow on every turn, or the MCP servers that give them tools", onChange: on.selectKind
-    }),
-    model.kind === "skills" ? h(Segmented, {
+    })
+  ];
+  return h(Stack, { axis: "h", spacing: 12, padding: 12, paddingX: 8 }, children.map(keyed));
+}
+
+function SourceRow(props) {
+  var model = props.model, on = props.on, prefix = model.prefix;
+  var children = [
+    h(Segmented, {
       options: model.tabs.map(function (tab) { return { value: tab.value, label: tab.label }; }), selected: model.tab,
       testID: prefix + "skills-tab-picker", label: "Skill source", width: 260, onChange: on.selectTab
-    }) : null,
+    }),
     h(Spacer)
   ];
-  if (model.kind === "skills") {
-    if (selecting) {
-      children.push(h(SelectionActions, { model: model, on: on }));
-    } else {
-      children.push(h(TextField, { text: model.search, placeholder: "Search skills", testID: prefix + "skills-search", width: 200, onChange: on.search }));
-      children.push(h(Button, { style: "bordered", testID: prefix + "new-skill-button", help: "Create a skill that both Claude and Codex can use", onPress: on.newSkill },
-        h(Label, { text: "New Skill", icon: "plus" })));
-    }
+  if (model.selection != null) {
+    children.push(h(SelectionActions, { model: model, on: on }));
+  } else {
+    children.push(h(TextField, { text: model.search, placeholder: "Search skills", testID: prefix + "skills-search", width: 200, onChange: on.search }));
+    children.push(h(Button, { style: "bordered", testID: prefix + "new-skill-button", help: "Create a skill that both Claude and Codex can use", onPress: on.newSkill },
+      h(Label, { text: "New Skill", icon: "plus" })));
   }
-  return h(Stack, { axis: "h", spacing: 12, padding: 12, paddingX: 8 }, children.map(keyed));
+  return h(Stack, { axis: "h", spacing: 12, padding: 10, paddingX: 20 }, children.map(keyed));
 }
 
 function SelectionActions(props) {
@@ -176,6 +181,7 @@ function galleryContent(model, on) {
 function Gallery(props) {
   var model = props.model, on = props.on, prefix = model.prefix;
   return h(Stack, { axis: "v", spacing: 0, align: "leading" },
+    model.kind === "skills" ? h(SourceRow, { model: model, on: on }) : null,
     model.error != null ? h(Text, { size: 12, color: "red", testID: prefix + "skills-error", fillWidth: true, padding: 8, paddingX: 12 }, model.error) : null,
     h(Text, { size: 10, color: "secondary", testID: prefix + "skills-provider-timing", padding: 8, paddingX: 12 },
       model.selection != null ? model.selectingHint : model.hint),
