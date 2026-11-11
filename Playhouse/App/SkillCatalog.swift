@@ -867,9 +867,19 @@ final class SkillCatalogManager {
 
     // MARK: Bridge
 
+    /// A skill Playhouse ships in its app bundle (`PluginRuntime/skills/<name>`),
+    /// bridged into the sessions that need it and never installed anywhere.
+    static func playhouseSkillFolder(_ name: String) -> String? {
+        guard let folder = PluginRuntime.bundledResources?.appendingPathComponent("skills/\(name)", isDirectory: true),
+              FileManager.default.fileExists(atPath: folder.appendingPathComponent("SKILL.md").path) else { return nil }
+        return folder.path
+    }
+
     /// Builds the wrapper folders that let each provider see the skills it does
     /// not read natively, and returns what its launch must pass.
-    func bridge(roots: [SkillRoot]) -> SkillBridgeLaunch {
+    /// `playhouseSkills` names skills from Playhouse's own bundle that this
+    /// launch also gets, each through its own Playhouse-owned wrapper.
+    func bridge(roots: [SkillRoot], playhouseSkills: [String] = []) -> SkillBridgeLaunch {
         let catalog = catalog(roots: roots)
         var launch = SkillBridgeLaunch()
 
@@ -948,6 +958,15 @@ final class SkillCatalogManager {
                 launch.codexLinks += codex.links
             }
         }
+        let playhouseLinks = playhouseSkills.compactMap { name in Self.playhouseSkillFolder(name).map { (name, $0) } }
+        if let claude = wrapper(kind: "claude", links: playhouseLinks, skillsSubpath: ".claude/skills", salt: "playhouse") {
+            launch.claudeAddDirectories.append(claude.root)
+            launch.claudeLinks += claude.links
+        }
+        if let codex = wrapper(kind: "codex", links: playhouseLinks, skillsSubpath: nil, salt: "playhouse") {
+            ownCodexRoots.insert(codex.root)
+            launch.codexLinks += codex.links
+        }
         let codexWrappers = existingWrappers(kind: "codex")
         launch.codexExtraRoots = codexWrappers
         for other in codexWrappers where !ownCodexRoots.contains(other) {
@@ -963,11 +982,7 @@ final class SkillCatalogManager {
     /// for a namespaced private skill, so Codex, which has no slash commands,
     /// can be handed each skill as a structured input.
     func invocations(in text: String, roots: [SkillRoot]) -> [SkillInvocation] {
-        let pattern = #"(?:^|\s)/((?:[A-Za-z0-9._-]+:)?[a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)"#
-        guard let expression = try? NSRegularExpression(pattern: pattern) else { return [] }
-        let names = expression.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
-            Range($0.range(at: 1), in: text).map { String(text[$0]) }
-        }
+        let names = Self.invokedNames(in: text)
         guard !names.isEmpty else { return [] }
         let catalog = catalog(roots: roots)
         var seen = Set<String>()
@@ -977,6 +992,42 @@ final class SkillCatalogManager {
             else { return nil }
             return SkillInvocation(name: record.name, path: record.folderPath! + "/SKILL.md")
         }
+    }
+
+    /// The `/skill-name` (or `/<repository>:<name>`) tokens a message names.
+    static func invokedNames(in text: String) -> [String] {
+        let pattern = #"(?:^|\s)/((?:[A-Za-z0-9._-]+:)?[a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)"#
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return [] }
+        return expression.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
+            Range($0.range(at: 1), in: text).map { String(text[$0]) }
+        }
+    }
+
+    /// The plugins folder beside this data directory's skill bridge, which a
+    /// plugin authoring task writes to.
+    var pluginsDirectory: String {
+        PluginLibrary(dataDirectory: URL(fileURLWithPath: environment.bridgeDirectory).deletingLastPathComponent().path).directory.path
+    }
+
+    /// The Playhouse skills a task's sessions get: a plugin authoring task
+    /// gets the plugin skill.
+    static func playhouseSkills(for task: any ConversationSubject) -> [String] {
+        (task as? BoardTask)?.pluginPlacement == nil ? [] : [TaskThreadDeveloperInstructions.pluginSkillName]
+    }
+
+    /// Everything a launch for `task` passes: the gallery's bridge, its
+    /// Playhouse skills, and the skills `message` invokes. Codex has no slash
+    /// commands, so a Playhouse skill a message names is handed over directly too.
+    func bridge(for task: any ConversationSubject, message: String) -> SkillBridgeLaunch {
+        let roots = SkillRoot.roots(for: task)
+        let playhouseSkills = Self.playhouseSkills(for: task)
+        var launch = bridge(roots: roots, playhouseSkills: playhouseSkills)
+        launch.invocations = invocations(in: message, roots: roots)
+        let named = Set(Self.invokedNames(in: message))
+        for link in launch.codexLinks where playhouseSkills.contains(link.name) && named.contains(link.name) {
+            launch.invocations.append(SkillInvocation(name: link.name, path: link.source + "/SKILL.md"))
+        }
+        return launch
     }
 
     private func prepareBridgeDirectory() {

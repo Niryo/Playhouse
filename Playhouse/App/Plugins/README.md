@@ -23,6 +23,7 @@ archive exist only as native SwiftUI built from the same atoms
 | `Core/` | Foundation + JavaScriptCore only: `PluginRuntime` (the JS context), `PluginNodeTree` (ops → nodes), `AtomProps` (atom names and props), `PluginRenderCommand` (`playhouse plugin render`). Also compiled into the bridge daemon. |
 | `Atoms/` | The atoms' SwiftUI views and `AtomRegistry`, which maps each atom name to a builder that decodes the node's props. |
 | `Renderer/` | `PluginSurface` (runs one script and renders its tree) and the Plugin Catalog window. |
+| `Host/` | Installed plugins in the app: `PluginRegistry` (the plugins `plugin list` reports), `PluginSlot` (a placement's entry buttons and Add Plugin mode's "Add here" placeholder), `PluginSurfaceView` (a mounted plugin with live props and host calls), its popover, modal, sidebar and page presentations, and the mode's banner. |
 | `Playhouse/Resources/PluginRuntime/` | `prelude.js` (the React host config), `vendor/` (prebuilt react 18.3.1, react-reconciler 0.29.2, scheduler 0.23.2), `catalog/` (one page per atom, `TaskItem.js`, `AgentsInfo.js`, `TokenStats.js`, `SkillsPage.js`, `RepositoryChips.js`, `Composer.js`, `KanbanColumn.js`, `DoneArchive.js`, and their `sample-*.json` data). |
 
 `catalog/TaskItem.js` is a demo that copies `TaskItemView` atom for atom, so the
@@ -247,6 +248,67 @@ row of the table above and on its catalog page which atoms it stands for. Its vi
 orange, leaves in green, with its type name on hover. The overlay is
 debug-only; it shows where atoms are used, so plain SwiftUI left inside a
 composite shows as a gap.
+
+## Installed plugins
+
+Users add plugins through Add Plugin mode. It is turned on from Plugins ▸ Add
+Plugin Mode or `playhouse plugin mode --on`, and turned off with the banner's
+Close button or `--off`. While it is on, each placement shows an "Add here"
+placeholder, and the task sidebar shows expanded. Pressing a placeholder runs
+`plugin author`, which creates a task whose agent builds the plugin with
+Playhouse's bundled `playhouse-plugin` skill
+(`Resources/PluginRuntime/skills/playhouse-plugin/SKILL.md`). Keep that skill
+in step with this README.
+
+A plugin is a folder `<data directory>/plugins/<id>/` holding `plugin.json`
+and its script:
+
+```json
+{ "id": "word-count", "name": "Word Count", "icon": "textformat.123",
+  "placement": "composerActions", "presentation": "popover", "entry": "index.js",
+  "width": 320, "height": 200 }
+```
+
+`plugin refresh` validates every folder and makes the window reload. It checks
+the manifest and renders each plugin once with sample context; any error marks
+the plugin invalid. The Plugins menu lists every plugin with its placement;
+an invalid one also shows its first error and gets no button. A plugin is
+deleted with its Delete item in the Plugins menu, or with `plugin delete --id`.
+
+| Placement | Where | Entry | Extra context in `Playhouse.props` |
+| --- | --- | --- | --- |
+| `mainSidebar` | The board's sidebar, below Scheduled Tasks | Labeled | None: it is standalone |
+| `conversationSidebar` | The task sidebar, below Changes | Labeled | `task`, `repositories`, `contextFolders` |
+| `conversationToolbar` | The task sidebar's bottom row, beside Terminal | Icon | `task`, `repositories`, `contextFolders` |
+| `composerActions` | The composer's actions row, beside Skills (also in the standalone chat) | Icon | The above and `composer` (`{draft, selection: {location, length, text}}`) |
+
+Every plugin also gets `plugin` (`{id, name, placement, presentation}`) and
+`app` (`{appearance}`). `presentation` is one of:
+
+- `popover`: anchored to the entry button.
+- `modal`: a sheet.
+- `sidebar`: slides in from the trailing edge.
+- `page`: covers the board or the conversation.
+
+The core builds the props (`PluginContext` in `Core/PluginLibrary.swift`).
+They stay live: `Playhouse.useProps()` re-renders when they change, as when the
+user edits the draft.
+
+Installed plugins also get host calls. Each returns a Promise:
+
+| Call | What it does |
+| --- | --- |
+| `Playhouse.bridge(command, arguments)` | Full app access: any bridge command the CLI sends (`"task.list"`, `"task.rename"`, `"conversation.send"`, …) except `plugin.render`, which would recurse. It resolves with the command's result, or rejects with an Error carrying `code` and `message`. In the app it goes through `DaemonClient`; in `plugin render`, through the daemon's own `PlayhouseBridgeRuntime` |
+| `Playhouse.ui.close()` | Closes the surface |
+| `Playhouse.ui.openTask(taskID)` | Opens a task |
+| `Playhouse.ui.composer.setDraft(text)`, `.insertText(text)`, `.replaceSelection(text)`, `.focus()` | Edit the composer at the conversation placements; elsewhere they reject |
+
+`plugin render` records the `ui` calls in its `hostCalls` output. Both hosts refuse calls by the same rules, `PluginHostRules` in `Core/PluginLibrary.swift`: `plugin.render` is `invalid_argument`, and a composer call from the board's sidebar is `unavailable`.
+
+The runtime sends each host call through `__native.hostCall` and settles its
+promise with `PluginRuntime.answerHostCall`. `PluginRuntime.updateProps`
+replaces the props. Both are Foundation-only, so the core stays free of app
+types.
 
 ## Op protocol
 

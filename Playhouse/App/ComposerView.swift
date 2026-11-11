@@ -106,6 +106,8 @@ struct ComposerActions {
     var steer: () -> Void = {}
     var focusChange: (Bool) -> Void = { _ in }
     var pasteImage: (Data) -> Void = { _ in }
+    /// The editor's selected range, in UTF-16 offsets.
+    var selectionChange: (NSRange) -> Void = { _ in }
     var openSkills: () -> Void = {}
     /// goal, mode:default or mode:plan.
     var modeMenu: (String) -> Void = { _ in }
@@ -132,6 +134,9 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
     var actions = ComposerActions()
     @ViewBuilder var header: () -> Header
     @ViewBuilder var scheduleContent: () -> ScheduleContent
+    /// Installed plugins' entries (and Add Plugin mode's placeholder) beside
+    /// the Skills button; native, and absent from the catalog's copy.
+    var pluginActions: AnyView? = nil
 
     var body: some View {
         AtomPanel(
@@ -147,7 +152,8 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
                 ),
                 common: AtomCommon(testID: prefix + "message-composer-scroll-view", hint: model.editorHelp),
                 onChange: actions.change, onSubmit: actions.submit, onSteerSubmit: actions.steer,
-                onFocusChange: actions.focusChange, onPasteImage: actions.pasteImage
+                onFocusChange: actions.focusChange, onPasteImage: actions.pasteImage,
+                onSelectionChange: actions.selectionChange
             )
             toolbar
         }
@@ -156,6 +162,9 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
     private var toolbar: some View {
         AtomStack(props: StackProps(axis: "h", spacing: 12)) {
             SkillsButton(testID: prefix + "open-skills-button", action: actions.openSkills)
+            if let pluginActions {
+                pluginActions
+            }
             modeMenu
             if let start = model.startImplementing {
                 startImplementing(start)

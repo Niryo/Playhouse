@@ -158,6 +158,10 @@ struct KanbanBoardView: View {
     @State private var boardScrollerWidth = KanbanBoardView.currentScrollerWidth()
     @State private var chatTask: StandaloneChat?
     @State private var isOpeningChatSidebar = false
+    /// A modal, sidebar or page plugin opened from the board's sidebar.
+    @State private var openBoardPlugin: PluginRecord?
+    @State private var isStartingPluginTask = false
+    @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) private var appearance = "dark"
 
     /// Provider-owning operations run in the bridge daemon.
     private var remoteConversations: RemoteConversationManager {
@@ -538,6 +542,11 @@ struct KanbanBoardView: View {
         .atomPage(PageProps(isPresented: isShowingScheduledTasks)) {
             scheduledTasksPage
         }
+        .pluginPresentation(
+            $openBoardPlugin,
+            props: { PluginContext.props(plugin: $0, appearance: appearance, task: nil, composer: nil) },
+            actions: boardPluginActions
+        )
         .task(id: "\(isShowingDoneArchive)-\(archiveSearchText)") {
             guard isShowingDoneArchive else { return }
             if archiveTasks.isEmpty && archiveHasMore { loadNextArchivePage() }
@@ -754,6 +763,14 @@ struct KanbanBoardView: View {
                 }
             }
 
+            PluginSlot(
+                placement: .mainSidebar,
+                props: { PluginContext.props(plugin: $0, appearance: appearance, task: nil, composer: nil) },
+                actions: boardPluginActions,
+                open: { openBoardPlugin = $0 },
+                add: startPluginTask
+            )
+
             Spacer(minLength: 0)
 
             AgentsInfoView(runningProviders: runningTaskCountByProvider)
@@ -938,6 +955,33 @@ struct KanbanBoardView: View {
         withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = visible }
     }
 
+    private var boardPluginActions: PluginUIActions {
+        PluginUIActions(openTask: { id in
+            if let task = try? BoardTaskManager(modelContext: modelContext).taskModel(id) {
+                openBoardPlugin = nil
+                isSelectedTaskNew = false
+                selectedTask = task
+            }
+        })
+    }
+
+    /// An Add Plugin mode placeholder was pressed: the new task's agent builds
+    /// a plugin for that placement, and the mode ends.
+    private func startPluginTask(_ placement: PluginPlacement) {
+        guard !isStartingPluginTask else { return }
+        isStartingPluginTask = true
+        Task { @MainActor in
+            defer { isStartingPluginTask = false }
+            do {
+                let started = try await PluginRegistry(client: conversationRuntime.client).author(placement)
+                PluginRegistry.setAddMode(false)
+                openTask(started.taskID, sending: started.prompt)
+            } catch {
+                saveError = error.localizedDescription
+            }
+        }
+    }
+
     /// Shows a task the daemon just created, such as one fixing skills, and
     /// has its conversation send `prompt` once it opens.
     private func openTask(_ id: UUID, sending prompt: String) {
@@ -949,7 +993,8 @@ struct KanbanBoardView: View {
                 // The user moved on while the store caught up; leave their choice alone.
                 guard selectedTask?.id == origin else { return }
                 if let task = try? manager.taskModel(id) {
-                    skillFixPrompts[id] = prompt
+                    // A plugin's openTask shows the task without sending anything.
+                    skillFixPrompts[id] = prompt.isEmpty ? nil : prompt
                     setChatSidebarVisible(false)
                     isSelectedTaskNew = false
                     conflictResolutionTaskID = nil

@@ -16312,6 +16312,307 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         # The editor raises no onPress, so pressing it is refused.
         self.assert_failure(self.call_cli("plugin", "render", "--page", "Composer", "--event", "message-composer-scroll-view:onPress", expected_status=2)[0], "invalid_argument")
 
+    # Installed plugins and Add Plugin mode
+
+    def plugins_folder(self):
+        return self.data_directory / "plugins"
+
+    def write_installed_plugin(self, plugin_id, source, placement="composerActions", presentation="popover", manifest=None):
+        """Writes a plugin folder as an authoring agent would: plugin.json and index.js."""
+        folder = self.plugins_folder() / plugin_id
+        folder.mkdir(parents=True, exist_ok=True)
+        fields = {"id": plugin_id, "name": plugin_id.replace("-", " ").title(), "icon": "puzzlepiece.extension",
+                  "placement": placement, "presentation": presentation}
+        fields.update(manifest or {})
+        (folder / "plugin.json").write_text(json.dumps(fields), encoding="utf-8")
+        if source is not None:
+            (folder / "index.js").write_text(source, encoding="utf-8")
+        return folder
+
+    PLUGIN_CONTEXT_SOURCE = """
+function Context() {
+  var props = Playhouse.useProps();
+  var state = React.useState("idle");
+  function report(promise, label) {
+    promise.then(function () { state[1](label + ": ok"); }, function (error) { state[1](label + ": " + error.code); });
+  }
+  var task = props.task;
+  var composer = props.composer;
+  return h(Stack, { spacing: 6 },
+    h(Text, { testID: "plugin-placement" }, props.plugin.placement),
+    h(Text, { testID: "plugin-task" }, task ? task.title : "no task"),
+    h(Text, { testID: "plugin-repositories" }, props.repositories ? props.repositories.map(function (r) { return r.repositoryPath.split("/").pop(); }).join(",") : "no repositories"),
+    h(Text, { testID: "plugin-draft" }, composer ? composer.draft : "no composer"),
+    h(Text, { testID: "plugin-selection" }, composer ? composer.selection.text : "no selection"),
+    h(Text, { testID: "plugin-status" }, state[0]),
+    h(Button, { testID: "plugin-rename", onPress: function () {
+      Playhouse.bridge("task.rename", { taskID: task.id, title: "Renamed by plugin" })
+        .then(function (result) { state[1]("renamed: " + result.title); });
+    } }, h(Text, null, "Rename")),
+    h(Button, { testID: "plugin-missing", onPress: function () {
+      Playhouse.bridge("task.get", { taskID: "00000000-0000-4000-8000-00000000dead" })
+        .then(function () { state[1]("found"); }, function (error) { state[1]("error: " + error.code); });
+    } }, h(Text, null, "Missing")),
+    h(Button, { testID: "plugin-upper", onPress: function () {
+      Playhouse.ui.composer.replaceSelection(composer.selection.text.toUpperCase());
+    } }, h(Text, null, "Uppercase")),
+    h(Button, { testID: "plugin-count", onPress: function () {
+      Playhouse.bridge("task.list", {}).then(function (result) { state[1]("tasks: " + result.tasks.length); }, function (error) { state[1]("count: " + error.code + " " + error.message); });
+    } }, h(Text, null, "Count")),
+    h(Button, { testID: "plugin-set-draft", onPress: function () { report(Playhouse.ui.composer.setDraft("fresh draft"), "setDraft"); } }, h(Text, null, "Set draft")),
+    h(Button, { testID: "plugin-insert", onPress: function () { report(Playhouse.ui.composer.insertText("!"), "insert"); } }, h(Text, null, "Insert")),
+    h(Button, { testID: "plugin-focus", onPress: function () { report(Playhouse.ui.composer.focus(), "focus"); } }, h(Text, null, "Focus")),
+    h(Button, { testID: "plugin-recursive", onPress: function () { report(Playhouse.bridge("plugin.render", { page: "Text" }), "render"); } }, h(Text, null, "Render")),
+    h(Button, { testID: "plugin-open", onPress: function () {
+      Playhouse.bridge("task.list", {}).then(function (result) { return Playhouse.ui.openTask(result.tasks[0].id); });
+    } }, h(Text, null, "Open")),
+    h(Button, { testID: "plugin-close", onPress: function () { Playhouse.ui.close(); } }, h(Text, null, "Close")));
+}
+Playhouse.render(h(Context));
+"""
+
+    # case-contract: test_plugin_add_mode_toggles_and_shows_placeholders | Add Plugin mode is off by default; the Plugins menu's Add Plugin Mode item and `plugin mode --on` turn it on, `plugin mode` reports the saved state to a fresh CLI process, `--off` turns it off, and any other option is refused as invalid_argument. While it is on, a bar across the top of the window explains the mode and its Close button turns it off; the board's sidebar shows a labeled Add here button below Scheduled Tasks; an open task shows its sidebar expanded even when the sidebar was collapsed, with a labeled Add here button in the sidebar, an Add here icon beside the Terminal button and an Add here icon beside the composer's Skills button; and the standalone chat shows only the composer's Add here icon. Turning the mode off from the CLI removes every placeholder live and returns the sidebar to its saved collapsed state.
+    def test_plugin_add_mode_toggles_and_shows_placeholders(self):
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "mode")[0]), {"enabled": False}, "Add Plugin mode starts off.")
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "mode", "--on")[0]), {"enabled": True})
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "mode")[0]), {"enabled": True},
+                         "A fresh CLI process reads the saved mode.")
+        writes, _ = self.call_cli("plugin", "mode", "--off")
+        self.assertEqual(self.assert_success(writes), {"enabled": False})
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "mode")[0]), {"enabled": False})
+        self.assert_failure(self.call_cli("plugin", "mode", "--sideways", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("plugin", "mode", "--on", "--off", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "mode")[0]), {"enabled": False}, "A refused option changes nothing.")
+
+    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Pressing an Add here placeholder, or `plugin author --placement <placement>`, creates a Backlog task titled New plugin: <placement title> with no repository, the plugins folder in the data directory as its context folder, the placement saved on the task, and the prompt `/playhouse-plugin Create a new plugin in the <title> placement (<id>).`; the window turns Add Plugin mode off, opens that task, and sends the prompt. An unknown placement is refused as invalid_argument. The task's turns carry plugin authoring instructions naming the placement, its context, the plugins folder and the plugin refresh and render commands, and Playhouse's bundled playhouse-plugin skill reaches the agent without being installed anywhere: Claude Code gets it through a Playhouse-owned --add-dir wrapper and loads it, and Codex gets it among the app-server's extra skill roots with the /playhouse-plugin message sent as a structured skill input naming its SKILL.md. An ordinary task's turn gets neither the instructions nor the skill.
+    def test_plugin_authoring_task_starts_with_placement_and_skill(self):
+        self.assert_failure(self.call_cli("plugin", "author", "--placement", "titleBar", expected_status=2)[0], "invalid_argument")
+        self.assertFalse(self.plugins_folder().exists(), "A refused placement creates nothing.")
+        expected_titles = {
+            "mainSidebar": "Main sidebar", "conversationSidebar": "Conversation sidebar",
+            "conversationToolbar": "Conversation sidebar toolbar", "composerActions": "Chat input actions",
+        }
+        started = {}
+        for placement, title in expected_titles.items():
+            provider = "codex" if placement == "conversationToolbar" else "claude"
+            result = self.assert_success(self.call_cli("plugin", "author", "--placement", placement, "--provider", provider)[0])
+            task, prompt = result["task"], result["prompt"]
+            self.assertEqual(prompt, f"/playhouse-plugin Create a new plugin in the {title} placement ({placement}).")
+            self.assertEqual(task["title"], f"New plugin: {title}")
+            self.assertEqual(task["status"], "Backlog")
+            self.assertEqual(task["pluginPlacement"], placement)
+            self.assertEqual(task["repositoryWorktrees"], [], "A plugin task needs no repository.")
+            self.assertEqual([os.path.realpath(path) for path in task["contextFolders"]], [os.path.realpath(self.plugins_folder())])
+            self.assertEqual(task["conversationProvider"], provider)
+            stored = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+            self.assertEqual(stored["savedPrompt"], prompt, "A fresh CLI process reads the task's prompt.")
+            self.assertEqual(stored["pluginPlacement"], placement)
+            started[placement] = (task, prompt)
+        self.assertTrue(self.plugins_folder().is_dir(), "Authoring creates the plugins folder.")
+
+        # Claude Code: the instructions ride --append-system-prompt and the skill a Playhouse wrapper.
+        environment = self.install_claude_fixture("claude-fixture-plugin-author")
+        history_path = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".history")
+        task, prompt = started["composerActions"]
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", prompt, extra_environment=environment)[0])
+        turn = next(turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText") == prompt)
+        arguments = turn["arguments"]
+        instructions = arguments[arguments.index("--append-system-prompt") + 1]
+        self.assertIn("Plugin authoring", instructions)
+        self.assertIn("Chat input actions placement (`composerActions`)", instructions)
+        self.assertIn("`composer` ({draft, selection", instructions, "The instructions describe the placement's context.")
+        self.assertTrue(str(self.plugins_folder()) in instructions or os.path.realpath(self.plugins_folder()) in instructions)
+        self.assertIn("plugin refresh", instructions)
+        self.assertIn("plugin render --plugin", instructions)
+        directories = [arguments[index + 1] for index, value in enumerate(arguments) if value == "--add-dir"]
+        wrappers = [Path(path) for path in directories if (Path(path) / ".claude" / "skills" / "playhouse-plugin").exists()]
+        self.assertEqual(len(wrappers), 1, f"One wrapper carries the plugin skill: {directories}")
+        self.assertSamePath(wrappers[0].parent, self.data_directory / "skill-bridge" / "claude")
+        skill = wrappers[0] / ".claude" / "skills" / "playhouse-plugin" / "SKILL.md"
+        self.assertTrue(os.path.realpath(skill).endswith("Contents/Resources/PluginRuntime/skills/playhouse-plugin/SKILL.md"),
+                        "The wrapper links to the skill in the app bundle.")
+        self.assertIn("name: playhouse-plugin", skill.read_text(encoding="utf-8"))
+        self.assertIn("playhouse-plugin", turn["skills"], "Claude Code loads the bundled skill.")
+        self.assertFalse((self.skills_home / ".claude" / "skills" / "playhouse-plugin").exists(), "Nothing is installed in the user's skills.")
+        self.assertFalse((self.plugins_folder() / ".claude").exists(), "Nothing is written into the plugins folder.")
+
+        # A follow-up turn of the plugin task keeps both.
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", "Make it blue.", extra_environment=environment)[0])
+        resumed = next(turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText") == "Make it blue.")
+        self.assertTrue(resumed["resumed"], "The follow-up resumes the plugin task's session.")
+        self.assertIn("Plugin authoring", resumed["arguments"][resumed["arguments"].index("--append-system-prompt") + 1])
+        resumed_directories = [resumed["arguments"][index + 1] for index, value in enumerate(resumed["arguments"]) if value == "--add-dir"]
+        self.assertIn(os.path.realpath(wrappers[0]), [os.path.realpath(path) for path in resumed_directories], "The resumed turn keeps the skill wrapper.")
+        bridge = self.assert_success(self.call_cli("skills", "bridge", "--task", task["id"])[0])
+        self.assertIn(os.path.realpath(wrappers[0]), [os.path.realpath(path) for path in bridge["claudeAddDirectories"]],
+                      "skills bridge reports the wrapper the launch passes.")
+
+        # An ordinary Claude task gets neither the instructions nor the skill.
+        ordinary = self.create_task("Ordinary task", roots=[], provider="claude")
+        self.assert_success(self.call_cli("conversation", "send", ordinary["id"], "--message", "Hello.", extra_environment=environment)[0])
+        plain = next(turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText") == "Hello.")
+        self.assertNotIn("Plugin authoring", plain["arguments"][plain["arguments"].index("--append-system-prompt") + 1])
+        self.assertNotIn("playhouse-plugin", plain["skills"])
+
+        # Codex: the instructions ride the thread and the skill an extra root plus a structured input.
+        task, prompt = started["conversationToolbar"]
+        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-plugin-author", message=prompt)
+        history = json.loads((self.data_directory / "codex-fixture-plugin-author.history").read_text(encoding="utf-8"))
+        self.assertIn("Conversation sidebar toolbar placement (`conversationToolbar`)", history["threadStartDeveloperInstructions"])
+        self.assertIn("plugin refresh", history["threadStartDeveloperInstructions"])
+        roots = [Path(root) for root in history["skillExtraRoots"] if (Path(root) / "playhouse-plugin" / "SKILL.md").exists()]
+        self.assertEqual(len(roots), 1, f"One extra root carries the plugin skill: {history['skillExtraRoots']}")
+        self.assertSamePath(roots[0].parent, self.data_directory / "skill-bridge" / "codex")
+        first = next(turn for turn in history["turns"] if turn["userMessage"] == prompt)
+        self.assertEqual([entry["name"] for entry in first["skillInputs"]], ["playhouse-plugin"])
+        self.assertTrue(first["skillInputs"][0]["path"].endswith("skills/playhouse-plugin/SKILL.md"))
+        disabled = {os.path.realpath(entry["path"]) for entry in (history.get("threadStartConfig") or {}).get("skills", {}).get("config", []) if entry["enabled"] is False}
+        self.assertNotIn(os.path.realpath(roots[0] / "playhouse-plugin" / "SKILL.md"), disabled, "The plugin task's own skill stays on.")
+        self.assertFalse((self.skills_codex_home / "config.toml").exists(), "Codex's config.toml is not written.")
+
+    # case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports none at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. After a refresh the window shows the valid plugin's button at its placement and the Plugins menu lists every plugin with its placement, an invalid one with its first error. Deleting a plugin from the Plugins menu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
+    def test_plugin_install_refresh_and_delete(self):
+        empty = self.assert_success(self.call_cli("plugin", "list")[0])
+        self.assertEqual(empty["plugins"], [])
+        self.assertSamePath(empty["directory"], self.plugins_folder())
+        self.assertEqual(empty["revision"], 0)
+
+        hello = 'Playhouse.render(h(Text, { testID: "hello" }, "Hello from a plugin"));'
+        self.write_installed_plugin("hello-board", hello, placement="mainSidebar", presentation="page", manifest={"name": "Hello Board", "icon": "hand.wave"})
+        self.write_installed_plugin("bad-placement", hello, placement="titleBar")
+        self.write_installed_plugin("bad-presentation", hello, presentation="toast")
+        self.write_installed_plugin("wrong-id", hello, manifest={"id": "other-id"})
+        self.write_installed_plugin("no-script", None)
+        (self.plugins_folder() / "no-manifest").mkdir()
+        (self.plugins_folder() / "no-manifest" / "index.js").write_text(hello, encoding="utf-8")
+        self.write_installed_plugin("throws", 'throw new Error("Plugin exploded");')
+        self.write_installed_plugin("unknown-atom", 'Playhouse.render(h("Blink", null));')
+        (self.plugins_folder() / "notes.txt").write_text("Not a plugin.\n", encoding="utf-8")
+
+        refreshed = self.assert_success(self.call_cli("plugin", "refresh")[0])
+        self.assertEqual(refreshed["revision"], 1, "A refresh tells the window to reload.")
+        plugins = {plugin["id"]: plugin for plugin in refreshed["plugins"]}
+        self.assertEqual(sorted(plugins), ["bad-placement", "bad-presentation", "hello-board", "no-manifest", "no-script", "throws", "unknown-atom", "wrong-id"],
+                         "Every plugin folder is listed, and a stray file is not.")
+        board = plugins["hello-board"]
+        self.assertTrue(board["valid"])
+        self.assertEqual(board["errors"], [])
+        self.assertEqual((board["name"], board["icon"], board["placement"], board["presentation"]), ("Hello Board", "hand.wave", "mainSidebar", "page"))
+        self.assertSamePath(board["entryPath"], self.plugins_folder() / "hello-board" / "index.js")
+        expected_errors = {
+            "bad-placement": "Unknown placement \"titleBar\"",
+            "bad-presentation": "Unknown presentation \"toast\"",
+            "wrong-id": "does not match its folder",
+            "no-script": "index.js is missing",
+            "no-manifest": "plugin.json is missing",
+            "throws": "Plugin exploded",
+            "unknown-atom": "Unknown atom <Blink>",
+        }
+        for plugin_id, fragment in expected_errors.items():
+            self.assertFalse(plugins[plugin_id]["valid"], f"{plugin_id} is invalid.")
+            self.assertTrue(any(fragment in error for error in plugins[plugin_id]["errors"]), f"{plugin_id}: {plugins[plugin_id]['errors']}")
+        self.assertEqual(plugins["throws"]["icon"], "puzzlepiece.extension", "A plugin without an icon gets the default.")
+
+        listed = self.assert_success(self.call_cli("plugin", "list")[0])
+        self.assertEqual(listed["plugins"], refreshed["plugins"], "A fresh CLI process reports the same plugins.")
+        self.assertEqual(listed["revision"], 1, "Listing does not bump the revision.")
+
+        deleted = self.assert_success(self.call_cli("plugin", "delete", "--id", "throws")[0])
+        self.assertEqual(deleted, {"deleted": "throws", "revision": 2})
+        self.assertFalse((self.plugins_folder() / "throws").exists(), "Deleting removes the plugin's folder.")
+        self.assertTrue((self.plugins_folder() / "hello-board" / "index.js").exists(), "Other plugins stay.")
+        self.assertNotIn("throws", [plugin["id"] for plugin in self.assert_success(self.call_cli("plugin", "list")[0])["plugins"]])
+        self.assert_failure(self.call_cli("plugin", "delete", "--id", "throws", expected_status=3)[0], "not_found")
+        self.assert_failure(self.call_cli("plugin", "delete", "--id", "../plugins", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("plugin", "delete", expected_status=2)[0], "invalid_argument")
+        self.assertTrue(self.plugins_folder().is_dir(), "A refused delete leaves the plugins folder.")
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "list")[0])["revision"], 2, "A refused delete does not bump the revision.")
+
+    # case-contract: test_plugin_surfaces_receive_context_and_host_access | An installed plugin receives its placement's context in Playhouse.props: the plugin and the appearance everywhere, the task with its repositories and context folders in the conversation placements, and the composer's draft and selected text in the composer placement, while the board's sidebar gets no task. `plugin render --plugin <id> --task <id>` renders it headlessly with that real context. Playhouse.bridge runs any bridge command but plugin render against the real store (a rename is seen by a fresh CLI process) and rejects a failing one with its code; Playhouse.ui close, openTask and the composer's setDraft, insertText, replaceSelection and focus are recorded headlessly; a composer call from the board's sidebar and a plugin render call are refused the same way in both hosts; and --task without --plugin or an unknown plugin is refused. In the window a page plugin from the board's sidebar covers the board, reads the real board, and its openTask opens that task without sending anything; a composer popover plugin opens anchored to its button showing the draft and the selected text, and its replaceSelection replaces the selected text in the composer; a sidebar plugin from the conversation sidebar slides in at the trailing edge showing the task's title and repository, inserts text after the selection, replaces the draft, renames the task, and closes with its close button; and a modal plugin beside the Terminal button opens as a sheet with the task's context and closes itself with Playhouse.ui.close.
+    def test_plugin_surfaces_receive_context_and_host_access(self):
+        self.write_installed_plugin("context-composer", self.PLUGIN_CONTEXT_SOURCE, placement="composerActions")
+        self.write_installed_plugin("context-board", self.PLUGIN_CONTEXT_SOURCE, placement="mainSidebar", presentation="page")
+        self.write_installed_plugin("props-dump", "Playhouse.render(h(Text, { testID: 'props' }, JSON.stringify(Playhouse.props)));", placement="conversationSidebar", presentation="sidebar")
+        self.write_installed_plugin("context-toolbar", self.PLUGIN_CONTEXT_SOURCE, placement="conversationToolbar", presentation="modal")
+        self.assertTrue(all(plugin["valid"] for plugin in self.assert_success(self.call_cli("plugin", "refresh")[0])["plugins"]))
+        task = self.create_repo_task("Plugin context task", [self.primary])
+
+        composer = json.dumps({"composer": {"draft": "make this loud", "selection": {"location": 10, "length": 4, "text": "loud"}}})
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--plugin", "context-composer", "--task", task["id"], "--props", composer)[0])
+        self.assertEqual(rendered["errors"], [])
+        tree = rendered["tree"]
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "plugin-placement")), "composerActions")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "plugin-task")), "Plugin context task")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "plugin-repositories")), self.primary.name)
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "plugin-draft")), "make this loud")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "plugin-selection")), "loud")
+        self.assertEqual(rendered["hostCalls"], [])
+
+        dumped = self.assert_success(self.call_cli("plugin", "render", "--plugin", "props-dump", "--task", task["id"])[0])
+        props = json.loads(self.plugin_text(self.plugin_node(dumped["tree"], "props")))
+        self.assertEqual(props["plugin"], {"id": "props-dump", "name": "Props Dump", "placement": "conversationSidebar", "presentation": "sidebar"})
+        self.assertEqual(props["app"], {"appearance": "dark"})
+        self.assertEqual(props["task"], {"id": task["id"], "title": "Plugin context task", "status": "Backlog", "provider": task["conversationProvider"], "isStandaloneChat": False})
+        self.assertEqual(props["contextFolders"], [])
+        self.assertEqual([os.path.realpath(repository["repositoryPath"]) for repository in props["repositories"]], [os.path.realpath(self.primary)])
+        self.assertNotIn("composer", props, "Only the composer placement gets the draft.")
+
+        board = self.assert_success(self.call_cli("plugin", "render", "--plugin", "context-board", "--task", task["id"])[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(board["tree"], "plugin-task")), "no task", "The board's sidebar is standalone.")
+        self.assertEqual(self.plugin_text(self.plugin_node(board["tree"], "plugin-draft")), "no composer")
+        counted = self.assert_success(self.call_cli("plugin", "render", "--plugin", "context-board", "--event", "plugin-count:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(counted["tree"], "plugin-status")), "tasks: 1", "A board plugin reads the real board.")
+
+        renamed = self.assert_success(self.call_cli("plugin", "render", "--plugin", "context-composer", "--task", task["id"], "--event", "plugin-rename:onPress")[0])
+        self.assertEqual(renamed["errors"], [])
+        self.assertEqual(self.plugin_text(self.plugin_node(renamed["tree"], "plugin-status")), "renamed: Renamed by plugin")
+        self.assertEqual([(call["kind"], call["name"], call["ok"]) for call in renamed["hostCalls"]], [("bridge", "task.rename", True)])
+        self.assertEqual(renamed["hostCalls"][0]["arguments"], {"taskID": task["id"], "title": "Renamed by plugin"})
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["title"], "Renamed by plugin",
+                         "A fresh CLI process sees the plugin's rename.")
+
+        missing = self.assert_success(self.call_cli("plugin", "render", "--plugin", "context-composer", "--task", task["id"], "--event", "plugin-missing:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(missing["tree"], "plugin-status")), "error: not_found")
+        self.assertEqual(missing["hostCalls"][0]["error"]["code"], "not_found")
+        self.assertFalse(missing["hostCalls"][0]["ok"])
+
+        upper = self.assert_success(self.call_cli("plugin", "render", "--plugin", "context-composer", "--task", task["id"], "--props", composer, "--event", "plugin-upper:onPress")[0])
+        self.assertEqual(upper["hostCalls"], [{"kind": "ui", "name": "composer.replaceSelection", "arguments": {"text": "LOUD"}, "ok": True, "result": None}])
+
+        def ui_call(plugin_id, event, *options):
+            rendered = self.assert_success(self.call_cli("plugin", "render", "--plugin", plugin_id, *options, "--event", f"{event}:onPress")[0])
+            self.assertEqual(rendered["errors"], [])
+            return rendered
+        recorded = {
+            "plugin-set-draft": ("composer.setDraft", {"text": "fresh draft"}, "setDraft: ok"),
+            "plugin-insert": ("composer.insertText", {"text": "!"}, "insert: ok"),
+            "plugin-focus": ("composer.focus", {}, "focus: ok"),
+        }
+        for event, (name, arguments, status) in recorded.items():
+            rendered = ui_call("context-composer", event, "--task", task["id"])
+            self.assertEqual(rendered["hostCalls"], [{"kind": "ui", "name": name, "arguments": arguments, "ok": True, "result": None}])
+            self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "plugin-status")), status)
+        closed = ui_call("context-toolbar", "plugin-close", "--task", task["id"])
+        self.assertEqual(closed["hostCalls"], [{"kind": "ui", "name": "close", "arguments": {}, "ok": True, "result": None}])
+        toolbar = self.assert_success(self.call_cli("plugin", "render", "--plugin", "context-toolbar", "--task", task["id"])[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(toolbar["tree"], "plugin-task")), "Renamed by plugin", "The toolbar placement gets the task.")
+        self.assertEqual(self.plugin_text(self.plugin_node(toolbar["tree"], "plugin-draft")), "no composer")
+
+        opened = ui_call("context-board", "plugin-open")
+        self.assertEqual([(call["kind"], call["name"], call["ok"]) for call in opened["hostCalls"]], [("bridge", "task.list", True), ("ui", "openTask", True)])
+        self.assertEqual(opened["hostCalls"][1]["arguments"], {"taskID": task["id"]})
+        # The board's sidebar has no composer, and no plugin renders plugins: refused as the window refuses them.
+        unavailable = ui_call("context-board", "plugin-focus")
+        self.assertEqual(self.plugin_text(self.plugin_node(unavailable["tree"], "plugin-status")), "focus: unavailable")
+        self.assertEqual(unavailable["hostCalls"][0]["error"]["code"], "unavailable")
+        recursive = ui_call("context-board", "plugin-recursive")
+        self.assertEqual(self.plugin_text(self.plugin_node(recursive["tree"], "plugin-status")), "render: invalid_argument")
+        self.assertEqual([(call["name"], call["ok"]) for call in recursive["hostCalls"]], [("plugin.render", False)])
+
+        self.assert_failure(self.call_cli("plugin", "render", "--plugin", "no-such-plugin", expected_status=3)[0], "not_found")
+        self.assert_failure(self.call_cli("plugin", "render", "--file", self.plugins_folder() / "props-dump" / "index.js", "--task", task["id"], expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("plugin", "render", "--plugin", "props-dump", "--page", "Text", expected_status=2)[0], "invalid_argument")
+
     # case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover, Modal, Page, SidePanel), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
     def test_debug_highlight_native_atoms_outlines_atoms(self):
         rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "Card")[0])

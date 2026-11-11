@@ -140,6 +140,8 @@ private final class ComposerDraftModel {
     var text = ""
     /// Bumped to put the keyboard back in the composer, such as after the Skills page closes.
     var focusRequest = 0
+    /// The editor's selected range, in UTF-16 offsets, for the composer's plugins.
+    var selection = NSRange(location: 0, length: 0)
     /// The composer text that needs no save: the draft last saved or restored, or the empty
     /// composer a send, steer, or queue left behind.
     @ObservationIgnored var settledText = ""
@@ -1058,6 +1060,15 @@ struct TaskConversationView: View {
     @State private var changeInventory = WorkspaceChangeInventory(unviewed: [], viewed: [], mergingRepositories: [])
     @State private var isViewedSectionExpanded = false
     @AppStorage(WorkspaceSettings.taskSidebarCollapsedKey, store: WorkspaceSettings.preferencesStore) private var isTaskSidebarCollapsed = false
+    /// Add Plugin mode shows the sidebar expanded, so its placements are visible, without
+    /// changing the saved collapsed preference it returns to.
+    @AppStorage(WorkspaceSettings.pluginAddModeKey, store: WorkspaceSettings.preferencesStore) private var isPluginAddModeOn = false
+    @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) private var pluginAppearance = "dark"
+    @Environment(PluginRegistry.self) private var pluginRegistry
+    /// A modal, sidebar or page plugin opened from this conversation's placements.
+    @State private var openConversationPlugin: PluginRecord?
+    @State private var isStartingPluginTask = false
+    private var isTaskSidebarShownCollapsed: Bool { isTaskSidebarCollapsed && !isPluginAddModeOn }
     @AppStorage(WorkspaceSettings.workspaceChangesSectionCollapsedKey, store: WorkspaceSettings.preferencesStore) private var isChangesSectionCollapsed = false
     /// The loading placeholder is for the first read only; later watcher refreshes keep the
     /// current list (or empty state) on screen instead of flashing the spinner.
@@ -1781,6 +1792,7 @@ struct TaskConversationView: View {
             }
         }
         .background(WorkspaceTheme.windowBackground)
+        .pluginPresentation($openConversationPlugin, props: pluginProps, actions: pluginActions)
         .onChange(of: task.id, initial: true) {
             runtimeSlice.observe(conversationRuntime, taskID: task.id.uuidString) { [task] in
                 Set([task.codexThreadID, task.claudeSessionID].compactMap { $0 })
@@ -2058,7 +2070,7 @@ struct TaskConversationView: View {
 
     /// The width the terminal panel can float over: the conversation, beside the sidebar and its divider.
     private func conversationWidth(in containerWidth: CGFloat) -> CGFloat {
-        containerWidth - (isTaskSidebarCollapsed ? Self.collapsedSidebarWidth : Self.expandedSidebarWidth) - 1
+        containerWidth - (isTaskSidebarShownCollapsed ? Self.collapsedSidebarWidth : Self.expandedSidebarWidth) - 1
     }
 
     /// Why this task can't open a terminal yet, shared with the CLI's `task terminal`.
@@ -2070,6 +2082,7 @@ struct TaskConversationView: View {
     private var sidebarCommandRow: some View {
         HStack(spacing: 4) {
             Spacer(minLength: 0)
+            PluginSlot(placement: .conversationToolbar, props: pluginProps, actions: pluginActions, open: { openConversationPlugin = $0 }, add: startPluginTask)
             Button {
                 setTerminalPresented(!isTerminalPresented)
             } label: {
@@ -2101,7 +2114,7 @@ struct TaskConversationView: View {
 
     @ViewBuilder
     private var taskSidebar: some View {
-        if isTaskSidebarCollapsed {
+        if isTaskSidebarShownCollapsed {
             collapsedTaskSidebar
         } else {
             expandedTaskSidebar
@@ -2187,6 +2200,10 @@ struct TaskConversationView: View {
             }
 
             Spacer(minLength: 0)
+
+            PluginSlot(placement: .conversationSidebar, props: pluginProps, actions: pluginActions, open: { openConversationPlugin = $0 }, add: startPluginTask)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
 
             Rectangle()
                 .fill(Color.primary.opacity(0.07))
@@ -5198,7 +5215,9 @@ struct TaskConversationView: View {
                 )
             }
         }
-            }, scheduleContent: { scheduleHint })
+            }, scheduleContent: { scheduleHint }, pluginActions: isReadOnly ? nil : AnyView(
+                PluginSlot(placement: .composerActions, props: pluginProps, actions: pluginActions, open: { openConversationPlugin = $0 }, add: startPluginTask)
+            ))
                 .onChange(of: draft) { _, newValue in
                     if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {
                         activatePlanMode()
@@ -5300,6 +5319,65 @@ struct TaskConversationView: View {
         )
     }
 
+    /// The context this conversation's placements hand a plugin. Read it only inside
+    /// a `PluginPropsScope`: the composer placement reads the draft.
+    private func pluginProps(_ plugin: PluginRecord) -> [String: PluginValue] {
+        let selection = composerDraft.selection
+        return PluginContext.props(
+            plugin: plugin, appearance: pluginAppearance, task: PluginTaskContext(task: task),
+            composer: PluginComposerContext(draft: composerDraft.text, selectionLocation: selection.location, selectionLength: selection.length)
+        )
+    }
+
+    private var pluginActions: PluginUIActions {
+        PluginUIActions(
+            close: { openConversationPlugin = nil },
+            openTask: { id in
+                openConversationPlugin = nil
+                onOpenTask(id, "")
+            },
+            composer: isReadOnly ? nil : { edit in applyPluginComposerEdit(edit) }
+        )
+    }
+
+    /// A plugin's `Playhouse.ui.composer` call, applied to the draft and its selection.
+    private func applyPluginComposerEdit(_ edit: PluginComposerEdit) {
+        let text = draft as NSString
+        let location = min(max(0, composerDraft.selection.location), text.length)
+        let length = min(max(0, composerDraft.selection.length), text.length - location)
+        switch edit {
+        case .setDraft(let value):
+            draft = value
+            composerDraft.selection = NSRange(location: (value as NSString).length, length: 0)
+        case .insertText(let value):
+            draft = text.replacingCharacters(in: NSRange(location: location + length, length: 0), with: value)
+            composerDraft.selection = NSRange(location: location + length + (value as NSString).length, length: 0)
+        case .replaceSelection(let value):
+            draft = text.replacingCharacters(in: NSRange(location: location, length: length), with: value)
+            composerDraft.selection = NSRange(location: location, length: (value as NSString).length)
+        case .focus:
+            break
+        }
+        composerDraft.focusRequest += 1
+    }
+
+    /// An Add Plugin mode placeholder was pressed: the new task's agent builds a
+    /// plugin for that placement, and the mode ends.
+    private func startPluginTask(_ placement: PluginPlacement) {
+        guard !isStartingPluginTask else { return }
+        isStartingPluginTask = true
+        Task { @MainActor in
+            defer { isStartingPluginTask = false }
+            do {
+                let started = try await pluginRegistry.author(placement)
+                PluginRegistry.setAddMode(false)
+                onOpenTask(started.taskID, started.prompt)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private var composerActions: ComposerActions {
         ComposerActions(
             change: { draft = $0 },
@@ -5320,6 +5398,7 @@ struct TaskConversationView: View {
                 do { try addImageData(image) }
                 catch { errorMessage = error.localizedDescription }
             },
+            selectionChange: { composerDraft.selection = $0 },
             openSkills: {
                 skillsPresentation += 1
                 isShowingSkills = true

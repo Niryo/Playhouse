@@ -8,6 +8,8 @@
 //   __native.log(level, message)
 //   __native.setTimer(id, ms)      Swift calls __playhouseFireTimer(id) when due
 //   __native.clearTimer(id)
+//   __native.hostCall(id, kind, name, arguments)
+//                                  Swift answers with __playhouseAnswerHostCall(id, ok, value)
 (function (global) {
   "use strict";
 
@@ -206,9 +208,75 @@
       return true;
     };
 
+    // Host calls: each returns a promise the host settles with __playhouseAnswerHostCall.
+    var hostCalls = {};
+    var nextHostCall = 1;
+    function hostCall(kind, name, args) {
+      return new Promise(function (resolve, reject) {
+        var id = nextHostCall++;
+        hostCalls[id] = { resolve: resolve, reject: reject };
+        __native.hostCall(id, kind, name, args === undefined ? null : args);
+      });
+    }
+    global.__playhouseAnswerHostCall = function (id, ok, value) {
+      var call = hostCalls[id];
+      if (!call) return;
+      delete hostCalls[id];
+      reconciler.batchedUpdates(function () {
+        run(function () {
+          if (ok) {
+            call.resolve(value);
+          } else {
+            var error = new Error((value && value.message) || "The host call failed.");
+            error.code = value && value.code;
+            call.reject(error);
+          }
+        });
+      });
+    };
+
+    // Swift replaces the props when the placement's context changes.
+    var propsListeners = [];
+    global.__playhouseSetProps = function (props) {
+      Playhouse.props = props || {};
+      reconciler.batchedUpdates(function () {
+        propsListeners.slice().forEach(function (listener) { run(function () { listener(Playhouse.props); }); });
+      });
+    };
+    function onPropsChange(listener) {
+      propsListeners.push(listener);
+      return function () {
+        var index = propsListeners.indexOf(listener);
+        if (index >= 0) propsListeners.splice(index, 1);
+      };
+    }
+
     var Playhouse = {
       props: global.__playhouseProps || {},
-      render: function (element) { reconciler.updateContainer(element, root, null, null); }
+      render: function (element) { reconciler.updateContainer(element, root, null, null); },
+      onPropsChange: onPropsChange,
+      // The current props, re-rendering the component whenever they change.
+      useProps: function () {
+        var state = React.useState(Playhouse.props);
+        React.useEffect(function () {
+          if (state[0] !== Playhouse.props) state[1](Playhouse.props);
+          return onPropsChange(function (props) { state[1](props); });
+        }, []);
+        return state[0];
+      },
+      // Any Playhouse bridge command, the same ones the CLI sends ("task.list", "task.create", …).
+      bridge: function (command, args) { return hostCall("bridge", String(command), args || {}); },
+      // What only the window can do.
+      ui: {
+        close: function () { return hostCall("ui", "close", {}); },
+        openTask: function (taskID) { return hostCall("ui", "openTask", { taskID: String(taskID) }); },
+        composer: {
+          setDraft: function (text) { return hostCall("ui", "composer.setDraft", { text: String(text) }); },
+          insertText: function (text) { return hostCall("ui", "composer.insertText", { text: String(text) }); },
+          replaceSelection: function (text) { return hostCall("ui", "composer.replaceSelection", { text: String(text) }); },
+          focus: function () { return hostCall("ui", "composer.focus", {}); }
+        }
+      }
     };
     global.React = React;
     global.h = React.createElement;

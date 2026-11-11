@@ -1,0 +1,52 @@
+import Foundation
+import Observation
+
+/// The window's installed plugins, read from the bridge daemon, which owns
+/// the plugins folder. The window reloads it whenever `plugin refresh` or
+/// `plugin delete` bumps `WorkspaceSettings.pluginsRevisionKey`.
+@MainActor
+@Observable
+final class PluginRegistry {
+    /// Every plugin folder, valid or not, sorted by id.
+    private(set) var plugins: [PluginRecord] = []
+    @ObservationIgnored private let client: DaemonClient
+
+    init(client: DaemonClient = DaemonClient()) {
+        self.client = client
+    }
+
+    func reload() async {
+        do {
+            let result = try await client.call("plugin.list")
+            plugins = try result.object?["plugins"]?.decoded([PluginRecord].self) ?? []
+        } catch {
+            PlayhouseDiagnostics.record("plugins.reload.failed", fields: ["error": error.localizedDescription])
+        }
+    }
+
+    /// The valid plugins whose entry goes in `placement`.
+    func plugins(for placement: PluginPlacement) -> [PluginRecord] {
+        plugins.filter { $0.valid && $0.placement == placement.rawValue }
+    }
+
+    func delete(_ id: String) async throws {
+        try await client.call("plugin.delete", ["pluginID": .string(id)])
+        await reload()
+    }
+
+    /// Creates the task whose agent builds a plugin for `placement`, and
+    /// returns it with the prompt its conversation sends.
+    func author(_ placement: PluginPlacement) async throws -> (taskID: UUID, prompt: String) {
+        let result = try await client.call("plugin.author", ["placement": .string(placement.rawValue)])
+        guard let task = try result.object?["task"]?.decoded(BoardTaskRecord.self),
+              let prompt = result.object?["prompt"]?.string else {
+            throw BridgeCommandError(code: "invalid_response", message: "The bridge did not return the new plugin task.")
+        }
+        return (task.id, prompt)
+    }
+
+    /// Add Plugin mode, shared with the CLI's `plugin mode`.
+    static func setAddMode(_ enabled: Bool) {
+        WorkspaceSettingsManager().setPluginAddMode(enabled)
+    }
+}
