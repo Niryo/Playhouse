@@ -130,18 +130,24 @@ struct PluginPresentationModifier: ViewModifier {
         plugin?.presentationKind == kind
     }
 
+    /// The presented container takes the atom's identifier, so it carries the
+    /// plugin surface's, as a popover's surface does.
+    private var surfaceCommon: AtomCommon {
+        AtomCommon(testID: plugin.map { "plugin-surface-\($0.id)" })
+    }
+
     func body(content: Content) -> some View {
         content
             .atomModal(
                 ModalProps(isPresented: isPresenting(.modal), width: plugin.map { Double($0.surfaceSize.width) }, height: plugin.map { Double($0.surfaceSize.height) }),
-                common: AtomCommon(testID: "plugin-modal"),
+                common: surfaceCommon,
                 onDismiss: { plugin = nil }
             ) { surface }
             .atomSidePanel(
                 SidePanelProps(isPresented: isPresenting(.sidebar), width: plugin.map { Double($0.surfaceSize.width) } ?? 360),
-                common: AtomCommon(testID: "plugin-side-panel")
+                common: surfaceCommon
             ) { surface }
-            .atomPage(PageProps(isPresented: isPresenting(.page)), common: AtomCommon(testID: "plugin-page")) { surface }
+            .atomPage(PageProps(isPresented: isPresenting(.page)), common: surfaceCommon) { surface }
     }
 
     @ViewBuilder
