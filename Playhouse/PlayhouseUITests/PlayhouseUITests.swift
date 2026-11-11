@@ -10158,9 +10158,9 @@ final class PlayhouseUITests: XCTestCase {
         let commentOnlyBubble = try waitForSideChatBubble()
         XCTAssertTrue(commentOnlyBubble.isHittable, "The side chat bubble should open on screen when the selection starts above the visible transcript.")
         let transcriptFrame = reloadedTranscript.frame
-        let anchoredEdge = abs(commentOnlyBubble.frame.minY - secondResponseLine.frame.maxY) < abs(commentOnlyBubble.frame.maxY - secondResponseLine.frame.minY)
-            ? commentOnlyBubble.frame.minY : commentOnlyBubble.frame.maxY
-        XCTAssertTrue(anchoredEdge >= transcriptFrame.minY - 30 && anchoredEdge <= transcriptFrame.maxY + 30,
+        // The bubble opens above the anchor, or below it without room, so one of its edges meets
+        // the selection's visible part, inside the transcript.
+        XCTAssertTrue([commentOnlyBubble.frame.minY, commentOnlyBubble.frame.maxY].contains { $0 >= transcriptFrame.minY - 40 && $0 <= transcriptFrame.maxY + 40 },
                       "The bubble should point at the selection's visible part, inside the transcript (bubble \(commentOnlyBubble.frame), transcript \(transcriptFrame)).")
         let commentOnlyField = element("side-chat-input")
         XCTAssertTrue(commentOnlyField.waitToExist(timeout: 5))
@@ -10257,7 +10257,7 @@ final class PlayhouseUITests: XCTestCase {
         return answer
     }
 
-    // case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply opens a large side chat bubble at the selection instead of an Add comment hint once the selection settles (it stays closed while Shift is held after a Shift-click extends the selection, then shows the whole extended range), showing the selected text and a compact chat whose composer has an Add comment button and a send button but no Skills button or mode menu. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection and a non-empty message; an unknown or closed side chat rejects follow-ups, and closing the bubble with Escape ends its side chat without adding a comment.
+    // case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply opens a side chat bubble above the selection instead of an Add comment hint once the selection settles; the bubble starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls (it stays closed while Shift is held after a Shift-click extends the selection, then shows the whole extended range), showing the selected text and a compact chat whose composer has an Add comment button and a send button but no Skills button or mode menu. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection and a non-empty message; an unknown or closed side chat rejects follow-ups, and closing the bubble with Escape ends its side chat without adding a comment.
     func test_side_chat_forks_claude_conversation_read_only() throws {
         _ = try installClaudeFixture(named: "claude-fixture-side-chat")
         _ = try runCLI(["settings", "set-default-provider", "claude"])
@@ -10272,6 +10272,11 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((selected.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
                        selection.trimmingCharacters(in: .whitespacesAndNewlines), "The bubble should show the selected text.")
         XCTAssertTrue(element("side-chat-empty-state").exists, "A new side chat should invite a question.")
+        let compact = opened.bubble.frame
+        XCTAssertLessThanOrEqual(compact.maxY, opened.reply.frame.minY + 4,
+                                 "The bubble should open above the selected text (bubble \(compact), selection \(opened.reply.frame)).")
+        XCTAssertLessThan(compact.width, 380, "A new side chat bubble should start compact (\(compact)).")
+        XCTAssertLessThan(compact.height, 300, "A new side chat bubble should start compact (\(compact)).")
         let bubbleElements = opened.bubble.descendants(matching: .any)
         XCTAssertTrue(bubbleElements.matching(identifier: "add-comment-button").firstMatch.exists,
                       "The side chat composer should have an Add comment button.")
@@ -10287,16 +10292,40 @@ final class PlayhouseUITests: XCTestCase {
         let answer = sendSideChatMessage("What does this mean?", answerIndex: 1, containing: "forked from \(sourceSession)")
         XCTAssertTrue(answer.label.contains("which asked: Explain the design of the parser."),
                       "The side chat should answer with the task conversation's context.")
+        XCTAssertTrue(waitUntil({ opened.bubble.frame.width > compact.width + 60 && opened.bubble.frame.height > compact.height + 40 }, timeout: 5),
+                      "The bubble should grow to wrap the conversation (compact \(compact), now \(opened.bubble.frame)).")
+        let afterFirstAnswer = opened.bubble.frame
         attachScreenshot(named: "Side chat answer with the task's context")
         _ = sendSideChatMessage("And the second point?", answerIndex: 3, containing: "Side chat follow-up 2 on")
         let created = sendSideChatMessage("Please create a task for this.", answerIndex: 5, containing: "Created task ")
+        XCTAssertTrue(waitUntil({ opened.bubble.frame.height > afterFirstAnswer.height + 20 }, timeout: 5),
+                      "The bubble should keep growing with each exchange (\(afterFirstAnswer) then \(opened.bubble.frame)).")
+        // More exchanges than fit: the chat stops at its maximum height and scrolls.
+        let transcript = element("side-chat-transcript")
+        for index in stride(from: 7, through: 11, by: 2) {
+            _ = sendSideChatMessage("Another point, number \(index)?", answerIndex: index, containing: "Side chat follow-up")
+        }
+        XCTAssertTrue(waitUntil({ (330...342).contains(transcript.frame.height) }, timeout: 5),
+                      "A long side chat should reach the transcript's maximum height (\(transcript.frame)).")
+        let capped = opened.bubble.frame
+        let lastAnswer = sendSideChatMessage("One more point?", answerIndex: 13, containing: "Side chat follow-up")
+        XCTAssertEqual(opened.bubble.frame.height, capped.height, accuracy: 2, "At its maximum the bubble stops growing.")
+        XCTAssertTrue(waitUntil({ transcript.frame.contains(CGPoint(x: lastAnswer.frame.midX, y: lastAnswer.frame.maxY - 2)) }, timeout: 5),
+                      "The newest answer should be scrolled into view (answer \(lastAnswer.frame), transcript \(transcript.frame)).")
+        let firstQuestion = element("side-chat-user-message-0")
+        XCTAssertLessThan(firstQuestion.frame.maxY, transcript.frame.minY + 1, "The first exchange should have scrolled out of view.")
+        attachElementScreenshot(opened.bubble, named: "Side chat bubble at its maximum height, scrolled to the newest answer")
+        XCTAssertTrue(waitUntil({
+            transcript.scroll(byDeltaX: 0, deltaY: 400)
+            return transcript.frame.contains(CGPoint(x: firstQuestion.frame.midX, y: firstQuestion.frame.midY))
+        }, timeout: 5), "Scrolling the side chat up should bring back its first exchange.")
         let createdID = String(created.label.split(separator: " ").last ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "."))
         let createdTask = try XCTUnwrap(try taskRecord(id: createdID), "The side chat should create a real task through the CLI.")
         XCTAssertEqual(createdTask["title"] as? String, "Side chat follow-up")
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.primary.appendingPathComponent("side-chat-forbidden.txt").path),
                        "The read-only side chat must not write files.")
         attachScreenshot(named: "Side chat created a task through the Playhouse CLI")
-        attachElementScreenshot(opened.bubble, named: "Side chat bubble after creating a task")
+        attachElementScreenshot(opened.bubble, named: "Side chat bubble scrolled back to its first exchange")
 
         let taskAfter = try XCTUnwrap(try taskRecord(id: opened.taskID))
         XCTAssertEqual(taskAfter["status"] as? String, taskBefore["status"] as? String, "The side chat must not change the task's status.")
@@ -24481,8 +24510,8 @@ final class PlayhouseUITests: XCTestCase {
     }
 
     /// Waits for the side chat bubble a settled selection opens and returns it. With `selection`,
-    /// the bubble must be attached to that text: overlapping it horizontally, just below or above
-    /// it, and big enough to hold a chat.
+    /// the bubble must be attached to that text: overlapping it horizontally and just above or
+    /// below it. It is never smaller than its compact size nor bigger than its grown one.
     @discardableResult
     private func waitForSideChatBubble(
         at selection: XCUIElement? = nil, file: StaticString = #filePath, line: UInt = #line
@@ -24491,8 +24520,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(bubble.waitToExist(timeout: 8), "Selecting transcript text should open the side chat bubble.", file: file, line: line)
         XCTAssertTrue(waitForStableFrame(bubble), "The side chat bubble should settle before it is measured.", file: file, line: line)
         let frame = bubble.frame
-        XCTAssertGreaterThanOrEqual(frame.width, 400, "The side chat bubble should be large (\(frame)).", file: file, line: line)
-        XCTAssertGreaterThanOrEqual(frame.height, 400, "The side chat bubble should be large (\(frame)).", file: file, line: line)
+        // Its accessibility frame is its content, inside the bubble's 14pt padding: 312 to 412 points wide.
+        XCTAssertTrue((300...430).contains(frame.width), "The side chat bubble should be 340 to 440 points wide with its padding (\(frame)).", file: file, line: line)
+        XCTAssertTrue((100...600).contains(frame.height), "The side chat bubble should fit its chat, up to its maximum height (\(frame)).", file: file, line: line)
         if let selection {
             let selected = selection.frame
             XCTAssertTrue(frame.maxX > selected.minX && frame.minX < selected.maxX,

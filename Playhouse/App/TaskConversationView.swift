@@ -814,8 +814,19 @@ private struct SideChatBubble: View {
     @State private var streamingText = ""
     @State private var errorMessage: String?
     @State private var didCopySelection = false
+    /// The chat's natural height; the transcript shows all of it up to `maxTranscriptHeight`.
+    @State private var transcriptContentHeight: CGFloat = 0
 
-    static let size = CGSize(width: 440, height: 460)
+    /// The bubble opens compact and grows as the chat does: wider once it has messages, taller
+    /// with each one, until `maxTranscriptHeight`, after which the chat scrolls.
+    static let compactWidth: CGFloat = 340
+    static let width: CGFloat = 440
+    static let maxTranscriptHeight: CGFloat = 340
+
+    private struct TranscriptHeightKey: PreferenceKey {
+        static let defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -824,7 +835,10 @@ private struct SideChatBubble: View {
             composer
         }
         .padding(14)
-        .frame(width: Self.size.width, height: Self.size.height)
+        .frame(width: messages.isEmpty && !isResponding ? Self.compactWidth : Self.width)
+        .fixedSize(horizontal: false, vertical: true)
+        .animation(.easeOut(duration: 0.18), value: transcriptContentHeight)
+        .animation(.easeOut(duration: 0.18), value: messages.isEmpty)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("side-chat-bubble")
         .onDisappear { if let sideChatID { close(sideChatID) } }
@@ -873,7 +887,7 @@ private struct SideChatBubble: View {
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 9) {
+                VStack(alignment: .leading, spacing: 9) {
                     if messages.isEmpty, !isResponding {
                         Text("Ask about the selected text, or type a comment and click Add comment.")
                             .font(.system(size: 12))
@@ -907,8 +921,12 @@ private struct SideChatBubble: View {
                     Color.clear.frame(height: 1).id("side-chat-bottom")
                 }
                 .padding(.horizontal, 2)
+                .background(GeometryReader { geometry in
+                    Color.clear.preference(key: TranscriptHeightKey.self, value: geometry.size.height)
+                })
             }
-            .frame(maxHeight: .infinity)
+            .frame(height: min(max(transcriptContentHeight, 1), Self.maxTranscriptHeight))
+            .onPreferenceChange(TranscriptHeightKey.self) { transcriptContentHeight = $0 }
             .accessibilityIdentifier("side-chat-transcript")
             .onChange(of: messages.count) { _, _ in proxy.scrollTo("side-chat-bottom", anchor: .bottom) }
             .onChange(of: streamingText) { _, _ in proxy.scrollTo("side-chat-bottom", anchor: .bottom) }
@@ -4853,7 +4871,9 @@ struct TaskConversationView: View {
                                     annotationSelection = nil
                                 }
                             }
-                        ), arrowEdge: .bottom) {
+                        // Above the selected lines, where it covers what was read rather than what
+                        // follows; AppKit moves it below them when the screen has no room above.
+                        ), arrowEdge: .top) {
                             SideChatBubble(
                                 selectedText: selection.text,
                                 send: { sideChatID, message, onDelta in
