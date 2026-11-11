@@ -15601,6 +15601,11 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         tabs = self.plugin_node(tree, "skills-tab-picker")
         self.assertEqual(([option["label"] for option in tabs["props"]["options"]], tabs["props"]["selected"], tabs["props"]["width"]),
                          (["Repo", "Global", "Built-in"], "repo", 260))
+        title_row = next(node for node in self.plugin_nodes(tree) if any(child.get("props", {}).get("testID") == "skills-title" for child in node.get("children", [])))
+        title_row_ids = {node.get("props", {}).get("testID") for node in self.plugin_nodes(title_row)}
+        for moved in ["skills-tab-picker", "skills-search", "new-skill-button"]:
+            self.assertNotIn(moved, title_row_ids, f"{moved} sits on its own row, not in the title row.")
+        self.assertIn("skills-kind-picker", title_row_ids, "The kind picker stays in the title row.")
         search = self.plugin_node(tree, "skills-search")
         self.assertEqual((search["props"]["text"], search["props"]["placeholder"], search["props"]["width"]), ("", "Search skills", 200))
         new_skill = self.plugin_node(tree, "new-skill-button")
@@ -15692,6 +15697,9 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(self.plugin_node(tree, "skills-kind-picker")["props"]["disabled"], True, "The kind picker is locked while selecting.")
         self.assertNotIn("shortcut", self.plugin_node(tree, "skills-back-button")["props"], "Escape ends selecting instead of going back.")
         self.assertEqual(self.plugin_node(tree, "skills-selection-done")["props"]["shortcut"], "cancel")
+        selecting_title_row = next(node for node in self.plugin_nodes(tree) if any(child.get("props", {}).get("testID") == "skills-title" for child in node.get("children", [])))
+        self.assertNotIn("skills-selection-done", {node.get("props", {}).get("testID") for node in self.plugin_nodes(selecting_title_row)},
+                         "The selection actions sit on the source row, not in the title row.")
         self.assertEqual(self.plugin_node(tree, "skills-fix-selected")["props"]["disabled"], True, "Nothing selected is broken, so nothing can be fixed.")
         delete = self.plugin_node(tree, "skills-delete-selected")["props"]
         self.assertEqual((delete["disabled"], delete["destructive"]), (False, True))
