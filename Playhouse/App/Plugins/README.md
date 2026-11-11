@@ -154,22 +154,22 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 
 | Atom | Props | Events | Children |
 | --- | --- | --- | --- |
-| `Stack` | `axis` (`"v"` default, `"h"`), `spacing`, `align` (column: leading/center/trailing; row: top/center/bottom/baseline), `group` (one accessibility container), `combine` (one accessibility element joining its children's labels) | | atoms |
+| `Stack` | `axis` (`"v"` default, `"h"`), `spacing`, `align` (column: leading/center/trailing; row: top/center/bottom/baseline), `group` (one accessibility container), `combine` (one accessibility element joining its children's labels); a surface, in either axis: `fill` (a color, `primary` default) at `fillOpacity` (1 default), drawn when either is set, a border inside its edge drawn when any of `stroke` (a color, `primary` default), `strokeOpacity` (1 default), `strokeWidth` (1 default) or `dash` (`[on, off]`, solid default) is set, in a rectangle rounded by `cornerRadius` (0 default) or, with `capsule`, with fully rounded ends (a circle when square). With no surface prop it draws nothing. With one, its frame and padding size the surface and its children sit inside it at the start of its axis and at `align` across it (a `minHeight` column with `align: "leading"` keeps them at the top leading corner), or, with `align` center or unset (the default), centered both ways, also when `fillWidth` stretches it, so give a Stack you decorate the `align` its children had. A fixed `width` or `height` centers them, as it does any atom's content. An unknown color draws `primary` | | atoms |
 | `Text` | `text` (or string children), `size`, `weight`, `design` (`monospaced`, `rounded`), `color`, `lineLimit`, `tracking`, `lineSpacing`, `wrap` (grow vertically), `numeric` (animate digits), `truncation` (`head`, `middle`, `tail` default), `monospacedDigits` | | strings |
 | `Icon` | `name` (SF Symbol) or `asset` (template image), `size`, `weight`, `color`, `original` (draw the asset in its own colors, as the board's logo) | | |
-| `Label` | `text`, `icon` (SF Symbol), `size`, `weight`, `color` | | |
-| `Button` | `style` (`plain` default, `borderless`, `bordered` push button, `prominent` accent push button, `link` accent text like a hyperlink, `automatic` the platform default), `emphasis` (hover capsule padding), `overhang` (capsule spills past the layout of a Button without a fixed size), `disabled`, `controlSize` (`small` or `large`; inherited otherwise), `shortcut` (`default`: Return presses it; `cancel`: Escape presses it; window-wide, so only a window's primary or dismissing action sets one), `destructive` (the destructive role) | `onPress()` | atoms (its label) |
+| `Label` | `text`, `icon` (SF Symbol), `size`, `weight`, `color`; SwiftUI's label for an `Icon` and a `Text` in a row `Stack` (see Composite atoms below) | | |
+| `Button` | `style` (`plain` default, `borderless`, `bordered` push button, `prominent` accent push button, `link` accent text like a hyperlink, `automatic` the platform default), `emphasis` (hover capsule padding), `overhang` (capsule spills past the layout of a Button without a fixed size), `disabled`, `controlSize` (`small` or `large`; inherited otherwise), `shortcut` (`default`: Return presses it; `cancel`: Escape presses it; window-wide, so only a window's primary or dismissing action sets one), `destructive` (the destructive role), `selected` (marked selected to accessibility: the current choice in a row of buttons) | `onPress()` | atoms (its label) |
 | `Link` | `url`, `emphasis` | | atoms (its label) |
 | `Spinner` | `size` (`small` default, `mini`, `regular`) | | |
 | `Spacer` | `minLength` | | |
 | `PillPicker` | `options` (`[{value, label, help?, testID?}]`), `selected`; the `help` tooltip may contain `{help}`, which is replaced by the shown option's help | `onChange(value)` | |
 | `Card` | `menu` (`[{id, title, icon?, destructive?, testID?}]`), `meter` (0…1 usage bar), `meterLabel`, `meterTestID`; `testID`, `label` and `hint` describe its open button | `onPress()`, `onMenu(id)` | atoms |
 | `Disclosure` | `title`, `collapsed` (required; the atom shows what it is given), `spacing`, `toggleTestID` (the title button); a collapsed section keeps its children in the tree and hides them | `onToggle()`, called inside an animation; the owner flips `collapsed` | atoms |
-| `Panel` | `spacing`, `fill` (a color, `primary` default), `fillOpacity` (0.05 default), `cornerRadius` (8 default), `capsule` (fully rounded ends instead, a circle when square), `stroke` (a border color), `strokeOpacity` (1 default), `strokeWidth` (1 default), `dash` (`[on, off]`, solid default), `align` (`leading` default, whose `minHeight` keeps children at the top, or `center`), `combine` (one accessibility element joining its children's labels); a rounded filled background behind a leading column, one accessibility container | | atoms |
+| `Panel` | `spacing`, `fill`, `fillOpacity`, `cornerRadius`, `capsule`, `stroke`, `strokeOpacity`, `strokeWidth`, `dash`, `align` (`leading` default or `center`), `combine`. A composite atom, shorthand for a column `Stack` with `group` and a surface whose defaults differ: `fill` `primary` at `fillOpacity` 0.05, `cornerRadius` 8, `align` `leading`, and a border only when it has a `stroke`. Its view is that Stack's (`PanelProps.stack`) | | atoms |
 | `Meter` | `fraction` (0…1, required), `color` (`accent` default), `thickness` (3 default), `trackOpacity` (0.12 default), `minFill` (shortest fill in points, 0 default); decorative unless it has a `label` | | |
 | `Scroll` | `spacing`, `maxHeight` (shrinks to its content up to it; the common `height` fixes it), `inset` (padding inside the scroll view), `lazy` (builds only the children in view); a vertical scroll view around a leading column that fills its width | | atoms |
 | `Divider` | none; a thin separator across its stack | | |
-| `ChoiceBar` | `options` (`[{value, label, testID?}]`), `selected`; one button per option, the selected one highlighted and marked selected | `onChange(value)`, not raised for the option already selected | |
+| `ChoiceBar` | `options` (`[{value, label, testID?}]`), `selected`; one button per option, the selected one highlighted and marked selected. Its capabilities are reachable through a decorated row `Stack` of `Button`s (`selected`) each on a decorated `Stack` with a `Text`, as the ChoiceBar page composes it beside the atom (see Composite atoms below) | `onChange(value)`, not raised for the option already selected | |
 | `Toggle` | `isOn` (required; the atom shows what it is given), `size` (`mini`, `small`, `regular` default), `disabled`; a switch with no visible label, so give it a `label` | `onToggle()`; the owner flips `isOn` | |
 | `TextField` | `text` (required), `placeholder`, `autoFocus` (takes the keyboard focus when it appears); a rounded one-line field that edits its own copy and takes `text` whenever the owner changes it | `onChange(text)` on every edit; `onSubmit()` for Return and `onArrow(direction)` (`up`, `down`) for the arrows, which keep their usual behavior when there is no handler | |
 | `Segmented` | `options` (`[{value, label}]`), `selected`, `disabled`; a segmented control, as wide as its segments unless it has a `width` | `onChange(value)`, not raised for the segment already selected | |
@@ -179,6 +179,24 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | `Editor` | `text` (required), `placeholder`, `placeholderTestID`, `enabled`, `autofocus`, `focused`, `focusRequest` (each new value moves the keyboard in once), `inputTestID` and `inputLabel` (the text view's own accessibility identifier and label); a multiline message editor that grows with its text; the common `hint` is its accessibility help; a pasted image reaches native owners only | `onChange(text)`, `onSubmit()` (Return), `onSteerSubmit()` (Command-Return), `onFocusChange(isFocused)` | |
 | `Popover` | `isPresented` (required), `arrowEdge` (`top` default, `bottom`, `leading`, `trailing`), `width`; shows the children after its first in a popover (a leading column) anchored to its first; its `testID` only names it to events | `onDismiss()` (a click outside or Escape; the owner sets `isPresented` false) | atoms: the anchor, then the content |
 | `StepSlider` | `options` (`[{value, label}]`), `selected`; a discrete slider as wide as its container, driven by click, drag or arrow keys; its common `label` and `testID` name it | `onChange(value)` | |
+
+### Composite atoms
+
+Most atoms do one thing. `Panel` is a composite atom: shorthand for a column
+`Stack` with `group` and a surface (`primary` at 0.05, radius 8, a border only
+when it has a `stroke`), drawn by that Stack's own view (`PanelProps.stack`).
+
+These are composites too, and still to settle:
+
+| Atom | Made of | What is left |
+| --- | --- | --- |
+| `ChoiceBar` | A decorated row `Stack` of `Button`s marked `selected`, each label a decorated `Stack` around a `Text` | Every capability is reachable that way; its view is still its own, whose circular corners a Stack's continuous ones would change |
+| `Label` | An `Icon` and a `Text` in a row `Stack` | Every capability is reachable that way; its view is SwiftUI's `Label`, which spaces and aligns them the platform's way |
+| `Card` | A press surface, a shadowed rounded fill, a right-click menu and a usage bar | Its shadow, right-click menu and heatmap usage bar are reachable through no smaller atom |
+| `Disclosure` | A `Button` (chevron `Icon` and `Text`) over a column `Stack` | Its animated collapse is reachable through no smaller atom |
+| `Scroll` | A scroll view around a column `Stack` | `lazy`: a `Stack` is never lazy |
+| `Menu` | A pull-down whose label is `Icon`s and a `Text` | Its label is symbol and text props, not atom children |
+| `PressArea`, `Popover` | A press or popover around a column `Stack` | The column is reachable through a nested `Stack`, but they draw their own |
 
 To add an atom, add its case and props struct to `Core/AtomProps.swift`, its
 view to `Atoms/AtomViews.swift`, its registry entry to

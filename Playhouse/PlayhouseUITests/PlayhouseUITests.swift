@@ -21270,6 +21270,124 @@ final class PlayhouseUITests: XCTestCase {
         }
     }
 
+    // case-contract: test_plugin_stack_surface_composes_panel_and_choice_bar | The Plugin Catalog's Stack page draws a surface on a Stack in both axes, while its Stacks without surface props draw nothing: a column filled accent at 0.18 with an accent border and an 8-point radius keeps its children at its top leading corner, inside its padding, when its 220-point minWidth and 90-point minHeight are larger than they are; a capsule row filled #2E7D32 with a dashed border lays its icon and text out side by side on that green; and a border-only Stack with align unset (a Stack's default, center) and fillWidth stretches across the page, draws its border and no fill with rounded corners, and keeps its text centered both ways in its 60-point minHeight. The Panel page shows each Panel beside the Stack it is shorthand for (a column Stack with group, fill primary at 0.05 and radius 8 unless set), and each pair is the same size, including the accent Log in Panel and the single decorated row Stack that replaces its nested row. `plugin render` reports the surface props on those nodes with no errors and none on the plain Stacks, and a mistyped surface prop on a Stack (fill, fillOpacity, cornerRadius, capsule, strokeWidth or dash) or an unknown one (shadow, or axis on a Panel) is reported in errors with exit 1, naming the prop and what is wrong. The ChoiceBar page also composes the bar from atoms, a decorated row Stack of Buttons each marked selected (the Button's selected prop) around a decorated Stack with a Text: it is the same size as the ChoiceBar atom beside it, its Overview button carries the selected trait, and clicking Wasters runs its onPress, which moves the selected trait to it (Composed: wasters) while the ChoiceBar atom stays on Overview; a mistyped selected on a Button is reported with its path.
+    func test_plugin_stack_surface_composes_panel_and_choice_bar() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Plugin Catalog")
+        let stackPage = catalogSidebarRow("plugin-catalog-atom-Stack")
+        XCTAssertTrue(stackPage.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Stack atom.")
+        stackPage.click()
+        func rgb(_ element: XCUIElement, x: CGFloat, y: CGFloat) throws -> (Int, Int, Int) {
+            let image = try XCTUnwrap(element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil))
+            let bitmap = NSBitmapImageRep(cgImage: image)
+            let color = try XCTUnwrap(bitmap.colorAt(x: min(image.width - 1, Int(CGFloat(image.width) * x)),
+                                                     y: min(image.height - 1, Int(CGFloat(image.height) * y)))?.usingColorSpace(.deviceRGB))
+            return (Int((color.redComponent * 255).rounded()), Int((color.greenComponent * 255).rounded()), Int((color.blueComponent * 255).rounded()))
+        }
+        func distance(_ a: (Int, Int, Int), _ b: (Int, Int, Int)) -> Int { max(abs(a.0 - b.0), abs(a.1 - b.1), abs(a.2 - b.2)) }
+
+        let column = element("stack-surface-column"), first = element("stack-surface-column-first")
+        XCTAssertTrue(column.waitToExist(timeout: 10), "The Stack page shows a column Stack with a surface.")
+        XCTAssertFalse(element("plugin-error").exists, "The Stack page renders without a plugin error.")
+        XCTAssertFalse(element("plugin-node-error").exists, "Every surface prop decodes.")
+        XCTAssertEqual(column.frame.height, 90, accuracy: 1, "The column is its 90-point minHeight: \(column.frame)")
+        XCTAssertEqual(column.frame.width, 220, accuracy: 1, "The column is its 220-point minWidth: \(column.frame)")
+        XCTAssertEqual(first.frame.minY - column.frame.minY, 8, accuracy: 2, "The children stay at the top, inside the padding: \(first.frame) in \(column.frame)")
+        XCTAssertEqual(first.frame.minX - column.frame.minX, 8, accuracy: 2, "The children stay at the leading edge, inside the padding: \(first.frame) in \(column.frame)")
+
+        // A Stack without surface props draws nothing: its empty part shows the page behind it. A plain Stack's
+        // accessibility frame is only its children's, so both points are read from the screen on its row: inside
+        // the full-width Stack well past its text, and in the page's padding 6 points in from its straight edge.
+        let plain = element("stack-fill"), page = element("plugin-catalog-surface")
+        XCTAssertTrue(plain.exists && page.exists)
+        let screenFrame = try XCTUnwrap(NSScreen.main?.frame)
+        let screen = NSBitmapImageRep(cgImage: try XCTUnwrap(XCUIScreen.main.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil)))
+        func screenRGB(x: CGFloat, y: CGFloat) throws -> (Int, Int, Int) {
+            let color = try XCTUnwrap(screen.colorAt(x: Int(x * CGFloat(screen.pixelsWide) / screenFrame.width),
+                                                     y: Int(y * CGFloat(screen.pixelsHigh) / screenFrame.height))?.usingColorSpace(.deviceRGB))
+            return (Int((color.redComponent * 255).rounded()), Int((color.greenComponent * 255).rounded()), Int((color.blueComponent * 255).rounded()))
+        }
+        XCTAssertLessThan(plain.frame.maxX, page.frame.maxX - 60, "The plain Stack's text ends well before the page's edge: \(plain.frame) in \(page.frame)")
+        let background = try screenRGB(x: page.frame.maxX - 6, y: plain.frame.midY)
+        XCTAssertLessThanOrEqual(distance(try screenRGB(x: page.frame.maxX - 30, y: plain.frame.midY), background), 4, "A plain Stack draws no background.")
+        XCTAssertGreaterThan(distance(try rgb(column, x: 0.9, y: 0.85), background), 8, "The decorated column is filled.")
+        XCTAssertGreaterThan(distance(try rgb(column, x: 0.5, y: 0.003), try rgb(column, x: 0.9, y: 0.85)), 20, "The column's accent border is drawn along its edge, over its fill.")
+        XCTAssertLessThanOrEqual(distance(try rgb(column, x: 0, y: 0), background), 6, "The column's corner is rounded: its outermost corner pixel is the page.")
+
+        attachScreenshot(named: "Stack atom: plain Stacks and a decorated column")
+        // The last two examples can sit below the catalog's visible area; their pixels are sampled only once they are in view.
+        let row = element("stack-surface-row"), rowText = element("stack-surface-row-text")
+        let center = element("stack-surface-center"), centerText = element("stack-surface-center-text")
+        XCTAssertTrue(row.exists && rowText.exists, "The Stack page shows a row Stack with a surface.")
+        XCTAssertTrue(center.exists && centerText.exists)
+        let pageScroll = app.scrollViews.containing(.any, identifier: "plugin-catalog-surface").firstMatch
+        for _ in 0..<10 where center.frame.maxY > pageScroll.frame.maxY - 2 {
+            pageScroll.scroll(byDeltaX: 0, deltaY: -60)
+        }
+        XCTAssertLessThanOrEqual(center.frame.maxY, pageScroll.frame.maxY - 2, "The border-only Stack is in view: \(center.frame) in \(pageScroll.frame)")
+        XCTAssertGreaterThanOrEqual(row.frame.minY, pageScroll.frame.minY + 2, "The decorated row is in view too: \(row.frame) in \(pageScroll.frame)")
+        XCTAssertEqual(rowText.frame.midY, row.frame.midY, accuracy: 2, "The row lays its text out beside its icon, centered vertically.")
+        XCTAssertGreaterThan(rowText.frame.minX - row.frame.minX, 20, "The icon sits before the text in the row: \(rowText.frame) in \(row.frame)")
+        assertPixel(row.screenshot().image, normalizedX: 0.5, normalizedY: 0.14, rgb: (46, 125, 50), accuracy: 25)
+        XCTAssertLessThanOrEqual(distance(try rgb(row, x: 0, y: 0), background), 6, "The row is a capsule: its corner is the page behind it.")
+        assertPixel(row.screenshot().image, normalizedX: 0.5, normalizedY: 0.86, rgb: (46, 125, 50), accuracy: 25)
+
+        XCTAssertEqual(center.frame.height, 60, accuracy: 1, "The border-only Stack is its 60-point minHeight.")
+        XCTAssertGreaterThan(center.frame.width, column.frame.width + 40, "fillWidth stretches it across the page: \(center.frame)")
+        XCTAssertEqual(centerText.frame.midX, center.frame.midX, accuracy: 2, "An unset align (center) keeps the text centered across the stretched width.")
+        XCTAssertEqual(centerText.frame.midY, center.frame.midY, accuracy: 2, "An unset align (center) keeps the text centered in the minHeight.")
+        XCTAssertGreaterThan(distance(try rgb(center, x: 0.5, y: 0.01), background), 40, "strokeWidth alone draws a primary border along the edge.")
+        XCTAssertLessThanOrEqual(distance(try rgb(center, x: 0.1, y: 0.5), background), 4, "A border alone draws no fill.")
+        XCTAssertLessThanOrEqual(distance(try rgb(center, x: 0, y: 0), background), 6, "The border-only Stack's corners are rounded.")
+        attachScreenshot(named: "Stack atom: decorated column, capsule row and border-only Stack")
+
+        catalogSidebarRow("plugin-catalog-atom-Panel").click()
+        let panelDefault = element("panel-default")
+        XCTAssertTrue(panelDefault.waitToExist(timeout: 10), "The Panel page shows its Panels.")
+        XCTAssertFalse(element("plugin-error").exists, "The Panel page renders without a plugin error.")
+        for name in ["panel-default", "panel-accent", "panel-capsule"] {
+            let panel = element(name), stack = element("\(name)-stack")
+            XCTAssertTrue(panel.waitToExist(timeout: 5) && stack.waitToExist(timeout: 5), "\(name) sits beside the Stack it stands for.")
+            XCTAssertEqual(panel.frame.width, stack.frame.width, accuracy: 0.5, "\(name) is as wide as its Stack.")
+            XCTAssertEqual(panel.frame.height, stack.frame.height, accuracy: 0.5, "\(name) is as tall as its Stack.")
+            XCTAssertLessThanOrEqual(distance(try rgb(panel, x: 0.97, y: 0.5), try rgb(stack, x: 0.97, y: 0.5)), 3, "\(name) draws the same surface as its Stack.")
+        }
+        attachScreenshot(named: "Panel atom beside the Stacks it is shorthand for")
+
+        catalogSidebarRow("plugin-catalog-atom-ChoiceBar").click()
+        let atomBar = element("choice-bar"), composedBar = element("choice-bar-composed")
+        XCTAssertTrue(atomBar.waitToExist(timeout: 10) && composedBar.waitToExist(timeout: 10), "The ChoiceBar page shows the atom and the bar composed from atoms.")
+        XCTAssertEqual(composedBar.frame.width, atomBar.frame.width, accuracy: 1, "The composed bar is as wide as the ChoiceBar atom.")
+        XCTAssertEqual(composedBar.frame.height, atomBar.frame.height, accuracy: 1, "The composed bar is as tall as the ChoiceBar atom.")
+        let composedOverview = element("choice-composed-overview"), composedWasters = element("choice-composed-wasters")
+        XCTAssertTrue(composedOverview.isSelected, "A Button marked selected carries the selected trait.")
+        XCTAssertFalse(composedWasters.isSelected)
+        composedWasters.click()
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("choice-composed-selected")) == "Composed: wasters" }, timeout: 5), "Clicking Wasters ran its onPress.")
+        XCTAssertTrue(waitUntil({ composedWasters.isSelected && !composedOverview.isSelected }, timeout: 5), "The selected trait moved to Wasters.")
+        XCTAssertTrue(element("choice-overview").isSelected, "The ChoiceBar atom stays on Overview.")
+        attachScreenshot(named: "ChoiceBar atom beside the bar composed from Stack and Button atoms")
+
+        for (source, message) in [
+            (#"Playhouse.render(h(Stack, { fill: 3 }));"#, "<Stack> has an invalid prop: fill: expected a string, found 3"),
+            (#"Playhouse.render(h(Stack, { axis: "h", fillOpacity: "high" }));"#, "<Stack> has an invalid prop: fillOpacity: expected a number, found a string"),
+            (#"Playhouse.render(h(Stack, { cornerRadius: true }));"#, "<Stack> has an invalid prop: cornerRadius: expected a number, found a boolean"),
+            (#"Playhouse.render(h(Stack, { capsule: "yes" }));"#, "<Stack> has an invalid prop: capsule: expected a boolean, found a string"),
+            (#"Playhouse.render(h(Stack, { strokeWidth: "2" }));"#, "<Stack> has an invalid prop: strokeWidth: expected a number, found a string"),
+            (#"Playhouse.render(h(Stack, { dash: "4" }));"#, "<Stack> has an invalid prop: dash: expected an array, found a string"),
+            (#"Playhouse.render(h(Stack, { dash: [4, "3"] }));"#, "<Stack> has an invalid prop: dash.1: expected a number, found a string"),
+            (#"Playhouse.render(h(Stack, { shadow: 4 }));"#, #"<Stack> has no prop "shadow""#),
+            (#"Playhouse.render(h(Panel, { axis: "h" }));"#, #"<Panel> has no prop "axis""#),
+            (#"Playhouse.render(h(Button, { selected: "yes" }));"#, "<Button> has an invalid prop: selected: expected a boolean, found a string"),
+        ] {
+            let file = dataDirectory.appendingPathComponent("plugin-surface-\(UUID().uuidString.prefix(8)).js")
+            try source.write(to: file, atomically: true, encoding: .utf8)
+            let failed = try runCLI(["plugin", "render", "--file", file.path], expectedStatus: 1)
+            let errors = (failed["result"] as? [String: Any])?["errors"] as? [String] ?? []
+            XCTAssertTrue(errors.contains { $0.contains(message) }, "\(source) reports \(message): \(errors)")
+        }
+    }
+
     // case-contract: test_plugin_task_item_renders_from_atoms_like_native | The Plugin Catalog's Task Item page shows the task item composed in JavaScript from atoms beside the native SwiftUI task item built from the same atoms and sample data: both show the same title, progress report, status message, token counter, conflicts button, pull-request mode pill and pull-request link with the same sizes, and the JavaScript tree uses only atoms with the native card's identifiers and context menu. Blocking the JavaScript item changes only its status message and the toggle's label (one commit: text, update, text on three nodes) while the native item keeps its own state, clicking the JavaScript card runs its onPress handler (Opened 1 times, one text op), choosing Merge in its mode pill runs onChange (Last: mode merge) without re-rendering the title or the card, and right-clicking the JavaScript card offers the native card's menu, whose Move to Done runs onMenu with its id (Last: menu done). The time row is one flat row: the clock, the created time and the token counter are siblings in one stack, so the time shows in full (Nov 8, 2026), as wide in the JavaScript item as in the native one and left of the counter.
     func test_plugin_task_item_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
