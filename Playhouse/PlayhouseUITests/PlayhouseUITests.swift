@@ -16882,14 +16882,17 @@ final class PlayhouseUITests: XCTestCase {
         let window = app.windows.firstMatch
         let conversation = element("empty-conversation")
         XCTAssertTrue(conversation.exists)
-        XCTAssertGreaterThan(conversation.frame.maxX, window.frame.maxX - 470, "Before the panel opens, the conversation reaches into the space the panel will take.")
+        // The empty state is centered in the transcript, so its own edge depends on the window's
+        // width; the transcript's scroll view is the conversation column's full width.
+        let conversationColumn = element("conversation-scroll-view")
+        XCTAssertGreaterThan(conversationColumn.frame.maxX, window.frame.maxX - 470, "Before the panel opens, the conversation reaches into the space the panel will take.")
         let conversationFrameBefore = conversation.frame
         toggle.click()
         let panel = element("task-terminal-panel")
         XCTAssertTrue(panel.waitToExist(timeout: 5))
         XCTAssertTrue(waitUntil({ abs(panel.frame.maxX - window.frame.maxX) <= 2 }, timeout: 5), "The panel settles against the window's right edge.")
         XCTAssertGreaterThan(panel.frame.minX, sidebar.frame.maxX, "The panel opens on the right, leaving the sidebar in place.")
-        XCTAssertLessThan(panel.frame.minX, conversation.frame.maxX, "The panel floats over the conversation's right side.")
+        XCTAssertLessThan(panel.frame.minX, conversationColumn.frame.maxX, "The panel floats over the conversation's right side.")
         XCTAssertEqual(conversation.frame.minX, conversationFrameBefore.minX, accuracy: 1, "Opening the terminal does not move the conversation.")
         XCTAssertEqual(conversation.frame.width, conversationFrameBefore.width, accuracy: 1, "Opening the terminal does not resize the conversation.")
         XCTAssertEqual(toggle.value as? String, "Shown")
@@ -21805,6 +21808,389 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.pluginText(lastAction) == "Last: open" }, timeout: 5))
         XCTAssertEqual(pluginText(native("native-last-action")), "Last: section overhead", "The native modal keeps its own state.")
         attachScreenshot(named: "Token Stats: the counter reopened the JavaScript modal")
+    }
+
+    // Installed plugins and Add Plugin mode
+
+    private var pluginsFolder: URL { dataDirectory.appendingPathComponent("plugins", isDirectory: true) }
+
+    /// Writes a plugin folder the way an authoring agent does: plugin.json and index.js.
+    private func writeInstalledPlugin(_ id: String, source: String?, placement: String = "composerActions", presentation: String = "popover", name: String? = nil, icon: String = "puzzlepiece.extension") throws {
+        let folder = pluginsFolder.appendingPathComponent(id, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let manifest: [String: Any] = ["id": id, "name": name ?? id.split(separator: "-").map { $0.capitalized }.joined(separator: " "),
+                                       "icon": icon, "placement": placement, "presentation": presentation]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: folder.appendingPathComponent("plugin.json"))
+        if let source { try source.write(to: folder.appendingPathComponent("index.js"), atomically: true, encoding: .utf8) }
+    }
+
+    private func pluginMode() throws -> Bool {
+        try XCTUnwrap((try runCLI(["plugin", "mode"])["result"] as? [String: Any])?["enabled"] as? Bool)
+    }
+
+    private func installedPluginIDs() throws -> [String] {
+        let plugins = try XCTUnwrap((try runCLI(["plugin", "list"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+        return plugins.compactMap { $0["id"] as? String }
+    }
+
+    /// The same context plugin the CLI case renders headlessly.
+    private static let pluginContextSource = """
+    function Context() {
+      var props = Playhouse.useProps();
+      var state = React.useState("idle");
+      function report(promise, label) {
+        promise.then(function () { state[1](label + ": ok"); }, function (error) { state[1](label + ": " + error.code); });
+      }
+      var task = props.task;
+      var composer = props.composer;
+      return h(Stack, { spacing: 6 },
+        h(Text, { testID: "plugin-placement" }, props.plugin.placement),
+        h(Text, { testID: "plugin-task" }, task ? task.title : "no task"),
+        h(Text, { testID: "plugin-repositories" }, props.repositories ? props.repositories.map(function (r) { return r.repositoryPath.split("/").pop(); }).join(",") : "no repositories"),
+        h(Text, { testID: "plugin-draft" }, composer ? composer.draft : "no composer"),
+        h(Text, { testID: "plugin-selection" }, composer ? composer.selection.text : "no selection"),
+        h(Text, { testID: "plugin-status" }, state[0]),
+        h(Button, { testID: "plugin-rename", onPress: function () {
+          Playhouse.bridge("task.rename", { taskID: task.id, title: "Renamed by plugin" })
+            .then(function (result) { state[1]("renamed: " + result.title); });
+        } }, h(Text, null, "Rename")),
+        h(Button, { testID: "plugin-upper", onPress: function () {
+          Playhouse.ui.composer.replaceSelection(composer.selection.text.toUpperCase());
+        } }, h(Text, null, "Uppercase")),
+        h(Button, { testID: "plugin-count", onPress: function () {
+          Playhouse.bridge("task.list", {}).then(function (result) { state[1]("tasks: " + result.tasks.length); }, function (error) { state[1]("count: " + error.code + " " + error.message); });
+        } }, h(Text, null, "Count")),
+        h(Button, { testID: "plugin-set-draft", onPress: function () { report(Playhouse.ui.composer.setDraft("fresh draft"), "setDraft"); } }, h(Text, null, "Set draft")),
+        h(Button, { testID: "plugin-insert", onPress: function () { report(Playhouse.ui.composer.insertText("!"), "insert"); } }, h(Text, null, "Insert")),
+        h(Button, { testID: "plugin-focus", onPress: function () { report(Playhouse.ui.composer.focus(), "focus"); } }, h(Text, null, "Focus")),
+        h(Button, { testID: "plugin-recursive", onPress: function () { report(Playhouse.bridge("plugin.render", { page: "Text" }), "render"); } }, h(Text, null, "Render")),
+        h(Button, { testID: "plugin-open", onPress: function () {
+          Playhouse.bridge("task.list", {}).then(function (result) { return Playhouse.ui.openTask(result.tasks[0].id); });
+        } }, h(Text, null, "Open")),
+        h(Button, { testID: "plugin-close", onPress: function () { Playhouse.ui.close(); } }, h(Text, null, "Close")));
+    }
+    Playhouse.render(h(Context));
+    """
+
+    // case-contract: test_plugin_add_mode_toggles_and_shows_placeholders | Add Plugin mode is off by default; the Plugins menu's Add Plugin Mode item and `plugin mode --on` turn it on, `plugin mode` reports the saved state to a fresh CLI process, `--off` turns it off, and any other option is refused as invalid_argument. While it is on, a bar across the top of the window explains the mode and its Close button turns it off; the board's sidebar shows a labeled Add here button below Scheduled Tasks; an open task shows its sidebar expanded even when the sidebar was collapsed, with a labeled Add here button in the sidebar, an Add here icon beside the Terminal button and an Add here icon beside the composer's Skills button; and the standalone chat shows only the composer's Add here icon. Turning the mode off from the CLI removes every placeholder live and returns the sidebar to its saved collapsed state.
+    func test_plugin_add_mode_toggles_and_shows_placeholders() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["task", "create", "--title", "Plugin mode task", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
+        let scheduled = element("scheduled-tasks-button")
+        XCTAssertTrue(scheduled.waitToExist(timeout: 15))
+        XCTAssertFalse(try pluginMode(), "Add Plugin mode starts off.")
+        XCTAssertFalse(element("plugin-mode-banner").exists)
+        XCTAssertFalse(element("plugin-add-here-mainSidebar").exists, "No placeholder shows while the mode is off.")
+
+        clickPluginsMenuItem("Add Plugin Mode")
+        XCTAssertTrue(element("plugin-mode-banner").waitToExist(timeout: 10), "The mode's bar appears across the top of the window.")
+        XCTAssertTrue(pluginText(element("plugin-mode-banner-text")).contains("Add here"))
+        XCTAssertTrue(try pluginMode(), "The menu item turns the mode on for the CLI too.")
+        let boardPlaceholder = element("plugin-add-here-mainSidebar")
+        XCTAssertTrue(boardPlaceholder.waitToExist(timeout: 5), "The board's sidebar shows its placeholder.")
+        XCTAssertEqual(boardPlaceholder.label, "Add here")
+        XCTAssertGreaterThan(boardPlaceholder.frame.width, 120, "The sidebar placeholder is a labeled button as wide as the sidebar.")
+        XCTAssertGreaterThanOrEqual(boardPlaceholder.frame.minY, scheduled.frame.maxY - 1, "The placeholder sits below Scheduled Tasks.")
+        XCTAssertLessThan(abs(boardPlaceholder.frame.minX - scheduled.frame.minX), 2, "The placeholder lines up with Scheduled Tasks.")
+        attachScreenshot(named: "Add Plugin mode on the board: the bar and the sidebar's Add here")
+
+        element("plugin-mode-close").click()
+        XCTAssertTrue(waitForDisappearance(element("plugin-mode-banner")), "Close leaves the mode.")
+        XCTAssertTrue(waitForDisappearance(boardPlaceholder))
+        XCTAssertFalse(try pluginMode())
+
+        // A collapsed task sidebar shows expanded while the mode is on, without changing the saved state.
+        openTask(named: "Plugin mode task")
+        let hideSidebar = element("hide-task-sidebar-button")
+        XCTAssertTrue(waitUntil({ hideSidebar.isHittable }, timeout: 10))
+        hideSidebar.click()
+        XCTAssertTrue(element("task-sidebar-collapsed").waitToExist(timeout: 5))
+        _ = try runCLI(["plugin", "mode", "--on"])
+        XCTAssertTrue(element("task-sidebar").waitToExist(timeout: 10), "Add Plugin mode shows the sidebar expanded.")
+        XCTAssertFalse(element("task-sidebar-collapsed").exists)
+        let sidebarPlaceholder = element("plugin-add-here-conversationSidebar")
+        let toolbarPlaceholder = element("plugin-add-here-conversationToolbar")
+        let composerPlaceholder = element("plugin-add-here-composerActions")
+        for placeholder in [sidebarPlaceholder, toolbarPlaceholder, composerPlaceholder] {
+            XCTAssertTrue(placeholder.waitToExist(timeout: 10), "\(placeholder) shows in the open task.")
+            XCTAssertEqual(placeholder.label, "Add here")
+        }
+        XCTAssertGreaterThan(sidebarPlaceholder.frame.width, 120, "The sidebar placeholder is a labeled button.")
+        XCTAssertLessThan(toolbarPlaceholder.frame.width, 40, "The toolbar placeholder is only an icon.")
+        XCTAssertLessThan(composerPlaceholder.frame.width, 40, "The composer placeholder is only an icon.")
+        XCTAssertTrue(element("plugin-mode-banner").exists)
+        let terminal = element("toggle-terminal-button")
+        XCTAssertLessThanOrEqual(toolbarPlaceholder.frame.maxX, terminal.frame.minX + 1, "The toolbar placeholder sits beside the Terminal button.")
+        XCTAssertLessThan(abs(toolbarPlaceholder.frame.midY - terminal.frame.midY), 4, "It shares the Terminal button's row.")
+        let skills = element("open-skills-button")
+        XCTAssertGreaterThanOrEqual(composerPlaceholder.frame.minX, skills.frame.maxX - 1, "The composer placeholder sits beside the Skills button.")
+        XCTAssertLessThan(abs(composerPlaceholder.frame.midY - skills.frame.midY), 4, "It shares the Skills button's row.")
+        XCTAssertGreaterThan(sidebarPlaceholder.frame.minY, element("hide-task-sidebar-button").frame.maxY, "The sidebar placeholder is a section below the header.")
+        XCTAssertLessThan(sidebarPlaceholder.frame.maxY, terminal.frame.minY, "It sits above the command row.")
+        attachScreenshot(named: "Add Plugin mode in a task: sidebar, toolbar and composer placeholders")
+
+        _ = try runCLI(["plugin", "mode", "--off"])
+        for placeholder in [sidebarPlaceholder, toolbarPlaceholder, composerPlaceholder] {
+            XCTAssertTrue(waitForDisappearance(placeholder, timeout: 10), "Turning the mode off from the CLI removes \(placeholder).")
+        }
+        XCTAssertTrue(element("task-sidebar-collapsed").waitToExist(timeout: 5), "The sidebar returns to its saved collapsed state.")
+        XCTAssertFalse(element("plugin-mode-banner").exists)
+        attachScreenshot(named: "Add Plugin mode off: the sidebar collapsed again")
+        element("show-task-sidebar-button").click()
+        XCTAssertTrue(element("task-sidebar").waitToExist(timeout: 5))
+
+        // The standalone chat has only the composer's placement.
+        returnToBoard()
+        _ = try runCLI(["plugin", "mode", "--on"])
+        // The mode's bar slides in above the board, moving the header down; click once it rests.
+        XCTAssertTrue(element("plugin-mode-banner").waitToExist(timeout: 10))
+        let chatButton = element("chat-sidebar-button")
+        XCTAssertTrue(waitForStableFrame(chatButton), "The Chat button stops moving once the bar is in.")
+        chatButton.click()
+        let chat = element("chat-sidebar")
+        XCTAssertTrue(chat.waitToExist(timeout: 10))
+        XCTAssertTrue(chat.descendants(matching: .any)["plugin-add-here-composerActions"].waitToExist(timeout: 10), "The chat's composer shows its placeholder.")
+        XCTAssertFalse(chat.descendants(matching: .any)["plugin-add-here-conversationSidebar"].exists, "The chat has no task sidebar.")
+        XCTAssertFalse(chat.descendants(matching: .any)["plugin-add-here-conversationToolbar"].exists)
+        attachScreenshot(named: "Add Plugin mode in the standalone chat: only the composer's Add here")
+        element("plugin-mode-close").click()
+        XCTAssertTrue(waitForDisappearance(chat.descendants(matching: .any)["plugin-add-here-composerActions"]))
+    }
+
+    // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Pressing an Add here placeholder, or `plugin author --placement <placement>`, creates a Backlog task titled New plugin: <placement title> with no repository, the plugins folder in the data directory as its context folder, the placement saved on the task, and the prompt `/playhouse-plugin Create a new plugin in the <title> placement (<id>).`; the window turns Add Plugin mode off, opens that task, and sends the prompt. An unknown placement is refused as invalid_argument. The task's turns carry plugin authoring instructions naming the placement, its context, the plugins folder and the plugin refresh and render commands, and Playhouse's bundled playhouse-plugin skill reaches the agent without being installed anywhere: Claude Code gets it through a Playhouse-owned --add-dir wrapper and loads it, and Codex gets it among the app-server's extra skill roots with the /playhouse-plugin message sent as a structured skill input naming its SKILL.md. An ordinary task's turn gets neither the instructions nor the skill.
+    func test_plugin_authoring_task_starts_with_placement_and_skill() throws {
+        let environment = try installClaudeFixture(named: "claude-fixture-plugin-author")
+        let historyURL = URL(fileURLWithPath: try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]) + ".history")
+        func turns() -> [[String: Any]] {
+            guard let data = try? Data(contentsOf: historyURL),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+            return (history["turns"] as? [[String: Any]] ?? []).filter { ($0["userText"] as? String)?.isEmpty == false }
+        }
+        launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["task", "create", "--title", "Plugin source task", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
+        let tasksBefore = try boardTaskRecords().count
+        assertCLIError(try runCLI(["plugin", "author", "--placement", "titleBar"], expectedStatus: 2), code: "invalid_argument")
+        XCTAssertEqual(try boardTaskRecords().count, tasksBefore, "A refused placement opens no task.")
+
+        // From the board's sidebar.
+        _ = try runCLI(["plugin", "mode", "--on"])
+        let boardPlaceholder = element("plugin-add-here-mainSidebar")
+        XCTAssertTrue(boardPlaceholder.waitToExist(timeout: 15))
+        boardPlaceholder.click()
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "New plugin: Main sidebar" }, timeout: 15),
+                      "Pressing Add here opens the new plugin task.")
+        XCTAssertTrue(waitForDisappearance(element("plugin-mode-banner"), timeout: 5), "Choosing a placement ends Add Plugin mode.")
+        XCTAssertFalse(try pluginMode())
+        let boardPrompt = "/playhouse-plugin Create a new plugin in the Main sidebar placement (mainSidebar)."
+        XCTAssertTrue(waitUntil({ turns().contains { $0["userText"] as? String == boardPrompt } }, timeout: 20), "The task sends its prompt as it opens.")
+        let boardTask = try XCTUnwrap(try boardTaskRecords().first { $0["title"] as? String == "New plugin: Main sidebar" })
+        XCTAssertEqual(boardTask["pluginPlacement"] as? String, "mainSidebar")
+        XCTAssertEqual((boardTask["repositoryWorktrees"] as? [Any])?.count, 0, "A plugin task needs no repository.")
+        XCTAssertEqual(((boardTask["contextFolders"] as? [String]) ?? []).map(realPath), [realPath(pluginsFolder.path)], "The plugins folder is its context folder.")
+        XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String ?? "").isEmpty }, timeout: 10), "The sent prompt leaves the composer.")
+        attachScreenshot(named: "The plugin task opened from the board's Add here, its prompt sent")
+
+        let turn = try XCTUnwrap(turns().first { $0["userText"] as? String == boardPrompt })
+        let arguments = try XCTUnwrap(turn["arguments"] as? [String])
+        let instructions = arguments[try XCTUnwrap(arguments.firstIndex(of: "--append-system-prompt")) + 1]
+        XCTAssertTrue(instructions.contains("Main sidebar placement (`mainSidebar`)"), "The turn carries the plugin authoring instructions.")
+        XCTAssertTrue(instructions.contains("plugin refresh"))
+        let directories = arguments.indices.filter { arguments[$0] == "--add-dir" }.map { arguments[$0 + 1] }
+        XCTAssertTrue(directories.contains { FileManager.default.fileExists(atPath: $0 + "/.claude/skills/playhouse-plugin/SKILL.md") },
+                      "Claude Code gets the bundled plugin skill through a Playhouse wrapper.")
+        XCTAssertTrue((turn["skills"] as? [String] ?? []).contains("playhouse-plugin"), "Claude Code loads the plugin skill.")
+
+        // From an open task's composer.
+        openTask(named: "Plugin source task")
+        _ = try runCLI(["plugin", "mode", "--on"])
+        let composerPlaceholder = element("plugin-add-here-composerActions")
+        XCTAssertTrue(composerPlaceholder.waitToExist(timeout: 10))
+        attachScreenshot(named: "Add here beside the composer's Skills button")
+        composerPlaceholder.click()
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "New plugin: Chat input actions" }, timeout: 15),
+                      "The composer's Add here opens its own plugin task.")
+        let composerPrompt = "/playhouse-plugin Create a new plugin in the Chat input actions placement (composerActions)."
+        XCTAssertTrue(waitUntil({ turns().contains { $0["userText"] as? String == composerPrompt } }, timeout: 20))
+        XCTAssertEqual(turns().filter { $0["userText"] as? String == composerPrompt }.count, 1, "The prompt is sent exactly once.")
+        XCTAssertFalse(element("plugin-mode-banner").exists)
+        let composerTask = try XCTUnwrap(try boardTaskRecords().first { $0["title"] as? String == "New plugin: Chat input actions" })
+        XCTAssertEqual(composerTask["pluginPlacement"] as? String, "composerActions")
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'user-message-'")).firstMatch.waitToExist(timeout: 10),
+                      "The prompt shows in the new task's conversation.")
+        attachScreenshot(named: "The plugin task opened from the composer's Add here")
+    }
+
+    // case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports none at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. After a refresh the window shows the valid plugin's button at its placement and the Plugins menu lists every plugin with its placement, an invalid one with its first error. Deleting a plugin from the Plugins menu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
+    func test_plugin_install_refresh_and_delete() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        XCTAssertTrue(element("scheduled-tasks-button").waitToExist(timeout: 15))
+        XCTAssertEqual(try installedPluginIDs(), [])
+        let hello = #"Playhouse.render(h(Text, { testID: "hello" }, "Hello from a plugin"));"#
+        try writeInstalledPlugin("hello-board", source: hello, placement: "mainSidebar", presentation: "page", name: "Hello Board", icon: "hand.wave")
+        try writeInstalledPlugin("throws", source: #"throw new Error("Plugin exploded");"#)
+        try writeInstalledPlugin("bad-placement", source: hello, placement: "titleBar")
+        XCTAssertFalse(element("plugin-entry-hello-board").exists, "A plugin shows only after a refresh.")
+
+        let refreshed = try XCTUnwrap(try runCLI(["plugin", "refresh"])["result"] as? [String: Any])
+        XCTAssertEqual(refreshed["revision"] as? Int, 1)
+        let entry = element("plugin-entry-hello-board")
+        XCTAssertTrue(entry.waitToExist(timeout: 10), "After a refresh the valid plugin's button shows at its placement.")
+        XCTAssertEqual(entry.label, "Hello Board")
+        XCTAssertGreaterThanOrEqual(entry.frame.minY, element("scheduled-tasks-button").frame.maxY - 1, "Its button sits below Scheduled Tasks.")
+        XCTAssertFalse(element("plugin-entry-throws").exists, "An invalid plugin shows no button.")
+        attachScreenshot(named: "An installed plugin's button in the board's sidebar")
+
+        let menu = app.menuBars.menuBarItems["Plugins"]
+        menu.click()
+        let helloItem = menu.menuItems["Hello Board — Main sidebar"]
+        XCTAssertTrue(helloItem.waitToExist(timeout: 5), "The Plugins menu lists the installed plugin with its placement.")
+        XCTAssertTrue(menu.menuItems["Throws — Chat input actions"].exists, "The Plugins menu lists an invalid plugin too.")
+        XCTAssertTrue(menu.menuItems["Bad Placement — titleBar"].exists)
+        XCTAssertTrue(menu.menuItems.matching(NSPredicate(format: "title CONTAINS %@", "Plugin exploded")).firstMatch.exists,
+                      "An invalid plugin shows its first error.")
+        XCTAssertEqual(menu.menuItems.matching(NSPredicate(format: "title CONTAINS %@", "Unknown placement")).count, 1,
+                       "Only the invalid plugins show an error, each its own.")
+        XCTAssertFalse(helloItem.isEnabled, "A plugin's row is a label, not a command.")
+        attachScreenshot(named: "The Plugins menu lists installed plugins with their placement")
+        menu.menuItems["Delete Hello Board…"].click()
+        let confirm = app.dialogs.buttons["Delete"].firstMatch
+        XCTAssertTrue(confirm.waitToExist(timeout: 5), "Deleting from the Plugins menu asks for confirmation.")
+        XCTAssertTrue(app.dialogs.staticTexts["Delete the plugin Hello Board?"].exists, "The confirmation names the plugin.")
+        attachScreenshot(named: "Deleting a plugin asks for confirmation")
+        confirm.click()
+        XCTAssertTrue(waitForDisappearance(entry, timeout: 10), "Deleting removes the plugin's button.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: pluginsFolder.appendingPathComponent("hello-board").path), "Deleting removes its folder.")
+        XCTAssertFalse(try installedPluginIDs().contains("hello-board"))
+
+        _ = try runCLI(["plugin", "delete", "--id", "throws"])
+        menu.click()
+        XCTAssertTrue(menu.menuItems["Bad Placement — titleBar"].waitToExist(timeout: 5))
+        XCTAssertTrue(waitUntil({ !menu.menuItems["Delete Throws…"].exists && !menu.menuItems["Delete Hello Board…"].exists }, timeout: 10),
+                      "The menu drops deleted plugins.")
+        attachScreenshot(named: "The Plugins menu after deleting plugins")
+        app.typeKey(.escape, modifierFlags: [])
+        assertCLIError(try runCLI(["plugin", "delete", "--id", "throws"], expectedStatus: 3), code: "not_found")
+        assertCLIError(try runCLI(["plugin", "delete", "--id", "../plugins"], expectedStatus: 2), code: "invalid_argument")
+    }
+
+    // case-contract: test_plugin_surfaces_receive_context_and_host_access | An installed plugin receives its placement's context in Playhouse.props: the plugin and the appearance everywhere, the task with its repositories and context folders in the conversation placements, and the composer's draft and selected text in the composer placement, while the board's sidebar gets no task. `plugin render --plugin <id> --task <id>` renders it headlessly with that real context. Playhouse.bridge runs any bridge command but plugin render against the real store (a rename is seen by a fresh CLI process) and rejects a failing one with its code; Playhouse.ui close, openTask and the composer's setDraft, insertText, replaceSelection and focus are recorded headlessly; a composer call from the board's sidebar and a plugin render call are refused the same way in both hosts; and --task without --plugin or an unknown plugin is refused. In the window a page plugin from the board's sidebar covers the board, reads the real board, and its openTask opens that task without sending anything; a composer popover plugin opens anchored to its button showing the draft and the selected text, and its replaceSelection replaces the selected text in the composer; a sidebar plugin from the conversation sidebar slides in at the trailing edge showing the task's title and repository, inserts text after the selection, replaces the draft, renames the task, and closes with its close button; and a modal plugin beside the Terminal button opens as a sheet with the task's context and closes itself with Playhouse.ui.close.
+    func test_plugin_surfaces_receive_context_and_host_access() throws {
+        try writeInstalledPlugin("context-composer", source: Self.pluginContextSource, placement: "composerActions", presentation: "popover", name: "Context Composer", icon: "textformat")
+        try writeInstalledPlugin("context-sidebar", source: Self.pluginContextSource, placement: "conversationSidebar", presentation: "sidebar", name: "Context Sidebar", icon: "sidebar.right")
+        try writeInstalledPlugin("context-board", source: Self.pluginContextSource, placement: "mainSidebar", presentation: "page", name: "Context Board", icon: "rectangle.stack")
+        try writeInstalledPlugin("context-toolbar", source: Self.pluginContextSource, placement: "conversationToolbar", presentation: "modal", name: "Context Toolbar", icon: "wrench")
+        launchApp(defaultParent: fixture.parent.path)
+        let plugins = try XCTUnwrap((try runCLI(["plugin", "refresh"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+        XCTAssertTrue(plugins.allSatisfy { $0["valid"] as? Bool == true }, "\(plugins)")
+        let task = try XCTUnwrap(try runCLI(["task", "create", "--title", "Plugin context task", "--prompt", "Fixture task description.", "--repo", fixture.primary.path])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let window = app.windows.firstMatch
+
+        // A page plugin from the board's sidebar: no task, real bridge access, the shared refusals, and openTask.
+        let boardEntry = element("plugin-entry-context-board")
+        XCTAssertTrue(boardEntry.waitToExist(timeout: 15))
+        boardEntry.click()
+        let page = element("plugin-surface-context-board")
+        XCTAssertTrue(page.waitToExist(timeout: 10), "The page plugin opens.")
+        XCTAssertTrue(waitForStableFrame(page), "The page finishes sliding in before it is clicked.")
+        XCTAssertGreaterThan(page.frame.width, window.frame.width - 4, "The page covers the board from edge to edge.")
+        XCTAssertGreaterThan(page.frame.height, window.frame.height / 2, "The page covers the board's height.")
+        XCTAssertEqual(pluginText(page.descendants(matching: .any)["plugin-task"]), "no task", "The board's sidebar hands the plugin no task.")
+        page.descendants(matching: .any)["plugin-count"].click()
+        XCTAssertTrue(waitUntil({ self.pluginText(page.descendants(matching: .any)["plugin-status"]) == "tasks: 1" }, timeout: 10),
+                      "Playhouse.bridge reads the real board.")
+        attachScreenshot(named: "A page plugin from the board's sidebar, after a bridge call")
+        page.descendants(matching: .any)["plugin-focus"].click()
+        XCTAssertTrue(waitUntil({ self.pluginText(page.descendants(matching: .any)["plugin-status"]) == "focus: unavailable" }, timeout: 10),
+                      "The board's sidebar has no composer.")
+        page.descendants(matching: .any)["plugin-recursive"].click()
+        XCTAssertTrue(waitUntil({ self.pluginText(page.descendants(matching: .any)["plugin-status"]) == "render: invalid_argument" }, timeout: 10),
+                      "A plugin can't render plugins.")
+        page.descendants(matching: .any)["plugin-open"].click()
+        XCTAssertTrue(waitForDisappearance(page, timeout: 10), "openTask closes the page.")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Plugin context task" }, timeout: 15),
+                      "openTask opens the task.")
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'user-message-'")).firstMatch.exists,
+                       "openTask sends nothing.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Backlog", "The opened task did not start.")
+
+        // A popover plugin beside the composer's Skills button sees the draft and the selection.
+        composer.click()
+        composer.typeText("make this loud")
+        for _ in 0..<4 { composer.typeKey(.leftArrow, modifierFlags: [.shift]) }
+        let composerEntry = element("plugin-entry-context-composer")
+        XCTAssertTrue(composerEntry.waitToExist(timeout: 5))
+        XCTAssertGreaterThanOrEqual(composerEntry.frame.minX, element("open-skills-button").frame.maxX - 1, "Its button sits beside the Skills button.")
+        composerEntry.click()
+        let popover = app.popovers.descendants(matching: .any)["plugin-surface-context-composer"]
+        XCTAssertTrue(popover.waitToExist(timeout: 10), "The plugin opens in a popover.")
+        XCTAssertTrue(waitForStableFrame(popover), "The popover finishes opening before it is clicked.")
+        let popoverFrame = app.popovers.firstMatch.frame
+        XCTAssertTrue(popoverFrame.minX <= composerEntry.frame.midX && composerEntry.frame.midX <= popoverFrame.maxX,
+                      "The popover is anchored over its button: \(popoverFrame) vs \(composerEntry.frame).")
+        XCTAssertLessThan(min(abs(popoverFrame.minY - composerEntry.frame.maxY), abs(composerEntry.frame.minY - popoverFrame.maxY)), 30,
+                          "The popover's arrow edge meets its button.")
+        XCTAssertEqual(pluginText(popover.descendants(matching: .any)["plugin-placement"]), "composerActions")
+        XCTAssertEqual(pluginText(popover.descendants(matching: .any)["plugin-task"]), "Plugin context task")
+        XCTAssertTrue(waitUntil({ self.pluginText(popover.descendants(matching: .any)["plugin-draft"]) == "make this loud" }, timeout: 5), "The plugin sees the draft.")
+        XCTAssertEqual(pluginText(popover.descendants(matching: .any)["plugin-selection"]), "loud", "The plugin sees the selected text.")
+        attachScreenshot(named: "A composer plugin's popover showing the draft and the selected text")
+        popover.descendants(matching: .any)["plugin-upper"].click()
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "make this LOUD" }, timeout: 10), "replaceSelection replaces the selected text in the composer.")
+        attachScreenshot(named: "The composer after the plugin replaced the selection")
+        // The composer took the keyboard back, so the plugin closes its own popover.
+        popover.descendants(matching: .any)["plugin-close"].click()
+        XCTAssertTrue(waitForDisappearance(popover, timeout: 5), "Playhouse.ui.close dismisses the popover.")
+
+        // A sidebar plugin from the conversation sidebar: the task's context and composer edits.
+        let sidebarEntry = element("plugin-entry-context-sidebar")
+        XCTAssertTrue(sidebarEntry.waitToExist(timeout: 5))
+        XCTAssertEqual(sidebarEntry.label, "Context Sidebar")
+        XCTAssertGreaterThan(sidebarEntry.frame.width, 120, "A sidebar placement's button is labeled.")
+        sidebarEntry.click()
+        let panel = element("plugin-surface-context-sidebar")
+        XCTAssertTrue(panel.waitToExist(timeout: 10), "The sidebar plugin slides in.")
+        XCTAssertTrue(waitForStableFrame(panel), "The panel finishes sliding in before it is clicked.")
+        XCTAssertTrue(waitUntil({ abs(panel.frame.maxX - window.frame.maxX) < 4 }, timeout: 5), "It sits against the window's trailing edge.")
+        XCTAssertLessThan(abs(panel.frame.width - 360), 4, "It is a 360-point panel, not a page or a sheet.")
+        XCTAssertTrue(app.sheets.count == 0 && app.popovers.count == 0)
+        XCTAssertEqual(pluginText(panel.descendants(matching: .any)["plugin-task"]), "Plugin context task")
+        XCTAssertEqual(pluginText(panel.descendants(matching: .any)["plugin-repositories"]), fixture.primary.lastPathComponent)
+        XCTAssertEqual(pluginText(panel.descendants(matching: .any)["plugin-draft"]), "no composer", "Only the composer placement gets the draft.")
+        panel.descendants(matching: .any)["plugin-insert"].click()
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "make this LOUD!" }, timeout: 10), "insertText inserts after the selection.")
+        panel.descendants(matching: .any)["plugin-set-draft"].click()
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "fresh draft" }, timeout: 10), "setDraft replaces the draft.")
+        XCTAssertEqual(pluginText(panel.descendants(matching: .any)["plugin-status"]), "setDraft: ok")
+        panel.descendants(matching: .any)["plugin-rename"].click()
+        XCTAssertTrue(waitUntil({ self.pluginText(panel.descendants(matching: .any)["plugin-status"]) == "renamed: Renamed by plugin" }, timeout: 10))
+        XCTAssertEqual(try taskRecord(id: taskID)?["title"] as? String, "Renamed by plugin", "The plugin's bridge call renamed the task in the store.")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Renamed by plugin" }, timeout: 10),
+                      "The open task shows the new title.")
+        attachScreenshot(named: "A sidebar plugin with the task's context, after editing the draft and renaming the task")
+        panel.descendants(matching: .any)["plugin-surface-close"].click()
+        XCTAssertTrue(waitForDisappearance(panel, timeout: 5), "The sidebar closes with its close button.")
+
+        // A modal plugin beside the Terminal button opens as a sheet and closes itself.
+        let toolbarEntry = element("plugin-entry-context-toolbar")
+        let terminal = element("toggle-terminal-button")
+        XCTAssertTrue(toolbarEntry.waitToExist(timeout: 5))
+        XCTAssertLessThanOrEqual(toolbarEntry.frame.maxX, terminal.frame.minX + 1, "Its icon sits beside the Terminal button.")
+        XCTAssertLessThan(abs(toolbarEntry.frame.midY - terminal.frame.midY), 4)
+        XCTAssertLessThan(toolbarEntry.frame.width, 40, "A toolbar entry is only an icon.")
+        toolbarEntry.click()
+        let sheet = app.sheets.descendants(matching: .any)["plugin-surface-context-toolbar"]
+        XCTAssertTrue(sheet.waitToExist(timeout: 10), "The modal plugin opens as a sheet.")
+        XCTAssertTrue(waitForStableFrame(sheet), "The sheet finishes opening before it is clicked.")
+        XCTAssertEqual(pluginText(sheet.descendants(matching: .any)["plugin-task"]), "Renamed by plugin", "The toolbar placement gets the task.")
+        XCTAssertEqual(pluginText(sheet.descendants(matching: .any)["plugin-draft"]), "no composer")
+        attachScreenshot(named: "A modal plugin from the sidebar toolbar")
+        sheet.descendants(matching: .any)["plugin-close"].click()
+        XCTAssertTrue(waitForDisappearance(sheet, timeout: 5), "Playhouse.ui.close dismisses the sheet.")
+        XCTAssertEqual(app.sheets.count, 0)
     }
 
     // case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.

@@ -111,6 +111,11 @@ enum WorkspaceSettings {
     static let defaultTokenUsageColorMax = TokenUsageHeatmap.defaultColorMax
     static let cpuUsageColorMaxKey = "cpuUsageColorMax"
     static let defaultCPUUsageColorMax = CPUUsageHeatmap.defaultColorMax
+    /// Add Plugin mode: the window shows "Add here" placeholders at every plugin placement.
+    static let pluginAddModeKey = "pluginAddMode"
+    /// Bumped whenever the plugins folder changes (`plugin refresh`, `plugin delete`), so
+    /// the window reloads its installed plugins.
+    static let pluginsRevisionKey = "pluginsRevision"
 
     static var preferencesStore: UserDefaults {
         #if DEBUG

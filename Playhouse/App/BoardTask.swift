@@ -236,6 +236,9 @@ final class BoardTask {
     var lastScheduledRunTaskID: UUID?
     /// The recurring schedule that started this task, if any.
     var scheduleSourceTaskID: UUID?
+    /// Set on a task started from an Add Plugin mode placeholder: the `PluginPlacement`
+    /// the new plugin's entry goes in. Its conversation gets plugin authoring instructions.
+    var pluginPlacement: String?
 
     var workspaceRootPaths: [String] {
         get {

@@ -967,13 +967,16 @@ struct AtomEditor: View {
     var onFocusChange: (Bool) -> Void = { _ in }
     /// A pasted image reaches only native owners.
     var onPasteImage: (Data) -> Void = { _ in }
+    /// The selection reaches only native owners, such as the composer's plugins.
+    var onSelectionChange: (NSRange) -> Void = { _ in }
     @State private var text: String
     @State private var height: CGFloat = 28
 
     init(
         props: EditorProps, common: AtomCommon = AtomCommon(), onChange: @escaping (String) -> Void,
         onSubmit: @escaping () -> Void = {}, onSteerSubmit: @escaping () -> Void = {},
-        onFocusChange: @escaping (Bool) -> Void = { _ in }, onPasteImage: @escaping (Data) -> Void = { _ in }
+        onFocusChange: @escaping (Bool) -> Void = { _ in }, onPasteImage: @escaping (Data) -> Void = { _ in },
+        onSelectionChange: @escaping (NSRange) -> Void = { _ in }
     ) {
         self.props = props
         self.common = common
@@ -982,6 +985,7 @@ struct AtomEditor: View {
         self.onSteerSubmit = onSteerSubmit
         self.onFocusChange = onFocusChange
         self.onPasteImage = onPasteImage
+        self.onSelectionChange = onSelectionChange
         _text = State(initialValue: props.text)
     }
 
@@ -998,7 +1002,8 @@ struct AtomEditor: View {
             inputLabel: props.inputLabel,
             onSubmit: onSubmit,
             onSteerSubmit: onSteerSubmit,
-            onPasteImage: onPasteImage
+            onPasteImage: onPasteImage,
+            onSelectionChange: onSelectionChange
         )
         .frame(height: height)
         .overlay(alignment: .topLeading) {

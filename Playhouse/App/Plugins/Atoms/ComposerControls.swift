@@ -18,6 +18,8 @@ struct NativeChatEditor: NSViewRepresentable {
     let onSubmit: () -> Void
     let onSteerSubmit: () -> Void
     let onPasteImage: (Data) -> Void
+    /// The selected range, in UTF-16 offsets, whenever it changes.
+    var onSelectionChange: (NSRange) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -112,6 +114,11 @@ struct NativeChatEditor: NSViewRepresentable {
             guard let editor = notification.object as? ChatEditorTextView else { return }
             parent.text = editor.string
             (editor.enclosingScrollView as? ChatEditorScrollView)?.requestTextLayout()
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let editor = notification.object as? NSTextView else { return }
+            parent.onSelectionChange(editor.selectedRange())
         }
 
         func textDidBeginEditing(_ notification: Notification) { parent.isFocused = true }
