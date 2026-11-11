@@ -6,8 +6,10 @@ applies them to an observable node tree, and SwiftUI draws that tree from
 native **atoms**. Plugins compose only atoms. Composites such as the task
 item, a board column's frame, the board's Agents info section, the Token Stats modal, the Skills
 page's header and gallery, the task header's repository chips and Add
-repository picker, and the conversation composer's box exist only as native
-SwiftUI built from the same atoms (`Playhouse/App/TaskItemView.swift`,
+repository picker, the conversation composer's box and the board's Done
+archive exist only as native SwiftUI built from the same atoms
+(`Playhouse/App/TaskItemView.swift`, `DoneArchivePanel` in
+`Playhouse/App/DoneArchiveView.swift`,
 `KanbanColumnSection` in `Playhouse/App/KanbanColumnSection.swift`,
 `ComposerView` in `Playhouse/App/ComposerView.swift`, `AgentsInfoSection` in
 `Playhouse/App/AgentsInfoView.swift`, `TokenStatsView` in
@@ -21,7 +23,7 @@ SwiftUI built from the same atoms (`Playhouse/App/TaskItemView.swift`,
 | `Core/` | Foundation + JavaScriptCore only: `PluginRuntime` (the JS context), `PluginNodeTree` (ops → nodes), `AtomProps` (atom names and props), `PluginRenderCommand` (`playhouse plugin render`). Also compiled into the bridge daemon. |
 | `Atoms/` | The atoms' SwiftUI views and `AtomRegistry`, which maps each atom name to a builder that decodes the node's props. |
 | `Renderer/` | `PluginSurface` (runs one script and renders its tree) and the Plugin Catalog window. |
-| `Playhouse/Resources/PluginRuntime/` | `prelude.js` (the React host config), `vendor/` (prebuilt react 18.3.1, react-reconciler 0.29.2, scheduler 0.23.2), `catalog/` (one page per atom, `TaskItem.js`, `AgentsInfo.js`, `TokenStats.js`, `SkillsPage.js`, `RepositoryChips.js`, `Composer.js`, and their `sample-*.json` data). |
+| `Playhouse/Resources/PluginRuntime/` | `prelude.js` (the React host config), `vendor/` (prebuilt react 18.3.1, react-reconciler 0.29.2, scheduler 0.23.2), `catalog/` (one page per atom, `TaskItem.js`, `AgentsInfo.js`, `TokenStats.js`, `SkillsPage.js`, `RepositoryChips.js`, `Composer.js`, `KanbanColumn.js`, `DoneArchive.js`, and their `sample-*.json` data). |
 
 `catalog/TaskItem.js` is a demo that copies `TaskItemView` atom for atom, so the
 catalog can show the two side by side. It is not a composite exposed to
@@ -62,10 +64,36 @@ notice, empty state and the Waiting Response column's tint (a second Panel
 washing the column in its accent); the column's cards stay native `TaskCardView`s passed in
 as content. Change it whenever the column's frame changes;
 `test_plugin_kanban_column_renders_from_atoms_like_native` compares the two.
+`catalog/DoneArchive.js` does the same for `DoneArchivePanel`, the board's
+Done archive: its title and close button, the search on a rounded fill (a
+`plain` TextField on a decorated Stack), then the empty message or the lazy
+list of rows, each a Button opening its task beside the same pull request
+Button and Link atoms the task item uses. The board presents it in a
+`SidePanel` atom, opened by the header's archive button (`DoneArchiveButton`),
+and asks for the next 40 tasks when the list's `onEndReached` fires; it owns
+the loaded pages and the search and derives a `DoneArchiveModel`. Change it
+whenever the archive changes; `test_plugin_done_archive_renders_from_atoms_like_native`
+compares the two.
+
+Plugins present UI the same three ways the board does, each a controlled
+atom whose first child is what it is presented over: `Modal` (a sheet over
+the window, which Escape dismisses through `onDismiss`; the board's Token
+Stats modal), `Page` (slides in over all of its first child; the Scheduled
+Tasks page) and `SidePanel` (slides in over one edge; the Done archive). The
+owner closes a Page or SidePanel with its own control, as the board's Back
+and close buttons do. A Page or SidePanel keeps an empty AppKit view behind what it covers so
+accessibility hit tests reach its controls (without one the board's archive
+rows took clicks but XCUITest couldn't find them), and a SidePanel orders its
+panel ahead of the covered view, so its controls stay reachable even when
+that view is one accessibility group (a plugin's base Stack with `group`). On a Modal or SidePanel, `width` (and a Modal's `height`) sizes what it
+presents, not the atom: those keys are its own props there, not the common
+frame props. A Popover's `width` still frames its anchor too; a follow-up is
+to keep atom and common prop names apart. The board presents those three through the same
+atom views (`atomModal`, `atomPage` and `atomSidePanel`).
+
 Smaller native views are also built straight from atoms, with no catalog
 copy because they have no state or layout a plugin would need to match: the
-board's header, sidebar button, worktree notice, Done archive pull request
-actions and Rename Task sheet (`KanbanBoardView.swift`), the Scheduled Tasks
+board's header, sidebar button, worktree notice and Rename Task sheet (`KanbanBoardView.swift`), the Scheduled Tasks
 page apart from its delete alert (`ScheduledTasksPageView.swift`), and in the
 conversation the notices above the composer, the queued follow-ups, the
 pending comment count, the active goal row, the comment hover card, the
@@ -74,7 +102,8 @@ changes sidebar's merge notice (`TaskConversationView.swift`).
 
 Each composite reads a display model that is already derived
 (`TaskItemModel`, `AgentsInfoModel`, `TokenStatsModel`, `SkillsPageModel`,
-`RepositoryChipsModel`, `RepositoryPickerModel`, `ComposerModel`, `KanbanColumnModel`), so the JavaScript copy
+`RepositoryChipsModel`, `RepositoryPickerModel`, `ComposerModel`, `KanbanColumnModel`,
+`DoneArchiveModel`), so the JavaScript copy
 formats nothing the native one doesn't.
 
 The app build does not run npm. `scripts/vendor-react.sh` is the one-time
@@ -92,7 +121,8 @@ A plugin is one script. The runtime defines these globals:
   the top-level fields of every `catalog/sample-*.json` (`task` and
   `blockedStatusMessage` for the task item, `agentsInfo` for Agents info,
   `tokenStats` and `tokenCounter` for Token Stats, `skillsPage` for the Skills
-  page, `repositoryChips` and `repositoryPicker` for the repository chips, `kanbanColumns` for the Kanban Column page).
+  page, `repositoryChips` and `repositoryPicker` for the repository chips, `kanbanColumns` for the Kanban Column page,
+  `doneArchive` for the Done Archive page).
   Two samples may not share a field.
 - `Playhouse.render(element)`: mounts the root.
 - `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`, `queueMicrotask`, `console`.
@@ -111,7 +141,7 @@ Playhouse.render(h(Counter));
 ```
 
 Raw strings may only appear inside a `Text`, and only `Stack`, `Button`,
-`Link`, `Card`, `Disclosure`, `Panel`, `Scroll`, `PressArea` and `Overlay` take atom children. An unknown atom, an unknown prop, a prop
+`Link`, `Card`, `Disclosure`, `Panel`, `Scroll`, `PressArea`, `Overlay`, `Popover`, `Modal`, `Page` and `SidePanel` take atom children. An unknown atom, an unknown prop, a prop
 with the wrong type, or an event the atom doesn't raise is an error. The commit stops at that op, and
 the ops before it stay applied. The catalog shows the error under whatever
 rendered.
@@ -132,7 +162,7 @@ exits 1 when the plugin reported errors.
 ## Atoms
 
 These are exactly the atoms the task item, the Agents info section, the
-Token Stats modal, the Skills page and the repository chips and picker and the composer are built from. Every atom also takes these common props:
+Token Stats modal, the Skills page, the repository chips and picker, the composer and the Done archive are built from, and that present the board's modal, page and side panel. Every atom also takes these common props:
 
 | Common prop | |
 | --- | --- |
@@ -167,11 +197,11 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | `Disclosure` | `title`, `collapsed` (required; the atom shows what it is given), `spacing`, `toggleTestID` (the title button); a collapsed section keeps its children in the tree and hides them | `onToggle()`, called inside an animation; the owner flips `collapsed` | atoms |
 | `Panel` | `spacing`, `fill`, `fillOpacity`, `cornerRadius`, `capsule`, `stroke`, `strokeOpacity`, `strokeWidth`, `dash`, `align` (`leading` default or `center`), `combine`. A composite atom, shorthand for a column `Stack` with `group` and a surface whose defaults differ: `fill` `primary` at `fillOpacity` 0.05, `cornerRadius` 8, `align` `leading`, and a border only when it has a `stroke`. Its view is that Stack's (`PanelProps.stack`) | | atoms |
 | `Meter` | `fraction` (0…1, required), `color` (`accent` default), `thickness` (3 default), `trackOpacity` (0.12 default), `minFill` (shortest fill in points, 0 default); decorative unless it has a `label` | | |
-| `Scroll` | `spacing`, `maxHeight` (shrinks to its content up to it; the common `height` fixes it), `inset` (padding inside the scroll view), `lazy` (builds only the children in view); a vertical scroll view around a leading column that fills its width | | atoms |
+| `Scroll` | `spacing`, `maxHeight` (shrinks to its content up to it; the common `height` fixes it), `inset` (padding inside the scroll view), `lazy` (builds only the children in view); a vertical scroll view around a leading column that fills its width | `onEndReached()`: raised each time the end of its content comes into view, and once when the content fits (the Done archive appends its next page). It isn't raised again while the end stays in view, so an owner whose page doesn't fill the view loads the next one itself | atoms |
 | `Divider` | none; a thin separator across its stack | | |
 | `ChoiceBar` | `options` (`[{value, label, testID?}]`), `selected`; one button per option, the selected one highlighted and marked selected. Its capabilities are reachable through a decorated row `Stack` of `Button`s (`selected`) each on a decorated `Stack` with a `Text`, as the ChoiceBar page composes it beside the atom (see Composite atoms below) | `onChange(value)`, not raised for the option already selected | |
 | `Toggle` | `isOn` (required; the atom shows what it is given), `size` (`mini`, `small`, `regular` default), `disabled`; a switch with no visible label, so give it a `label` | `onToggle()`; the owner flips `isOn` | |
-| `TextField` | `text` (required), `placeholder`, `autoFocus` (takes the keyboard focus when it appears); a rounded one-line field that edits its own copy and takes `text` whenever the owner changes it | `onChange(text)` on every edit; `onSubmit()` for Return and `onArrow(direction)` (`up`, `down`) for the arrows, which keep their usual behavior when there is no handler | |
+| `TextField` | `text` (required), `placeholder`, `autoFocus` (takes the keyboard focus when it appears), `style` (`rounded` default, `plain`: no border, for a field on a decorated `Stack`); a one-line field that edits its own copy and takes `text` whenever the owner changes it | `onChange(text)` on every edit; `onSubmit()` for Return and `onArrow(direction)` (`up`, `down`) for the arrows, which keep their usual behavior when there is no handler | |
 | `Segmented` | `options` (`[{value, label}]`), `selected`, `disabled`; a segmented control, as wide as its segments unless it has a `width` | `onChange(value)`, not raised for the segment already selected | |
 | `Menu` | `icon` (SF Symbol), `text` (beside or instead of the symbol), `size`, `weight` (the symbol's), `textSize`, `textWeight`, `badgeIcon` (a second symbol before the text), `color` (`secondary` default), `indicator` (the pull-down chevron, hidden by default), `disabled`, `items` (groups `[[{id, title, destructive?, help?, testID?, checked?, icon?, disabled?}]]`, a separator between non-empty groups; a checked item shows a checkmark and a disabled one is dimmed and can't be chosen); a borderless pull-down whose common `width` and `height` frame its label | `onMenu(id)` | |
 | `PressArea` | `spacing`, `pointer` (the pointing hand); a leading column that takes every click on its children, one accessibility container | `onPress()` for a click, `onLongPress()` for a press and hold | atoms |
@@ -179,6 +209,9 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | `Editor` | `text` (required), `placeholder`, `placeholderTestID`, `enabled`, `autofocus`, `focused`, `focusRequest` (each new value moves the keyboard in once), `inputTestID` and `inputLabel` (the text view's own accessibility identifier and label); a multiline message editor that grows with its text; the common `hint` is its accessibility help; a pasted image reaches native owners only | `onChange(text)`, `onSubmit()` (Return), `onSteerSubmit()` (Command-Return), `onFocusChange(isFocused)` | |
 | `Popover` | `isPresented` (required), `arrowEdge` (`top` default, `bottom`, `leading`, `trailing`), `width`; shows the children after its first in a popover (a leading column) anchored to its first; its `testID` only names it to events | `onDismiss()` (a click outside or Escape; the owner sets `isPresented` false) | atoms: the anchor, then the content |
 | `StepSlider` | `options` (`[{value, label}]`), `selected`; a discrete slider as wide as its container, driven by click, drag or arrow keys; its common `label` and `testID` name it | `onChange(value)` | |
+| `Modal` | `isPresented` (required), `width`, `height` (fix the sheet's size; it fits its content otherwise); a sheet over the window presented from its first child, which stays laid out as usual, showing the rest in a leading column; its `testID` and accessibility props name the sheet's content | `onDismiss()` (Escape; the owner sets `isPresented` false) | atoms: the presenter, then the content |
+| `Page` | `isPresented` (required); slides in from the trailing edge over all of its first child, which stays laid out as usual and sizes the atom, showing the rest in a leading column on the window background, like the Scheduled Tasks page; its `testID` and accessibility props name the page; the owner closes it with its own control | | atoms: the covered view, then the page |
+| `SidePanel` | `isPresented` (required), `edge` (`trailing` default, `leading`), `width` (340 default); a full-height panel sliding in over that edge of its first child, which stays laid out as usual and sizes the atom, showing the rest in a column with no spacing on the window background, with a hairline along its inner edge and a shadow, like the Done archive; its `testID` and accessibility props name the panel; the owner closes it with its own control | | atoms: the covered view, then the panel |
 
 ### Composite atoms
 
@@ -196,7 +229,8 @@ These are composites too, and still to settle:
 | `Disclosure` | A `Button` (chevron `Icon` and `Text`) over a column `Stack` | Its animated collapse is reachable through no smaller atom |
 | `Scroll` | A scroll view around a column `Stack` | `lazy`: a `Stack` is never lazy |
 | `Menu` | A pull-down whose label is `Icon`s and a `Text` | Its label is symbol and text props, not atom children |
-| `PressArea`, `Popover` | A press or popover around a column `Stack` | The column is reachable through a nested `Stack`, but they draw their own |
+| `PressArea`, `Popover`, `Modal` | A press or presentation around a column `Stack` | The column is reachable through a nested `Stack`, but they draw their own |
+| `Page`, `SidePanel` | A presentation around a column `Stack` on a `window`-filled surface | The column and the fill are reachable through a `Stack`; the shadow over what they cover and the SidePanel's one-edge hairline are reachable through no smaller atom |
 
 To add an atom, add its case and props struct to `Core/AtomProps.swift`, its
 view to `Atoms/AtomViews.swift`, its registry entry to

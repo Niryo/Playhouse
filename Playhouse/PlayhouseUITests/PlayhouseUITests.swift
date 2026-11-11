@@ -1855,7 +1855,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "A task keeps its resolved branch when another task already used the slug")
     }
 
-    // case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable archive, whose conversation keeps its composer for follow-up questions; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
+    // case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable archive, whose conversation keeps its composer for follow-up questions; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged. The archive slides in from the board header's archive button as a 340-point SidePanel atom (done-archive-panel) along the window's trailing edge, and its close button slides it away until the button opens it again.
     func test_task_done_removes_worktree_and_preserves_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture().merging(Self.prCheckCooldownEnvironment) { $1 }
@@ -2065,6 +2065,19 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(archiveResult.exists, "Older tasks should not be loaded into the first archive page.")
         for _ in 0..<8 where !archiveResult.isHittable { archiveList.swipeUp() }
         XCTAssertTrue(waitUntil({ archiveResult.isHittable && archiveList.frame.intersects(archiveResult.frame) }, timeout: 10), "Scrolling should load older completed tasks into the archive viewport.")
+        // The archive is a SidePanel atom along the window's trailing edge; its close button slides it away.
+        let archivePanel = element("done-archive-panel")
+        let boardWindow = app.windows.firstMatch
+        XCTAssertTrue(archivePanel.exists, "The archive is presented in its SidePanel.")
+        XCTAssertEqual(archivePanel.frame.width, 340, accuracy: 1, "The archive's side panel is 340 points wide.")
+        XCTAssertEqual(archivePanel.frame.maxX, boardWindow.frame.maxX, accuracy: 2, "The side panel slides in along the window's trailing edge.")
+        XCTAssertTrue(archivePanel.frame.contains(archiveList.frame), "The list sits inside the side panel.")
+        attachScreenshot(named: "Board Done archive in its SidePanel")
+        element("close-done-archive-button").click()
+        XCTAssertTrue(waitUntil({ !archivePanel.exists && !archiveList.exists }, timeout: 5), "The close button slides the archive away.")
+        archiveButton.click()
+        XCTAssertTrue(archivePanel.waitToExist(timeout: 5), "The archive button opens the side panel again.")
+        XCTAssertTrue(element("done-archive-task-\(titleMatchID)").waitToExist(timeout: 10), "The reopened archive lists the newest completed task.")
         let archiveSearch = element("done-archive-search")
         archiveSearch.click()
         archiveSearch.typeText("no-such-archive-task")
@@ -16880,8 +16893,10 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Sidebar command row with the terminal button on the right")
 
         let window = app.windows.firstMatch
-        let conversation = element("empty-conversation")
+        // The whole conversation area, not its centered empty state, whose edges move with the window's width.
+        let conversation = element("conversation-scroll-view")
         XCTAssertTrue(conversation.exists)
+        XCTAssertTrue(element("empty-conversation").exists)
         XCTAssertGreaterThan(conversation.frame.maxX, window.frame.maxX - 470, "Before the panel opens, the conversation reaches into the space the panel will take.")
         let conversationFrameBefore = conversation.frame
         toggle.click()
@@ -20998,7 +21013,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(switched["conversationProvider"] as? String, liveProvider)
     }
 
-    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips and Composer examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors. The Button page also shows a link-style Button and a large one (taller than a regular Button), each running onPress, the Menu page's disabled Run Now item is shown but can't be chosen, and the Icon page draws the app logo asset in its own colors (original) in a 50-point frame with its accessibility label; a mistyped original or Menu item disabled is reported with its path.
+    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider, Modal, Page, SidePanel) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips, Composer and Done Archive examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors. The Button page also shows a link-style Button and a large one (taller than a regular Button), each running onPress, the Menu page's disabled Run Now item is shown but can't be chosen, and the Icon page draws the app logo asset in its own colors (original) in a 50-point frame with its accessibility label; a mistyped original or Menu item disabled is reported with its path. The Scroll page's lazy paged list raises onEndReached each time its end scrolls into view: it starts at 1 pages loaded, and scrolling to its end appends a page and then, scrolled to the new end, another (2, then 3 pages loaded); in `plugin render` each onEndReached is one commit that adds the page's rows and changes the readout. The TextField page's plain field (style plain) draws no border on its rounded Stack, so it is shorter than the rounded field, and typing in it runs its onChange.
     func test_plugin_renderer_commits_minimal_ops_and_runs_handlers() throws {
         executionTimeAllowance = 360 // It opens and checks every atom's catalog page, then exercises each control.
         launchApp(defaultParent: fixture.parent.path)
@@ -21010,11 +21025,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("plugin-catalog-skills-page").exists, "The sidebar lists the Skills Page example.")
         XCTAssertTrue(element("plugin-catalog-repository-chips").exists, "The sidebar lists the Repository Chips example.")
         XCTAssertTrue(element("plugin-catalog-composer").exists, "The sidebar lists the Composer example.")
+        XCTAssertTrue(element("plugin-catalog-done-archive").exists, "The sidebar lists the Done Archive example.")
 
         let rendered = try XCTUnwrap(try runCLI(["plugin", "render", "--page", "Stack"])["result"] as? [String: Any])
         let atoms = try XCTUnwrap(rendered["atoms"] as? [String])
         XCTAssertEqual(atoms, ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter",
-                               "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Overlay", "Editor", "Popover", "StepSlider"])
+                               "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Overlay", "Editor", "Popover", "StepSlider",
+                               "Modal", "Page", "SidePanel"])
         try assertPluginValuesCrossWithJSONRules()
         for atom in atoms {
             let row = catalogSidebarRow("plugin-catalog-atom-\(atom)")
@@ -21122,6 +21139,22 @@ final class PlayhouseUITests: XCTestCase {
         }
         XCTAssertLessThanOrEqual(lastRow.frame.maxY, scroll.frame.maxY + 1, "Scrolling inside the Scroll brings its last row into view.")
         attachScreenshot(named: "Scroll atom capped at 120 points and scrolled to its last row")
+        // A lazy Scroll raises onEndReached each time its end scrolls into view.
+        let paged = element("scroll-paged")
+        let pages = element("scroll-pages")
+        XCTAssertTrue(paged.waitToExist(timeout: 5))
+        XCTAssertEqual(pluginText(pages), "1 pages loaded", "The paged list's end starts out of view.")
+        for expected in ["2 pages loaded", "3 pages loaded"] {
+            for _ in 0..<40 where pluginText(pages) != expected {
+                paged.scroll(byDeltaX: 0, deltaY: -200)
+            }
+            XCTAssertTrue(waitUntil({ self.pluginText(pages) == expected }, timeout: 5), "Scrolling to the end loads the next page: \(pluginText(pages))")
+        }
+        // The list is lazy, so the third page's last row is built only once it scrolls near.
+        let pagedLastRow = element("scroll-paged-row-60")
+        for _ in 0..<20 where !pagedLastRow.exists { paged.scroll(byDeltaX: 0, deltaY: -200) }
+        XCTAssertTrue(pagedLastRow.exists, "The third page's rows are in the list.")
+        attachScreenshot(named: "Lazy Scroll appended two pages as its end scrolled into view")
 
         // The Skills page's controls.
         catalogSidebarRow("plugin-catalog-atom-Toggle").click()
@@ -21140,6 +21173,14 @@ final class PlayhouseUITests: XCTestCase {
         field.click()
         field.typeText("release")
         XCTAssertTrue(waitUntil({ self.pluginText(self.element("text-field-value")) == "Text: release" }, timeout: 5), "onChange received the typed text.")
+        let plainField = element("text-field-plain")
+        XCTAssertTrue(plainField.waitToExist(timeout: 5))
+        XCTAssertLessThan(plainField.frame.height, field.frame.height - 1, "The plain field draws no border, so it is shorter than the rounded one.")
+        XCTAssertTrue(element("text-field-plain-box").frame.contains(plainField.frame), "The plain field sits inside its rounded Stack.")
+        plainField.click()
+        plainField.typeText("quiet")
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("text-field-plain-value")) == "Plain: quiet" }, timeout: 5), "Typing in the plain field runs its onChange.")
+        field.click()
         field.typeKey(.downArrow, modifierFlags: [])
         XCTAssertTrue(waitUntil({ self.pluginText(self.element("text-field-key")) == "Key: down" }, timeout: 5), "Down ran onArrow with its direction.")
         field.typeKey(.upArrow, modifierFlags: [])
@@ -21658,6 +21699,204 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Kanban columns: Add pressed in both")
     }
 
+    // case-contract: test_plugin_presentation_atoms_open_modal_page_and_side_panel | Plugins present UI the three ways the board does, each a controlled atom whose first child is what it is presented from and stays laid out as usual. On the Plugin Catalog's Modal page, the Open modal button runs onPress (Last: open) and opens a 320-point sheet over the window showing the modal's title and a Done button; Done closes it (Last: done), and Escape closes it again through onDismiss (Last: dismiss). On the Page page, Open page (Last: open) slides a page over the whole 420 by 220 point view below it, covering that view's frame and showing its title, and its Back button closes it (Last: back), uncovering the view. On the SidePanel page, Open trailing (Last: open trailing) slides a 200-point panel as tall as the 480 by 240 point view below it in over that view's trailing edge, Open leading (Last: open leading) over its leading edge, and the panel's close button closes it (Last: close). `plugin render` keeps each atom's presented content in the tree after its first child, and opening or closing is one commit that updates only the presentation atom's props and the readout. Only a Modal raises onDismiss: a Page or SidePanel given an onDismiss handler, or a Modal, Page or SidePanel without isPresented or with a mistyped width or edge, is reported in errors.
+    func test_plugin_presentation_atoms_open_modal_page_and_side_panel() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Plugin Catalog")
+        func open(_ atom: String) {
+            let row = catalogSidebarRow("plugin-catalog-atom-\(atom)")
+            row.click()
+            let title = element("plugin-catalog-title")
+            XCTAssertTrue(waitUntil({ title.exists && self.pluginText(title) == atom }, timeout: 10), "Selecting \(atom) shows its page.")
+            XCTAssertFalse(element("plugin-error").exists, "The \(atom) page renders without errors.")
+        }
+
+        // Modal: a sheet over the window, closed by its Done button or Escape.
+        open("Modal")
+        let modalLast = element("modal-last")
+        XCTAssertFalse(element("modal-title").exists, "The modal starts closed.")
+        XCTAssertLessThan(element("modal-open").frame.width, 200, "The Modal's width sizes its sheet, not the button it is presented from.")
+        element("modal-open").click()
+        let modalTitle = element("modal-title")
+        XCTAssertTrue(modalTitle.waitToExist(timeout: 5), "Open modal presents the sheet.")
+        XCTAssertEqual(pluginText(modalLast), "Last: open")
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitToExist(timeout: 5), "The modal is a sheet over the catalog window.")
+        XCTAssertEqual(element("modal-demo").frame.width, 320, accuracy: 1, "The sheet's content is the modal's 320-point width.")
+        XCTAssertTrue(sheet.frame.contains(element("modal-done").frame), "The Done button is in the sheet.")
+        attachScreenshot(named: "Modal atom: sheet open", fullScreen: true)
+        element("modal-done").click()
+        XCTAssertTrue(waitUntil({ !modalTitle.exists && self.pluginText(modalLast) == "Last: done" }, timeout: 5), "Done closes the sheet through its handler.")
+        element("modal-open").click()
+        XCTAssertTrue(modalTitle.waitToExist(timeout: 5), "The modal opens again.")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ !modalTitle.exists && self.pluginText(modalLast) == "Last: dismiss" }, timeout: 5), "Escape runs onDismiss, which closes the sheet.")
+
+        // Page: slides over all of the view below it, closed by its Back button.
+        open("Page")
+        let pageBase = element("page-base")
+        let page = element("page-demo")
+        XCTAssertTrue(pageBase.waitToExist(timeout: 5))
+        XCTAssertEqual(pageBase.frame.width, 420, accuracy: 1)
+        XCTAssertEqual(pageBase.frame.height, 220, accuracy: 1)
+        XCTAssertFalse(page.exists, "The page starts closed.")
+        element("page-open").click()
+        XCTAssertTrue(element("page-title").waitToExist(timeout: 5), "Open page slides the page in.")
+        XCTAssertEqual(pluginText(element("page-last")), "Last: open")
+        XCTAssertTrue(waitUntil({ abs(page.frame.minX - pageBase.frame.minX) < 1 }, timeout: 5), "The page finishes sliding in over the view.")
+        XCTAssertEqual(page.frame.width, pageBase.frame.width, accuracy: 1, "The page covers the view's width.")
+        XCTAssertEqual(page.frame.height, pageBase.frame.height, accuracy: 1, "The page covers the view's height.")
+        XCTAssertEqual(page.frame.minY, pageBase.frame.minY, accuracy: 1)
+        attachScreenshot(named: "Page atom: page over its view")
+        element("page-back").click()
+        XCTAssertTrue(waitUntil({ !page.exists && self.pluginText(self.element("page-last")) == "Last: back" }, timeout: 5), "Back closes the page.")
+        XCTAssertTrue(element("page-open").isHittable, "The view is uncovered again.")
+
+        // SidePanel: slides in over either edge of the view below it; its controls are reachable.
+        func pressPanelClose() {
+            let close = element("side-panel-close")
+            XCTAssertTrue(close.waitToExist(timeout: 5))
+            XCTAssertTrue(waitUntil({ close.isHittable }, timeout: 5), "The panel's close button is hittable, so assistive clients reach it.")
+            close.click()
+        }
+        open("SidePanel")
+        let panelBase = element("side-panel-base")
+        let panel = element("side-panel-demo")
+        XCTAssertTrue(panelBase.waitToExist(timeout: 5))
+        XCTAssertFalse(panel.exists, "The panel starts closed.")
+        element("side-panel-open-trailing").click()
+        XCTAssertTrue(element("side-panel-title").waitToExist(timeout: 5), "Open trailing slides the panel in.")
+        XCTAssertEqual(pluginText(element("side-panel-last")), "Last: open trailing")
+        XCTAssertTrue(waitUntil({ abs(panel.frame.maxX - panelBase.frame.maxX) < 1 }, timeout: 5), "The panel rests along the view's trailing edge.")
+        XCTAssertEqual(panel.frame.width, 200, accuracy: 1, "The panel is its 200-point width.")
+        XCTAssertEqual(panel.frame.height, panelBase.frame.height, accuracy: 1, "The panel is as tall as the view.")
+        XCTAssertEqual(panel.frame.minY, panelBase.frame.minY, accuracy: 1)
+        attachScreenshot(named: "SidePanel atom: trailing panel")
+        pressPanelClose()
+        XCTAssertTrue(waitUntil({ !panel.exists && self.pluginText(self.element("side-panel-last")) == "Last: close" }, timeout: 5), "The close button closes the panel.")
+        element("side-panel-open-leading").click()
+        XCTAssertTrue(element("side-panel-title").waitToExist(timeout: 5), "Open leading slides the panel in.")
+        XCTAssertEqual(pluginText(element("side-panel-last")), "Last: open leading")
+        XCTAssertTrue(waitUntil({ abs(panel.frame.minX - panelBase.frame.minX) < 1 }, timeout: 5), "The panel rests along the view's leading edge.")
+        XCTAssertEqual(panel.frame.width, 200, accuracy: 1)
+        attachScreenshot(named: "SidePanel atom: leading panel")
+        pressPanelClose()
+        XCTAssertTrue(waitUntil({ !panel.exists }, timeout: 5), "The close button closes the leading panel too.")
+    }
+
+    // case-contract: test_plugin_done_archive_renders_from_atoms_like_native | The Plugin Catalog's Done Archive page shows the board's Done archive composed in JavaScript from atoms above the native SwiftUI archive the board presents, built from the same atoms and sample model, each opened by the board header's archive button (the bordered Button atom with the archivebox icon, labelled Done tasks) into a 340-point SidePanel over the trailing edge of a 560 by 460 point stand-in for the board, open at first. Both show the Done tasks title and its close button, the search field with its Search tasks and conversations placeholder, and a list of five rows, each a button opening its task with the done checkmark, its title and its date, beside its pull request actions: a #227 link, a PR button beside a #228 link, a PRs button, a disabled busy PR button showing a spinner, and nothing for a task without repositories, each at the same size in both and with the board archive's identifiers (done-archive-task, done-archive-create-pr, done-archive-pr-link, done-archive-search, and done-archive-list valued 5 tasks loaded). The JavaScript tree uses only atoms (SidePanel, Stack, Text, Icon, Button, Link, Spinner, Spacer, Divider, TextField, Scroll), its search a plain TextField on a rounded Stack. The list's end is in view, so its onEndReached runs on both sides (End reached). Typing in the JavaScript search runs onChange (Last: search followed by the text), narrows the rows to the matching title and shows the clear button, which clears the search and brings every row back; a search that matches nothing shows No matching tasks instead of the list. A PR button runs its handler with its task (Last: create pr followed by the title), a row runs open (Last: open followed by the title) and slides the panel away, the archive button opens it again (Last: toggle open), and the close button closes it (Last: close), while the native archive keeps its own state. The list raises no onPress, so pressing it is refused as invalid_argument.
+    func test_plugin_done_archive_renders_from_atoms_like_native() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Plugin Catalog")
+        let example = catalogSidebarRow("plugin-catalog-done-archive")
+        XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Done Archive example.")
+        example.click()
+        let jsSide = element("plugin-catalog-js-done-archive")
+        let nativeSide = element("plugin-catalog-native-done-archive")
+        XCTAssertTrue(jsSide.waitToExist(timeout: 10), "The page shows the JavaScript archive.")
+        XCTAssertTrue(nativeSide.waitToExist(timeout: 10), "The page shows the native archive.")
+        XCTAssertFalse(element("plugin-error").exists, "The JavaScript archive renders without errors.")
+
+        // The board window behind the catalog has the same identifiers, so every
+        // lookup is scoped to its catalog column.
+        func js(_ identifier: String) -> XCUIElement {
+            jsSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func native(_ identifier: String) -> XCUIElement {
+            nativeSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        // The side panel's controls are reachable: each must be hittable before it is clicked.
+        func press(_ control: XCUIElement) {
+            XCTAssertTrue(control.waitToExist(timeout: 5), "\(control) exists.")
+            XCTAssertTrue(waitUntil({ control.isHittable }, timeout: 5), "\(control) is hittable, so assistive clients reach it.")
+            control.click()
+        }
+        func assertSameSize(_ identifier: String) {
+            let jsElement = js(identifier), nativeElement = native("native-\(identifier)")
+            XCTAssertTrue(jsElement.waitToExist(timeout: 10), "The JavaScript archive has \(identifier).")
+            XCTAssertTrue(nativeElement.waitToExist(timeout: 10), "The native archive has \(identifier).")
+            XCTAssertEqual(jsElement.frame.width, nativeElement.frame.width, accuracy: 1, "\(identifier) has the same width in both.")
+            XCTAssertEqual(jsElement.frame.height, nativeElement.frame.height, accuracy: 1, "\(identifier) has the same height in both.")
+        }
+        let ids = (1...5).map { "4F3A2C10-0000-4000-8000-00000000000\($0)" }
+        let titles = ["Fix Skills page tab row layout", "Purple tint for the Waiting Response column", "Update the clean-mac AMI and monitoring",
+                      "Investigate and fix a task error", "Plan the next release notes"]
+        for side in [jsSide, nativeSide] {
+            let prefix = side == jsSide ? "" : "native-"
+            let panel = side.descendants(matching: .any).matching(identifier: "\(prefix)done-archive-panel").firstMatch
+            let board = side.descendants(matching: .any).matching(identifier: "\(prefix)done-archive-board").firstMatch
+            XCTAssertTrue(panel.waitToExist(timeout: 10), "The archive starts open in its side panel.")
+            XCTAssertEqual(board.frame.width, 560, accuracy: 1)
+            XCTAssertEqual(board.frame.height, 460, accuracy: 1)
+            XCTAssertTrue(waitUntil({ abs(panel.frame.maxX - board.frame.maxX) < 1 }, timeout: 5), "The panel rests along the board's trailing edge.")
+            XCTAssertEqual(panel.frame.width, 340, accuracy: 1, "The archive's side panel is 340 points wide.")
+            XCTAssertEqual(panel.frame.height, board.frame.height, accuracy: 1, "The side panel is as tall as the board.")
+            let button = side.descendants(matching: .any).matching(identifier: "\(prefix)done-archive-button").firstMatch
+            XCTAssertEqual(button.label, "Done tasks", "The archive button is labelled Done tasks.")
+        }
+        for identifier in ["done-archive-button", "done-archive-panel", "done-archive-title", "close-done-archive-button", "done-archive-search", "done-archive-list",
+                           "done-archive-pr-link-\(ids[0])-227", "done-archive-create-pr-\(ids[1])", "done-archive-pr-link-\(ids[1])-228",
+                           "done-archive-create-pr-\(ids[2])", "done-archive-create-pr-\(ids[3])"] + ids.map({ "done-archive-task-\($0)" }) {
+            assertSameSize(identifier)
+        }
+        XCTAssertEqual(pluginText(js("done-archive-title")), "Done tasks")
+        XCTAssertEqual(js("done-archive-search").placeholderValue, "Search tasks and conversations")
+        XCTAssertEqual(js("done-archive-list").value as? String, "5 tasks loaded")
+        XCTAssertEqual(native("native-done-archive-list").value as? String, "5 tasks loaded")
+        // A row's button may expose its texts as children or join them into its own label.
+        func shows(_ row: XCUIElement, _ text: String) -> Bool {
+            row.staticTexts[text].exists || accessibleLabelOrValue(of: row).contains(text)
+        }
+        for (id, title) in zip(ids, titles) {
+            XCTAssertTrue(shows(js("done-archive-task-\(id)"), title), "The JavaScript row shows \(title).")
+            XCTAssertTrue(shows(native("native-done-archive-task-\(id)"), title), "The native row shows \(title).")
+        }
+        XCTAssertTrue(shows(js("done-archive-task-\(ids[0])"), "10 November 2026"), "A row shows its task's date.")
+        XCTAssertTrue(shows(native("native-done-archive-task-\(ids[0])"), "10 November 2026"))
+        XCTAssertFalse(js("done-archive-create-pr-\(ids[3])").isEnabled, "The busy PR button is disabled.")
+        XCTAssertFalse(native("native-done-archive-create-pr-\(ids[3])").isEnabled)
+        XCTAssertFalse(js("done-archive-create-pr-\(ids[4])").exists, "A task without repositories has no pull request actions.")
+        XCTAssertFalse(js("clear-archive-search-button").exists, "An empty search has no clear button.")
+        XCTAssertTrue(waitUntil({ self.pluginText(js("js-end-reached")) == "End reached" }, timeout: 5), "The JavaScript list's end is in view, so onEndReached ran.")
+        XCTAssertTrue(waitUntil({ self.pluginText(native("native-end-reached")) == "End reached" }, timeout: 5), "The native list's end is in view too.")
+        attachScreenshot(named: "Done archive: JavaScript above native")
+
+        // Searching narrows the rows; clearing brings them back.
+        let search = js("done-archive-search")
+        press(search)
+        search.typeText("release")
+        XCTAssertTrue(waitUntil({ self.pluginText(js("js-last-action")) == "Last: search release" }, timeout: 5), "Typing runs onChange.")
+        XCTAssertTrue(waitUntil({ !js("done-archive-task-\(ids[0])").exists && js("done-archive-task-\(ids[4])").exists }, timeout: 5), "The search narrows the rows.")
+        XCTAssertTrue(native("native-done-archive-task-\(ids[0])").exists, "The native archive keeps its own search.")
+        XCTAssertTrue(js("clear-archive-search-button").exists, "A search shows the clear button.")
+        attachScreenshot(named: "Done archive: search narrows the JavaScript rows")
+        press(js("clear-archive-search-button"))
+        XCTAssertTrue(waitUntil({ js("done-archive-task-\(ids[0])").exists && (js("done-archive-search").value as? String ?? "").isEmpty }, timeout: 5), "Clear brings every row back.")
+        press(search)
+        search.typeText("nothing-matches")
+        XCTAssertTrue(js("done-archive-empty-state").waitToExist(timeout: 5), "A search with no matches shows the empty state.")
+        XCTAssertEqual(pluginText(js("done-archive-empty-state")), "No matching tasks")
+        XCTAssertFalse(js("done-archive-list").exists, "No list while nothing matches.")
+        attachScreenshot(named: "Done archive: no matching tasks")
+        press(js("clear-archive-search-button"))
+        XCTAssertTrue(js("done-archive-list").waitToExist(timeout: 5))
+
+        // Each control runs its own side's handler.
+        press(js("done-archive-create-pr-\(ids[1])"))
+        XCTAssertTrue(waitUntil({ self.pluginText(js("js-last-action")) == "Last: create pr \(titles[1])" }, timeout: 5), "A PR button runs its handler with its task.")
+        press(js("done-archive-task-\(ids[0])"))
+        XCTAssertTrue(waitUntil({ self.pluginText(js("js-last-action")) == "Last: open \(titles[0])" }, timeout: 5), "A row runs open with its task.")
+        XCTAssertTrue(waitUntil({ !js("done-archive-panel").exists }, timeout: 5), "Opening a task slides the panel away.")
+        XCTAssertTrue(native("native-done-archive-panel").exists, "The native archive stays open.")
+        attachScreenshot(named: "Done archive: JavaScript panel closed after opening a task")
+        js("done-archive-button").click()
+        XCTAssertTrue(js("done-archive-panel").waitToExist(timeout: 5), "The archive button opens it again.")
+        XCTAssertEqual(pluginText(js("js-last-action")), "Last: toggle open")
+        press(js("close-done-archive-button"))
+        XCTAssertTrue(waitUntil({ !js("done-archive-panel").exists && self.pluginText(js("js-last-action")) == "Last: close" }, timeout: 5), "The close button closes it.")
+        XCTAssertEqual(pluginText(native("native-last-action")), "Last: none", "The native archive keeps its own state.")
+    }
+
     // case-contract: test_plugin_token_stats_renders_from_atoms_like_native | The Plugin Catalog's Token Stats page shows the Token Stats modal composed in JavaScript from atoms above the native SwiftUI modal the board presents, built from the same atoms and sample data, each opened by the task item's token counter (the same overhanging Button atom, labelled with its description and hinted Open Token Stats). Both show the title and the task's title, the View raw input… button, a section bar of Overview, Wasters, Tools & MCP and Overhead with Overview selected, the call headlines (Final transcript size, Total sent (incl. subagents), Excluding cache reads (incl. subagents)), the main-agent and subagent split, the call and output lines, the total, the four buckets, the per-tool rollup and the per-turn rows, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Label, Button, Spacer, ChoiceBar, Divider, Scroll, Meter) with the board modal's identifiers. Choosing Wasters in the JavaScript section bar runs onChange with its value (Last: section wasters) and shows the largest items, each with a 72-point share bar, its kind, the removed-by-compaction flag, its request count and a small Show button, then the repeated result and the cache miss, while the native modal stays on Overview until its own bar moves it, after which both show the same rows at the same size. Show runs its JavaScript handler with the item's raw input target (Last: raw input claude #14) and View raw input… with the final transcript (Last: raw input final transcript), without re-rendering any row. Tools & MCP lists each tool's bar, calls and total and the MCP server, and Overhead lists what every request carries and each agent. The overview scrolls within at most 320 points and each map section within a fixed 420. Done closes the JavaScript modal (Last: done) and leaves the native one open, and the counter opens it again (Last: open). The section bar raises no onPress, so pressing it is refused as invalid_argument.
     func test_plugin_token_stats_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
@@ -21807,13 +22046,14 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Token Stats: the counter reopened the JavaScript modal")
     }
 
-    // case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
+    // case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover, Modal, Page, SidePanel), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
     func test_debug_highlight_native_atoms_outlines_atoms() throws {
+        executionTimeAllowance = 360 // It opens and checks every atom's catalog page.
         launchApp(defaultParent: fixture.parent.path)
         let rendered = try XCTUnwrap(try runCLI(["plugin", "render", "--page", "Card"])["result"] as? [String: Any])
         let atoms = try XCTUnwrap(rendered["atoms"] as? [String])
         let containers = Set(try XCTUnwrap(rendered["containerAtoms"] as? [String]))
-        XCTAssertEqual(containers, ["Stack", "Panel", "Card", "Scroll", "Disclosure", "Overlay", "Popover"], "Only the structural atoms are containers.")
+        XCTAssertEqual(containers, ["Stack", "Panel", "Card", "Scroll", "Disclosure", "Overlay", "Popover", "Modal", "Page", "SidePanel"], "Only the structural atoms are containers.")
         XCTAssertTrue(containers.isSubset(of: Set(atoms)), "Every container is a known atom.")
         let highlight = NSPredicate(format: "identifier IN %@", ["atom-highlight-container", "atom-highlight-leaf"])
         func outlines(in root: XCUIElement, _ atom: String? = nil) -> XCUIElementQuery {
