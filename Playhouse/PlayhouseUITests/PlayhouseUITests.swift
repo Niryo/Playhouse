@@ -10296,6 +10296,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.primary.appendingPathComponent("side-chat-forbidden.txt").path),
                        "The read-only side chat must not write files.")
         attachScreenshot(named: "Side chat created a task through the Playhouse CLI")
+        attachElementScreenshot(opened.bubble, named: "Side chat bubble after creating a task")
 
         let taskAfter = try XCTUnwrap(try taskRecord(id: opened.taskID))
         XCTAssertEqual(taskAfter["status"] as? String, taskBefore["status"] as? String, "The side chat must not change the task's status.")
@@ -24892,12 +24893,43 @@ final class PlayhouseUITests: XCTestCase {
         return try XCTUnwrap(samples > 0 ? total / samples : nil, "No pixels sampled in \(column).")
     }
 
+    /// Attaches the app as it looks now. On macOS a capture is always the whole screen, where the
+    /// app's window is a small part of a large desktop; unless `fullScreen` asks for the desktop,
+    /// the image is cut down to the app's windows and popovers at the screen's own pixel density,
+    /// so text in a showcase screenshot stays readable.
     private func attachScreenshot(named name: String, fullScreen: Bool = false) {
-        let screenshot = fullScreen ? XCUIScreen.main.screenshot() : app.screenshot()
-        let attachment = XCTAttachment(screenshot: screenshot)
+        let screenshot = XCUIScreen.main.screenshot()
+        let attachment = (fullScreen ? nil : appWindowsImage(of: screenshot)).map { XCTAttachment(image: $0) }
+            ?? XCTAttachment(screenshot: screenshot)
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    /// Attaches `element` alone, at native pixel density, for UI that is small within its window.
+    private func attachElementScreenshot(_ element: XCUIElement, named name: String) {
+        let attachment = XCTAttachment(screenshot: element.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// `screenshot` cropped to the union of the app's windows and popovers (such as the side chat
+    /// bubble, which can reach past its window), with a small margin, or nil when it can't tell.
+    private func appWindowsImage(of screenshot: XCUIScreenshot) -> NSImage? {
+        guard let image = screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let screen = NSScreen.main?.frame, screen.width > 0 else { return nil }
+        let frames = (app.windows.allElementsBoundByIndex + app.popovers.allElementsBoundByIndex)
+            .map(\.frame).filter { !$0.isEmpty && $0.width > 1 && $0.height > 1 }
+        guard let first = frames.first else { return nil }
+        let region = frames.dropFirst().reduce(first) { $0.union($1) }
+            .insetBy(dx: -16, dy: -16)
+            .intersection(CGRect(origin: .zero, size: screen.size))
+        // Element frames are in screen points from the top left, as the captured image is.
+        let scale = CGFloat(image.width) / screen.width
+        let pixels = CGRect(x: region.minX * scale, y: region.minY * scale, width: region.width * scale, height: region.height * scale).integral
+        guard !region.isEmpty, let cropped = image.cropping(to: pixels) else { return nil }
+        return NSImage(cgImage: cropped, size: NSSize(width: cropped.width, height: cropped.height))
     }
 
     private func assertScreenshotIfVisible(named name: String) {
