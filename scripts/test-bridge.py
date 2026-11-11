@@ -3632,7 +3632,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.primary, "rev-parse", stale_slug).strip(), stale_commit)
         self.assertNotIn(f"branch refs/heads/{stale_slug}\n", self.run_git(self.primary, "worktree", "list", "--porcelain") + "\n")
 
-    # case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable archive, whose conversation keeps its composer for follow-up questions; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
+    # case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable archive, whose conversation keeps its composer for follow-up questions; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged. The archive slides in from the board header's archive button as a 340-point SidePanel atom (done-archive-panel) along the window's trailing edge, and its close button slides it away until the button opens it again.
     def test_task_done_removes_worktree_and_preserves_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary, self.secondary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
@@ -15087,7 +15087,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         path.write_text(source, encoding="utf-8")
         return self.call_cli("plugin", "render", "--file", path, *options, expected_status=expected_status)[0]
 
-    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips and Composer examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors. The Button page also shows a link-style Button and a large one (taller than a regular Button), each running onPress, the Menu page's disabled Run Now item is shown but can't be chosen, and the Icon page draws the app logo asset in its own colors (original) in a 50-point frame with its accessibility label; a mistyped original or Menu item disabled is reported with its path.
+    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider, Modal, Page, SidePanel) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips, Composer and Done Archive examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors. The Button page also shows a link-style Button and a large one (taller than a regular Button), each running onPress, the Menu page's disabled Run Now item is shown but can't be chosen, and the Icon page draws the app logo asset in its own colors (original) in a 50-point frame with its accessibility label; a mistyped original or Menu item disabled is reported with its path. The Scroll page's lazy paged list raises onEndReached each time its end scrolls into view: it starts at 1 pages loaded, and scrolling to its end appends a page and then, scrolled to the new end, another (2, then 3 pages loaded); in `plugin render` each onEndReached is one commit that adds the page's rows and changes the readout. The TextField page's plain field (style plain) draws no border on its rounded Stack, so it is shorter than the rounded field, and typing in it runs its onChange.
     def test_plugin_renderer_commits_minimal_ops_and_runs_handlers(self):
         plugin = """
 function App() {
@@ -15107,7 +15107,8 @@ Playhouse.render(h(App));
 """
         rendered = self.assert_success(self.render_plugin(plugin))
         self.assertEqual(rendered["atoms"], ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter",
-                                             "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Overlay", "Editor", "Popover", "StepSlider"],
+                                             "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Overlay", "Editor", "Popover", "StepSlider",
+                                             "Modal", "Page", "SidePanel"],
                          "Plugins compose exactly the native composites' atoms.")
         self.assertEqual(rendered["errors"], [])
         self.assertEqual(len(rendered["commits"]), 1, "The first render is one commit.")
@@ -15182,13 +15183,13 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertTrue(any("Invalid commit" in error and "integer" in error for error in out_of_range["result"]["errors"]),
                         f"An op whose node id is out of range is reported, not a crash: {out_of_range['result']['errors']}")
 
-        for page in ["AgentsInfo", "Button", "Card", "ChoiceBar", "Composer", "Disclosure", "Divider", "Editor", "Icon", "Label", "Link", "Menu", "Meter", "Overlay",
-                     "KanbanColumn", "Panel", "PillPicker", "Popover", "PressArea", "RepositoryChips", "Scroll", "Segmented", "SkillsPage", "Spacer", "Spinner", "Stack", "StepSlider",
+        for page in ["AgentsInfo", "Button", "Card", "ChoiceBar", "Composer", "Disclosure", "Divider", "DoneArchive", "Editor", "Icon", "Label", "Link", "Menu", "Meter", "Modal", "Overlay",
+                     "KanbanColumn", "Page", "Panel", "PillPicker", "Popover", "PressArea", "RepositoryChips", "Scroll", "Segmented", "SidePanel", "SkillsPage", "Spacer", "Spinner", "Stack", "StepSlider",
                      "TaskItem", "Text", "TextField", "Toggle", "TokenStats"]:
             page_render = self.assert_success(self.call_cli("plugin", "render", "--page", page)[0])
             self.assertEqual(page_render["errors"], [], f"The {page} catalog page renders without errors.")
             used = {node["type"] for node in self.plugin_nodes(page_render["tree"])}
-            if page not in ("TaskItem", "AgentsInfo", "TokenStats", "SkillsPage", "RepositoryChips", "Composer", "KanbanColumn"):
+            if page not in ("TaskItem", "AgentsInfo", "TokenStats", "SkillsPage", "RepositoryChips", "Composer", "KanbanColumn", "DoneArchive"):
                 self.assertIn(page, used, f"The {page} page shows its atom.")
         disclosure = self.assert_success(self.call_cli("plugin", "render", "--page", "Disclosure", "--event", "disclosure-demo:onToggle")[0])
         section = self.plugin_node(disclosure["tree"], "disclosure-demo")
@@ -15214,6 +15215,15 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual((scroll["type"], scroll["props"]["maxHeight"]), ("Scroll", 120))
         self.assertEqual(len([child for child in scroll["children"] if child["type"] == "Text"]), 8, "Adding rows puts them inside the Scroll.")
         self.assertEqual(self.plugin_text(self.plugin_node(scrolled["tree"], "scroll-count")), "8 rows")
+        paged = self.assert_success(self.call_cli("plugin", "render", "--page", "Scroll", "--event", "scroll-paged:onEndReached", "--event", "scroll-paged:onEndReached")[0])
+        self.assertEqual(paged["errors"], [])
+        paged_scroll = self.plugin_node(paged["tree"], "scroll-paged")
+        self.assertEqual((paged_scroll["props"]["lazy"], paged_scroll["events"]), (True, ["onEndReached"]))
+        self.assertEqual(len(paged_scroll["children"]), 60, "Each onEndReached appends a 20-row page.")
+        self.assertEqual(self.plugin_text(self.plugin_node(paged["tree"], "scroll-pages")), "3 pages loaded")
+        for step in [entry for entry in paged["commits"] if entry["step"] == "scroll-paged:onEndReached"]:
+            self.assertIn("text", step["ops"], "Each page changes the readout.")
+            self.assertEqual(step["ops"].count("create"), 20, "Each page creates its 20 rows.")
         toggled = self.assert_success(self.call_cli("plugin", "render", "--page", "Toggle", "--event", "toggle-demo:onToggle")[0])
         switch = self.plugin_node(toggled["tree"], "toggle-demo")
         state = self.plugin_node(toggled["tree"], "toggle-state")
@@ -15225,6 +15235,11 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         field = self.plugin_node(typed["tree"], "text-field-demo")
         self.assertEqual((sorted(field["events"]), field["props"]["text"], field["props"]["placeholder"]), (["onArrow", "onChange", "onSubmit"], "release", "Search skills"))
         self.assertEqual(self.plugin_text(self.plugin_node(typed["tree"], "text-field-value")), "Text: release", "onChange received the new text.")
+        plain = self.assert_success(self.call_cli("plugin", "render", "--page", "TextField", "--event", "text-field-plain:onChange:quiet")[0])
+        plain_field = self.plugin_node(plain["tree"], "text-field-plain")
+        self.assertEqual((plain_field["props"]["style"], plain_field["props"]["text"], plain_field["events"]), ("plain", "quiet", ["onChange"]))
+        self.assertEqual(self.plugin_node(plain["tree"], "text-field-plain-box")["props"]["cornerRadius"], 9, "The plain field sits on a rounded Stack.")
+        self.assertEqual(self.plugin_text(self.plugin_node(plain["tree"], "text-field-plain-value")), "Plain: quiet", "The plain field's onChange ran its handler.")
         keyed = self.assert_success(self.call_cli("plugin", "render", "--page", "TextField", "--event", "text-field-demo:onArrow:down")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(keyed["tree"], "text-field-key")), "Key: down", "onArrow received the arrow's direction.")
         submitted = self.assert_success(self.call_cli(
@@ -15576,6 +15591,174 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(pressed["touchedNodes"], [last_action["children"][1]["id"]])
         self.assertEqual(backlog["updates"], 0, "No column re-rendered.")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "KanbanColumn", "--event", "column-backlog:onPress", expected_status=2)[0], "invalid_argument")
+
+    # case-contract: test_plugin_presentation_atoms_open_modal_page_and_side_panel | Plugins present UI the three ways the board does, each a controlled atom whose first child is what it is presented from and stays laid out as usual. On the Plugin Catalog's Modal page, the Open modal button runs onPress (Last: open) and opens a 320-point sheet over the window showing the modal's title and a Done button; Done closes it (Last: done), and Escape closes it again through onDismiss (Last: dismiss). On the Page page, Open page (Last: open) slides a page over the whole 420 by 220 point view below it, covering that view's frame and showing its title, and its Back button closes it (Last: back), uncovering the view. On the SidePanel page, Open trailing (Last: open trailing) slides a 200-point panel as tall as the 480 by 240 point view below it in over that view's trailing edge, Open leading (Last: open leading) over its leading edge, and the panel's close button closes it (Last: close). `plugin render` keeps each atom's presented content in the tree after its first child, and opening or closing is one commit that updates only the presentation atom's props and the readout. Only a Modal raises onDismiss: a Page or SidePanel given an onDismiss handler, or a Modal, Page or SidePanel without isPresented or with a mistyped width or edge, is reported in errors.
+    def test_plugin_presentation_atoms_open_modal_page_and_side_panel(self):
+        def commit(rendered, step):
+            return {entry["step"]: entry for entry in rendered["commits"]}[step]
+
+        # Modal: the presenter, then the sheet's content, kept in the tree while closed.
+        modal_page = self.assert_success(self.call_cli("plugin", "render", "--page", "Modal")[0])
+        self.assertEqual(modal_page["errors"], [])
+        modal = self.plugin_node(modal_page["tree"], "modal-demo")
+        self.assertEqual((modal["type"], modal["props"]["isPresented"], modal["props"]["width"], modal["events"]), ("Modal", False, 320, ["onDismiss"]))
+        self.assertEqual(modal["children"][0]["props"]["testID"], "modal-open", "The first child presents the sheet.")
+        self.plugin_node(modal["children"][1], "modal-title")
+        self.plugin_node(modal_page["tree"], "modal-done")
+        last = self.plugin_node(modal_page["tree"], "modal-last")
+        opened = self.assert_success(self.call_cli("plugin", "render", "--page", "Modal", "--event", "modal-open:onPress",
+                                                   "--event", "modal-done:onPress", "--event", "modal-open:onPress", "--event", "modal-demo:onDismiss")[0])
+        self.assertEqual(opened["errors"], [])
+        steps = [entry for entry in opened["commits"] if entry["step"] != "render"]
+        self.assertEqual([entry["step"] for entry in steps], ["modal-open:onPress", "modal-done:onPress", "modal-open:onPress", "modal-demo:onDismiss"])
+        for entry in steps:
+            self.assertEqual(sorted(entry["ops"]), ["text", "update"], f"{entry['step']} updates only the Modal's props and the readout.")
+            self.assertEqual(sorted(entry["touchedNodes"]), sorted([modal["id"], last["children"][1]["id"]]))
+        self.assertFalse(self.plugin_node(opened["tree"], "modal-demo")["props"]["isPresented"])
+        self.assertEqual(self.plugin_text(self.plugin_node(opened["tree"], "modal-last")), "Last: dismiss", "Escape's onDismiss ran its JavaScript handler.")
+        reopened = self.assert_success(self.call_cli("plugin", "render", "--page", "Modal", "--event", "modal-open:onPress")[0])
+        self.assertTrue(self.plugin_node(reopened["tree"], "modal-demo")["props"]["isPresented"])
+        self.assertEqual(self.plugin_text(self.plugin_node(reopened["tree"], "modal-last")), "Last: open")
+
+        # Page: the covered view, then the page.
+        page_page = self.assert_success(self.call_cli("plugin", "render", "--page", "Page", "--event", "page-open:onPress")[0])
+        self.assertEqual(page_page["errors"], [])
+        page = self.plugin_node(page_page["tree"], "page-demo")
+        self.assertEqual((page["type"], page["props"]["isPresented"], page.get("events", [])), ("Page", True, []))
+        base = page["children"][0]
+        self.assertEqual((base["props"]["testID"], base["props"]["width"], base["props"]["height"]), ("page-base", 420, 220))
+        self.assertEqual([child["type"] for child in page["children"]], ["Stack", "Stack", "Divider", "Text"], "The covered view, then the page's column.")
+        self.plugin_node(page["children"][1], "page-title")
+        self.assertEqual(sorted(commit(page_page, "page-open:onPress")["ops"]), ["text", "update"])
+        closed = self.assert_success(self.call_cli("plugin", "render", "--page", "Page", "--event", "page-open:onPress", "--event", "page-back:onPress")[0])
+        self.assertFalse(self.plugin_node(closed["tree"], "page-demo")["props"]["isPresented"])
+        self.assertEqual(self.plugin_text(self.plugin_node(closed["tree"], "page-last")), "Last: back")
+        self.assertEqual(sorted(commit(closed, "page-back:onPress")["ops"]), ["text", "update"])
+
+        # SidePanel: the covered view, then the panel, on either edge.
+        side_page = self.assert_success(self.call_cli("plugin", "render", "--page", "SidePanel", "--event", "side-panel-open-trailing:onPress")[0])
+        self.assertEqual(side_page["errors"], [])
+        panel = self.plugin_node(side_page["tree"], "side-panel-demo")
+        self.assertEqual((panel["type"], panel["props"]["isPresented"], panel["props"]["edge"], panel["props"]["width"], panel.get("events", [])), ("SidePanel", True, "trailing", 200, []))
+        base = panel["children"][0]
+        self.assertEqual((base["props"]["testID"], base["props"]["width"], base["props"]["height"]), ("side-panel-base", 480, 240))
+        self.plugin_node(panel["children"][1], "side-panel-title")
+        self.plugin_node(panel["children"][1], "side-panel-close")
+        self.assertEqual(self.plugin_text(self.plugin_node(side_page["tree"], "side-panel-last")), "Last: open trailing")
+        leading = self.assert_success(self.call_cli("plugin", "render", "--page", "SidePanel", "--event", "side-panel-open-leading:onPress", "--event", "side-panel-close:onPress")[0])
+        self.assertEqual(self.plugin_node(leading["tree"], "side-panel-demo")["props"]["edge"], "leading")
+        self.assertEqual(sorted(commit(leading, "side-panel-open-leading:onPress")["ops"]), ["text", "update"])
+        self.assertFalse(self.plugin_node(leading["tree"], "side-panel-demo")["props"]["isPresented"])
+        self.assertEqual(self.plugin_text(self.plugin_node(leading["tree"], "side-panel-last")), "Last: close")
+
+        # Only a Modal raises onDismiss, and each needs isPresented with well-typed props.
+        for source, error in [
+            ('Playhouse.render(h(Page, { isPresented: true, onDismiss: function () {} }, h(Text, null, "Base")));', '<Page> has no event "onDismiss"'),
+            ('Playhouse.render(h(SidePanel, { isPresented: true, onDismiss: function () {} }, h(Text, null, "Base")));', '<SidePanel> has no event "onDismiss"'),
+            ('Playhouse.render(h(Modal, { width: 300 }, h(Text, null, "Base")));', "<Modal> has an invalid prop: isPresented: missing"),
+            ('Playhouse.render(h(Page, {}, h(Text, null, "Base")));', "<Page> has an invalid prop: isPresented: missing"),
+            ('Playhouse.render(h(SidePanel, { isPresented: true, width: "wide" }, h(Text, null, "Base")));', "<SidePanel> has an invalid prop: width: expected a number, found a string"),
+            ('Playhouse.render(h(SidePanel, { isPresented: true, edge: 3 }, h(Text, null, "Base")));', "<SidePanel> has an invalid prop: edge: expected a string, found 3"),
+        ]:
+            failed = self.render_plugin(source, expected_status=1)
+            self.assertTrue(failed["ok"], "A plugin that fails still reports its render.")
+            self.assertTrue(any(error in message for message in failed["result"]["errors"]), f"{source} reports {error}: {failed['result']['errors']}")
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "SidePanel", "--event", "side-panel-demo:onDismiss", expected_status=2)[0], "invalid_argument")
+
+    # case-contract: test_plugin_done_archive_renders_from_atoms_like_native | The Plugin Catalog's Done Archive page shows the board's Done archive composed in JavaScript from atoms above the native SwiftUI archive the board presents, built from the same atoms and sample model, each opened by the board header's archive button (the bordered Button atom with the archivebox icon, labelled Done tasks) into a 340-point SidePanel over the trailing edge of a 560 by 460 point stand-in for the board, open at first. Both show the Done tasks title and its close button, the search field with its Search tasks and conversations placeholder, and a list of five rows, each a button opening its task with the done checkmark, its title and its date, beside its pull request actions: a #227 link, a PR button beside a #228 link, a PRs button, a disabled busy PR button showing a spinner, and nothing for a task without repositories, each at the same size in both and with the board archive's identifiers (done-archive-task, done-archive-create-pr, done-archive-pr-link, done-archive-search, and done-archive-list valued 5 tasks loaded). The JavaScript tree uses only atoms (SidePanel, Stack, Text, Icon, Button, Link, Spinner, Spacer, Divider, TextField, Scroll), its search a plain TextField on a rounded Stack. The list's end is in view, so its onEndReached runs on both sides (End reached). Typing in the JavaScript search runs onChange (Last: search followed by the text), narrows the rows to the matching title and shows the clear button, which clears the search and brings every row back; a search that matches nothing shows No matching tasks instead of the list. A PR button runs its handler with its task (Last: create pr followed by the title), a row runs open (Last: open followed by the title) and slides the panel away, the archive button opens it again (Last: toggle open), and the close button closes it (Last: close), while the native archive keeps its own state. The list raises no onPress, so pressing it is refused as invalid_argument.
+    def test_plugin_done_archive_renders_from_atoms_like_native(self):
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive")[0])
+        self.assertEqual(rendered["errors"], [])
+        tree = rendered["tree"]
+        sample = json.loads((Path(__file__).resolve().parent.parent / "Playhouse/Resources/PluginRuntime/catalog/sample-done-archive.json").read_text(encoding="utf-8"))["doneArchive"]
+        ids = [row["id"] for row in sample["rows"]]
+        types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
+        self.assertEqual(types, {"SidePanel", "Stack", "Text", "Icon", "Button", "Link", "Spinner", "Spacer", "Divider", "TextField", "Scroll"}, "The archive is atoms only.")
+
+        button = self.plugin_node(tree, "done-archive-button")
+        self.assertEqual((button["type"], button["props"]["style"], button["props"]["label"], button["props"]["help"]), ("Button", "bordered", "Done tasks", "Browse completed tasks"))
+        self.assertEqual(button["children"][0]["props"]["name"], "archivebox")
+        panel = self.plugin_node(tree, "done-archive-panel")
+        self.assertEqual((panel["type"], panel["props"]["isPresented"], panel["props"]["width"]), ("SidePanel", True, 340), "The archive starts open in a 340-point SidePanel.")
+        self.assertNotIn("edge", panel["props"], "It slides in over the trailing edge, the default.")
+        board = panel["children"][0]
+        self.assertEqual((board["props"]["testID"], board["props"]["width"], board["props"]["height"]), ("done-archive-board", 560, 460))
+        archive = panel["children"][1]
+        self.assertEqual([child["type"] for child in archive["children"]], ["Stack", "Divider", "Stack", "Scroll"], "Header, divider, search, then the list.")
+        self.assertEqual(self.plugin_text(self.plugin_node(archive, "done-archive-title")), "Done tasks")
+        close = self.plugin_node(archive, "close-done-archive-button")
+        self.assertEqual((close["props"]["label"], close["props"]["help"], close["children"][0]["props"]["name"]), ("Close done tasks", "Close done tasks", "xmark"))
+        search = self.plugin_node(archive, "done-archive-search")
+        self.assertEqual((search["type"], search["props"]["style"], search["props"]["placeholder"], search["props"]["text"]), ("TextField", "plain", "Search tasks and conversations", ""))
+        search_box = archive["children"][2]["children"][0]
+        self.assertEqual((search_box["props"]["fill"], search_box["props"]["fillOpacity"], search_box["props"]["cornerRadius"], search_box["props"]["padding"]), ("primary", 0.045, 9, 10), "The search sits on a rounded Stack.")
+        self.assertEqual(search_box["children"][0]["props"]["name"], "magnifyingglass")
+        all_ids = [node.get("props", {}).get("testID") for node in self.plugin_nodes(tree)]
+        self.assertNotIn("clear-archive-search-button", all_ids, "An empty search has no clear button.")
+
+        listing = self.plugin_node(archive, "done-archive-list")
+        self.assertEqual((listing["props"]["lazy"], listing["props"]["spacing"], listing["props"]["value"], listing["events"]), (True, 5, "5 tasks loaded", ["onEndReached"]))
+        self.assertEqual(len(listing["children"]), 5, "One row per sample task.")
+        for row in sample["rows"]:
+            opener = self.plugin_node(listing, f"done-archive-task-{row['id']}")
+            self.assertEqual(opener["props"]["help"], f"Open task: {row['title']}")
+            texts = [self.plugin_text(node) for node in self.plugin_nodes(opener) if node["type"] == "Text"]
+            self.assertEqual(texts, [row["title"], row["date"]])
+            icon = next(node for node in self.plugin_nodes(opener) if node["type"] == "Icon")
+            self.assertEqual((icon["props"]["name"], icon["props"]["color"]), ("checkmark.circle.fill", "#339E73"))
+        link = self.plugin_node(listing, f"done-archive-pr-link-{ids[0]}-227")
+        self.assertEqual((link["type"], link["props"]["url"], link["props"]["help"], link["props"]["minWidth"], link["props"]["minHeight"]), ("Link", "https://github.com/example/playhouse/pull/227", "playhouse", 30, 30))
+        self.assertEqual(self.plugin_text(link["children"][0]), "#227")
+        create = self.plugin_node(listing, f"done-archive-create-pr-{ids[1]}")
+        self.assertEqual((create["props"]["style"], create["props"]["width"], create["props"]["height"], create["props"]["disabled"]), ("borderless", 30, 30, False))
+        self.assertEqual(self.plugin_text(create["children"][0]), "PR")
+        self.plugin_node(listing, f"done-archive-pr-link-{ids[1]}-228")
+        self.assertEqual(self.plugin_text(self.plugin_node(listing, f"done-archive-create-pr-{ids[2]}")["children"][0]), "PRs")
+        busy = self.plugin_node(listing, f"done-archive-create-pr-{ids[3]}")
+        self.assertEqual((busy["props"]["disabled"], busy["children"][0]["type"], busy["children"][0]["props"]["size"]), (True, "Spinner", "mini"))
+        self.assertNotIn(f"done-archive-create-pr-{ids[4]}", all_ids, "A task without repositories has no pull request actions.")
+        self.assertEqual(len(listing["children"][4]["children"]), 1, "Its row is only its open button.")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "js-end-reached")), "End not reached", "Headlessly nothing scrolls into view.")
+
+        # Each control runs its JavaScript handler.
+        steps = ["done-archive-list:onEndReached", "done-archive-search:onChange:release"]
+        driven = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive", *[part for step in steps for part in ("--event", step)])[0])
+        self.assertEqual(driven["errors"], [])
+        commits = {entry["step"]: entry for entry in driven["commits"]}
+        end_text = self.plugin_node(tree, "js-end-reached")
+        self.assertEqual(commits["done-archive-list:onEndReached"]["ops"], ["text"])
+        self.assertEqual(commits["done-archive-list:onEndReached"]["touchedNodes"], [end_text["children"][0]["id"]], "Reaching the end changes only its readout.")
+        self.assertEqual(self.plugin_text(self.plugin_node(driven["tree"], "js-end-reached")), "End reached")
+        narrowed = self.plugin_node(driven["tree"], "done-archive-list")
+        self.assertEqual([child["children"][0]["props"]["testID"] for child in narrowed["children"]], [f"done-archive-task-{ids[4]}"], "The search narrows the rows to the matching title.")
+        self.assertEqual(self.plugin_node(driven["tree"], "done-archive-search")["props"]["text"], "release")
+        self.plugin_node(driven["tree"], "clear-archive-search-button")
+        self.assertEqual(self.plugin_text(self.plugin_node(driven["tree"], "js-last-action")), "Last: search release")
+
+        pressed = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive", "--event", f"done-archive-create-pr-{ids[1]}:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(pressed["tree"], "js-last-action")), f"Last: create pr {sample['rows'][1]['title']}")
+        self.assertEqual({entry["step"]: entry for entry in pressed["commits"]}[f"done-archive-create-pr-{ids[1]}:onPress"]["ops"], ["text"], "A PR button changes only the readout.")
+
+        cleared = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive", "--event", "done-archive-search:onChange:nothing-matches",
+                                                    "--event", "clear-archive-search-button:onPress")[0])
+        self.assertEqual(len(self.plugin_node(cleared["tree"], "done-archive-list")["children"]), 5, "Clearing the search brings every row back.")
+        self.assertEqual(self.plugin_node(cleared["tree"], "done-archive-search")["props"]["text"], "")
+        empty = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive", "--event", "done-archive-search:onChange:nothing-matches")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(empty["tree"], "done-archive-empty-state")), "No matching tasks")
+        self.assertNotIn("done-archive-list", [node.get("props", {}).get("testID") for node in self.plugin_nodes(empty["tree"])], "No list while nothing matches.")
+
+        opened = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive", "--event", f"done-archive-task-{ids[0]}:onPress",
+                                                   "--event", "done-archive-button:onPress", "--event", "close-done-archive-button:onPress")[0])
+        opened_commits = [entry for entry in opened["commits"] if entry["step"] != "render"]
+        self.assertEqual(sorted(opened_commits[0]["ops"]), ["text", "update"], "Opening a row closes the panel: its props and the readout.")
+        self.assertEqual(self.plugin_text(self.plugin_node(opened["tree"], "js-last-action")), "Last: close")
+        self.assertFalse(self.plugin_node(opened["tree"], "done-archive-panel")["props"]["isPresented"])
+        reopened = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive", "--event", f"done-archive-task-{ids[0]}:onPress", "--event", "done-archive-button:onPress")[0])
+        self.assertTrue(self.plugin_node(reopened["tree"], "done-archive-panel")["props"]["isPresented"])
+        self.assertEqual(self.plugin_text(self.plugin_node(reopened["tree"], "js-last-action")), "Last: toggle open")
+        first_open = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive", "--event", f"done-archive-task-{ids[0]}:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(first_open["tree"], "js-last-action")), f"Last: open {sample['rows'][0]['title']}")
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "DoneArchive", "--event", "done-archive-list:onPress", expected_status=2)[0], "invalid_argument")
 
     # case-contract: test_plugin_token_stats_renders_from_atoms_like_native | The Plugin Catalog's Token Stats page shows the Token Stats modal composed in JavaScript from atoms above the native SwiftUI modal the board presents, built from the same atoms and sample data, each opened by the task item's token counter (the same overhanging Button atom, labelled with its description and hinted Open Token Stats). Both show the title and the task's title, the View raw input… button, a section bar of Overview, Wasters, Tools & MCP and Overhead with Overview selected, the call headlines (Final transcript size, Total sent (incl. subagents), Excluding cache reads (incl. subagents)), the main-agent and subagent split, the call and output lines, the total, the four buckets, the per-tool rollup and the per-turn rows, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Label, Button, Spacer, ChoiceBar, Divider, Scroll, Meter) with the board modal's identifiers. Choosing Wasters in the JavaScript section bar runs onChange with its value (Last: section wasters) and shows the largest items, each with a 72-point share bar, its kind, the removed-by-compaction flag, its request count and a small Show button, then the repeated result and the cache miss, while the native modal stays on Overview until its own bar moves it, after which both show the same rows at the same size. Show runs its JavaScript handler with the item's raw input target (Last: raw input claude #14) and View raw input… with the final transcript (Last: raw input final transcript), without re-rendering any row. Tools & MCP lists each tool's bar, calls and total and the MCP server, and Overhead lists what every request carries and each agent. The overview scrolls within at most 320 points and each map section within a fixed 420. Done closes the JavaScript modal (Last: done) and leaves the native one open, and the counter opens it again (Last: open). The section bar raises no onPress, so pressing it is refused as invalid_argument.
     def test_plugin_token_stats_renders_from_atoms_like_native(self):
@@ -16129,13 +16312,13 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         # The editor raises no onPress, so pressing it is refused.
         self.assert_failure(self.call_cli("plugin", "render", "--page", "Composer", "--event", "message-composer-scroll-view:onPress", expected_status=2)[0], "invalid_argument")
 
-    # case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
+    # case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover, Modal, Page, SidePanel), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
     def test_debug_highlight_native_atoms_outlines_atoms(self):
         rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "Card")[0])
         self.assertEqual(rendered["errors"], [])
         containers = rendered["containerAtoms"]
         self.assertEqual(containers, [atom for atom in rendered["atoms"] if atom in containers], "Every container is a known atom.")
-        self.assertEqual(set(containers), {"Stack", "Panel", "Card", "Scroll", "Disclosure", "Overlay", "Popover"},
+        self.assertEqual(set(containers), {"Stack", "Panel", "Card", "Scroll", "Disclosure", "Overlay", "Popover", "Modal", "Page", "SidePanel"},
                          "Only the atoms that lay out a composite's structure are containers.")
         leaves = [atom for atom in rendered["atoms"] if atom not in containers]
         self.assertEqual(leaves, ["Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Meter", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Editor", "StepSlider"],

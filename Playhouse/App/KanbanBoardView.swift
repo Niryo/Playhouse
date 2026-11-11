@@ -246,10 +246,7 @@ struct KanbanBoardView: View {
                 }
             }
         }
-        .sheet(isPresented: Binding(
-            get: { taskShowingTokenStats != nil },
-            set: { if !$0 { taskShowingTokenStats = nil } }
-        )) {
+        .atomModal(ModalProps(isPresented: taskShowingTokenStats != nil), onDismiss: { taskShowingTokenStats = nil }) {
             if let taskShowingTokenStats {
                 TokenStatsSheet(taskID: taskShowingTokenStats.id, taskTitle: taskShowingTokenStats.title, modelContext: modelContext)
             }
@@ -507,14 +504,9 @@ struct KanbanBoardView: View {
                 }
             }
         }
-        // Keep a platform view behind the board. #156 removed the last one (the old drag-end
-        // monitor). Without it, accessibility hit tests over parts of the opened Done archive
-        // resolved to the board's scroll view underneath: the rows still took mouse clicks, but
-        // XCUITest (and so assistive clients) did not find them. A platform view here restores
-        // it; that was found by bisecting and experiment, and the AppKit mechanism is not
-        // confirmed. Do not remove it without rerunning test_task_done_removes_worktree_and_preserves_branch,
-        // whose archive hittability check guards it.
-        .background(BoardAccessibilityHitTestAnchor())
+        // The SidePanel atom below keeps a platform view behind the board, without which
+        // accessibility hit tests over the opened Done archive resolve to the board's scroll
+        // view underneath (see `AccessibilityHitTestAnchor`).
         .overlay(alignment: .topTrailing) {
             if isShowingBoardSearch {
                 boardSearchBar
@@ -525,20 +517,16 @@ struct KanbanBoardView: View {
                     .zIndex(2)
             }
         }
-        .overlay(alignment: .trailing) {
-            if isShowingDoneArchive {
-                doneArchivePanel
-                    .frame(width: 340)
-                    .frame(maxHeight: .infinity)
-                    .background(WorkspaceTheme.windowBackground)
-                    .overlay(alignment: .leading) { Rectangle().fill(Color.primary.opacity(0.10)).frame(width: 1) }
-                    .shadow(color: .black.opacity(0.16), radius: 18, x: -6, y: 0)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-                    .accessibilityElement(children: .contain)
-            }
+        // The archive is a SidePanel atom over the board, and the Scheduled Tasks page a Page atom.
+        .atomSidePanel(
+            SidePanelProps(isPresented: isShowingDoneArchive, width: 340),
+            common: AtomCommon(testID: "done-archive-panel")
+        ) {
+            doneArchivePanel
         }
-        .animation(.easeInOut(duration: 0.24), value: isShowingDoneArchive)
-        .overlay { scheduledTasksPage }
+        .atomPage(PageProps(isPresented: isShowingScheduledTasks)) {
+            scheduledTasksPage
+        }
         .task(id: "\(isShowingDoneArchive)-\(archiveSearchText)") {
             guard isShowingDoneArchive else { return }
             if archiveTasks.isEmpty && archiveHasMore { loadNextArchivePage() }
@@ -784,12 +772,8 @@ struct KanbanBoardView: View {
             AtomSpacer(props: SpacerProps(minLength: 20))
 
             AtomStack(props: StackProps(axis: "h", spacing: 14)) {
-                AtomButton(
-                    props: ButtonProps(style: "bordered"),
-                    common: AtomCommon(testID: "done-archive-button", label: "Done tasks", help: "Browse completed tasks"),
-                    action: { withAnimation(.easeInOut(duration: 0.24)) { isShowingDoneArchive.toggle() } }
-                ) {
-                    AtomIcon(props: IconProps(name: "archivebox", size: 14, weight: "semibold"), common: AtomCommon(width: 30, height: 30))
+                DoneArchiveButton {
+                    withAnimation(.easeInOut(duration: 0.24)) { isShowingDoneArchive.toggle() }
                 }
                 AtomButton(
                     props: ButtonProps(style: "bordered", disabled: isOpeningChatSidebar),
@@ -837,141 +821,32 @@ struct KanbanBoardView: View {
         }
     }
 
+    /// The archive's display model and actions; the board owns the loaded pages and the search.
     private var doneArchivePanel: some View {
         let query = archiveSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let completed = query.isEmpty ? archiveTasks : (archiveSearchResults ?? [])
-        let results = completed
-        return VStack(spacing: 0) {
-            HStack {
-                Text("Done tasks").font(.system(size: 14, weight: .semibold))
-                Spacer()
-                Button { closeDoneArchive() } label: { Image(systemName: "xmark") }
-                .buttonHoverPointer()
-                .nativeHelp("Close done tasks")
-                    .buttonStyle(.plain).accessibilityLabel("Close done tasks")
-                    .accessibilityIdentifier("close-done-archive-button")
-            }
-            .padding(16)
-            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1)
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search tasks and conversations", text: $archiveSearchText)
-                    .textFieldStyle(.plain).accessibilityIdentifier("done-archive-search")
-                if !archiveSearchText.isEmpty {
-                    Button { archiveSearchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                    .buttonHoverPointer()
-                    .nativeHelp("Clear archive search")
-                        .buttonStyle(.plain).accessibilityLabel("Clear archive search")
-                        .accessibilityIdentifier("clear-archive-search-button")
-                }
-            }
-            .padding(10).background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9)).padding(12)
-            if results.isEmpty && (query.isEmpty ? !archiveHasMore && !isLoadingArchivePage : archiveSearchResults != nil) && !isIndexingArchive {
-                Text(query.isEmpty ? "No completed tasks" : "No matching tasks")
-                    .font(.system(size: 12)).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityIdentifier("done-archive-empty-state")
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 5) {
-                        ForEach(results) { task in
-                            HStack(spacing: 0) {
-                                Button {
-                                    selectedTask = task
-                                    isSelectedTaskNew = false
-                                    closeDoneArchive()
-                                } label: {
-                                    HStack(spacing: 10) {
-                                        Image(systemName: "checkmark.circle.fill").foregroundStyle(TaskStatus.done.accent)
-                                        VStack(alignment: .leading, spacing: 3) {
-                                            Text(task.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                                            Text(task.createdAt, style: .date).font(.system(size: 10)).foregroundStyle(.secondary)
-                                        }
-                                        Spacer(minLength: 0)
-                                    }
-                                    .padding(10).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                                }
-                                .buttonHoverPointer()
-                                .nativeHelp("Open task: \(task.title)")
-                                .buttonStyle(.plain)
-                                .accessibilityIdentifier("done-archive-task-\(task.id.uuidString)")
-                                if !task.repositoryWorktrees.isEmpty {
-                                    archivedTaskPullRequestControl(task)
-                                        .padding(.trailing, 10)
-                                }
-                            }
-                            .onAppear {
-                                if query.isEmpty && task.id == archiveTasks.last?.id { loadNextArchivePage() }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    if isLoadingArchivePage || isIndexingArchive {
-                        ProgressView().controlSize(.small).padding(12)
-                    }
-                }
-                .scrollIndicators(.visible)
-                .accessibilityIdentifier("done-archive-list")
-                .accessibilityValue("\(archiveTasks.count) tasks loaded")
-            }
-        }
-    }
-
-    /// The archive row's pull request actions, composed only of plugin atoms
-    /// (Plugins/Atoms) like the task item's.
-    @ViewBuilder
-    private func archivedTaskPullRequestControl(_ task: BoardTask) -> some View {
-        let linked = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
-        let awaiting = task.repositoryWorktrees.filter(\.awaitsPullRequest)
-        let started = task.repositoryWorktrees.filter { !$0.isPending }
-        let hasMultipleRepositories = (awaiting.isEmpty ? started : awaiting).count > 1
-        let isCreating = taskCreatingPullRequests.contains(task.id)
-        let title = hasMultipleRepositories ? "PRs" : "PR"
-        if linked.isEmpty {
-            archivedTaskCreatePullRequestButton(
-                task, title: title, busy: isCreating,
-                label: hasMultipleRepositories ? "PRs. Create pull requests for each repository linked to this completed task" : "PR. Create a pull request for each repository linked to this completed task",
-                help: "Create a pull request for each repository linked to this completed task"
-            )
-        } else {
-            AtomStack(props: StackProps(axis: "h", spacing: 5)) {
-                if !awaiting.isEmpty {
-                    archivedTaskCreatePullRequestButton(
-                        task, title: title, busy: isCreating,
-                        label: hasMultipleRepositories ? "PRs. Create pull requests for repositories without a linked pull request" : "PR. Create a pull request for the repository without a linked pull request",
-                        help: "Create pull requests for repositories without a linked pull request"
-                    )
-                }
-                // Pull requests merged before a renewed worktree stay listed ahead of the current ones.
-                ForEach(task.pastRepositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil } + linked, id: \.pullRequestURL) { record in
-                    if let number = record.pullRequestNumber, let url = record.pullRequestURL {
-                        // The chip stays compact; the click target keeps the 30 pt minimum of its sibling actions.
-                        AtomLink(
-                            props: LinkProps(url: url, emphasis: 5),
-                            common: AtomCommon(
-                                testID: "done-archive-pr-link-\(task.id.uuidString)-\(number)",
-                                help: URL(fileURLWithPath: record.repositoryPath).lastPathComponent, minWidth: 30, minHeight: 30
-                            )
-                        ) {
-                            AtomText(props: TextProps(text: "#\(number)", size: 10, weight: "semibold", design: "monospaced"))
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func archivedTaskCreatePullRequestButton(_ task: BoardTask, title: String, busy: Bool, label: String, help: String) -> some View {
-        AtomButton(
-            props: ButtonProps(style: "borderless", emphasis: 4, disabled: busy),
-            common: AtomCommon(testID: "done-archive-create-pr-\(task.id.uuidString)", label: label, help: help, width: 30, height: 30),
-            action: { createPullRequests(for: task) }
-        ) {
-            if busy {
-                AtomSpinner(props: SpinnerProps(size: "mini"))
-            } else {
-                AtomText(props: TextProps(text: title, size: 10, weight: "semibold"))
-            }
-        }
+        let results = query.isEmpty ? archiveTasks : (archiveSearchResults ?? [])
+        let isEmpty = results.isEmpty && (query.isEmpty ? !archiveHasMore && !isLoadingArchivePage : archiveSearchResults != nil) && !isIndexingArchive
+        let model = DoneArchiveModel(
+            search: archiveSearchText,
+            rows: results.map { DoneArchiveModel.row($0, isCreatingPullRequests: taskCreatingPullRequests.contains($0.id)) },
+            emptyMessage: isEmpty ? (query.isEmpty ? "No completed tasks" : "No matching tasks") : nil,
+            loading: isLoadingArchivePage || isIndexingArchive,
+            loadedCount: archiveTasks.count
+        )
+        return DoneArchivePanel(model: model, actions: DoneArchiveActions(
+            close: closeDoneArchive,
+            search: { archiveSearchText = $0 },
+            open: { id in
+                guard let task = results.first(where: { $0.id.uuidString == id }) else { return }
+                selectedTask = task
+                isSelectedTaskNew = false
+                closeDoneArchive()
+            },
+            createPullRequests: { id in
+                if let task = results.first(where: { $0.id.uuidString == id }) { createPullRequests(for: task) }
+            },
+            loadMore: { if query.isEmpty { loadNextArchivePage() } }
+        ))
     }
 
     @MainActor
@@ -1076,41 +951,30 @@ struct KanbanBoardView: View {
         }
     }
 
-    /// Slides in over the board like the Skills page. It stays up while a task opened from it
-    /// is showing, so closing that task returns here.
+    /// Slides in over the board like the Skills page, presented by the board's Page atom. It stays
+    /// up while a task opened from it is showing, so closing that task returns here.
     private var scheduledTasksPage: some View {
-        ZStack {
-            if isShowingScheduledTasks {
-                ScheduledTasksPageView(
-                    scheduledTasks: allTasks.filter { $0.scheduleKind != nil },
-                    remoteConversations: remoteConversations,
-                    onNewTask: { openNewTask(presentingSchedule: .recurring) },
-                    onOpenTask: { task in
-                        isSelectedTaskNew = false
-                        conflictResolutionTaskID = nil
-                        presentScheduleOnOpen = nil
-                        selectedTask = task
-                    },
-                    onOpenRunTask: { id in
-                        if let task = try? BoardTaskManager(modelContext: modelContext).taskModel(id) {
-                            isShowingScheduledTasks = false
-                            isSelectedTaskNew = false
-                            presentScheduleOnOpen = nil
-                            selectedTask = task
-                        }
-                    }
-                ) {
+        ScheduledTasksPageView(
+            scheduledTasks: allTasks.filter { $0.scheduleKind != nil },
+            remoteConversations: remoteConversations,
+            onNewTask: { openNewTask(presentingSchedule: .recurring) },
+            onOpenTask: { task in
+                isSelectedTaskNew = false
+                conflictResolutionTaskID = nil
+                presentScheduleOnOpen = nil
+                selectedTask = task
+            },
+            onOpenRunTask: { id in
+                if let task = try? BoardTaskManager(modelContext: modelContext).taskModel(id) {
                     isShowingScheduledTasks = false
+                    isSelectedTaskNew = false
+                    presentScheduleOnOpen = nil
+                    selectedTask = task
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .shadow(color: .black.opacity(0.25), radius: 16, x: -4)
-                .transition(.move(edge: .trailing))
             }
+        ) {
+            isShowingScheduledTasks = false
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .clipped()
-        .allowsHitTesting(isShowingScheduledTasks)
-        .animation(.spring(response: 0.34, dampingFraction: 0.92), value: isShowingScheduledTasks)
     }
 
     private func openNewTask() {
@@ -1476,13 +1340,6 @@ private struct TopLeadingScrollAlignment: ViewModifier {
             content
         }
     }
-}
-
-/// An empty, zero-size AppKit view kept behind the board because, empirically, the Done
-/// archive overlay's accessibility hit testing breaks without one; see its use in `body`.
-private struct BoardAccessibilityHitTestAnchor: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
-    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 private struct DoneDropDrawer: View {
