@@ -2496,7 +2496,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try runGitOutput(remote, "show", "refs/heads/\(branch):\(conflictPath)"), "resolved local and remote versions")
     }
 
-    // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done removes its managed worktree and keeps its branch and target commit without committing or merging. When the worktree holds uncommitted changes the move is refused until the user confirms discarding them: declining keeps the task in Review with its files intact, and confirming removes them. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
+    // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done removes its managed worktree and keeps its branch and target commit without committing or merging. When the worktree holds uncommitted changes the move is refused until the user confirms discarding them: declining keeps the task in Review with its files intact, and confirming removes them. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns and just left of the board scroller, which keeps the window edge, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
     func test_task_done_preserves_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -23485,8 +23485,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("task-done-drop-target").waitToExist(timeout: 5), "The Done drawer should always be present at the board edge.")
         let source = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         // The drawer's tab slides open once the drag begins and is then centered 32 points
-        // in from the window edge.
-        let doneTarget = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.5)).withOffset(CGVector(dx: -32, dy: 0))
+        // in from the board scroller's lane, which is about 16 points wide at the window edge.
+        let doneTarget = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.5)).withOffset(CGVector(dx: -48, dy: 0))
         source.press(forDuration: 0.5, thenDragTo: doneTarget, withVelocity: .default, thenHoldForDuration: 1.5)
     }
 
@@ -23516,14 +23516,19 @@ final class PlayhouseUITests: XCTestCase {
         add(attachment)
     }
 
-    /// The Done drawer shows only a thin sliver beside the board while nothing is dragged.
+    /// The Done drawer shows only a thin sliver beside the columns while nothing is dragged,
+    /// just left of the board's vertical scroller, which keeps the window edge.
     private func assertDoneDrawerResting(_ moment: String, file: StaticString = #filePath, line: UInt = #line) {
         let drawer = element("task-done-drop-target")
         let board = element("board-columns-scroll-view")
+        let lastColumn = element("column-review")
         let window = app.windows.firstMatch
         XCTAssertTrue(drawer.waitToExist(timeout: 5), "The Done drawer should exist \(moment).", file: file, line: line)
-        XCTAssertTrue(waitUntil({ drawer.frame.minX >= window.frame.maxX - 6 }, timeout: 3), "The Done drawer should rest as a sliver at the window edge \(moment).", file: file, line: line)
-        XCTAssertGreaterThanOrEqual(drawer.frame.minX, board.frame.maxX - 1, "The Done drawer must sit beside the board columns, never over them \(moment).", file: file, line: line)
+        // The sliver is 5 points wide and sits left of a scroller lane of 11 to 16 points.
+        XCTAssertTrue(waitUntil({ drawer.frame.minX >= window.frame.maxX - 24 }, timeout: 3), "The Done drawer should rest as a sliver near the window edge \(moment).", file: file, line: line)
+        XCTAssertLessThanOrEqual(drawer.frame.minX, window.frame.maxX - 14, "The Done drawer must leave the window edge to the board scroller \(moment).", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(board.frame.maxX, window.frame.maxX - 1, "The board, and so its vertical scroller, must reach the window edge \(moment).", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(drawer.frame.minX, lastColumn.frame.maxX, "The Done drawer must sit beside the board columns, never over them \(moment).", file: file, line: line)
     }
 
     /// Installs the Claude Code protocol fixture for this case and returns the

@@ -154,6 +154,8 @@ struct KanbanBoardView: View {
     @State private var isShowingChatSidebar = false
     /// The thickness a legacy (always visible) scroller takes from the board's visible area.
     @State private var boardScrollerInset = KanbanBoardView.legacyScrollerInset()
+    /// The vertical scroller's thickness in the current style, which the Done drawer stays clear of.
+    @State private var boardScrollerWidth = KanbanBoardView.currentScrollerWidth()
     @State private var chatTask: StandaloneChat?
     @State private var isOpeningChatSidebar = false
 
@@ -382,6 +384,10 @@ struct KanbanBoardView: View {
         return NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
     }
 
+    private static func currentScrollerWidth() -> CGFloat {
+        NSScroller.scrollerWidth(for: .regular, scrollerStyle: NSScroller.preferredScrollerStyle)
+    }
+
     private var boardContent: some View {
         ZStack(alignment: .topLeading) {
             VStack(spacing: 0) {
@@ -455,28 +461,33 @@ struct KanbanBoardView: View {
                                     .padding(.horizontal, 30)
                                     .padding(.top, 22)
                                     .padding(.bottom, 28)
+                                    // Room for the Done drawer, so the last column scrolls clear of it.
+                                    .padding(.trailing, DoneDropDrawer.gutterWidth)
                                     .frame(
                                         minWidth: max(0, viewport.size.width - boardScrollerInset),
                                         minHeight: max(0, viewport.size.height - boardScrollerInset)
                                     )
                                 }
                                 .modifier(TopLeadingScrollAlignment())
-                                .scrollIndicators(.visible)
                                 .background(WorkspaceTheme.windowBackground)
                                 .scrollContentBackground(.hidden)
                                 .accessibilityIdentifier("board-columns-scroll-view")
+                                // The drawer floats over the scroll view's trailing edge rather than
+                                // beside it, so the vertical scroller sits at the window edge with the
+                                // drawer to its left, and the drawer stays put while scrolling.
+                                .overlay(alignment: .trailing) {
+                                    DoneDropDrawer(
+                                        isOpen: draggedTaskStatus == .review,
+                                        isActive: $isDoneTargetActive,
+                                        onDrop: { moveTask(id: $0, to: .done) }
+                                    )
+                                    .padding(.trailing, boardScrollerWidth)
+                                }
                             }
                             .onReceive(NotificationCenter.default.publisher(for: NSScroller.preferredScrollerStyleDidChangeNotification)) { _ in
                                 boardScrollerInset = Self.legacyScrollerInset()
+                                boardScrollerWidth = Self.currentScrollerWidth()
                             }
-
-                            // A fixed gutter beside the scroll view rather than an overlay, so the opened
-                            // drawer never covers a column and stays put while scrolling.
-                            DoneDropDrawer(
-                                isOpen: draggedTaskStatus == .review,
-                                isActive: $isDoneTargetActive,
-                                onDrop: { moveTask(id: $0, to: .done) }
-                            )
                         }
                     }
                 }
@@ -1353,6 +1364,8 @@ private struct DoneDropDrawer: View {
     private static let trailingMargin: CGFloat = 10
     /// How much of the tab's leading edge stays visible while no drag is in progress.
     private static let peekWidth: CGFloat = 5
+    /// The full width the drawer occupies at the board's trailing edge.
+    static let gutterWidth = gap + tabWidth + trailingMargin
 
     var body: some View {
         // The gutter keeps its width so the board never reflows; only the tab slides, from
