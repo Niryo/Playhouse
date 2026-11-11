@@ -7609,6 +7609,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "conversation", "side-chat", task["id"], "--selection", "   ", "--message", "Why?",
             extra_environment=environment, expected_status=2,
         )[0], "invalid_argument")
+        for flag, value in (("--model", "bad model!"), ("--effort", "extreme")):
+            self.assert_failure(self.call_cli(
+                "conversation", "side-chat", task["id"], "--side-chat", side_chat_id, "--message", "Which model?", flag, value,
+                extra_environment=environment, expected_status=2,
+            )[0], "invalid_argument")
         self.assert_failure(self.call_cli(
             "conversation", "side-chat", task["id"], "--side-chat", "no-such-side-chat", "--message", "Hello?",
             extra_environment=environment, expected_status=3,
@@ -7620,7 +7625,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             extra_environment=environment, expected_status=3,
         )[0], "not_found")
 
-    # case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply opens a side chat bubble above the selection instead of an Add comment hint once the selection settles; the bubble starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls (it stays closed while Shift is held after a Shift-click extends the selection, then shows the whole extended range), showing the selected text and a compact chat whose composer has an Add comment button and a send button but no Skills button or mode menu. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection and a non-empty message; an unknown or closed side chat rejects follow-ups, and closing the bubble with Escape ends its side chat without adding a comment.
+    # case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a Side chat hint centered above the selection, and no bubble opens until it is clicked; clicking it hides the hint and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls. The bubble shows the selected text and a compact chat with no subtitle, whose composer has a Comment button, the conversation's model picker and a send button but no Skills button or mode menu. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown or closed side chat rejects follow-ups, and closing the bubble with Escape ends its side chat without adding a comment.
     def test_side_chat_forks_claude_conversation_read_only(self):
         task, executable, environment = self.open_side_chat_task("claude", "claude-fixture-side-chat")
         source_session = task["claudeSessionID"]
@@ -7658,9 +7663,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertNotIn(f"task outcome {task['id']} <completed", instructions)
         self.assertEqual(fork["userText"], "<selected-text>\nthe parser design\n</selected-text>\n\nWhat does this mean?")
 
+        # Each message may pick its own model and effort; the task keeps its own.
         follow_up = self.assert_success(self.call_cli(
             "conversation", "side-chat", task["id"], "--side-chat", opened["sideChatID"],
-            "--message", "And the second point?", extra_environment=environment,
+            "--message", "And the second point?", "--model", "claude-sonnet-4-6", "--effort", "high",
+            extra_environment=environment,
         )[0])
         self.assertEqual(follow_up["sideChatID"], opened["sideChatID"])
         self.assertEqual(follow_up["reply"], f"Side chat follow-up 2 on {fork_session}: And the second point?")
@@ -7670,6 +7677,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertNotIn("--fork-session", resumed["arguments"])
         self.assertNotIn("--session-id", resumed["arguments"])
         self.assertEqual(resumed["userText"], "And the second point?")
+        self.assertEqual(resumed["arguments"][resumed["arguments"].index("--model") + 1], "claude-sonnet-4-6")
+        self.assertEqual(resumed["effort"], "high")
 
         created = self.assert_success(self.call_cli(
             "conversation", "side-chat", task["id"], "--side-chat", opened["sideChatID"],
@@ -7677,6 +7686,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )[0])
         create_turn = json.loads(fixture_history.read_text(encoding="utf-8"))["turns"][-1]
         create_arguments = create_turn["arguments"]
+        # A message that names no model keeps the side chat's previous choice.
+        self.assertEqual(create_arguments[create_arguments.index("--model") + 1], "claude-sonnet-4-6")
+        self.assertEqual(create_turn["effort"], "high")
         hooks = json.loads(create_arguments[create_arguments.index("--settings") + 1])["hooks"]["PreToolUse"]
         self.assertEqual(len(hooks), 1, "A read-only launch carries exactly one Playhouse PreToolUse hook.")
         self.assertTrue(hooks[0]["hooks"][0]["command"].endswith("'hook' 'side-chat-pre-tool-use'"))
@@ -7700,7 +7712,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
                          "The side chat's messages must not reach the task's conversation.")
         self.assert_side_chat_validation(task, environment, opened["sideChatID"])
 
-    # case-contract: test_side_chat_forks_codex_conversation_read_only | The first side chat message on a Codex task's selected text forks the task's Codex thread with thread/fork into Codex's read-only sandbox (excluding turns from the response, with approvals off and the side chat developer instructions), and every side chat turn names a read-only sandbox policy with network access, so the Playhouse CLI still reaches the bridge daemon. The answer streams, names the forked source thread and quotes the selected text; a follow-up continues the same forked thread, and asking it to create a task really creates one through the CLI, run inside the read-only sandbox, where the daemon accepts only board requests from a sandboxed caller, so the same side chat's task delete is refused as forbidden and the task stays. The task's own conversation, Codex thread, status and history are unchanged. In the app the bubble opens on the selection, shows the question and the answer below the selected text, and a follow-up adds a second exchange.
+    # case-contract: test_side_chat_forks_codex_conversation_read_only | The first side chat message on a Codex task's selected text forks the task's Codex thread with thread/fork into Codex's read-only sandbox (excluding turns from the response, with approvals off and the side chat developer instructions), and every side chat turn names a read-only sandbox policy with network access, so the Playhouse CLI still reaches the bridge daemon. The answer streams, names the forked source thread and quotes the selected text; a follow-up continues the same forked thread with the model and effort chosen for it, reloading the fork in the read-only sandbox when the model changes, and asking it to create a task really creates one through the CLI, run inside the read-only sandbox, where the daemon accepts only board requests from a sandboxed caller, so the same side chat's task delete is refused as forbidden and the task stays. The task's own conversation, Codex thread, status and history are unchanged. In the app the bubble opens on the selection, shows the question and the answer below the selected text, and a follow-up adds a second exchange.
     def test_side_chat_forks_codex_conversation_read_only(self):
         task, executable, environment = self.open_side_chat_task("codex", "codex-fixture-side-chat-success")
         source_thread = task["codexThreadID"]
@@ -7734,17 +7746,33 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
         follow_up = self.assert_success(self.call_cli(
             "conversation", "side-chat", task["id"], "--side-chat", opened["sideChatID"],
-            "--message", "And the second point?", extra_environment=environment,
+            "--message", "And the second point?", "--model", "gpt-6-sol", "--effort", "high",
+            extra_environment=environment,
         )[0])
         self.assertEqual(follow_up["reply"], f"Side chat follow-up 2 on {fork['threadId']}: And the second point?")
+        second_turn = read_history()["sideChatTurns"][-1]
+        self.assertEqual((second_turn["model"], second_turn["effort"]), ("gpt-6-sol", "high"))
+        # A new model reloads the forked thread, still in the read-only sandbox.
+        self.assertEqual(read_history()["sideChatResumes"], [{"threadId": fork["threadId"], "sandbox": "read-only"}])
         self.assertEqual(len(read_history()["threadForks"]), 1, "A follow-up must continue the fork, not fork again.")
         self.assertEqual(read_history()["sideChatTurns"][-1]["sandboxPolicy"], {"type": "readOnly", "networkAccess": True})
 
+        # An effort the model doesn't support is refused before any turn, and isn't kept.
+        turns_before = len(read_history()["sideChatTurns"])
+        self.assert_failure(self.call_cli(
+            "conversation", "side-chat", task["id"], "--side-chat", opened["sideChatID"],
+            "--message", "Think harder?", "--model", "gpt-6-mini", "--effort", "xhigh",
+            extra_environment=environment, expected_status=2,
+        )[0], "invalid_argument")
+        self.assertEqual(len(read_history()["sideChatTurns"]), turns_before)
         created = self.assert_success(self.call_cli(
             "conversation", "side-chat", task["id"], "--side-chat", opened["sideChatID"],
             "--message", "Please create a task for this.", extra_environment=environment,
         )[0])
         self.assertRegex(created["reply"], r"^Created task [0-9A-F-]{36}\.$")
+        create_turn = read_history()["sideChatTurns"][-1]
+        self.assertEqual((create_turn["model"], create_turn["effort"]), ("gpt-6-sol", "high"),
+                         "A message that names no model keeps the side chat's previous choice.")
         new_task = self.task_for(created["reply"].removeprefix("Created task ").removesuffix("."), environment)
         self.assertEqual(new_task["title"], "Side chat follow-up")
         # The CLI runs in a read-only sandbox there; the daemon refuses its non-board requests.
@@ -7758,7 +7786,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
                          "The side chat's messages must not reach the task's conversation.")
         self.assert_side_chat_validation(task, environment, opened["sideChatID"])
 
-    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages, including wrapped multiline selections, opens the side chat bubble at the selected lines instead of an Add comment hint, and the bubble's Add comment button adds what is typed in its composer as a comment on the selection and closes it. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and closing the bubble with Escape leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload. User messages render in a neutral gray, input-style bubble with a thin light border and light text rather than the blue accent fill.
+    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages, including wrapped multiline selections, shows a Side chat hint above the selected lines in place of the Add comment hint; clicking it opens the side chat bubble at the selected lines, and the bubble's Comment button adds what is typed in its composer as a comment on the selection and closes it. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and closing the bubble with Escape leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload. User messages render in a neutral gray, input-style bubble with a thin light border and light text rather than the blue accent fill.
     def test_conversation_adds_ordered_text_annotations(self):
         task = self.create_repo_task("Conversation comments", [self.primary])
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"

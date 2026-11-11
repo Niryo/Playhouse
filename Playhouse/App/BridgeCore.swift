@@ -218,8 +218,9 @@ enum SideChatSessions {
         let taskID: UUID
         let provider: ConversationProvider
         let threadID: String
-        let modelID: String
-        let effort: ConversationEffort
+        /// The model and effort of the side chat's latest message; each message may choose its own.
+        var modelID: String
+        var effort: ConversationEffort
         let workspace: ConversationWorkspaceContext
         var isResponding = false
     }
@@ -231,19 +232,25 @@ extension ConversationManager {
     /// Sends `message` to a side chat. Without `sideChatID` it opens one: the task's
     /// provider forks its conversation, read-only, and the first message carries the
     /// selected text. The task, its status and its own conversation are left untouched.
+    /// `modelID` and `effort` choose this message's model; without them a new side chat uses
+    /// the task's and a later message keeps the side chat's previous choice.
     func sideChat(
         taskID: UUID,
         sideChatID: String?,
         selectedText: String?,
         message: String,
+        modelID requestedModelID: String? = nil,
+        effort requestedEffort: ConversationEffort? = nil,
         onDelta: @escaping (String) -> Void = { _ in }
     ) async throws -> SideChatReply {
         let message = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else {
             throw BridgeCommandError(code: "invalid_argument", message: "Type a message for the side chat.")
         }
+        if let requestedModelID, !Self.isValidModelID(requestedModelID) {
+            throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
+        }
         let id: String
-        let session: SideChatSessions.Session
         var prompt = message
         if let sideChatID {
             guard let existing = SideChatSessions.sessions[sideChatID], existing.taskID == taskID else {
@@ -252,8 +259,9 @@ extension ConversationManager {
             guard !existing.isResponding else {
                 throw BridgeCommandError(code: "invalid_transition", message: "The side chat is still answering.")
             }
+            // Busy from here, before anything is awaited, so a second message can't start a turn too.
+            SideChatSessions.sessions[sideChatID]?.isResponding = true
             id = sideChatID
-            session = existing
         } else {
             let selection = (selectedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !selection.isEmpty else {
@@ -268,25 +276,37 @@ extension ConversationManager {
             let roots = Self.launchRoots(task).compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
             var workspace = try launchWorkspace(for: task, roots: roots)
             workspace.isReadOnly = true
-            let modelID = try modelID(taskID: taskID) ?? provider.defaultModelID
+            let modelID = try requestedModelID ?? modelID(taskID: taskID) ?? provider.defaultModelID
+            let effort = try requestedEffort ?? effort(taskID: taskID)
+            try await client.validateEffort(effort, modelID: modelID, workspace: workspace)
             let threadID = try await client.forkThread(
                 sourceThreadID: sourceThreadID, workspace: workspace, modelID: modelID,
                 developerInstructions: TaskThreadDeveloperInstructions.sideChat(taskID: taskID)
             )
             id = UUID().uuidString.lowercased()
-            session = SideChatSessions.Session(
+            SideChatSessions.sessions[id] = SideChatSessions.Session(
                 taskID: taskID, provider: provider, threadID: threadID, modelID: modelID,
-                effort: try effort(taskID: taskID), workspace: workspace
+                effort: effort, workspace: workspace, isResponding: true
             )
-            SideChatSessions.sessions[id] = session
             PlayhouseDiagnostics.record("conversation.side_chat.opened", fields: [
                 "taskID": taskID.uuidString, "sideChatID": id, "provider": provider.rawValue,
                 "sourceThreadID": sourceThreadID, "threadID": threadID
             ])
             prompt = "<selected-text>\n\(selection)\n</selected-text>\n\n\(message)"
         }
-        SideChatSessions.sessions[id]?.isResponding = true
         defer { SideChatSessions.sessions[id]?.isResponding = false }
+        if let current = SideChatSessions.sessions[id], sideChatID != nil, requestedModelID != nil || requestedEffort != nil {
+            // A follow-up's new choice is checked before it is kept for later messages.
+            try await clients.client(for: current.provider).validateEffort(
+                requestedEffort ?? current.effort, modelID: requestedModelID ?? current.modelID, workspace: current.workspace
+            )
+        }
+        // The live entry, which closing the bubble removes meanwhile; never a copy written back.
+        if let requestedModelID { SideChatSessions.sessions[id]?.modelID = requestedModelID }
+        if let requestedEffort { SideChatSessions.sessions[id]?.effort = requestedEffort }
+        guard let session = SideChatSessions.sessions[id] else {
+            throw BridgeCommandError(code: "not_found", message: "This side chat has ended. Select the text again to start a new one.")
+        }
         let client = clients.client(for: session.provider)
         let threadID = session.threadID
         var answers: [String] = []
@@ -10721,6 +10741,13 @@ final class PlayhouseBridgeRuntime {
                     sideChatID: request.arguments["sideChatID"]?.string,
                     selectedText: request.arguments["selection"]?.string,
                     message: request.arguments["message"]?.string ?? "",
+                    modelID: request.arguments["model"]?.string,
+                    effort: try request.arguments["effort"]?.string.map { value in
+                        guard let effort = ConversationEffort(rawValue: value) else {
+                            throw BridgeCommandError(code: "invalid_argument", message: "Unknown effort '\(value)'. Valid efforts: low, medium, high, xhigh.")
+                        }
+                        return effort
+                    },
                     onDelta: { text in
                         eventHandler(BridgeEvent(requestID: request.id, type: "text_delta", payload: .object(["text": .string(text)])))
                     }

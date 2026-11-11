@@ -802,7 +802,10 @@ private struct SideChatBubble: View {
     }
 
     let selectedText: String
-    let send: (_ sideChatID: String?, _ message: String, _ onDelta: @escaping (String) -> Void) async throws -> SideChatReply
+    /// The task provider's models; the side chat starts on the task's model and effort.
+    let models: [ConversationModelOption]
+    let defaultModelName: String
+    let send: (_ sideChatID: String?, _ message: String, _ modelID: String, _ effort: ConversationEffort, _ onDelta: @escaping (String) -> Void) async throws -> SideChatReply
     let addComment: (String) -> Void
     let close: (_ sideChatID: String) -> Void
     let dismiss: () -> Void
@@ -816,6 +819,32 @@ private struct SideChatBubble: View {
     @State private var didCopySelection = false
     /// The chat's natural height; the transcript shows all of it up to `maxTranscriptHeight`.
     @State private var transcriptContentHeight: CGFloat = 0
+    /// This side chat's own model and effort: choosing them never changes the task's.
+    @State private var modelID: String
+    @State private var effort: ConversationEffort
+    @State private var isModelPickerPresented = false
+
+    init(
+        selectedText: String,
+        models: [ConversationModelOption],
+        defaultModelName: String,
+        modelID: String,
+        effort: ConversationEffort,
+        send: @escaping (_ sideChatID: String?, _ message: String, _ modelID: String, _ effort: ConversationEffort, _ onDelta: @escaping (String) -> Void) async throws -> SideChatReply,
+        addComment: @escaping (String) -> Void,
+        close: @escaping (_ sideChatID: String) -> Void,
+        dismiss: @escaping () -> Void
+    ) {
+        self.selectedText = selectedText
+        self.models = models
+        self.defaultModelName = defaultModelName
+        self.send = send
+        self.addComment = addComment
+        self.close = close
+        self.dismiss = dismiss
+        _modelID = State(initialValue: modelID)
+        _effort = State(initialValue: effort)
+    }
 
     /// The bubble opens compact and grows as the chat does: wider once it has messages, taller
     /// with each one, until `maxTranscriptHeight`, after which the chat scrolls.
@@ -888,13 +917,6 @@ private struct SideChatBubble: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 9) {
-                    if messages.isEmpty, !isResponding {
-                        Text("Ask about the selected text, or type a comment and click Add comment.")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.tertiary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .accessibilityIdentifier("side-chat-empty-state")
-                    }
                     ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
                         messageRow(message, index: index)
                     }
@@ -983,17 +1005,28 @@ private struct SideChatBubble: View {
             )
             AtomStack(props: StackProps(axis: "h", spacing: 8)) {
                 AtomButton(
-                    common: AtomCommon(testID: "add-comment-button", label: "Add comment", help: "Add what you typed as a comment on the selected text"),
+                    common: AtomCommon(testID: "add-comment-button", label: "Comment", help: "Add what you typed as a comment on the selected text"),
                     action: { addComment(draft.trimmingCharacters(in: .whitespacesAndNewlines)) }
                 ) {
                     AtomStack(
                         props: StackProps(axis: "h", fill: "primary", fillOpacity: 0.1, capsule: true),
                         common: AtomCommon(height: 26, paddingX: 10)
                     ) {
-                        AtomLabel(props: LabelProps(text: "Add comment", icon: "text.bubble", size: 12, weight: "semibold"))
+                        AtomLabel(props: LabelProps(text: "Comment", icon: "text.bubble", size: 12, weight: "semibold"))
                     }
                 }
                 AtomSpacer(props: SpacerProps(minLength: 0))
+                ComposerModelPicker(
+                    picker: modelPicker, prefix: "side-chat-",
+                    toggle: { isModelPickerPresented.toggle() },
+                    dismiss: { isModelPickerPresented = false },
+                    selectModel: { id in
+                        guard models.contains(where: { $0.id == id }) else { return }
+                        modelID = id
+                        effort = models.effort(effort, keptFor: id)
+                    },
+                    selectEffort: { value in if let chosen = ConversationEffort(rawValue: value) { effort = chosen } }
+                )
                 AtomButton(
                     props: ButtonProps(disabled: isSendDisabled),
                     // Its value names the side chat this bubble runs, once the first message opened one.
@@ -1015,6 +1048,30 @@ private struct SideChatBubble: View {
         isResponding || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var selectedModel: ConversationModelOption? {
+        modelID.isEmpty ? models.first(where: \.isDefault) : models.first(where: { $0.id == modelID })
+    }
+
+    private var effortChoices: [ConversationEffort] {
+        models.effortChoices(for: modelID)
+    }
+
+    /// The same model button and popover as the conversation's composer, for this side chat.
+    private var modelPicker: ComposerModel.ModelPicker {
+        let name = selectedModel?.name ?? (modelID.isEmpty ? defaultModelName : modelID)
+        return ComposerModel.ModelPicker(
+            name: name,
+            effort: effort.title,
+            label: "Side chat model: \(name), effort: \(effort.title)",
+            open: isModelPickerPresented,
+            models: models.map { option in
+                .init(id: option.id, title: option.name, checked: option.id == selectedModel?.id, icon: nil, help: "Select \(option.name)", testID: "model-option-\(option.id)")
+            },
+            effortChoices: effortChoices.map { .init(value: $0.rawValue, label: $0.title) },
+            selectedEffort: effort.rawValue
+        )
+    }
+
     private func sendDraft() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isResponding else { return }
@@ -1025,7 +1082,7 @@ private struct SideChatBubble: View {
         errorMessage = nil
         Task { @MainActor in
             do {
-                let reply = try await send(sideChatID, text) { delta in streamingText += delta }
+                let reply = try await send(sideChatID, text, modelID, effort) { delta in streamingText += delta }
                 sideChatID = reply.sideChatID
                 let answer = reply.reply.isEmpty ? streamingText : reply.reply
                 messages.append(Message(isUser: false, text: answer.trimmingCharacters(in: .whitespacesAndNewlines)))
@@ -1296,8 +1353,6 @@ struct TaskConversationView: View {
     @State private var annotations: [ConversationAnnotation] = []
     @State private var annotationSelection: AnnotationSelection?
     @State private var currentTextSelection: AnnotationSelection?
-    /// Waits for the current selection to settle before opening its side chat bubble.
-    @State private var sideChatOpening: Task<Void, Never>?
     @State private var activities: [ConversationActivity] = []
     /// Tool calls from every loaded turn, each shown in the timeline after the
     /// message it followed.
@@ -2160,7 +2215,6 @@ struct TaskConversationView: View {
             // History reloads bring back the hidden text for replies this window streamed.
             if !streamedRecoveryReplies.isEmpty { showStreamedRecoveryReplies() }
         }
-        .onChange(of: currentTextSelection?.id) { _, _ in scheduleSideChatOpening() }
         .onChange(of: providerTurnIsActive) { _, isTurnActive in
             if isTurnActive { watchRunningTurnIfNeeded() }
             if !isTurnActive, task.isStandaloneChat { refreshChatPageStatus() }
@@ -4839,33 +4893,19 @@ struct TaskConversationView: View {
         }
     }
 
-    /// Opens the side chat bubble on the selection once it settles: after a pause with no
-    /// mouse button or Shift held, so dragging or extending a selection never opens it midway.
-    private func scheduleSideChatOpening() {
-        sideChatOpening?.cancel()
-        guard let selection = currentTextSelection else { return }
-        sideChatOpening = Task { @MainActor in
-            repeat {
-                try? await Task.sleep(for: .milliseconds(450))
-            } while !Task.isCancelled && (NSEvent.pressedMouseButtons != 0 || NSEvent.modifierFlags.contains(.shift))
-            guard !Task.isCancelled, currentTextSelection?.id == selection.id,
-                  annotationSelection?.id != selection.id else { return }
-            annotationSelection = selection
-        }
-    }
-
     private func selectionHint(messageID: String, anchorID: Int) -> some View {
         Group {
             if let selection = currentTextSelection,
                selection.messageID == messageID, selection.anchorID == anchorID {
                 GeometryReader { geometry in
-                    // Only an anchor for the bubble: the selected lines' top edge, kept inside the text.
+                    let isBubbleOpen = annotationSelection?.id == selection.id
+                    // The bubble's anchor: the selected lines themselves, kept inside the text.
                     Color.clear
                         .frame(width: max(1, min(selection.bounds.width, geometry.size.width)), height: max(1, selection.bounds.height))
                         .allowsHitTesting(false)
                         .accessibilityHidden(true)
                         .popover(isPresented: Binding(
-                            get: { annotationSelection?.id == selection.id },
+                            get: { isBubbleOpen },
                             set: { isPresented in
                                 if !isPresented, annotationSelection?.id == selection.id {
                                     annotationSelection = nil
@@ -4876,11 +4916,15 @@ struct TaskConversationView: View {
                         ), arrowEdge: .top) {
                             SideChatBubble(
                                 selectedText: selection.text,
-                                send: { sideChatID, message, onDelta in
+                                models: modelOptions,
+                                defaultModelName: provider.defaultModelName,
+                                modelID: selectedModelID,
+                                effort: selectedEffort,
+                                send: { sideChatID, message, modelID, effort, onDelta in
                                     try await conversationManager.sideChat(
                                         taskID: task.id, sideChatID: sideChatID,
                                         selection: sideChatID == nil ? selection.text : nil,
-                                        message: message, onDelta: onDelta
+                                        message: message, modelID: modelID, effort: effort, onDelta: onDelta
                                     )
                                 },
                                 addComment: { comment in addAnnotation(selection, comment: comment) },
@@ -4896,6 +4940,30 @@ struct TaskConversationView: View {
                             x: min(max(selection.bounds.midX, 1), max(1, geometry.size.width - 1)),
                             y: selection.bounds.midY
                         )
+                    // The hint that opens the bubble, centered above the selection, gone while it is open.
+                    if !isBubbleOpen {
+                        Button {
+                            annotationSelection = selection
+                        } label: {
+                            Label("Side chat", systemImage: "bubble.left.and.text.bubble.right")
+                                .font(.system(size: 13, weight: .medium))
+                                .padding(.horizontal, 12).padding(.vertical, 7)
+                                .background(.regularMaterial, in: Capsule())
+                                .overlay(Capsule().strokeBorder(Color.white.opacity(0.12)))
+                                .shadow(color: .black.opacity(0.25), radius: 5, y: 2)
+                        }
+                        .buttonStyle(.plain)
+                        .buttonHoverPointer()
+                        .nativeHelp("Discuss or comment on the selected text")
+                        .accessibilityLabel("Side chat")
+                        .accessibilityIdentifier("side-chat-hint-button")
+                        .frame(width: 120, height: 30)
+                        .position(
+                            x: min(max(selection.bounds.midX, 60), max(60, geometry.size.width - 60)),
+                            y: selection.bounds.minY - 22
+                        )
+                        .zIndex(20)
+                    }
                 }
             }
         }
@@ -6042,12 +6110,7 @@ struct TaskConversationView: View {
     }
 
     private func effortChoices(for modelID: String) -> [ConversationEffort] {
-        let model = modelID.isEmpty
-            ? modelOptions.first(where: \.isDefault)
-            : modelOptions.first(where: { $0.id == modelID })
-        guard let supported = model?.supportedEfforts,
-              !supported.isEmpty else { return ConversationEffort.allCases }
-        return ConversationEffort.allCases.filter(supported.contains)
+        modelOptions.effortChoices(for: modelID)
     }
 
     private func modelName(for modelID: String) -> String {
@@ -6056,8 +6119,7 @@ struct TaskConversationView: View {
 
     private func selectPickerModel(_ model: ConversationModelOption) {
         pickerModelID = model.id
-        guard !pickerEffortChoices.contains(pickerEffort) else { return }
-        pickerEffort = pickerEffortChoices.contains(.medium) ? .medium : pickerEffortChoices[0]
+        pickerEffort = modelOptions.effort(pickerEffort, keptFor: model.id)
     }
 
     private func commitModelPickerSelection() {
@@ -8049,8 +8111,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
         weak var anchorView: NSTextView?
         var renderedKey = ""
         let measurer = TextHeightMeasurer()
-        /// How much of a selection that starts above the visible transcript the side chat bubble's
-        /// anchor keeps, so the bubble opens at the selection's visible part.
+        /// Room above a selection for the Side chat hint, centered 22pt above it and 30pt tall.
         private static let selectionHintClearance: CGFloat = 40
         private var responseCommentPopover: NSPopover?
         private var activeResponseCommentID: String?
@@ -8242,8 +8303,8 @@ private struct SelectableAnnotationText: NSViewRepresentable {
             var bounds = view.layoutManager?.boundingRect(forGlyphRange: glyphs, in: view.textContainer!) ?? .zero
             bounds.origin.x += view.textContainerOrigin.x
             bounds.origin.y += view.textContainerOrigin.y
-            // A selection that starts above the visible part of the transcript anchors its side
-            // chat bubble to the top of what is still visible.
+            // A selection that starts above the visible part of the transcript anchors its Side
+            // chat hint, which sits above the selection, to the top of what is still visible.
             let visible = view.visibleRect
             if bounds.minY < visible.minY, bounds.maxY > visible.minY {
                 let top = min(visible.minY + Self.selectionHintClearance, bounds.maxY)

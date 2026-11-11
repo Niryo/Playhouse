@@ -482,9 +482,13 @@ struct RemoteConversationManager {
         sideChatID: String?,
         selection: String?,
         message: String,
+        modelID: String? = nil,
+        effort: ConversationEffort? = nil,
         onDelta: @escaping (String) -> Void
     ) async throws -> SideChatReply {
         var arguments: [String: BridgeValue] = ["taskID": id(taskID), "message": .string(message)]
+        if let modelID, !modelID.isEmpty { arguments["model"] = .string(modelID) }
+        if let effort { arguments["effort"] = .string(effort.rawValue) }
         if let sideChatID { arguments["sideChatID"] = .string(sideChatID) }
         if let selection { arguments["selection"] = .string(selection) }
         return try await daemon.call("conversation.side_chat", arguments) { event in

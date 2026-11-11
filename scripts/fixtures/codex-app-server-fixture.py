@@ -266,8 +266,10 @@ def handle_side_chat(message, history_path):
         reply = f"Side chat about \"{selection}\", forked from {side_chat['source']}: {question}"
     else:
         reply = f"Side chat follow-up {side_chat['turns']} on {thread_id}: {question}"
+    settings = (params.get("collaborationMode") or {}).get("settings") or {}
     record("sideChatTurns", {"threadId": thread_id, "text": text, "sandboxPolicy": params.get("sandboxPolicy"),
-                             "approvalPolicy": params.get("approvalPolicy"), "reply": reply})
+                             "approvalPolicy": params.get("approvalPolicy"), "reply": reply,
+                             "model": params.get("model"), "effort": settings.get("reasoningEffort")})
     write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": turn_id, "status": "inProgress"}}})
     item = {"id": f"item-{turn_id}", "type": "agentMessage", "phase": "final_answer", "text": reply}
     write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": thread_id, "turnId": turn_id, "item": {**item, "text": ""}}})

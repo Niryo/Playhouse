@@ -873,12 +873,14 @@ enum PlayhouseCLI {
                     "answers": .object(answers.mapValues { .array($0.map(BridgeValue.string)) })
                 ])
             case "side-chat":
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--selection", "--side-chat"])
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--selection", "--side-chat", "--model", "--effort"])
                 guard let message = flags["--message"]?.first,
                       (flags["--selection"]?.first != nil) != (flags["--side-chat"]?.first != nil) else {
-                    throw CLIError.usage("Use: playhouse conversation side-chat <task-id> --message <text> (--selection <text> | --side-chat <side-chat-id>)")
+                    throw CLIError.usage("Use: playhouse conversation side-chat <task-id> --message <text> (--selection <text> | --side-chat <side-chat-id>) [--model <model-id>] [--effort <low|medium|high|xhigh>]")
                 }
                 var arguments: [String: BridgeValue] = ["taskID": .string(id), "message": .string(message)]
+                if let model = flags["--model"]?.first { arguments["model"] = .string(model) }
+                if let effort = flags["--effort"]?.first { arguments["effort"] = .string(effort) }
                 if let selection = flags["--selection"]?.first { arguments["selection"] = .string(selection) }
                 if let sideChatID = flags["--side-chat"]?.first { arguments["sideChatID"] = .string(sideChatID) }
                 return BridgeRequest(command: "conversation.side_chat", arguments: arguments)
@@ -1119,7 +1121,7 @@ enum PlayhouseCLI {
       playhouse conversation stop <task-id>
       playhouse conversation provider <task-id> [set <codex|claude>|capabilities]
       playhouse conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]
-      playhouse conversation side-chat <task-id> --message <text> (--selection <text> | --side-chat <side-chat-id>)
+      playhouse conversation side-chat <task-id> --message <text> (--selection <text> | --side-chat <side-chat-id>) [--model <model-id>] [--effort <low|medium|high|xhigh>]
       playhouse conversation side-chat-close <task-id> <side-chat-id>
       playhouse conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...] [--context-page <page-id>]...
 
