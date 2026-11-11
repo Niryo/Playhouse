@@ -3632,7 +3632,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.primary, "rev-parse", stale_slug).strip(), stale_commit)
         self.assertNotIn(f"branch refs/heads/{stale_slug}\n", self.run_git(self.primary, "worktree", "list", "--porcelain") + "\n")
 
-    # case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable archive, whose conversation keeps its composer for follow-up questions; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
+    # case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable archive, whose conversation keeps its composer for follow-up questions; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged. The archive slides in from the board header's archive button as a 340-point SidePanel atom (done-archive-panel) along the window's trailing edge, and its close button slides it away until the button opens it again.
     def test_task_done_removes_worktree_and_preserves_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary, self.secondary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
@@ -3746,7 +3746,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertGreaterEqual(len(archived_tasks), 41, "The CLI board read should retain completed tasks beyond the first visible archive page.")
         self.assertTrue(set(filler_ids).issubset(archived_ids), "All persisted archive records should remain available across pages.")
 
-    # case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done removes its managed worktree and keeps its branch and target commit without committing or merging. When the worktree holds uncommitted changes the move is refused until the user confirms discarding them: declining keeps the task in Review with its files intact, and confirming removes them. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
+    # case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done removes its managed worktree and keeps its branch and target commit without committing or merging. When the worktree holds uncommitted changes the move is refused until the user confirms discarding them: declining keeps the task in Review with its files intact, and confirming removes them. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns and just left of the board scroller, which keeps the window edge, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
     def test_task_done_preserves_dirty_worktree(self):
         task = self.create_repo_task("Dirty cleanup", [self.primary], materialize=True)
         worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
@@ -7697,6 +7697,51 @@ class PlayhouseBridgeTests(unittest.TestCase):
             [item for item in ordinary_messages(comment_only_history["messages"]) if item["role"] == "assistant"][-1]["text"],
         )
 
+    # case-contract: test_conversation_persists_unsent_comments | Unsent conversation comments are saved with the task draft. Through CLI/XPC, a saved comment list reports its count on a fresh read, malformed input is rejected with invalid_argument and leaves the saved comments unchanged, a later draft save keeps them, appending a list adds only comments not already saved (how a send that ends without delivering its comments returns them without overwriting newer ones), and an empty list clears them. Saving comments after a sent prompt leaves hasUnsentDraft false, so the sent prompt never returns to the composer as a draft. In the app, comments added to a conversation are saved as they are added and survive switching to another task and back and quitting and relaunching: the composer shows the pending comment count and the highlights are restored. Sending them delivers their source ranges, clears the saved comments, and reopening the task shows no pending comment and no duplicate.
+    def test_conversation_persists_unsent_comments(self):
+        task = self.create_repo_task("Unsent comments", [self.primary])
+        sent_prompt = "Already sent prompt."
+        # The created task's description is its draft; clear it so the submitted prompt is the last sent one.
+        self.assert_success(self.call_cli("task", "draft", task["id"], "--text", "")[0])
+        self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", sent_prompt, "--status", "In Progress", "--submitted", "true")[0])
+        pending = [{
+            "id": "11111111-1111-1111-1111-111111111111", "messageID": "assistant-message", "blockID": 0,
+            "startOffset": 3, "endBlockID": 0, "endOffset": 15, "text": "first phrase", "comment": "Explain this", "pending": True,
+        }, {
+            "id": "22222222-2222-2222-2222-222222222222", "messageID": "assistant-message", "blockID": 0,
+            "startOffset": 22, "endBlockID": 2, "endOffset": 36, "text": "second phrase", "comment": "And this", "pending": True,
+        }]
+        saved = self.assert_success(self.call_cli("task", "comments", task["id"], "--json", json.dumps(pending))[0])
+        self.assertEqual(saved["pendingCommentCount"], 2)
+        self.assertFalse(saved["hasUnsentDraft"], "Comments must not turn the sent prompt back into a draft.")
+        self.assertEqual(saved["savedPrompt"], sent_prompt)
+        reread = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(reread["pendingCommentCount"], 2, "Saved comments persist across a fresh CLI/XPC read.")
+        self.assertFalse(reread["hasUnsentDraft"])
+        rejected, _ = self.call_cli("task", "comments", task["id"], "--json", "not json", expected_status=2)
+        self.assert_failure(rejected, "invalid_argument")
+        rejected, _ = self.call_cli("task", "comments", task["id"], "--json", json.dumps([{"comment": "missing fields"}]), expected_status=2)
+        self.assert_failure(rejected, "invalid_argument")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["pendingCommentCount"], 2,
+                         "Rejected input leaves the saved comments unchanged.")
+        drafted = self.assert_success(self.call_cli("task", "draft", task["id"], "--text", "A typed draft")[0])
+        self.assertEqual(drafted["pendingCommentCount"], 2, "A draft save keeps the saved comments.")
+        self.assertTrue(drafted["hasUnsentDraft"])
+        # A send that ends without delivering its comments appends them back: saved ones are kept,
+        # and a comment already saved is not duplicated.
+        returned = [dict(pending[1]), {
+            "id": "33333333-3333-3333-3333-333333333333", "messageID": "assistant-message", "blockID": 1,
+            "startOffset": 0, "endBlockID": 1, "endOffset": 4, "text": "word", "comment": "Returned", "pending": True,
+        }]
+        appended = self.assert_success(
+            self.call_cli("task", "comments", task["id"], "--json", json.dumps(returned), "--append")[0]
+        )
+        self.assertEqual(appended["pendingCommentCount"], 3, "Appending adds only comments not already saved.")
+        cleared = self.assert_success(self.call_cli("task", "comments", task["id"], "--json", "[]")[0])
+        self.assertEqual(cleared["pendingCommentCount"], 0)
+        self.assertEqual(cleared["savedPrompt"], "A typed draft", "Clearing comments leaves the typed draft alone.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["pendingCommentCount"], 0)
+
     # case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged.
     def test_claude_auto_branch_uses_generated_title_and_fallback(self):
         source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
@@ -9520,7 +9565,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "A fresh read-only subagent inspection should return the child conversation's stored content.",
         )
 
-    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing is hidden until a first message is sent and while the agent waits on answers to its questions, then stays enabled with an empty composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, including a list that starts on the line right after a paragraph without a blank line, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment and wrapping a long cell onto every line it needs instead of cutting it off with an ellipsis, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in and fits the viewport, the question that started it stays pinned near the top of the transcript, consistent with the user message preceding its final answer in CLI/XPC history. The plan streams in four held deltas that end inside a paragraph, inside a list item after it, and inside the fenced code block; CLI/XPC events carry exactly those deltas in order, and at each held stage the plan's one prose text view and its code block show exactly the text streamed so far, with nothing repeated or left over from an earlier stage, before the completed plan shows its whole code block.
+    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing is hidden until a first message is sent and while the agent waits on answers to its questions, then stays enabled with an empty composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, including a list that starts on the line right after a paragraph without a blank line, a list that starts at 2 after a heading (rendered as items 2-5 with their real numbers, while a "3. " line inside a paragraph stays prose), and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment and wrapping a long cell onto every line it needs instead of cutting it off with an ellipsis, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in and fits the viewport, the question that started it stays pinned near the top of the transcript, consistent with the user message preceding its final answer in CLI/XPC history. The plan streams in four held deltas that end inside a paragraph, inside a list item after it, and inside the fenced code block; CLI/XPC events carry exactly those deltas in order, and at each held stage the plan's one prose text view and its code block show exactly the text streamed so far, with nothing repeated or left over from an earlier stage, before the completed plan shows its whole code block.
     def test_plan_mode_renders_markdown_in_conversation(self):
         task_id = self.create_task(title="Plan mode Markdown", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -9531,7 +9576,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
-        markdown_reply = "## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n\nTwo numbered steps follow on the very next lines:\n1. First numbered step: capture the baseline state before changes.\n\n2. Second numbered step: apply the fix and confirm there are no regressions.\n\n```javascript\nconsole.log(\"Hello, world!\");\n```\n\n| Step | Status |\n| --- | :---: |\n| Verify fixture | Done |\n| Render table | Pending |\n| Wrap long cell | This status note is deliberately long so that it has to wrap onto several lines inside its column instead of being cut off with an ellipsis, and it keeps going for a while longer so that even a wide window still needs at least three lines to show every word of it |"
+        markdown_reply = "## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n\nTwo numbered steps follow on the very next lines:\n1. First numbered step: capture the baseline state before changes.\n\n2. Second numbered step: apply the fix and confirm there are no regressions.\n\n```javascript\nconsole.log(\"Hello, world!\");\n```\n\n| Step | Status |\n| --- | :---: |\n| Verify fixture | Done |\n| Render table | Pending |\n| Wrap long cell | This status note is deliberately long so that it has to wrap onto several lines inside its column instead of being cut off with an ellipsis, and it keeps going for a while longer so that even a wide window still needs at least three lines to show every word of it |\n\n## Still open\n\n2. Open question two: should the installed app differ from the dev build?\n3. Open question three: when should the app restart?\n4. Open question four: which version numbers do we use?\n5. Open question five: may we use the local test feed?\n\nModel sizes vary a lot in practice, and\n3. 5 billion parameters is a common size."
         sent, events = self.call_cli(
             "conversation", "send", task_id, "--message", "Plan the task.", "--mode", "plan",
             extra_environment=env,
@@ -9589,6 +9634,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
                       "Bridge history should preserve the plan's raw Markdown table source for the client to render.")
         self.assertIn("| Wrap long cell | This status note is deliberately long", reloaded_plan,
                       "Bridge history should preserve a long table cell in full for the client to wrap.")
+        self.assertIn("## Still open\n\n2. Open question two:", reloaded_plan,
+                      "Bridge history should preserve a list that starts at 2 after a heading as raw Markdown for the client to render.")
+        self.assertIn("\n\nModel sizes vary a lot in practice, and\n3. 5 billion parameters is a common size.", reloaded_plan,
+                      "Bridge history should preserve a mid-paragraph '3. ' line untouched.")
         plan_diagnostics = self.diagnostic_events()
         plan_summary = next(event for event in plan_diagnostics
                             if event.get("event") == "codex.notification.summary"
@@ -10371,7 +10420,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(saved)["status"], "Blocked")
         self.assertEqual(self.assert_success(saved)["savedPrompt"], "A follow-up draft.")
 
-    # case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the question's Markdown, header, and option descriptions reach the client, and the UI renders the question inline with its Markdown formatted at the reply text size, its header, and each option's description, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
+    # case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the question's Markdown, including a long paragraph, header, and option descriptions reach the client unchanged, and the UI renders the question inline with its Markdown formatted at the reply text size and its long paragraph wrapped in full across several lines without truncation, its header, and each option's description, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
     def test_claude_questions_can_be_answered_after_switching_conversations(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-question"
@@ -10393,8 +10442,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
         request = user_input["payload"]["userInputRequest"]
         question = request["questions"][0]
         self.assertEqual(
-            question["question"], "Which color should I use for **the primary button**?\n\nIt also tints `LinkText`.",
-            "The question's Markdown must reach the client unchanged so the form can render it.",
+            question["question"],
+            "Which color should I use for **the primary button**?\n\nIt also tints `LinkText`.\n\n"
+            "When the user clicks an \"Add here\" placeholder, which conversation should open: the task's active "
+            "conversation, a new conversation started just for that placeholder, or the conversation the placeholder "
+            "was originally added from?",
+            "The question's Markdown, including its long multi-line paragraph, must reach the client unchanged and untruncated.",
         )
         self.assertEqual(question["header"], "Color")
         self.assertEqual(
@@ -15034,7 +15087,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         path.write_text(source, encoding="utf-8")
         return self.call_cli("plugin", "render", "--file", path, *options, expected_status=expected_status)[0]
 
-    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips and Composer examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors. The Button page also shows a link-style Button and a large one (taller than a regular Button), each running onPress, the Menu page's disabled Run Now item is shown but can't be chosen, and the Icon page draws the app logo asset in its own colors (original) in a 50-point frame with its accessibility label; a mistyped original or Menu item disabled is reported with its path.
+    # case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider, Modal, Page, SidePanel) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips, Composer and Done Archive examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors. The Button page also shows a link-style Button and a large one (taller than a regular Button), each running onPress, the Menu page's disabled Run Now item is shown but can't be chosen, and the Icon page draws the app logo asset in its own colors (original) in a 50-point frame with its accessibility label; a mistyped original or Menu item disabled is reported with its path. The Scroll page's lazy paged list raises onEndReached each time its end scrolls into view: it starts at 1 pages loaded, and scrolling to its end appends a page and then, scrolled to the new end, another (2, then 3 pages loaded); in `plugin render` each onEndReached is one commit that adds the page's rows and changes the readout. The TextField page's plain field (style plain) draws no border on its rounded Stack, so it is shorter than the rounded field, and typing in it runs its onChange.
     def test_plugin_renderer_commits_minimal_ops_and_runs_handlers(self):
         plugin = """
 function App() {
@@ -15054,7 +15107,8 @@ Playhouse.render(h(App));
 """
         rendered = self.assert_success(self.render_plugin(plugin))
         self.assertEqual(rendered["atoms"], ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter",
-                                             "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Overlay", "Editor", "Popover", "StepSlider"],
+                                             "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Overlay", "Editor", "Popover", "StepSlider",
+                                             "Modal", "Page", "SidePanel"],
                          "Plugins compose exactly the native composites' atoms.")
         self.assertEqual(rendered["errors"], [])
         self.assertEqual(len(rendered["commits"]), 1, "The first render is one commit.")
@@ -15129,13 +15183,13 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertTrue(any("Invalid commit" in error and "integer" in error for error in out_of_range["result"]["errors"]),
                         f"An op whose node id is out of range is reported, not a crash: {out_of_range['result']['errors']}")
 
-        for page in ["AgentsInfo", "Button", "Card", "ChoiceBar", "Composer", "Disclosure", "Divider", "Editor", "Icon", "Label", "Link", "Menu", "Meter", "Overlay",
-                     "KanbanColumn", "Panel", "PillPicker", "Popover", "PressArea", "RepositoryChips", "Scroll", "Segmented", "SkillsPage", "Spacer", "Spinner", "Stack", "StepSlider",
+        for page in ["AgentsInfo", "Button", "Card", "ChoiceBar", "Composer", "Disclosure", "Divider", "DoneArchive", "Editor", "Icon", "Label", "Link", "Menu", "Meter", "Modal", "Overlay",
+                     "KanbanColumn", "Page", "Panel", "PillPicker", "Popover", "PressArea", "RepositoryChips", "Scroll", "Segmented", "SidePanel", "SkillsPage", "Spacer", "Spinner", "Stack", "StepSlider",
                      "TaskItem", "Text", "TextField", "Toggle", "TokenStats"]:
             page_render = self.assert_success(self.call_cli("plugin", "render", "--page", page)[0])
             self.assertEqual(page_render["errors"], [], f"The {page} catalog page renders without errors.")
             used = {node["type"] for node in self.plugin_nodes(page_render["tree"])}
-            if page not in ("TaskItem", "AgentsInfo", "TokenStats", "SkillsPage", "RepositoryChips", "Composer", "KanbanColumn"):
+            if page not in ("TaskItem", "AgentsInfo", "TokenStats", "SkillsPage", "RepositoryChips", "Composer", "KanbanColumn", "DoneArchive"):
                 self.assertIn(page, used, f"The {page} page shows its atom.")
         disclosure = self.assert_success(self.call_cli("plugin", "render", "--page", "Disclosure", "--event", "disclosure-demo:onToggle")[0])
         section = self.plugin_node(disclosure["tree"], "disclosure-demo")
@@ -15161,6 +15215,15 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual((scroll["type"], scroll["props"]["maxHeight"]), ("Scroll", 120))
         self.assertEqual(len([child for child in scroll["children"] if child["type"] == "Text"]), 8, "Adding rows puts them inside the Scroll.")
         self.assertEqual(self.plugin_text(self.plugin_node(scrolled["tree"], "scroll-count")), "8 rows")
+        paged = self.assert_success(self.call_cli("plugin", "render", "--page", "Scroll", "--event", "scroll-paged:onEndReached", "--event", "scroll-paged:onEndReached")[0])
+        self.assertEqual(paged["errors"], [])
+        paged_scroll = self.plugin_node(paged["tree"], "scroll-paged")
+        self.assertEqual((paged_scroll["props"]["lazy"], paged_scroll["events"]), (True, ["onEndReached"]))
+        self.assertEqual(len(paged_scroll["children"]), 60, "Each onEndReached appends a 20-row page.")
+        self.assertEqual(self.plugin_text(self.plugin_node(paged["tree"], "scroll-pages")), "3 pages loaded")
+        for step in [entry for entry in paged["commits"] if entry["step"] == "scroll-paged:onEndReached"]:
+            self.assertIn("text", step["ops"], "Each page changes the readout.")
+            self.assertEqual(step["ops"].count("create"), 20, "Each page creates its 20 rows.")
         toggled = self.assert_success(self.call_cli("plugin", "render", "--page", "Toggle", "--event", "toggle-demo:onToggle")[0])
         switch = self.plugin_node(toggled["tree"], "toggle-demo")
         state = self.plugin_node(toggled["tree"], "toggle-state")
@@ -15172,6 +15235,11 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         field = self.plugin_node(typed["tree"], "text-field-demo")
         self.assertEqual((sorted(field["events"]), field["props"]["text"], field["props"]["placeholder"]), (["onArrow", "onChange", "onSubmit"], "release", "Search skills"))
         self.assertEqual(self.plugin_text(self.plugin_node(typed["tree"], "text-field-value")), "Text: release", "onChange received the new text.")
+        plain = self.assert_success(self.call_cli("plugin", "render", "--page", "TextField", "--event", "text-field-plain:onChange:quiet")[0])
+        plain_field = self.plugin_node(plain["tree"], "text-field-plain")
+        self.assertEqual((plain_field["props"]["style"], plain_field["props"]["text"], plain_field["events"]), ("plain", "quiet", ["onChange"]))
+        self.assertEqual(self.plugin_node(plain["tree"], "text-field-plain-box")["props"]["cornerRadius"], 9, "The plain field sits on a rounded Stack.")
+        self.assertEqual(self.plugin_text(self.plugin_node(plain["tree"], "text-field-plain-value")), "Plain: quiet", "The plain field's onChange ran its handler.")
         keyed = self.assert_success(self.call_cli("plugin", "render", "--page", "TextField", "--event", "text-field-demo:onArrow:down")[0])
         self.assertEqual(self.plugin_text(self.plugin_node(keyed["tree"], "text-field-key")), "Key: down", "onArrow received the arrow's direction.")
         submitted = self.assert_success(self.call_cli(
@@ -15523,6 +15591,174 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(pressed["touchedNodes"], [last_action["children"][1]["id"]])
         self.assertEqual(backlog["updates"], 0, "No column re-rendered.")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "KanbanColumn", "--event", "column-backlog:onPress", expected_status=2)[0], "invalid_argument")
+
+    # case-contract: test_plugin_presentation_atoms_open_modal_page_and_side_panel | Plugins present UI the three ways the board does, each a controlled atom whose first child is what it is presented from and stays laid out as usual. On the Plugin Catalog's Modal page, the Open modal button runs onPress (Last: open) and opens a 320-point sheet over the window showing the modal's title and a Done button; Done closes it (Last: done), and Escape closes it again through onDismiss (Last: dismiss). On the Page page, Open page (Last: open) slides a page over the whole 420 by 220 point view below it, covering that view's frame and showing its title, and its Back button closes it (Last: back), uncovering the view. On the SidePanel page, Open trailing (Last: open trailing) slides a 200-point panel as tall as the 480 by 240 point view below it in over that view's trailing edge, Open leading (Last: open leading) over its leading edge, and the panel's close button closes it (Last: close). `plugin render` keeps each atom's presented content in the tree after its first child, and opening or closing is one commit that updates only the presentation atom's props and the readout. Only a Modal raises onDismiss: a Page or SidePanel given an onDismiss handler, or a Modal, Page or SidePanel without isPresented or with a mistyped width or edge, is reported in errors.
+    def test_plugin_presentation_atoms_open_modal_page_and_side_panel(self):
+        def commit(rendered, step):
+            return {entry["step"]: entry for entry in rendered["commits"]}[step]
+
+        # Modal: the presenter, then the sheet's content, kept in the tree while closed.
+        modal_page = self.assert_success(self.call_cli("plugin", "render", "--page", "Modal")[0])
+        self.assertEqual(modal_page["errors"], [])
+        modal = self.plugin_node(modal_page["tree"], "modal-demo")
+        self.assertEqual((modal["type"], modal["props"]["isPresented"], modal["props"]["width"], modal["events"]), ("Modal", False, 320, ["onDismiss"]))
+        self.assertEqual(modal["children"][0]["props"]["testID"], "modal-open", "The first child presents the sheet.")
+        self.plugin_node(modal["children"][1], "modal-title")
+        self.plugin_node(modal_page["tree"], "modal-done")
+        last = self.plugin_node(modal_page["tree"], "modal-last")
+        opened = self.assert_success(self.call_cli("plugin", "render", "--page", "Modal", "--event", "modal-open:onPress",
+                                                   "--event", "modal-done:onPress", "--event", "modal-open:onPress", "--event", "modal-demo:onDismiss")[0])
+        self.assertEqual(opened["errors"], [])
+        steps = [entry for entry in opened["commits"] if entry["step"] != "render"]
+        self.assertEqual([entry["step"] for entry in steps], ["modal-open:onPress", "modal-done:onPress", "modal-open:onPress", "modal-demo:onDismiss"])
+        for entry in steps:
+            self.assertEqual(sorted(entry["ops"]), ["text", "update"], f"{entry['step']} updates only the Modal's props and the readout.")
+            self.assertEqual(sorted(entry["touchedNodes"]), sorted([modal["id"], last["children"][1]["id"]]))
+        self.assertFalse(self.plugin_node(opened["tree"], "modal-demo")["props"]["isPresented"])
+        self.assertEqual(self.plugin_text(self.plugin_node(opened["tree"], "modal-last")), "Last: dismiss", "Escape's onDismiss ran its JavaScript handler.")
+        reopened = self.assert_success(self.call_cli("plugin", "render", "--page", "Modal", "--event", "modal-open:onPress")[0])
+        self.assertTrue(self.plugin_node(reopened["tree"], "modal-demo")["props"]["isPresented"])
+        self.assertEqual(self.plugin_text(self.plugin_node(reopened["tree"], "modal-last")), "Last: open")
+
+        # Page: the covered view, then the page.
+        page_page = self.assert_success(self.call_cli("plugin", "render", "--page", "Page", "--event", "page-open:onPress")[0])
+        self.assertEqual(page_page["errors"], [])
+        page = self.plugin_node(page_page["tree"], "page-demo")
+        self.assertEqual((page["type"], page["props"]["isPresented"], page.get("events", [])), ("Page", True, []))
+        base = page["children"][0]
+        self.assertEqual((base["props"]["testID"], base["props"]["width"], base["props"]["height"]), ("page-base", 420, 220))
+        self.assertEqual([child["type"] for child in page["children"]], ["Stack", "Stack", "Divider", "Text"], "The covered view, then the page's column.")
+        self.plugin_node(page["children"][1], "page-title")
+        self.assertEqual(sorted(commit(page_page, "page-open:onPress")["ops"]), ["text", "update"])
+        closed = self.assert_success(self.call_cli("plugin", "render", "--page", "Page", "--event", "page-open:onPress", "--event", "page-back:onPress")[0])
+        self.assertFalse(self.plugin_node(closed["tree"], "page-demo")["props"]["isPresented"])
+        self.assertEqual(self.plugin_text(self.plugin_node(closed["tree"], "page-last")), "Last: back")
+        self.assertEqual(sorted(commit(closed, "page-back:onPress")["ops"]), ["text", "update"])
+
+        # SidePanel: the covered view, then the panel, on either edge.
+        side_page = self.assert_success(self.call_cli("plugin", "render", "--page", "SidePanel", "--event", "side-panel-open-trailing:onPress")[0])
+        self.assertEqual(side_page["errors"], [])
+        panel = self.plugin_node(side_page["tree"], "side-panel-demo")
+        self.assertEqual((panel["type"], panel["props"]["isPresented"], panel["props"]["edge"], panel["props"]["width"], panel.get("events", [])), ("SidePanel", True, "trailing", 200, []))
+        base = panel["children"][0]
+        self.assertEqual((base["props"]["testID"], base["props"]["width"], base["props"]["height"]), ("side-panel-base", 480, 240))
+        self.plugin_node(panel["children"][1], "side-panel-title")
+        self.plugin_node(panel["children"][1], "side-panel-close")
+        self.assertEqual(self.plugin_text(self.plugin_node(side_page["tree"], "side-panel-last")), "Last: open trailing")
+        leading = self.assert_success(self.call_cli("plugin", "render", "--page", "SidePanel", "--event", "side-panel-open-leading:onPress", "--event", "side-panel-close:onPress")[0])
+        self.assertEqual(self.plugin_node(leading["tree"], "side-panel-demo")["props"]["edge"], "leading")
+        self.assertEqual(sorted(commit(leading, "side-panel-open-leading:onPress")["ops"]), ["text", "update"])
+        self.assertFalse(self.plugin_node(leading["tree"], "side-panel-demo")["props"]["isPresented"])
+        self.assertEqual(self.plugin_text(self.plugin_node(leading["tree"], "side-panel-last")), "Last: close")
+
+        # Only a Modal raises onDismiss, and each needs isPresented with well-typed props.
+        for source, error in [
+            ('Playhouse.render(h(Page, { isPresented: true, onDismiss: function () {} }, h(Text, null, "Base")));', '<Page> has no event "onDismiss"'),
+            ('Playhouse.render(h(SidePanel, { isPresented: true, onDismiss: function () {} }, h(Text, null, "Base")));', '<SidePanel> has no event "onDismiss"'),
+            ('Playhouse.render(h(Modal, { width: 300 }, h(Text, null, "Base")));', "<Modal> has an invalid prop: isPresented: missing"),
+            ('Playhouse.render(h(Page, {}, h(Text, null, "Base")));', "<Page> has an invalid prop: isPresented: missing"),
+            ('Playhouse.render(h(SidePanel, { isPresented: true, width: "wide" }, h(Text, null, "Base")));', "<SidePanel> has an invalid prop: width: expected a number, found a string"),
+            ('Playhouse.render(h(SidePanel, { isPresented: true, edge: 3 }, h(Text, null, "Base")));', "<SidePanel> has an invalid prop: edge: expected a string, found 3"),
+        ]:
+            failed = self.render_plugin(source, expected_status=1)
+            self.assertTrue(failed["ok"], "A plugin that fails still reports its render.")
+            self.assertTrue(any(error in message for message in failed["result"]["errors"]), f"{source} reports {error}: {failed['result']['errors']}")
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "SidePanel", "--event", "side-panel-demo:onDismiss", expected_status=2)[0], "invalid_argument")
+
+    # case-contract: test_plugin_done_archive_renders_from_atoms_like_native | The Plugin Catalog's Done Archive page shows the board's Done archive composed in JavaScript from atoms above the native SwiftUI archive the board presents, built from the same atoms and sample model, each opened by the board header's archive button (the bordered Button atom with the archivebox icon, labelled Done tasks) into a 340-point SidePanel over the trailing edge of a 560 by 460 point stand-in for the board, open at first. Both show the Done tasks title and its close button, the search field with its Search tasks and conversations placeholder, and a list of five rows, each a button opening its task with the done checkmark, its title and its date, beside its pull request actions: a #227 link, a PR button beside a #228 link, a PRs button, a disabled busy PR button showing a spinner, and nothing for a task without repositories, each at the same size in both and with the board archive's identifiers (done-archive-task, done-archive-create-pr, done-archive-pr-link, done-archive-search, and done-archive-list valued 5 tasks loaded). The JavaScript tree uses only atoms (SidePanel, Stack, Text, Icon, Button, Link, Spinner, Spacer, Divider, TextField, Scroll), its search a plain TextField on a rounded Stack. The list's end is in view, so its onEndReached runs on both sides (End reached). Typing in the JavaScript search runs onChange (Last: search followed by the text), narrows the rows to the matching title and shows the clear button, which clears the search and brings every row back; a search that matches nothing shows No matching tasks instead of the list. A PR button runs its handler with its task (Last: create pr followed by the title), a row runs open (Last: open followed by the title) and slides the panel away, the archive button opens it again (Last: toggle open), and the close button closes it (Last: close), while the native archive keeps its own state. The list raises no onPress, so pressing it is refused as invalid_argument.
+    def test_plugin_done_archive_renders_from_atoms_like_native(self):
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive")[0])
+        self.assertEqual(rendered["errors"], [])
+        tree = rendered["tree"]
+        sample = json.loads((Path(__file__).resolve().parent.parent / "Playhouse/Resources/PluginRuntime/catalog/sample-done-archive.json").read_text(encoding="utf-8"))["doneArchive"]
+        ids = [row["id"] for row in sample["rows"]]
+        types = {node["type"] for node in self.plugin_nodes(tree)} - {"#root", "#text"}
+        self.assertEqual(types, {"SidePanel", "Stack", "Text", "Icon", "Button", "Link", "Spinner", "Spacer", "Divider", "TextField", "Scroll"}, "The archive is atoms only.")
+
+        button = self.plugin_node(tree, "done-archive-button")
+        self.assertEqual((button["type"], button["props"]["style"], button["props"]["label"], button["props"]["help"]), ("Button", "bordered", "Done tasks", "Browse completed tasks"))
+        self.assertEqual(button["children"][0]["props"]["name"], "archivebox")
+        panel = self.plugin_node(tree, "done-archive-panel")
+        self.assertEqual((panel["type"], panel["props"]["isPresented"], panel["props"]["width"]), ("SidePanel", True, 340), "The archive starts open in a 340-point SidePanel.")
+        self.assertNotIn("edge", panel["props"], "It slides in over the trailing edge, the default.")
+        board = panel["children"][0]
+        self.assertEqual((board["props"]["testID"], board["props"]["width"], board["props"]["height"]), ("done-archive-board", 560, 460))
+        archive = panel["children"][1]
+        self.assertEqual([child["type"] for child in archive["children"]], ["Stack", "Divider", "Stack", "Scroll"], "Header, divider, search, then the list.")
+        self.assertEqual(self.plugin_text(self.plugin_node(archive, "done-archive-title")), "Done tasks")
+        close = self.plugin_node(archive, "close-done-archive-button")
+        self.assertEqual((close["props"]["label"], close["props"]["help"], close["children"][0]["props"]["name"]), ("Close done tasks", "Close done tasks", "xmark"))
+        search = self.plugin_node(archive, "done-archive-search")
+        self.assertEqual((search["type"], search["props"]["style"], search["props"]["placeholder"], search["props"]["text"]), ("TextField", "plain", "Search tasks and conversations", ""))
+        search_box = archive["children"][2]["children"][0]
+        self.assertEqual((search_box["props"]["fill"], search_box["props"]["fillOpacity"], search_box["props"]["cornerRadius"], search_box["props"]["padding"]), ("primary", 0.045, 9, 10), "The search sits on a rounded Stack.")
+        self.assertEqual(search_box["children"][0]["props"]["name"], "magnifyingglass")
+        all_ids = [node.get("props", {}).get("testID") for node in self.plugin_nodes(tree)]
+        self.assertNotIn("clear-archive-search-button", all_ids, "An empty search has no clear button.")
+
+        listing = self.plugin_node(archive, "done-archive-list")
+        self.assertEqual((listing["props"]["lazy"], listing["props"]["spacing"], listing["props"]["value"], listing["events"]), (True, 5, "5 tasks loaded", ["onEndReached"]))
+        self.assertEqual(len(listing["children"]), 5, "One row per sample task.")
+        for row in sample["rows"]:
+            opener = self.plugin_node(listing, f"done-archive-task-{row['id']}")
+            self.assertEqual(opener["props"]["help"], f"Open task: {row['title']}")
+            texts = [self.plugin_text(node) for node in self.plugin_nodes(opener) if node["type"] == "Text"]
+            self.assertEqual(texts, [row["title"], row["date"]])
+            icon = next(node for node in self.plugin_nodes(opener) if node["type"] == "Icon")
+            self.assertEqual((icon["props"]["name"], icon["props"]["color"]), ("checkmark.circle.fill", "#339E73"))
+        link = self.plugin_node(listing, f"done-archive-pr-link-{ids[0]}-227")
+        self.assertEqual((link["type"], link["props"]["url"], link["props"]["help"], link["props"]["minWidth"], link["props"]["minHeight"]), ("Link", "https://github.com/example/playhouse/pull/227", "playhouse", 30, 30))
+        self.assertEqual(self.plugin_text(link["children"][0]), "#227")
+        create = self.plugin_node(listing, f"done-archive-create-pr-{ids[1]}")
+        self.assertEqual((create["props"]["style"], create["props"]["width"], create["props"]["height"], create["props"]["disabled"]), ("borderless", 30, 30, False))
+        self.assertEqual(self.plugin_text(create["children"][0]), "PR")
+        self.plugin_node(listing, f"done-archive-pr-link-{ids[1]}-228")
+        self.assertEqual(self.plugin_text(self.plugin_node(listing, f"done-archive-create-pr-{ids[2]}")["children"][0]), "PRs")
+        busy = self.plugin_node(listing, f"done-archive-create-pr-{ids[3]}")
+        self.assertEqual((busy["props"]["disabled"], busy["children"][0]["type"], busy["children"][0]["props"]["size"]), (True, "Spinner", "mini"))
+        self.assertNotIn(f"done-archive-create-pr-{ids[4]}", all_ids, "A task without repositories has no pull request actions.")
+        self.assertEqual(len(listing["children"][4]["children"]), 1, "Its row is only its open button.")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "js-end-reached")), "End not reached", "Headlessly nothing scrolls into view.")
+
+        # Each control runs its JavaScript handler.
+        steps = ["done-archive-list:onEndReached", "done-archive-search:onChange:release"]
+        driven = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive", *[part for step in steps for part in ("--event", step)])[0])
+        self.assertEqual(driven["errors"], [])
+        commits = {entry["step"]: entry for entry in driven["commits"]}
+        end_text = self.plugin_node(tree, "js-end-reached")
+        self.assertEqual(commits["done-archive-list:onEndReached"]["ops"], ["text"])
+        self.assertEqual(commits["done-archive-list:onEndReached"]["touchedNodes"], [end_text["children"][0]["id"]], "Reaching the end changes only its readout.")
+        self.assertEqual(self.plugin_text(self.plugin_node(driven["tree"], "js-end-reached")), "End reached")
+        narrowed = self.plugin_node(driven["tree"], "done-archive-list")
+        self.assertEqual([child["children"][0]["props"]["testID"] for child in narrowed["children"]], [f"done-archive-task-{ids[4]}"], "The search narrows the rows to the matching title.")
+        self.assertEqual(self.plugin_node(driven["tree"], "done-archive-search")["props"]["text"], "release")
+        self.plugin_node(driven["tree"], "clear-archive-search-button")
+        self.assertEqual(self.plugin_text(self.plugin_node(driven["tree"], "js-last-action")), "Last: search release")
+
+        pressed = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive", "--event", f"done-archive-create-pr-{ids[1]}:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(pressed["tree"], "js-last-action")), f"Last: create pr {sample['rows'][1]['title']}")
+        self.assertEqual({entry["step"]: entry for entry in pressed["commits"]}[f"done-archive-create-pr-{ids[1]}:onPress"]["ops"], ["text"], "A PR button changes only the readout.")
+
+        cleared = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive", "--event", "done-archive-search:onChange:nothing-matches",
+                                                    "--event", "clear-archive-search-button:onPress")[0])
+        self.assertEqual(len(self.plugin_node(cleared["tree"], "done-archive-list")["children"]), 5, "Clearing the search brings every row back.")
+        self.assertEqual(self.plugin_node(cleared["tree"], "done-archive-search")["props"]["text"], "")
+        empty = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive", "--event", "done-archive-search:onChange:nothing-matches")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(empty["tree"], "done-archive-empty-state")), "No matching tasks")
+        self.assertNotIn("done-archive-list", [node.get("props", {}).get("testID") for node in self.plugin_nodes(empty["tree"])], "No list while nothing matches.")
+
+        opened = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive", "--event", f"done-archive-task-{ids[0]}:onPress",
+                                                   "--event", "done-archive-button:onPress", "--event", "close-done-archive-button:onPress")[0])
+        opened_commits = [entry for entry in opened["commits"] if entry["step"] != "render"]
+        self.assertEqual(sorted(opened_commits[0]["ops"]), ["text", "update"], "Opening a row closes the panel: its props and the readout.")
+        self.assertEqual(self.plugin_text(self.plugin_node(opened["tree"], "js-last-action")), "Last: close")
+        self.assertFalse(self.plugin_node(opened["tree"], "done-archive-panel")["props"]["isPresented"])
+        reopened = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive", "--event", f"done-archive-task-{ids[0]}:onPress", "--event", "done-archive-button:onPress")[0])
+        self.assertTrue(self.plugin_node(reopened["tree"], "done-archive-panel")["props"]["isPresented"])
+        self.assertEqual(self.plugin_text(self.plugin_node(reopened["tree"], "js-last-action")), "Last: toggle open")
+        first_open = self.assert_success(self.call_cli("plugin", "render", "--page", "DoneArchive", "--event", f"done-archive-task-{ids[0]}:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(first_open["tree"], "js-last-action")), f"Last: open {sample['rows'][0]['title']}")
+        self.assert_failure(self.call_cli("plugin", "render", "--page", "DoneArchive", "--event", "done-archive-list:onPress", expected_status=2)[0], "invalid_argument")
 
     # case-contract: test_plugin_token_stats_renders_from_atoms_like_native | The Plugin Catalog's Token Stats page shows the Token Stats modal composed in JavaScript from atoms above the native SwiftUI modal the board presents, built from the same atoms and sample data, each opened by the task item's token counter (the same overhanging Button atom, labelled with its description and hinted Open Token Stats). Both show the title and the task's title, the View raw input… button, a section bar of Overview, Wasters, Tools & MCP and Overhead with Overview selected, the call headlines (Final transcript size, Total sent (incl. subagents), Excluding cache reads (incl. subagents)), the main-agent and subagent split, the call and output lines, the total, the four buckets, the per-tool rollup and the per-turn rows, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Label, Button, Spacer, ChoiceBar, Divider, Scroll, Meter) with the board modal's identifiers. Choosing Wasters in the JavaScript section bar runs onChange with its value (Last: section wasters) and shows the largest items, each with a 72-point share bar, its kind, the removed-by-compaction flag, its request count and a small Show button, then the repeated result and the cache miss, while the native modal stays on Overview until its own bar moves it, after which both show the same rows at the same size. Show runs its JavaScript handler with the item's raw input target (Last: raw input claude #14) and View raw input… with the final transcript (Last: raw input final transcript), without re-rendering any row. Tools & MCP lists each tool's bar, calls and total and the MCP server, and Overhead lists what every request carries and each agent. The overview scrolls within at most 320 points and each map section within a fixed 420. Done closes the JavaScript modal (Last: done) and leaves the native one open, and the counter opens it again (Last: open). The section bar raises no onPress, so pressing it is refused as invalid_argument.
     def test_plugin_token_stats_renders_from_atoms_like_native(self):
@@ -16377,13 +16613,13 @@ Playhouse.render(h(Context));
         self.assert_failure(self.call_cli("plugin", "render", "--file", self.plugins_folder() / "props-dump" / "index.js", "--task", task["id"], expected_status=2)[0], "invalid_argument")
         self.assert_failure(self.call_cli("plugin", "render", "--plugin", "props-dump", "--page", "Text", expected_status=2)[0], "invalid_argument")
 
-    # case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
+    # case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover, Modal, Page, SidePanel), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
     def test_debug_highlight_native_atoms_outlines_atoms(self):
         rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "Card")[0])
         self.assertEqual(rendered["errors"], [])
         containers = rendered["containerAtoms"]
         self.assertEqual(containers, [atom for atom in rendered["atoms"] if atom in containers], "Every container is a known atom.")
-        self.assertEqual(set(containers), {"Stack", "Panel", "Card", "Scroll", "Disclosure", "Overlay", "Popover"},
+        self.assertEqual(set(containers), {"Stack", "Panel", "Card", "Scroll", "Disclosure", "Overlay", "Popover", "Modal", "Page", "SidePanel"},
                          "Only the atoms that lay out a composite's structure are containers.")
         leaves = [atom for atom in rendered["atoms"] if atom not in containers]
         self.assertEqual(leaves, ["Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Meter", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Editor", "StepSlider"],

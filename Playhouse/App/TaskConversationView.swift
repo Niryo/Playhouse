@@ -146,6 +146,8 @@ private final class ComposerDraftModel {
     /// composer a send, steer, or queue left behind.
     @ObservationIgnored var settledText = ""
     @ObservationIgnored var autosaveTask: Task<Void, Never>?
+    /// The latest pending-comment save; the next one waits for it.
+    @ObservationIgnored var annotationSaveTask: Task<Void, Never>?
 }
 
 /// Evaluates `content` in its own body, so Observation attributes the composer's draft reads to
@@ -725,20 +727,6 @@ private struct TableBlockView: View {
     }
 }
 
-private struct ConversationAnnotation: Identifiable, Codable {
-    let id: UUID
-    let messageID: String
-    /// The comment starts `startOffset` into this block's text and ends `endOffset` into
-    /// `endBlockID`'s, so a comment on prose blocks rendered together can span several of them.
-    let blockID: Int
-    let startOffset: Int
-    let endBlockID: Int
-    let endOffset: Int
-    let text: String
-    let comment: String
-    var pending = true
-}
-
 private struct ResponseAnnotationReference {
     let text: String
     let comment: String
@@ -1049,6 +1037,8 @@ struct TaskConversationView: View {
     @State private var latestTurnContentHeight: CGFloat = 0
     @State private var lastScrolledUserMessageID: String?
     @State private var annotations: [ConversationAnnotation] = []
+    /// Pending comments handed to the turn now running; they leave the saved draft until it ends.
+    @State private var inFlightAnnotationIDs: Set<UUID> = []
     @State private var annotationSelection: AnnotationSelection?
     @State private var currentTextSelection: AnnotationSelection?
     @State private var annotationComment = ""
@@ -4790,7 +4780,10 @@ struct TaskConversationView: View {
         formatted.enumerateAttribute(InlineCodeStyle.attribute, in: NSRange(location: 0, length: formatted.length)) { value, range, _ in
             if let color = value as? NSColor { formatted.addAttribute(.backgroundColor, value: color, range: range) }
         }
+        // A row is placed at the height it measured, and a stack around this text, like the question form's,
+        // may hand that height out unevenly; keeping the text's natural height stops it truncating to one line.
         return Text((try? AttributedString(formatted, including: \.appKit)) ?? Self.markdownAttributedText(block.text))
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     /// Renders a list marker ("•" or "1.") through the same `SelectableAnnotationText`/NSTextView
@@ -4891,9 +4884,9 @@ struct TaskConversationView: View {
         var blocks: [AssistantMarkdownBlock] = []
         var paragraphLines: [String] = []
         var paragraphStart: Int?
-        // Only treat digit-dot-space prefixes as an ordered list when they form a sequence that
-        // starts at 1 and increments by one; otherwise a sentence like "3. 5 billion parameters…"
-        // would be mis-parsed as a list item.
+        // Treat digit-dot-space prefixes as an ordered list when they start a block (any number,
+        // as in CommonMark) or start at 1 while a paragraph is open, then increment by one;
+        // otherwise a wrapped sentence like "3. 5 billion parameters…" would be mis-parsed.
         var lastOrderedNumber: Int?
 
         func flushParagraph() {
@@ -5000,8 +4993,9 @@ struct TaskConversationView: View {
             } else if let ordered = orderedListPrefix(line[...]),
                       // As in CommonMark, only a list starting at 1 may interrupt a paragraph,
                       // so a wrapped line that happens to begin "3. " stays part of its paragraph.
+                      // With no paragraph open, a new list may start at any number.
                       paragraphLines.isEmpty || ordered.number == 1,
-                      ordered.number == (lastOrderedNumber.map { $0 + 1 } ?? 1) {
+                      ordered.number == (lastOrderedNumber.map { $0 + 1 } ?? (paragraphLines.isEmpty ? ordered.number : 1)) {
                 flushParagraph()
                 lastOrderedNumber = ordered.number
                 blocks.append(AssistantMarkdownBlock(id: index, kind: .orderedListItem(number: ordered.number), text: String(ordered.rest)))
@@ -5232,6 +5226,10 @@ struct TaskConversationView: View {
                         draft = ""
                     }
                     scheduleDraftAutosave(newValue)
+                }
+                .onChange(of: annotations) { _, _ in
+                    guard !isReadOnly, !isLoadingHistory else { return }
+                    persistPendingAnnotations()
                 }
         }
         .padding(.horizontal, 28)
@@ -5791,7 +5789,7 @@ struct TaskConversationView: View {
     }
 
     private func restoreAnnotations(from messages: [ConversationMessage], keepingPending: Bool = false) {
-        var restored: [ConversationAnnotation] = keepingPending ? annotations.filter(\.pending) : []
+        var restored: [ConversationAnnotation] = []
         for message in messages where message.role == .user {
             guard let start = message.text.range(of: "<response-comments>")
                     ?? message.text.range(of: "<response-annotations>"),
@@ -5814,7 +5812,12 @@ struct TaskConversationView: View {
                 ))
             }
         }
-        annotations = restored
+        // Sent comments are never in the saved list, but one whose clear was interrupted could be.
+        annotations = PersistedAnnotations.restored(
+            sent: restored,
+            livePending: keepingPending ? annotations.filter(\.pending) : [],
+            persisted: inFlightAnnotationIDs.isEmpty ? PersistedAnnotations.decode(task.pendingAnnotationsData) : []
+        )
     }
 
     /// Shows the cached provider model list and remembered selection without a
@@ -6149,6 +6152,10 @@ struct TaskConversationView: View {
             }
             return
         }
+        if !pendingAnnotations.isEmpty {
+            inFlightAnnotationIDs = Set(pendingAnnotations.map(\.id))
+            persistPendingAnnotations()
+        }
         if usesComposerDraft && isEnteringGoal && !pendingAnnotations.isEmpty {
             isEnteringGoal = false
         }
@@ -6194,6 +6201,9 @@ struct TaskConversationView: View {
         let statusBeforeSubmission = task.status
 
         Task { @MainActor in
+            // However the send ends, its comments leave the in-flight set: a completed turn has
+            // already marked them sent, and any it did not send stay pending in the saved draft.
+            defer { releaseInFlightAnnotations(pendingAnnotations) }
             let saved = await saveDraftAndGenerateTitle(
                 status: .inProgress,
                 prompt: text,
@@ -6285,6 +6295,11 @@ struct TaskConversationView: View {
                     // Codex exited after the turn started). Returning it to the composer would save
                     // it as an unsent draft and prefix it to the next message.
                     applyHistoryMessages(deliveredHistory)
+                    // The comments went out with the prompt, so they are sent, not pending.
+                    let deliveredIDs = Set(pendingAnnotations.map(\.id))
+                    for index in annotations.indices where deliveredIDs.contains(annotations[index].id) {
+                        annotations[index].pending = false
+                    }
                     errorMessage = error.localizedDescription
                 } else {
                     messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
@@ -6798,6 +6813,46 @@ struct TaskConversationView: View {
         draft = ""
         pendingImages.removeAll()
         persistDraft()
+    }
+
+    /// Saves the unsent comments with the task's draft; comments in a running turn are excluded.
+    /// Values are captured now, so the save still completes after the view goes away. Saves run
+    /// one after another, so an older list never overwrites a newer one.
+    private func persistPendingAnnotations() {
+        let data = PersistedAnnotations.encode(annotations.filter { !inFlightAnnotationIDs.contains($0.id) })
+        let taskID = task.id
+        let taskManager = BoardTaskManager(modelContext: modelContext)
+        let previousSave = composerDraft.annotationSaveTask
+        composerDraft.annotationSaveTask = Task { @MainActor in
+            await previousSave?.value
+            do {
+                try await taskManager.savePendingAnnotations(taskID, data: data)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Ends a send's hold on its comments. Ones it did not deliver are still pending and go back
+    /// to the saved draft by appending, never by overwriting: this view may be gone, and a newer
+    /// view of the task may have saved other comments since.
+    private func releaseInFlightAnnotations(_ sent: [ConversationAnnotation]) {
+        guard !sent.isEmpty else { return }
+        let sentIDs = Set(sent.map(\.id))
+        inFlightAnnotationIDs.subtract(sentIDs)
+        let undelivered = annotations.filter { $0.pending && sentIDs.contains($0.id) }
+        guard let data = PersistedAnnotations.encode(undelivered) else { return }
+        let taskID = task.id
+        let taskManager = BoardTaskManager(modelContext: modelContext)
+        let previousSave = composerDraft.annotationSaveTask
+        composerDraft.annotationSaveTask = Task { @MainActor in
+            await previousSave?.value
+            do {
+                try await taskManager.savePendingAnnotations(taskID, data: data, appending: true)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     /// Saves the composer's text and images together as the task's draft, during a turn

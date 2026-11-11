@@ -117,51 +117,41 @@ struct PluginModeBanner: View {
     }
 }
 
-/// A modal, sidebar or page plugin opened from a placement, drawn by the view
-/// that owns the placement: a sheet, a panel sliding in from the trailing
-/// edge, or a page over the whole view.
+/// A modal, sidebar or page plugin opened from a placement, composed from the
+/// Modal, SidePanel and Page presentation atoms over the view that owns the
+/// placement: a sheet, a panel sliding in from the trailing edge, or a page
+/// over the whole view. The plugin's own header closes it.
 struct PluginPresentationModifier: ViewModifier {
     @Binding var plugin: PluginRecord?
     let props: (PluginRecord) -> [String: PluginValue]
     let actions: PluginUIActions
 
-    func body(content: Content) -> some View {
-        content
-            .sheet(isPresented: Binding(
-                get: { plugin?.presentationKind == .modal },
-                set: { if !$0 { plugin = nil } }
-            )) {
-                if let plugin {
-                    surface(plugin)
-                        .frame(width: plugin.surfaceSize.width, height: plugin.surfaceSize.height)
-                }
-            }
-            .overlay(alignment: .trailing) {
-                ZStack {
-                    if let plugin, plugin.presentationKind == .sidebar {
-                        surface(plugin)
-                            .frame(width: plugin.surfaceSize.width)
-                            .frame(maxHeight: .infinity)
-                            .background(WorkspaceTheme.windowBackground)
-                            .overlay(alignment: .leading) { Rectangle().fill(Color.primary.opacity(0.10)).frame(width: 1) }
-                            .shadow(color: .black.opacity(0.18), radius: 14, x: -4)
-                            .transition(.move(edge: .trailing))
-                    } else if let plugin, plugin.presentationKind == .page {
-                        surface(plugin)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(WorkspaceTheme.windowBackground)
-                            .transition(.move(edge: .trailing))
-                    }
-                }
-                .animation(.easeInOut(duration: 0.22), value: plugin?.id)
-            }
+    private func isPresenting(_ kind: PluginPresentation) -> Bool {
+        plugin?.presentationKind == kind
     }
 
-    private func surface(_ plugin: PluginRecord) -> some View {
-        var surfaceActions = actions
-        surfaceActions.close = { self.plugin = nil }
-        return PluginPropsScope {
-            PluginSurfaceView(plugin: plugin, props: props(plugin), actions: surfaceActions)
+    func body(content: Content) -> some View {
+        content
+            .atomModal(
+                ModalProps(isPresented: isPresenting(.modal), width: plugin.map { Double($0.surfaceSize.width) }, height: plugin.map { Double($0.surfaceSize.height) }),
+                common: AtomCommon(testID: "plugin-modal"),
+                onDismiss: { plugin = nil }
+            ) { surface }
+            .atomSidePanel(
+                SidePanelProps(isPresented: isPresenting(.sidebar), width: plugin.map { Double($0.surfaceSize.width) } ?? 360),
+                common: AtomCommon(testID: "plugin-side-panel")
+            ) { surface }
+            .atomPage(PageProps(isPresented: isPresenting(.page)), common: AtomCommon(testID: "plugin-page")) { surface }
+    }
+
+    @ViewBuilder
+    private var surface: some View {
+        if let plugin {
+            var surfaceActions = actions
+            let _ = surfaceActions.close = { self.plugin = nil }
+            PluginPropsScope {
+                PluginSurfaceView(plugin: plugin, props: props(plugin), actions: surfaceActions)
+            }
         }
     }
 }

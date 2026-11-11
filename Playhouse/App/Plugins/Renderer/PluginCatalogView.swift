@@ -65,7 +65,7 @@ private struct PluginCommitReadout: View {
 /// The Plugins menu's catalog: every atom rendered by its JavaScript page, and
 /// the native composites (the task item, the Agents info section, the Token
 /// Stats modal, the Skills page, the repository chips and picker, the
-/// composer) composed in JavaScript beside the native ones.
+/// composer, the Done archive) composed in JavaScript beside the native ones.
 struct PluginCatalogView: View {
     private enum Page: Hashable {
         case atom(AtomType)
@@ -76,6 +76,7 @@ struct PluginCatalogView: View {
         case skillsPage
         case repositoryChips
         case composer
+        case doneArchive
     }
 
     @State private var selection: Page? = .atom(.stack)
@@ -112,6 +113,9 @@ struct PluginCatalogView: View {
                     Text("Composer")
                         .tag(Page.composer)
                         .accessibilityIdentifier("plugin-catalog-composer")
+                    Text("Done Archive")
+                        .tag(Page.doneArchive)
+                        .accessibilityIdentifier("plugin-catalog-done-archive")
                 }
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190)
@@ -119,7 +123,7 @@ struct PluginCatalogView: View {
             ScrollView {
                 switch selection {
                 case .atom(let atom)?:
-                    AtomPage(atom: atom).id(atom)
+                    AtomCatalogPage(atom: atom).id(atom)
                 case .taskItem?:
                     TaskItemComparison()
                 case .agentsInfo?:
@@ -134,6 +138,8 @@ struct PluginCatalogView: View {
                     RepositoryChipsComparison()
                 case .composer?:
                     ComposerComparison()
+                case .doneArchive?:
+                    DoneArchiveComparison()
                 case nil:
                     EmptyView()
                 }
@@ -155,7 +161,7 @@ private func comparisonColumn(_ title: String, width: CGFloat, @ViewBuilder cont
     .frame(width: width, alignment: .leading)
 }
 
-private struct AtomPage: View {
+private struct AtomCatalogPage: View {
     let atom: AtomType
 
     var body: some View {
@@ -872,6 +878,100 @@ private struct NativeComposerDemo: View {
                 ComposerView(model: model, actions: actions, header: { EmptyView() }, scheduleContent: {
                     AtomText(props: TextProps(text: "The schedule hint stays native.", size: 12), common: AtomCommon(testID: "native-schedule-hint", padding: 12))
                 })
+            }
+        }
+    }
+}
+
+/// The JavaScript Done archive above the native one, from the same sample
+/// model, each opened by the board header's archive button into a SidePanel
+/// atom over a 560 by 460 point stand-in for the board. Each side keeps its own
+/// open state and search; the native side uses a "native-" prefix so the two
+/// never share accessibility identifiers.
+private struct DoneArchiveComparison: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Done Archive")
+                .font(.title2.weight(.semibold))
+                .accessibilityIdentifier("plugin-catalog-title")
+            if let page = catalogPage("DoneArchive"),
+               let sample = try? Self.sample(page.props) {
+                comparisonColumn("JavaScript (React → atoms)", width: 580) {
+                    PluginSurface(source: page.source, name: "DoneArchive.js", props: page.props)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("plugin-catalog-js-done-archive")
+                comparisonColumn("Native SwiftUI (atoms)", width: 580) {
+                    NativeDoneArchiveDemo(sample: sample)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("plugin-catalog-native-done-archive")
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    struct Sample: Decodable {
+        var doneArchive: DoneArchiveModel
+    }
+
+    static func sample(_ props: [String: PluginValue]) throws -> Sample {
+        try PluginValueDecoder.decode(Sample.self, from: .object(props))
+    }
+}
+
+/// The native Done archive with the same demo state as DoneArchive.js, built from the same atoms.
+private struct NativeDoneArchiveDemo: View {
+    let sample: DoneArchiveComparison.Sample
+    @State private var open = true
+    @State private var search = ""
+    @State private var reachedEnd = false
+    @State private var lastAction = "none"
+
+    /// The demo's search applied to the sample, as the board narrows its own.
+    private var model: DoneArchiveModel {
+        var model = sample.doneArchive
+        let query = search.trimmingCharacters(in: .whitespaces).lowercased()
+        model.prefix = "native-"
+        model.search = search
+        model.rows = query.isEmpty ? model.rows : model.rows.filter { $0.title.lowercased().contains(query) }
+        model.emptyMessage = model.rows.isEmpty ? "No matching tasks" : nil
+        return model
+    }
+
+    private func title(_ id: String) -> String {
+        sample.doneArchive.rows.first { $0.id == id }?.title ?? id
+    }
+
+    var body: some View {
+        AtomStack(props: StackProps(axis: "v", spacing: 12, align: "leading")) {
+            AtomStack(props: StackProps(axis: "h", spacing: 8)) {
+                AtomText(props: TextProps(text: "Board header button", size: 11, color: "secondary"))
+                DoneArchiveButton(testID: "native-done-archive-button") {
+                    lastAction = open ? "toggle closed" : "toggle open"
+                    open.toggle()
+                }
+                AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
+                AtomText(props: TextProps(text: reachedEnd ? "End reached" : "End not reached", size: 11, color: "secondary"), common: AtomCommon(testID: "native-end-reached"))
+            }
+            AtomStack(
+                props: StackProps(axis: "v", spacing: 0, group: true, fill: "window", cornerRadius: 10),
+                common: AtomCommon(testID: "native-done-archive-board", width: 560, height: 460)
+            ) {
+                AtomText(props: TextProps(text: "The board", size: 12, color: "tertiary"))
+            }
+            .atomSidePanel(
+                SidePanelProps(isPresented: open, width: 340),
+                common: AtomCommon(testID: "native-done-archive-panel")
+            ) {
+                DoneArchivePanel(model: model, actions: DoneArchiveActions(
+                    close: { open = false; lastAction = "close" },
+                    search: { search = $0; lastAction = "search \($0)" },
+                    open: { open = false; lastAction = "open \(title($0))" },
+                    createPullRequests: { lastAction = "create pr \(title($0))" },
+                    loadMore: { reachedEnd = true }
+                ))
             }
         }
     }
