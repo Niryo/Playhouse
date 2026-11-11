@@ -344,6 +344,8 @@ final class ClaudeSessionRunner {
     private var nextControlRequestID = 1
     private var pendingControlRequests: [String: CheckedContinuation<[String: Any], Error>] = [:]
     private var activeMode: ConversationMode = .code
+    /// A side chat's turn: file-editing tools and shell commands other than the CLI are denied.
+    private var activeReadOnly = false
     private var pendingCommandUUIDs = Set<String>()
     /// What each model call (by message ID) has reported so far, so the live
     /// counter adds a call once and only its later growth after that.
@@ -457,6 +459,7 @@ final class ClaudeSessionRunner {
         hideSensitiveRecoveryPrompt: Bool
     ) async throws {
         activeMode = mode
+        activeReadOnly = workspace.isReadOnly
         wakeGrace = ClaudeSessionRunner.graceOverride(
             "PLAYHOUSE_E2E_CLAUDE_WAKE_GRACE_SECONDS", default: ClaudeSessionRunner.parentWakeGracePeriod
         )
@@ -552,6 +555,7 @@ final class ClaudeSessionRunner {
         ConversationSteerMailbox.clearActiveTurn(threadID: sessionID)
         activeTurnID = nil
         activeMode = .code
+        activeReadOnly = false
         isTurnActive = false
         pendingQuestion = nil
         pendingUserInputRequest = nil
@@ -680,9 +684,17 @@ final class ClaudeSessionRunner {
             "--include-partial-messages",
             "--forward-subagent-text",
             "--permission-prompt-tool", "stdio",
-            "--permission-mode", mode == .plan ? "plan" : "default",
-            resume ? "--resume" : "--session-id", sessionID
+            "--permission-mode", mode == .plan ? "plan" : "default"
         ]
+        if !resume, let source = owner?.forkSourceSessionID(for: sessionID) {
+            // A side chat's first turn copies the source session's context under its own ID.
+            arguments += ["--resume", source, "--fork-session", "--session-id", sessionID]
+        } else {
+            arguments += [resume ? "--resume" : "--session-id", sessionID]
+        }
+        if workspace.isReadOnly {
+            arguments += ["--disallowedTools", ClaudeSessionRunner.readOnlyDeniedTools.joined(separator: ",")]
+        }
         if modelID != ClaudeCodeClient.defaultModelID { arguments += ["--model", modelID] }
         if !persistsSessions { arguments.append("--no-session-persistence") }
         for root in workspace.roots.dropFirst() { arguments += ["--add-dir", root.path] }
@@ -695,7 +707,9 @@ final class ClaudeSessionRunner {
         // Turned-off rule files are excluded the same way, AGENTS.md is read
         // alongside a CLAUDE.md, and the working repository's .mcp.json servers
         // are started or skipped, so they all share one --settings value.
-        if let settings = RuleBridgeLaunch.claudeSettingsJSON(skills: workspace.skillBridge, rules: workspace.ruleBridge, mcp: workspace.mcpBridge) {
+        var settings = RuleBridgeLaunch.claudeSettingsJSON(skills: workspace.skillBridge, rules: workspace.ruleBridge, mcp: workspace.mcpBridge)
+        if workspace.isReadOnly { settings = ClaudeSessionRunner.readOnlySettings(settings) }
+        if let settings {
             arguments += ["--settings", settings]
         }
         // MCP servers Claude Code doesn't read itself, such as Codex's own or
@@ -1260,11 +1274,41 @@ final class ClaudeSessionRunner {
                 "behavior": "deny",
                 "message": "Playhouse showed this plan to the user, who will reply in a later message. End your turn now without further output."
             ])
+        case _ where activeReadOnly && !ClaudeSessionRunner.readOnlyAllows(toolName: toolName, input: input):
+            try? sendControlResponse(requestID: requestID, response: [
+                "behavior": "deny",
+                "message": SideChatReadOnlyPolicy.denialMessage
+            ])
         default:
             // Code mode runs without approval prompts. Claude Code has already
             // applied the user's native allow and deny rules before asking.
             try? sendControlResponse(requestID: requestID, response: ["behavior": "allow", "updatedInput": input])
         }
+    }
+
+    /// The tools a read-only turn never gets, removed from its launch as well as denied.
+    static let readOnlyDeniedTools = SideChatReadOnlyPolicy.deniedTools
+
+    /// Whether a read-only turn may use a tool Claude Code asked about (see `SideChatReadOnlyPolicy`).
+    static func readOnlyAllows(toolName: String, input: [String: Any]) -> Bool {
+        SideChatReadOnlyPolicy.allows(toolName: toolName, input: input, cliPaths: [TaskThreadDeveloperInstructions.cliExecutableURL().path])
+    }
+
+    /// The launch's `--settings` with the read-only `PreToolUse` hook added, so every tool call
+    /// is checked before the user's own Claude Code allow rules can approve it.
+    static func readOnlySettings(_ settings: String?) -> String? {
+        var object = settings.flatMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] } ?? [:]
+        let cli = TaskThreadDeveloperInstructions.cliExecutableURL().path
+        let command = ([cli] + SideChatReadOnlyPolicy.hookSubcommand)
+            .map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+            .joined(separator: " ")
+        var hooks = object["hooks"] as? [String: Any] ?? [:]
+        var preToolUse = hooks["PreToolUse"] as? [[String: Any]] ?? []
+        preToolUse.append(["matcher": "*", "hooks": [["type": "command", "command": command]]])
+        hooks["PreToolUse"] = preToolUse
+        object["hooks"] = hooks
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return settings }
+        return String(data: data, encoding: .utf8)
     }
 
     private func presentQuestions(requestID: String, input: [String: Any]) {
@@ -1793,6 +1837,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     private var runners: [String: ClaudeSessionRunner] = [:]
     private var runsDirectory: URL?
     private var newSessionIDs = Set<String>()
+    private var forkSourceSessionIDs: [String: String] = [:]
     private var startingSessionIDs = Set<String>()
     private var interruptedThreadIDs = Set<String>()
     /// The process and turn identity each conversation last ran under, so a
@@ -1898,6 +1943,18 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         newSessionIDs.insert(sessionID)
         return sessionID
     }
+
+    /// A fork is a new session ID too; its first turn resumes the source session with
+    /// `--fork-session`, so Claude Code copies that context under the new ID and the
+    /// source session never gains the fork's turns.
+    func forkThread(sourceThreadID: String, workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String {
+        let sessionID = try await startThread(workspace: workspace, modelID: modelID, developerInstructions: developerInstructions)
+        forkSourceSessionIDs[sessionID] = sourceThreadID
+        return sessionID
+    }
+
+    /// The session a new session's first turn forks, until Claude Code has accepted it.
+    func forkSourceSessionID(for sessionID: String) -> String? { forkSourceSessionIDs[sessionID] }
 
     func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption] {
         let response = try await withMetadataSession(workspace: workspace) { _ in [:] }
@@ -2129,7 +2186,10 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             // turn succeeded. Keeping the marker past a failed first turn would
             // claim the ID again on the retry and fail with "already in use",
             // leaving the conversation unresumable.
-            if runner.sessionExists { newSessionIDs.remove(sessionID) }
+            if runner.sessionExists {
+                newSessionIDs.remove(sessionID)
+                forkSourceSessionIDs.removeValue(forKey: sessionID)
+            }
             // The identity only; the client reports whether a turn is still active.
             lastTurnDiagnosticsByThread[sessionID] = runner.diagnosticFields([:])
                 .filter { $0.key != "isTurnActive" }

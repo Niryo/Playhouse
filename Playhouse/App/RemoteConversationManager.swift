@@ -476,6 +476,26 @@ struct RemoteConversationManager {
         return (title, provider)
     }
 
+    /// Sends a side chat message; without `sideChatID`, opens a side chat on `selection`.
+    func sideChat(
+        taskID: UUID,
+        sideChatID: String?,
+        selection: String?,
+        message: String,
+        onDelta: @escaping (String) -> Void
+    ) async throws -> SideChatReply {
+        var arguments: [String: BridgeValue] = ["taskID": id(taskID), "message": .string(message)]
+        if let sideChatID { arguments["sideChatID"] = .string(sideChatID) }
+        if let selection { arguments["selection"] = .string(selection) }
+        return try await daemon.call("conversation.side_chat", arguments) { event in
+            if event.type == "text_delta", let text = event.payload.object?["text"]?.string { onDelta(text) }
+        }.decoded(SideChatReply.self)
+    }
+
+    func closeSideChat(taskID: UUID, sideChatID: String) async {
+        _ = try? await daemon.call("conversation.side_chat.close", ["taskID": id(taskID), "sideChatID": .string(sideChatID)])
+    }
+
     func reconcileLifecycleStatusOnOpen(taskID: UUID) async throws -> BoardTaskRecord {
         try await daemon.call("task.reconcile", ["taskID": id(taskID)]).decoded(BoardTaskRecord.self)
     }

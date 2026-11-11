@@ -186,6 +186,98 @@ def write_waste_rollouts(thread_id):
                 handle.write(json.dumps({"timestamp": "2026-11-03T10:00:00.000Z", **line}) + "\n")
 
 
+# Side chat threads this server forked, each with the thread it was forked from.
+SIDE_CHAT_THREADS = {}
+
+
+def side_chat_selection(text):
+    match = re.search(r"<selected-text>\n(.*?)\n</selected-text>", text or "", re.S)
+    return match.group(1) if match else None
+
+
+# Codex's read-only sandbox with network access: no file writes, sockets allowed.
+READ_ONLY_SANDBOX_PROFILE = '(version 1)(allow default)(deny file-write*)(allow file-write* (literal "/dev/null"))'
+
+
+def run_side_chat_cli(instructions, marker, extra):
+    """Runs the Playhouse CLI the side chat instructions list (found by `marker`) with `extra`
+    arguments inside a read-only macOS sandbox, as Codex runs a side chat's commands, and
+    returns its parsed JSON output."""
+    line = next((line.strip() for line in (instructions or "").splitlines()
+                 if line.strip().startswith("'") and marker in line), None)
+    if line is None:
+        return {"ok": False, "error": "The side chat instructions list no such command."}
+    executable = shlex.split(line)[0]
+    completed = subprocess.run(["/usr/bin/sandbox-exec", "-p", READ_ONLY_SANDBOX_PROFILE, executable] + extra,
+                               capture_output=True, text=True, timeout=60)
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return {"ok": False, "error": completed.stderr.strip() or completed.stdout.strip()}
+
+
+def handle_side_chat(message, history_path):
+    """Serves a Playhouse side chat: `thread/fork` copies a thread under a new ID, and a turn on
+    a forked thread answers about the selected text. Every fork and side chat turn is recorded
+    in the history file. Returns whether the message was a side chat's."""
+    method = message.get("method")
+    params = message.get("params", {})
+    def record(key, entry):
+        history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
+        history.setdefault(key, []).append(entry)
+        history_path.write_text(json.dumps(history), encoding="utf-8")
+    if method == "thread/fork":
+        thread_id = f"fork-{uuid.uuid4()}"
+        SIDE_CHAT_THREADS[thread_id] = {"source": params.get("threadId"), "instructions": params.get("developerInstructions"), "turns": 0}
+        record("threadForks", {
+            "threadId": thread_id, "sourceThreadId": params.get("threadId"), "sandbox": params.get("sandbox"),
+            "approvalPolicy": params.get("approvalPolicy"), "excludeTurns": params.get("excludeTurns"),
+            "cwd": params.get("cwd"), "developerInstructions": params.get("developerInstructions"),
+        })
+        write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": thread_id}, "model": params.get("model", "gpt-6-luna")}})
+        return True
+    if method == "thread/resume" and params.get("threadId") in SIDE_CHAT_THREADS:
+        record("sideChatResumes", {"threadId": params.get("threadId"), "sandbox": params.get("sandbox")})
+        write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": params.get("threadId")}, "model": params.get("model", "gpt-6-luna")}})
+        return True
+    if method in ("thread/read", "thread/turns/list", "thread/items/list") and params.get("threadId") in SIDE_CHAT_THREADS:
+        write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": params.get("threadId"), "turns": []}, "data": [], "nextCursor": None}})
+        return True
+    if method != "turn/start" or params.get("threadId") not in SIDE_CHAT_THREADS:
+        return False
+    thread_id = params["threadId"]
+    side_chat = SIDE_CHAT_THREADS[thread_id]
+    side_chat["turns"] += 1
+    text = next((item.get("text") for item in params.get("input", []) if item.get("type") == "text"), "") or ""
+    turn_id = f"turn-side-chat-{uuid.uuid4()}"
+    selection = side_chat_selection(text)
+    question = text.split("</selected-text>", 1)[-1].strip()
+    if "create a task" in question.lower():
+        created = run_side_chat_cli(side_chat["instructions"], "task create", [
+            "task", "create", "--title", "Side chat follow-up", "--prompt", f"Follow up on the side chat about: {question}"])
+        task_id = (created.get("result") or {}).get("id") if created.get("ok") else None
+        reply = f"Created task {task_id}." if task_id else f"Could not create the task: {created.get('error')}"
+        if task_id:
+            # Beyond the board commands, the daemon refuses what the sandbox would stop.
+            deleted = run_side_chat_cli(side_chat["instructions"], "task create", ["task", "delete", task_id])
+            record("sideChatForbiddenRequests", {"command": "task delete", "ok": deleted.get("ok"),
+                                                  "error": (deleted.get("error") or {}).get("code") if isinstance(deleted.get("error"), dict) else deleted.get("error")})
+    elif selection is not None:
+        reply = f"Side chat about \"{selection}\", forked from {side_chat['source']}: {question}"
+    else:
+        reply = f"Side chat follow-up {side_chat['turns']} on {thread_id}: {question}"
+    record("sideChatTurns", {"threadId": thread_id, "text": text, "sandboxPolicy": params.get("sandboxPolicy"),
+                             "approvalPolicy": params.get("approvalPolicy"), "reply": reply})
+    write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": turn_id, "status": "inProgress"}}})
+    item = {"id": f"item-{turn_id}", "type": "agentMessage", "phase": "final_answer", "text": reply}
+    write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": thread_id, "turnId": turn_id, "item": {**item, "text": ""}}})
+    write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {
+        "threadId": thread_id, "turnId": turn_id, "itemId": item["id"], "delta": reply}})
+    write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": item}})
+    write({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed"}}})
+    return True
+
+
 def write(value):
     if (isinstance(value, dict) and value.get("method") == "turn/completed"
             and "usage" not in value.get("params", {})):
@@ -1154,6 +1246,8 @@ def main():
         if message.get("method") == "initialized":
             return
         if "method" in message and "id" not in message:
+            return
+        if handle_side_chat(message, history_path):
             return
         if message.get("method") == "initialize":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"serverInfo": {"name": "playhouse-fixture", "version": "1"}}})

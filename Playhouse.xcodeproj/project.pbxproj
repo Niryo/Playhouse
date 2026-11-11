@@ -441,6 +441,7 @@
 				"$(SRCROOT)/Playhouse/Bridge/BridgeContract.swift",
 				"$(SRCROOT)/Playhouse/Bridge/BridgeSocket.swift",
 				"$(SRCROOT)/Playhouse/Bridge/DaemonMain.swift",
+				"$(SRCROOT)/Playhouse/Bridge/SandboxCheck.h",
 				"$(SRCROOT)/Playhouse/CLI/BridgeClient.swift",
 				"$(SRCROOT)/Playhouse/CLI/PlayhouseCLI.swift",
 				"$(SRCROOT)/Playhouse/App/BridgeCore.swift",

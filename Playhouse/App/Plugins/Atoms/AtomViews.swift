@@ -967,15 +967,19 @@ struct AtomEditor: View {
     var onFocusChange: (Bool) -> Void = { _ in }
     /// A pasted image reaches only native owners.
     var onPasteImage: (Data) -> Void = { _ in }
+    /// Escape reaches only native owners, and only those that set it.
+    var onCancel: (() -> Void)? = nil
     @State private var text: String
     @State private var height: CGFloat = 28
 
     init(
         props: EditorProps, common: AtomCommon = AtomCommon(), onChange: @escaping (String) -> Void,
         onSubmit: @escaping () -> Void = {}, onSteerSubmit: @escaping () -> Void = {},
-        onFocusChange: @escaping (Bool) -> Void = { _ in }, onPasteImage: @escaping (Data) -> Void = { _ in }
+        onFocusChange: @escaping (Bool) -> Void = { _ in }, onPasteImage: @escaping (Data) -> Void = { _ in },
+        onCancel: (() -> Void)? = nil
     ) {
         self.props = props
+        self.onCancel = onCancel
         self.common = common
         self.onChange = onChange
         self.onSubmit = onSubmit
@@ -998,7 +1002,8 @@ struct AtomEditor: View {
             inputLabel: props.inputLabel,
             onSubmit: onSubmit,
             onSteerSubmit: onSteerSubmit,
-            onPasteImage: onPasteImage
+            onPasteImage: onPasteImage,
+            onCancel: onCancel
         )
         .frame(height: height)
         .overlay(alignment: .topLeading) {

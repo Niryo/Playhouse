@@ -791,6 +791,235 @@ private class MeasuredTextView: NSTextView {
     }
 }
 
+/// The bubble that opens on selected conversation text: a small side chat about the
+/// selection, forked read-only from the task's conversation, whose Add comment button
+/// turns what is typed into a comment on the selection instead of sending it.
+private struct SideChatBubble: View {
+    private struct Message: Identifiable {
+        let id = UUID()
+        let isUser: Bool
+        let text: String
+    }
+
+    let selectedText: String
+    let send: (_ sideChatID: String?, _ message: String, _ onDelta: @escaping (String) -> Void) async throws -> SideChatReply
+    let addComment: (String) -> Void
+    let close: (_ sideChatID: String) -> Void
+    let dismiss: () -> Void
+
+    @State private var messages: [Message] = []
+    @State private var draft = ""
+    @State private var sideChatID: String?
+    @State private var isResponding = false
+    @State private var streamingText = ""
+    @State private var errorMessage: String?
+    @State private var didCopySelection = false
+
+    static let size = CGSize(width: 440, height: 460)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            header
+            transcript
+            composer
+        }
+        .padding(14)
+        .frame(width: Self.size.width, height: Self.size.height)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("side-chat-bubble")
+        .onDisappear { if let sideChatID { close(sideChatID) } }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Label("Side chat", systemImage: "bubble.left.and.text.bubble.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(selectedText, forType: .string)
+                    didCopySelection = true
+                } label: {
+                    Image(systemName: didCopySelection ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .buttonHoverPointer()
+                .nativeHelp("Copy selected text")
+                .accessibilityLabel("Copy selected text")
+                .accessibilityIdentifier("side-chat-copy-selection")
+            }
+            HStack(alignment: .top, spacing: 8) {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(Color.orange.opacity(0.8))
+                    .frame(width: 3)
+                Text(verbatim: selectedText)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // Its value is the whole selection, however much of it the three lines show.
+                    .accessibilityIdentifier("side-chat-selected-text")
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var transcript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 9) {
+                    if messages.isEmpty, !isResponding {
+                        Text("Ask about the selected text, or type a comment and click Add comment.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityIdentifier("side-chat-empty-state")
+                    }
+                    ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+                        messageRow(message, index: index)
+                    }
+                    if isResponding {
+                        if streamingText.isEmpty {
+                            HStack(spacing: 6) {
+                                ProgressView().controlSize(.small)
+                                Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary)
+                            }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityIdentifier("side-chat-responding")
+                        } else {
+                            assistantText(streamingText)
+                                .accessibilityIdentifier("side-chat-streaming-reply")
+                        }
+                    }
+                    if let errorMessage {
+                        Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.orange)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityIdentifier("side-chat-error")
+                    }
+                    Color.clear.frame(height: 1).id("side-chat-bottom")
+                }
+                .padding(.horizontal, 2)
+            }
+            .frame(maxHeight: .infinity)
+            .accessibilityIdentifier("side-chat-transcript")
+            .onChange(of: messages.count) { _, _ in proxy.scrollTo("side-chat-bottom", anchor: .bottom) }
+            .onChange(of: streamingText) { _, _ in proxy.scrollTo("side-chat-bottom", anchor: .bottom) }
+        }
+    }
+
+    @ViewBuilder
+    private func messageRow(_ message: Message, index: Int) -> some View {
+        if message.isUser {
+            HStack {
+                Spacer(minLength: 40)
+                Text(verbatim: message.text)
+                    .font(.system(size: 12.5))
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 11))
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(message.text)
+            .accessibilityIdentifier("side-chat-user-message-\(index)")
+        } else {
+            assistantText(message.text)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(message.text)
+                .accessibilityIdentifier("side-chat-assistant-message-\(index)")
+        }
+    }
+
+    private func assistantText(_ text: String) -> some View {
+        let markdown = (try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        )) ?? AttributedString(text)
+        return Text(markdown)
+            .font(.system(size: 12.5))
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var composer: some View {
+        AtomStack(
+            props: StackProps(axis: "v", spacing: 6, fill: "panel", fillOpacity: 1, cornerRadius: 16, stroke: "primary", strokeOpacity: 0.1),
+            common: AtomCommon(padding: 9)
+        ) {
+            AtomEditor(
+                props: EditorProps(
+                    text: draft, placeholder: "Ask about the selection…", placeholderTestID: "side-chat-placeholder",
+                    enabled: true, autofocus: true, inputTestID: "side-chat-input", inputLabel: "Side chat message"
+                ),
+                common: AtomCommon(testID: "side-chat-input-scroll-view", hint: "Return sends the message. Add comment adds it as a comment instead."),
+                onChange: { draft = $0 }, onSubmit: sendDraft, onSteerSubmit: sendDraft,
+                onCancel: dismiss
+            )
+            AtomStack(props: StackProps(axis: "h", spacing: 8)) {
+                AtomButton(
+                    common: AtomCommon(testID: "add-comment-button", label: "Add comment", help: "Add what you typed as a comment on the selected text"),
+                    action: { addComment(draft.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                ) {
+                    AtomStack(
+                        props: StackProps(axis: "h", fill: "primary", fillOpacity: 0.1, capsule: true),
+                        common: AtomCommon(height: 26, paddingX: 10)
+                    ) {
+                        AtomLabel(props: LabelProps(text: "Add comment", icon: "text.bubble", size: 12, weight: "semibold"))
+                    }
+                }
+                AtomSpacer(props: SpacerProps(minLength: 0))
+                AtomButton(
+                    props: ButtonProps(disabled: isSendDisabled),
+                    // Its value names the side chat this bubble runs, once the first message opened one.
+                    common: AtomCommon(testID: "side-chat-send-button", label: "Send to side chat", value: sideChatID, help: "Send to side chat"),
+                    action: sendDraft
+                ) {
+                    AtomStack(
+                        props: StackProps(axis: "h", fill: "accent", fillOpacity: 1, cornerRadius: 13),
+                        common: AtomCommon(width: 26, height: 26, opacity: isSendDisabled ? 0.45 : 1)
+                    ) {
+                        AtomIcon(props: IconProps(name: "arrow.up", size: 11, weight: "bold", color: "white"))
+                    }
+                }
+            }
+        }
+    }
+
+    private var isSendDisabled: Bool {
+        isResponding || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func sendDraft() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !isResponding else { return }
+        draft = ""
+        messages.append(Message(isUser: true, text: text))
+        isResponding = true
+        streamingText = ""
+        errorMessage = nil
+        Task { @MainActor in
+            do {
+                let reply = try await send(sideChatID, text) { delta in streamingText += delta }
+                sideChatID = reply.sideChatID
+                let answer = reply.reply.isEmpty ? streamingText : reply.reply
+                messages.append(Message(isUser: false, text: answer.trimmingCharacters(in: .whitespacesAndNewlines)))
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            streamingText = ""
+            isResponding = false
+        }
+    }
+}
+
 private final class CommentTrackingTextView: MeasuredTextView {
     var hoverTrackingOwner: AnyObject?
     /// The whole message this block belongs to; copying a fully selected block copies it all.
@@ -882,7 +1111,7 @@ private final class CommentTrackingTextView: MeasuredTextView {
 private struct AnnotationSelection: Identifiable {
     let id = UUID()
     let messageID: String
-    /// The text view showing the selection, which places its Add comment hint: the first block
+    /// The text view showing the selection, which anchors its side chat bubble: the first block
     /// of an assistant prose run, or 0 for a user message.
     let anchorID: Int
     let blockID: Int
@@ -1049,7 +1278,8 @@ struct TaskConversationView: View {
     @State private var annotations: [ConversationAnnotation] = []
     @State private var annotationSelection: AnnotationSelection?
     @State private var currentTextSelection: AnnotationSelection?
-    @State private var annotationComment = ""
+    /// Waits for the current selection to settle before opening its side chat bubble.
+    @State private var sideChatOpening: Task<Void, Never>?
     @State private var activities: [ConversationActivity] = []
     /// Tool calls from every loaded turn, each shown in the timeline after the
     /// message it followed.
@@ -1912,6 +2142,7 @@ struct TaskConversationView: View {
             // History reloads bring back the hidden text for replies this window streamed.
             if !streamedRecoveryReplies.isEmpty { showStreamedRecoveryReplies() }
         }
+        .onChange(of: currentTextSelection?.id) { _, _ in scheduleSideChatOpening() }
         .onChange(of: providerTurnIsActive) { _, isTurnActive in
             if isTurnActive { watchRunningTurnIfNeeded() }
             if !isTurnActive, task.isStandaloneChat { refreshChatPageStatus() }
@@ -4590,72 +4821,61 @@ struct TaskConversationView: View {
         }
     }
 
+    /// Opens the side chat bubble on the selection once it settles: after a pause with no
+    /// mouse button or Shift held, so dragging or extending a selection never opens it midway.
+    private func scheduleSideChatOpening() {
+        sideChatOpening?.cancel()
+        guard let selection = currentTextSelection else { return }
+        sideChatOpening = Task { @MainActor in
+            repeat {
+                try? await Task.sleep(for: .milliseconds(450))
+            } while !Task.isCancelled && (NSEvent.pressedMouseButtons != 0 || NSEvent.modifierFlags.contains(.shift))
+            guard !Task.isCancelled, currentTextSelection?.id == selection.id,
+                  annotationSelection?.id != selection.id else { return }
+            annotationSelection = selection
+        }
+    }
+
     private func selectionHint(messageID: String, anchorID: Int) -> some View {
         Group {
             if let selection = currentTextSelection,
                selection.messageID == messageID, selection.anchorID == anchorID {
                 GeometryReader { geometry in
-                    Button {
-                        annotationSelection = selection
-                        annotationComment = ""
-                    } label: {
-                        Text("Add comment")
-                            .font(.system(size: 13, weight: .medium))
-                            .padding(.horizontal, 12).padding(.vertical, 7)
-                            .background(.regularMaterial, in: Capsule())
-                            .overlay(Capsule().strokeBorder(Color.white.opacity(0.12)))
-                            .shadow(color: .black.opacity(0.25), radius: 5, y: 2)
-                    }
-                    .buttonStyle(.plain)
-                    .buttonHoverPointer()
-                    .nativeHelp("Add comment to selected text")
-                    .accessibilityIdentifier("add-comment-to-selection-button")
-                    .frame(width: 112, height: 30)
-                    // Attached to the hint itself: after `.position`, the view fills the whole
-                    // text block, and the popover opened at the block's top edge, away from the hint.
-                    .popover(isPresented: Binding(
-                        get: { annotationSelection?.id == selection.id },
-                        set: { isPresented in
-                            if !isPresented, annotationSelection?.id == selection.id {
-                                annotationSelection = nil
-                                annotationComment = ""
+                    // Only an anchor for the bubble: the selected lines' top edge, kept inside the text.
+                    Color.clear
+                        .frame(width: max(1, min(selection.bounds.width, geometry.size.width)), height: max(1, selection.bounds.height))
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                        .popover(isPresented: Binding(
+                            get: { annotationSelection?.id == selection.id },
+                            set: { isPresented in
+                                if !isPresented, annotationSelection?.id == selection.id {
+                                    annotationSelection = nil
+                                }
                             }
+                        ), arrowEdge: .bottom) {
+                            SideChatBubble(
+                                selectedText: selection.text,
+                                send: { sideChatID, message, onDelta in
+                                    try await conversationManager.sideChat(
+                                        taskID: task.id, sideChatID: sideChatID,
+                                        selection: sideChatID == nil ? selection.text : nil,
+                                        message: message, onDelta: onDelta
+                                    )
+                                },
+                                addComment: { comment in addAnnotation(selection, comment: comment) },
+                                close: { sideChatID in
+                                    Task { await conversationManager.closeSideChat(taskID: task.id, sideChatID: sideChatID) }
+                                },
+                                dismiss: {
+                                    if annotationSelection?.id == selection.id { annotationSelection = nil }
+                                }
+                            )
                         }
-                    ), arrowEdge: .top) {
-                        HStack(spacing: 10) {
-                            TextField("Add an optional comment…", text: $annotationComment)
-                                .textFieldStyle(.plain)
-                                .onSubmit { addAnnotation(selection) }
-                                .accessibilityIdentifier("comment-input-field")
-                            Button { addAnnotation(selection) } label: {
-                                Image(systemName: "arrow.up")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(Color.black)
-                                    .frame(width: 32, height: 32)
-                                    .background(Color.white.opacity(0.78), in: Circle())
-                            }
-                            .buttonHoverPointer()
-                            .buttonStyle(.plain)
-                            .nativeHelp("Add comment")
-                            .accessibilityLabel("Add comment")
-                            .accessibilityIdentifier("add-comment-button")
-                        }
-                        .padding(.leading, 15)
-                        .padding(.trailing, 7)
-                        .padding(.vertical, 7)
-                        .frame(width: 355)
-                        .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
-                        // The outline is drawn over the field and the arrow. Hit-testable, it took
-                        // every click on the arrow, which never ran its action; only the text
-                        // field, an AppKit view, still received clicks.
-                        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)).allowsHitTesting(false))
-                        .padding(5)
-                    }
-                    .position(
-                        x: min(max(selection.bounds.midX, 56), max(56, geometry.size.width - 56)),
-                        y: selection.bounds.minY - 22
-                    )
-                    .zIndex(20)
+                        .position(
+                            x: min(max(selection.bounds.midX, 1), max(1, geometry.size.width - 1)),
+                            y: selection.bounds.midY
+                        )
                 }
             }
         }
@@ -4803,16 +5023,15 @@ struct TaskConversationView: View {
             .frame(width: ceil(markerWidth) + 4, alignment: .leading)
     }
 
-    private func addAnnotation(_ selection: AnnotationSelection) {
+    private func addAnnotation(_ selection: AnnotationSelection, comment: String) {
         guard annotationSelection?.id == selection.id else { return }
         annotations.append(ConversationAnnotation(
             id: UUID(), messageID: selection.messageID, blockID: selection.blockID,
             startOffset: selection.startOffset, endBlockID: selection.endBlockID, endOffset: selection.endOffset,
-            text: selection.text, comment: annotationComment.trimmingCharacters(in: .whitespacesAndNewlines)
+            text: selection.text, comment: comment
         ))
         annotationSelection = nil
         currentTextSelection = nil
-        annotationComment = ""
     }
 
     private func responseAnnotationReferences(for message: ConversationMessage) -> [ResponseAnnotationReference] {
@@ -7810,7 +8029,8 @@ private struct SelectableAnnotationText: NSViewRepresentable {
         weak var anchorView: NSTextView?
         var renderedKey = ""
         let measurer = TextHeightMeasurer()
-        /// Room above a selection for the Add comment hint, centered 22pt above it and 30pt tall.
+        /// How much of a selection that starts above the visible transcript the side chat bubble's
+        /// anchor keeps, so the bubble opens at the selection's visible part.
         private static let selectionHintClearance: CGFloat = 40
         private var responseCommentPopover: NSPopover?
         private var activeResponseCommentID: String?
@@ -8002,8 +8222,8 @@ private struct SelectableAnnotationText: NSViewRepresentable {
             var bounds = view.layoutManager?.boundingRect(forGlyphRange: glyphs, in: view.textContainer!) ?? .zero
             bounds.origin.x += view.textContainerOrigin.x
             bounds.origin.y += view.textContainerOrigin.y
-            // A selection that starts above the visible part of the transcript anchors its Add
-            // comment hint, which sits above the selection, to the top of what is still visible.
+            // A selection that starts above the visible part of the transcript anchors its side
+            // chat bubble to the top of what is still visible.
             let visible = view.visibleRect
             if bounds.minY < visible.minY, bounds.maxY > visible.minY {
                 let top = min(visible.minY + Self.selectionHintClearance, bounds.maxY)

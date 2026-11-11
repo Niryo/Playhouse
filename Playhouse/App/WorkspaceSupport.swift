@@ -163,6 +163,12 @@ struct ConversationWorkspaceContext {
     var ruleBridge: RuleBridgeLaunch?
     /// The MCP servers each provider is passed or told to skip. Only a turn's own launch sets it.
     var mcpBridge: McpBridgeLaunch?
+    /// A side chat's turns may read the workspace and run the Playhouse CLI but never
+    /// change files (see `SideChatReadOnlyPolicy`): Codex runs them in its read-only sandbox,
+    /// whose CLI calls the daemon limits to board requests, and Claude Code, which has no
+    /// sandbox, checks every tool call in a hook that runs before the user's own allow rules.
+    /// MCP tools stay available on both providers, as Codex's sandbox does not cover them.
+    var isReadOnly = false
 
     /// One Codex thread config joining what skills and MCP servers each need.
     var codexThreadConfig: [String: Any]? {

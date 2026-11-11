@@ -560,6 +560,9 @@ protocol ConversationProviderClient: AnyObject {
     /// turns at once must not report another conversation's process or turn.
     func diagnosticFields(forThread threadID: String, _ additionalFields: [String: String]) -> [String: String]
     func startThread(workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String
+    /// A new conversation that starts with a copy of `sourceThreadID`'s whole context and
+    /// runs on its own from then on, leaving the source conversation untouched.
+    func forkThread(sourceThreadID: String, workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String
     func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption]
     func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws
     func sendMessage(

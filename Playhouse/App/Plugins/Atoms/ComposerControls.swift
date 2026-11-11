@@ -18,6 +18,8 @@ struct NativeChatEditor: NSViewRepresentable {
     let onSubmit: () -> Void
     let onSteerSubmit: () -> Void
     let onPasteImage: (Data) -> Void
+    /// Escape, for a native owner that closes on it; without one the text view keeps its own.
+    var onCancel: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -65,6 +67,7 @@ struct NativeChatEditor: NSViewRepresentable {
         editor.onSubmit = onSubmit
         editor.onSteerSubmit = onSteerSubmit
         editor.onPasteImage = onPasteImage
+        editor.onCancel = onCancel
         editor.isEditable = isEnabled
         editor.isSelectable = isEnabled
         editor.setAccessibilityHelp(accessibilityHelp)
@@ -205,6 +208,12 @@ final class ChatEditorTextView: NSTextView {
     var onSubmit: (() -> Void)?
     var onSteerSubmit: (() -> Void)?
     var onPasteImage: ((Data) -> Void)?
+    var onCancel: (() -> Void)?
+
+    override func cancelOperation(_ sender: Any?) {
+        guard let onCancel else { return super.cancelOperation(sender) }
+        onCancel()
+    }
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(paste(_:)),

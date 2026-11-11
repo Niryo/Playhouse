@@ -6991,16 +6991,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(volcanoView.waitToExist(timeout: 10), "An earlier page's message stays visible after rotation.")
         volcanoView.click()
         volcanoView.typeKey("a", modifierFlags: .command)
-        let addComment = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
-        XCTAssertTrue(addComment.waitToExist(timeout: 5), "Selecting transcript text should expose Add comment.")
-        addComment.click()
-        let commentField = element("comment-input-field")
+        let commentBubble = try waitForSideChatBubble(at: volcanoView)
+        let commentField = element("side-chat-input")
         XCTAssertTrue(commentField.waitToExist(timeout: 5))
-        assertCommentFieldBesideHint(commentField)
         commentField.typeText("What did we say before?")
-        // Clicking the arrow submits a comment on a user message (it once did nothing there).
+        // Add comment turns the side chat's text into a comment on a user message.
         element("add-comment-button").click()
-        XCTAssertTrue(waitUntil({ !commentField.exists }, timeout: 5), "Submitting the comment should close its popover.")
+        XCTAssertTrue(commentBubble.waitForNonExistence(timeout: 5), "Adding the comment should close the side chat bubble.")
         XCTAssertTrue(waitUntil({ element("send-message-button").isEnabled }, timeout: 5), "A comment alone should be sendable.")
         XCTAssertTrue(waitUntil({
             self.accessibleLabelOrValue(of: self.element("pending-comment-count")).contains("1 comment")
@@ -9633,7 +9630,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(texts.contains("OK."))
     }
 
-    // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload. User messages render in a neutral gray, input-style bubble with a thin light border and light text rather than the blue accent fill.
+    // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages, including wrapped multiline selections, opens the side chat bubble at the selected lines instead of an Add comment hint, and the bubble's Add comment button adds what is typed in its composer as a comment on the selection and closes it. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and closing the bubble with Escape leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload. User messages render in a neutral gray, input-style bubble with a thin light border and light text rather than the blue accent fill.
     func test_conversation_adds_ordered_text_annotations() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-goal-success").path
         let fixtureStateDirectory = dataDirectory.appendingPathComponent("comment-goal-fixture-state", isDirectory: true)
@@ -9665,7 +9662,9 @@ final class PlayhouseUITests: XCTestCase {
         let assistantMessage = try XCTUnwrap(messages.first { $0["role"] as? String == "assistant" })
         let assistantID = try XCTUnwrap(assistantMessage["id"] as? String)
         XCTAssertFalse(try XCTUnwrap(assistantMessage["text"] as? String).isEmpty)
-        let userSelection = String(sourceText.prefix(10))
+        // Double-clicking the first word selects it in one step, as the side chat bubble opens
+        // once a selection settles.
+        let userSelection = "Long"
         var assistantSelection = ""
         openTask(named: "Comment source")
         let seededHistory = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
@@ -9853,35 +9852,26 @@ final class PlayhouseUITests: XCTestCase {
         assertGrayBorderedUserBubble(userBubbleScreenshot.image)
         attachScreenshot(named: "User message gray bordered bubble")
         func selectPrefix(_ view: XCUIElement) {
-            view.click()
-            view.typeKey("a", modifierFlags: .command)
-            view.typeKey(.leftArrow, modifierFlags: [])
-            for _ in 0..<10 { view.typeKey(.rightArrow, modifierFlags: .shift) }
+            // On the text itself: the bubble's padding around it takes no clicks.
+            let text = view.textViews.firstMatch.exists ? view.textViews.firstMatch : view
+            text.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 12, dy: 9)).doubleClick()
         }
         func selectAllText(_ view: XCUIElement) {
             view.click()
             view.typeKey("a", modifierFlags: .command)
         }
-        let addComment = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
-        selectAllText(userView)
-        XCTAssertTrue(addComment.waitToExist(timeout: 5), "Selecting transcript text should expose Add comment.")
-        XCTAssertGreaterThan(userView.frame.height, 40, "The selected text should wrap across multiple lines.")
-        XCTAssertLessThan(abs(addComment.frame.midX - userView.frame.midX), 70,
-                          "For a multiline selection, the floating hint should center over the selected lines.")
-        // The hint is part of the message element, so measure against its text: the bubble's
-        // edge is 11pt above the text.
         let userText = userView.textViews.firstMatch
         XCTAssertTrue(userText.exists, "The user message should expose its selectable text.")
-        XCTAssertLessThanOrEqual(addComment.frame.maxY, userText.frame.minY - 11 + 8,
-                                 "The floating hint should sit above the multiline selection.")
-        addComment.click()
-        let initialCommentField = element("comment-input-field")
+        selectAllText(userView)
+        XCTAssertGreaterThan(userView.frame.height, 40, "The selected text should wrap across multiple lines.")
+        let initialBubble = try waitForSideChatBubble(at: userText)
+        XCTAssertFalse(app.buttons["add-comment-to-selection-button"].exists, "The side chat bubble replaces the Add comment hint.")
+        let initialCommentField = element("side-chat-input")
         XCTAssertTrue(initialCommentField.waitToExist(timeout: 5))
-        XCTAssertLessThan(initialCommentField.frame.height, 40, "The comment entry should be a compact single-line field.")
-        assertCommentFieldBesideHint(initialCommentField)
         initialCommentField.typeText("Discard this comment")
         app.typeKey(.escape, modifierFlags: [])
-        XCTAssertFalse(element("send-message-button").isEnabled, "Cancelling should leave no pending comment to submit.")
+        XCTAssertTrue(initialBubble.waitForNonExistence(timeout: 5), "Escape should close the side chat bubble.")
+        XCTAssertFalse(element("send-message-button").isEnabled, "Closing the bubble should leave no pending comment to submit.")
 
         for (sourceView, comment, selectAll) in [
             (userView, "Explain this phrase", false),
@@ -9898,24 +9888,20 @@ final class PlayhouseUITests: XCTestCase {
             } else {
                 selectPrefix(sourceView)
             }
-            XCTAssertTrue(addComment.waitToExist(timeout: 5))
-            addComment.click()
-            let field = element("comment-input-field")
+            let bubble = try waitForSideChatBubble(at: sourceView)
+            let field = element("side-chat-input")
             XCTAssertTrue(field.waitToExist(timeout: 5))
-            assertCommentFieldBesideHint(field)
-            XCTAssertLessThan(field.frame.height, 40, "The comment input should stay compact.")
             let submitComment = element("add-comment-button")
-            XCTAssertTrue(submitComment.exists, "The compact input should include its submit arrow.")
-            XCTAssertGreaterThan(darkPixelCount(in: submitComment), 3,
-                                 "The submit arrow should be dark and visible on its light circular control.")
-            XCTAssertGreaterThan(lightPixelCount(in: submitComment), 20,
-                                 "The submit control should retain a light circular background behind the arrow.")
+            XCTAssertTrue(submitComment.exists, "The side chat composer should include its Add comment button.")
             // Typing the long comment would take most of the case's time budget.
             if comment.count > 100 { pasteText(comment, into: field) } else { field.typeText(comment) }
-            // The arrow submits on both message kinds; its outline once took every click on it.
-            // Return is covered by the comment-only selection below.
+            if comment == "Explain this phrase" {
+                attachScreenshot(named: "Side chat bubble with a comment typed before Add comment")
+            }
+            // Add comment works on both message kinds and never sends the text to the side chat.
             submitComment.click()
-            XCTAssertTrue(field.waitForNonExistence(timeout: 5), "The arrow should add the comment and close the field.")
+            XCTAssertFalse(element("side-chat-user-message-0").exists, "Add comment must not send the text to the side chat.")
+            XCTAssertTrue(bubble.waitForNonExistence(timeout: 5), "Add comment should add the comment and close the bubble.")
             XCTAssertTrue(element("send-message-button").isEnabled, "A comment without freeform text should enable sending.")
             let expectedCountLabel = comment == "Explain this phrase" ? "1 comment" : "2 comments"
             XCTAssertTrue(waitUntil({
@@ -9956,7 +9942,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(savedPrompt.contains("\"messageId\":\"\(sourceID)\""))
         XCTAssertTrue(savedPrompt.contains("\"messageId\":\"\(assistantID)\""))
         XCTAssertTrue(savedPrompt.contains("\"startOffset\":0"))
-        XCTAssertTrue(savedPrompt.contains("\"endOffset\":10"))
+        XCTAssertTrue(savedPrompt.contains("\"endOffset\":4"))
         XCTAssertTrue(savedPrompt.contains("\"text\":\"\(userSelection)\""))
         XCTAssertTrue(savedPrompt.contains("\"text\":\"\(assistantSelection)\""))
         XCTAssertTrue(savedPrompt.contains("\"comment\":\"Explain this phrase\""))
@@ -10167,16 +10153,20 @@ final class PlayhouseUITests: XCTestCase {
         let secondLineOrangeBefore = orangePixels(in: secondResponseLine)
         secondResponseLine.click()
         secondResponseLine.typeKey("a", modifierFlags: .command)
-        let addCommentOnly = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
-        XCTAssertTrue(addCommentOnly.waitToExist(timeout: 5))
         // The selection starts in the first paragraph, which can be scrolled above the
-        // transcript; the hint then stays at the top of the selection's visible part.
-        XCTAssertTrue(addCommentOnly.isHittable && reloadedTranscript.frame.contains(addCommentOnly.frame),
-                      "The Add comment hint should stay on screen when the selection starts above the visible transcript.")
-        addCommentOnly.click()
-        let commentOnlyField = element("comment-input-field")
+        // transcript; the bubble then opens at the selection's visible part.
+        let commentOnlyBubble = try waitForSideChatBubble()
+        XCTAssertTrue(commentOnlyBubble.isHittable, "The side chat bubble should open on screen when the selection starts above the visible transcript.")
+        let transcriptFrame = reloadedTranscript.frame
+        let anchoredEdge = abs(commentOnlyBubble.frame.minY - secondResponseLine.frame.maxY) < abs(commentOnlyBubble.frame.maxY - secondResponseLine.frame.minY)
+            ? commentOnlyBubble.frame.minY : commentOnlyBubble.frame.maxY
+        XCTAssertTrue(anchoredEdge >= transcriptFrame.minY - 30 && anchoredEdge <= transcriptFrame.maxY + 30,
+                      "The bubble should point at the selection's visible part, inside the transcript (bubble \(commentOnlyBubble.frame), transcript \(transcriptFrame)).")
+        let commentOnlyField = element("side-chat-input")
         XCTAssertTrue(commentOnlyField.waitToExist(timeout: 5))
-        commentOnlyField.typeText("Explain this reply\r")
+        commentOnlyField.typeText("Explain this reply")
+        element("add-comment-button").click()
+        XCTAssertTrue(commentOnlyBubble.waitForNonExistence(timeout: 5), "Add comment should close the bubble.")
         XCTAssertTrue(element("pending-comment-count").waitToExist(timeout: 5), "The comment-only selection should become a pending comment.")
         XCTAssertTrue(accessibleLabelOrValue(of: element("pending-comment-count")).contains("1 comment"),
                       "A selection across paragraphs should add one comment, not one per paragraph.")
@@ -10228,6 +10218,148 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertGreaterThan(orangePixels(in: secondResponseLine), secondLineOrangeBefore + 5,
                              "Reopening should restore the cross-paragraph highlight on its last paragraph.")
         attachScreenshot(named: "Restored comment spanning two reply paragraphs")
+    }
+
+    /// Opens `title`'s conversation after its first turn, selects all of the reply's text and
+    /// returns the task ID, the reply's text element and the side chat bubble that opened on it.
+    private func openSideChatOnReply(title: String) throws -> (taskID: String, reply: XCUIElement, bubble: XCUIElement) {
+        try createTaskFixture(title: title, roots: [fixture.primary.path])
+        let taskID = try taskID(named: title)
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Explain the design of the parser."])
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let reply = try XCTUnwrap(ordinaryMessages(try XCTUnwrap(history["messages"] as? [[String: Any]]))
+            .last { ($0["role"] as? String) == "assistant" })
+        let replyID = try XCTUnwrap(reply["id"] as? String)
+        openTask(named: title)
+        let replyText = element("assistant-message-\(replyID)").descendants(matching: .staticText).firstMatch
+        XCTAssertTrue(replyText.waitToExist(timeout: 10), "The task's reply should be visible.")
+        XCTAssertTrue(waitForStableFrame(replyText), "The reply should settle before its text is selected.")
+        replyText.click()
+        replyText.typeKey("a", modifierFlags: .command)
+        let bubble = try waitForSideChatBubble(at: replyText)
+        XCTAssertFalse(app.buttons["add-comment-to-selection-button"].exists, "The bubble replaces the Add comment hint.")
+        return (taskID, replyText, bubble)
+    }
+
+    /// Sends `message` from the open side chat bubble and returns the answer element at `index`.
+    private func sendSideChatMessage(_ message: String, answerIndex index: Int, containing expected: String) -> XCUIElement {
+        let input = element("side-chat-input")
+        XCTAssertTrue(input.waitToExist(timeout: 5))
+        input.click()
+        input.typeText(message + "\r")
+        let question = element("side-chat-user-message-\(index - 1)")
+        XCTAssertTrue(question.waitToExist(timeout: 10), "The side chat should show the question it sent.")
+        XCTAssertEqual(question.label, message)
+        let answer = element("side-chat-assistant-message-\(index)")
+        XCTAssertTrue(waitUntil({ answer.exists && answer.label.contains(expected) }, timeout: 30),
+                      "The side chat should answer with \(expected); it showed \(answer.exists ? answer.label : "nothing").")
+        XCTAssertTrue((input.value as? String ?? "").isEmpty, "Sending should clear the side chat composer.")
+        return answer
+    }
+
+    // case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply opens a large side chat bubble at the selection instead of an Add comment hint once the selection settles (it stays closed while Shift is held after a Shift-click extends the selection, then shows the whole extended range), showing the selected text and a compact chat whose composer has an Add comment button and a send button but no Skills button or mode menu. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection and a non-empty message; an unknown or closed side chat rejects follow-ups, and closing the bubble with Escape ends its side chat without adding a comment.
+    func test_side_chat_forks_claude_conversation_read_only() throws {
+        _ = try installClaudeFixture(named: "claude-fixture-side-chat")
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        launchApp(defaultParent: fixture.parent.path)
+        let opened = try openSideChatOnReply(title: "Claude side chat")
+        let taskBefore = try XCTUnwrap(try taskRecord(id: opened.taskID))
+        let historyBefore = try XCTUnwrap((try runCLI(["conversation", "history", opened.taskID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        let selected = element("side-chat-selected-text")
+        XCTAssertTrue(selected.waitToExist(timeout: 5))
+        let selection = opened.reply.value as? String ?? ""
+        XCTAssertFalse(selection.isEmpty, "The reply should expose its selectable text.")
+        XCTAssertEqual((selected.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                       selection.trimmingCharacters(in: .whitespacesAndNewlines), "The bubble should show the selected text.")
+        XCTAssertTrue(element("side-chat-empty-state").exists, "A new side chat should invite a question.")
+        let bubbleElements = opened.bubble.descendants(matching: .any)
+        XCTAssertTrue(bubbleElements.matching(identifier: "add-comment-button").firstMatch.exists,
+                      "The side chat composer should have an Add comment button.")
+        XCTAssertTrue(bubbleElements.matching(identifier: "side-chat-send-button").firstMatch.exists)
+        XCTAssertFalse(bubbleElements.matching(identifier: "open-skills-button").firstMatch.exists,
+                       "The side chat composer has no Skills button.")
+        XCTAssertFalse(bubbleElements.matching(identifier: "conversation-mode-menu").firstMatch.exists,
+                       "The side chat composer has no mode menu.")
+        XCTAssertFalse(element("side-chat-send-button").isEnabled, "An empty side chat message can't be sent.")
+        attachScreenshot(named: "Side chat bubble opened on the selected reply")
+
+        let sourceSession = try XCTUnwrap(taskBefore["claudeSessionID"] as? String)
+        let answer = sendSideChatMessage("What does this mean?", answerIndex: 1, containing: "forked from \(sourceSession)")
+        XCTAssertTrue(answer.label.contains("which asked: Explain the design of the parser."),
+                      "The side chat should answer with the task conversation's context.")
+        attachScreenshot(named: "Side chat answer with the task's context")
+        _ = sendSideChatMessage("And the second point?", answerIndex: 3, containing: "Side chat follow-up 2 on")
+        let created = sendSideChatMessage("Please create a task for this.", answerIndex: 5, containing: "Created task ")
+        let createdID = String(created.label.split(separator: " ").last ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let createdTask = try XCTUnwrap(try taskRecord(id: createdID), "The side chat should create a real task through the CLI.")
+        XCTAssertEqual(createdTask["title"] as? String, "Side chat follow-up")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.primary.appendingPathComponent("side-chat-forbidden.txt").path),
+                       "The read-only side chat must not write files.")
+        attachScreenshot(named: "Side chat created a task through the Playhouse CLI")
+
+        let taskAfter = try XCTUnwrap(try taskRecord(id: opened.taskID))
+        XCTAssertEqual(taskAfter["status"] as? String, taskBefore["status"] as? String, "The side chat must not change the task's status.")
+        XCTAssertEqual(taskAfter["claudeSessionID"] as? String, sourceSession, "The task keeps its own Claude session.")
+        let historyAfter = try XCTUnwrap((try runCLI(["conversation", "history", opened.taskID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        XCTAssertEqual(historyAfter.compactMap { $0["text"] as? String }, historyBefore.compactMap { $0["text"] as? String },
+                       "The side chat's messages must not reach the task's conversation.")
+
+        let sideChatID = element("side-chat-send-button").value as? String ?? ""
+        XCTAssertFalse(sideChatID.isEmpty, "The bubble should name the side chat its first message opened.")
+        // That side chat is live while the bubble is open, so the rejection after Escape is the close.
+        let live = try XCTUnwrap(try runCLI(["conversation", "side-chat", opened.taskID, "--side-chat", sideChatID, "--message", "Still open?"])["result"] as? [String: Any])
+        XCTAssertTrue((live["reply"] as? String ?? "").contains("Side chat follow-up"), "The bubble's side chat should still answer before it closes: \(live)")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(opened.bubble.waitForNonExistence(timeout: 5), "Escape should close the side chat bubble.")
+        XCTAssertFalse(element("send-message-button").isEnabled, "Closing the side chat adds no comment.")
+        XCTAssertFalse(element("pending-comment-count").exists)
+        attachScreenshot(named: "Side chat closed with Escape and no pending comment")
+        // The bubble ends its side chat as it goes away, in a request of its own.
+        Thread.sleep(forTimeInterval: 1.5)
+        let rejected = try runCLI(["conversation", "side-chat", opened.taskID, "--side-chat", sideChatID, "--message", "Still there?"],
+                                  expectedStatus: 3)
+        XCTAssertEqual((rejected["error"] as? [String: Any])?["code"] as? String, "not_found",
+                       "Closing the bubble should end its side chat.")
+
+        // Extending a selection with Shift held keeps the bubble closed until the selection settles.
+        opened.reply.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5)).withOffset(CGVector(dx: 1, dy: 0)).click()
+        XCUIElement.perform(withKeyModifiers: .shift) {
+            opened.reply.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.5)).withOffset(CGVector(dx: -1, dy: 0)).click()
+            for _ in 0..<2 {
+                Thread.sleep(forTimeInterval: 0.7)
+                XCTAssertFalse(self.element("side-chat-bubble").exists, "The bubble must not open while Shift extends the selection.")
+            }
+        }
+        _ = try waitForSideChatBubble(at: opened.reply)
+        XCTAssertEqual((element("side-chat-selected-text").value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       selection.trimmingCharacters(in: .whitespacesAndNewlines),
+                       "The bubble should open on the whole Shift-extended selection.")
+        app.typeKey(.escape, modifierFlags: [])
+    }
+
+    // case-contract: test_side_chat_forks_codex_conversation_read_only | The first side chat message on a Codex task's selected text forks the task's Codex thread with thread/fork into Codex's read-only sandbox (excluding turns from the response, with approvals off and the side chat developer instructions), and every side chat turn names a read-only sandbox policy with network access, so the Playhouse CLI still reaches the bridge daemon. The answer streams, names the forked source thread and quotes the selected text; a follow-up continues the same forked thread, and asking it to create a task really creates one through the CLI, run inside the read-only sandbox, where the daemon accepts only board requests from a sandboxed caller, so the same side chat's task delete is refused as forbidden and the task stays. The task's own conversation, Codex thread, status and history are unchanged. In the app the bubble opens on the selection, shows the question and the answer below the selected text, and a follow-up adds a second exchange.
+    func test_side_chat_forks_codex_conversation_read_only() throws {
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success").path
+        launchApp(defaultParent: fixture.parent.path)
+        let opened = try openSideChatOnReply(title: "Codex side chat")
+        let taskBefore = try XCTUnwrap(try taskRecord(id: opened.taskID))
+        let sourceThread = try XCTUnwrap(taskBefore["codexThreadID"] as? String)
+        let historyBefore = try XCTUnwrap((try runCLI(["conversation", "history", opened.taskID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        let answer = sendSideChatMessage("What does this mean?", answerIndex: 1, containing: "forked from \(sourceThread): What does this mean?")
+        XCTAssertTrue(answer.label.hasPrefix("Side chat about \""), "The answer should quote the selected text.")
+        XCTAssertGreaterThan(answer.frame.minY, element("side-chat-selected-text").frame.maxY, "The answer should appear below the selected text.")
+        attachScreenshot(named: "Codex side chat answer below the selected text")
+        _ = sendSideChatMessage("And the second point?", answerIndex: 3, containing: "Side chat follow-up 2 on fork-")
+        let created = sendSideChatMessage("Please create a task for this.", answerIndex: 5, containing: "Created task ")
+        let createdID = String(created.label.split(separator: " ").last ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        XCTAssertEqual(try taskRecord(id: createdID)?["title"] as? String, "Side chat follow-up")
+        attachScreenshot(named: "Codex side chat follow-ups")
+        let taskAfter = try XCTUnwrap(try taskRecord(id: opened.taskID))
+        XCTAssertEqual(taskAfter["status"] as? String, taskBefore["status"] as? String)
+        XCTAssertEqual(taskAfter["codexThreadID"] as? String, sourceThread, "The task keeps its own Codex thread.")
+        let historyAfter = try XCTUnwrap((try runCLI(["conversation", "history", opened.taskID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        XCTAssertEqual(historyAfter.compactMap { $0["text"] as? String }, historyBefore.compactMap { $0["text"] as? String },
+                       "The side chat's messages must not reach the task's conversation.")
     }
 
     // case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged.
@@ -24347,27 +24479,32 @@ final class PlayhouseUITests: XCTestCase {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
 
-    /// The comment popover opens on the Add comment hint, not elsewhere on the selected message:
-    /// its field sits just above or below the hint and roughly centered on it. A popover anchored
-    /// to the whole text block once opened at the block's top edge, far from a hint lower down.
-    /// The popover's arrow shares the hint's "Add comment" label, so it is excluded by identifier.
-    private func assertCommentFieldBesideHint(
-        _ field: XCUIElement, file: StaticString = #filePath, line: UInt = #line
-    ) {
-        // An assistant hint takes its prose block's identifier, so it is found by label.
-        let hint = app.buttons.matching(NSPredicate(
-            format: "label == %@ AND identifier != %@", "Add comment", "add-comment-button"
-        )).firstMatch
-        XCTAssertTrue(hint.exists, "The Add comment hint should stay while its comment field is open.", file: file, line: line)
-        let fieldFrame = field.frame
-        let hintFrame = hint.frame
-        let verticalGap = min(abs(fieldFrame.midY - hintFrame.minY), abs(fieldFrame.midY - hintFrame.maxY))
-        XCTAssertLessThan(verticalGap, 60,
-                          "The comment field should open just above or below the Add comment hint (field \(fieldFrame), hint \(hintFrame)).",
+    /// Waits for the side chat bubble a settled selection opens and returns it. With `selection`,
+    /// the bubble must be attached to that text: overlapping it horizontally, just below or above
+    /// it, and big enough to hold a chat.
+    @discardableResult
+    private func waitForSideChatBubble(
+        at selection: XCUIElement? = nil, file: StaticString = #filePath, line: UInt = #line
+    ) throws -> XCUIElement {
+        let bubble = element("side-chat-bubble")
+        XCTAssertTrue(bubble.waitToExist(timeout: 8), "Selecting transcript text should open the side chat bubble.", file: file, line: line)
+        XCTAssertTrue(waitForStableFrame(bubble), "The side chat bubble should settle before it is measured.", file: file, line: line)
+        let frame = bubble.frame
+        XCTAssertGreaterThanOrEqual(frame.width, 400, "The side chat bubble should be large (\(frame)).", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(frame.height, 400, "The side chat bubble should be large (\(frame)).", file: file, line: line)
+        if let selection {
+            let selected = selection.frame
+            XCTAssertTrue(frame.maxX > selected.minX && frame.minX < selected.maxX,
+                          "The bubble should open over the selected text's columns (bubble \(frame), selection \(selected)).",
                           file: file, line: line)
-        XCTAssertLessThan(abs(fieldFrame.midX - hintFrame.midX), 120,
-                          "The comment field should open centered on the Add comment hint (field \(fieldFrame), hint \(hintFrame)).",
-                          file: file, line: line)
+            // The bubble's edge meets the selected lines: below their last line, above their first,
+            // or, for a selection inside the first line, right under it.
+            let gap = min(abs(frame.minY - selected.maxY), abs(frame.maxY - selected.minY), abs(frame.minY - selected.minY))
+            XCTAssertLessThan(gap, 60,
+                              "The bubble should open right at the selection (bubble \(frame), selection \(selected)).",
+                              file: file, line: line)
+        }
+        return bubble
     }
 
     private func element(withAccessibilityLabel label: String) -> XCUIElement {
@@ -24650,14 +24787,6 @@ final class PlayhouseUITests: XCTestCase {
 
     private func orangePixelCount(in screenshot: XCUIScreenshot) -> Int {
         pixelCount(in: screenshot.image, where: Self.isOrangePixel)
-    }
-
-    private func darkPixelCount(in element: XCUIElement) -> Int {
-        pixelCount(in: element.screenshot().image) { $0.redComponent < 0.3 && $0.greenComponent < 0.3 && $0.blueComponent < 0.3 }
-    }
-
-    private func lightPixelCount(in element: XCUIElement) -> Int {
-        pixelCount(in: element.screenshot().image) { $0.redComponent > 0.68 && $0.greenComponent > 0.68 && $0.blueComponent > 0.68 }
     }
 
     private func orangePixelFillRatio(in screenshot: XCUIScreenshot) -> Double {

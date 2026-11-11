@@ -10,6 +10,16 @@ enum PlayhouseCLI {
             return
         }
 
+        // Claude Code's read-only side chat hook: answered here, without the daemon, for each tool call.
+        if arguments == SideChatReadOnlyPolicy.hookSubcommand {
+            let input = FileHandle.standardInput.readDataToEndOfFile()
+            let cliPaths = [CommandLine.arguments[0]] + (Bundle.main.executableURL.map { [$0.path] } ?? [])
+            if let output = SideChatReadOnlyPolicy.hookOutput(for: input, cliPaths: cliPaths) {
+                FileHandle.standardOutput.write(output)
+            }
+            return
+        }
+
         let request: BridgeRequest
         do {
             request = try parse(arguments)
@@ -862,6 +872,19 @@ enum PlayhouseCLI {
                     "taskID": .string(id), "requestID": .string(tail[1]),
                     "answers": .object(answers.mapValues { .array($0.map(BridgeValue.string)) })
                 ])
+            case "side-chat":
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--selection", "--side-chat"])
+                guard let message = flags["--message"]?.first,
+                      (flags["--selection"]?.first != nil) != (flags["--side-chat"]?.first != nil) else {
+                    throw CLIError.usage("Use: playhouse conversation side-chat <task-id> --message <text> (--selection <text> | --side-chat <side-chat-id>)")
+                }
+                var arguments: [String: BridgeValue] = ["taskID": .string(id), "message": .string(message)]
+                if let selection = flags["--selection"]?.first { arguments["selection"] = .string(selection) }
+                if let sideChatID = flags["--side-chat"]?.first { arguments["sideChatID"] = .string(sideChatID) }
+                return BridgeRequest(command: "conversation.side_chat", arguments: arguments)
+            case "side-chat-close":
+                guard tail.count == 2 else { throw CLIError.usage("Use: playhouse conversation side-chat-close <task-id> <side-chat-id>") }
+                return BridgeRequest(command: "conversation.side_chat.close", arguments: ["taskID": .string(id), "sideChatID": .string(tail[1])])
             case "send":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image", "--context-page"])
                 var answers: [String: [String]] = [:]
@@ -1096,6 +1119,8 @@ enum PlayhouseCLI {
       playhouse conversation stop <task-id>
       playhouse conversation provider <task-id> [set <codex|claude>|capabilities]
       playhouse conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]
+      playhouse conversation side-chat <task-id> --message <text> (--selection <text> | --side-chat <side-chat-id>)
+      playhouse conversation side-chat-close <task-id> <side-chat-id>
       playhouse conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...] [--context-page <page-id>]...
 
     Results are JSON. Conversation send emits JSON event lines followed by a final response.
