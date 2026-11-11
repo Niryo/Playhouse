@@ -10375,7 +10375,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(saved)["status"], "Blocked")
         self.assertEqual(self.assert_success(saved)["savedPrompt"], "A follow-up draft.")
 
-    # case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the question's Markdown, header, and option descriptions reach the client, and the UI renders the question inline with its Markdown formatted at the reply text size, its header, and each option's description, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
+    # case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the question's Markdown, including a long paragraph, header, and option descriptions reach the client unchanged, and the UI renders the question inline with its Markdown formatted at the reply text size and its long paragraph wrapped in full across several lines without truncation, its header, and each option's description, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
     def test_claude_questions_can_be_answered_after_switching_conversations(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-question"
@@ -10397,8 +10397,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
         request = user_input["payload"]["userInputRequest"]
         question = request["questions"][0]
         self.assertEqual(
-            question["question"], "Which color should I use for **the primary button**?\n\nIt also tints `LinkText`.",
-            "The question's Markdown must reach the client unchanged so the form can render it.",
+            question["question"],
+            "Which color should I use for **the primary button**?\n\nIt also tints `LinkText`.\n\n"
+            "When the user clicks an \"Add here\" placeholder, which conversation should open: the task's active "
+            "conversation, a new conversation started just for that placeholder, or the conversation the placeholder "
+            "was originally added from?",
+            "The question's Markdown, including its long multi-line paragraph, must reach the client unchanged and untruncated.",
         )
         self.assertEqual(question["header"], "Color")
         self.assertEqual(

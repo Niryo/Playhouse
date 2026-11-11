@@ -4773,7 +4773,10 @@ struct TaskConversationView: View {
         formatted.enumerateAttribute(InlineCodeStyle.attribute, in: NSRange(location: 0, length: formatted.length)) { value, range, _ in
             if let color = value as? NSColor { formatted.addAttribute(.backgroundColor, value: color, range: range) }
         }
+        // A row is placed at the height it measured, and a stack around this text, like the question form's,
+        // may hand that height out unevenly; keeping the text's natural height stops it truncating to one line.
         return Text((try? AttributedString(formatted, including: \.appKit)) ?? Self.markdownAttributedText(block.text))
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     /// Renders a list marker ("•" or "1.") through the same `SelectableAnnotationText`/NSTextView
