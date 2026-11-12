@@ -64,6 +64,14 @@ final class BridgeSocketConnection {
         Darwin.close(descriptor)
     }
 
+    /// The connected process, as the kernel reports it, or nil when it can't say.
+    var peerProcessID: pid_t? {
+        var pid: pid_t = 0
+        var size = socklen_t(MemoryLayout<pid_t>.size)
+        guard getsockopt(descriptor, SOL_LOCAL, LOCAL_PEERPID, &pid, &size) == 0, pid > 0 else { return nil }
+        return pid
+    }
+
     fileprivate init(descriptor: Int32) {
         self.descriptor = descriptor
         // Writing to a peer that has gone away returns EPIPE instead of

@@ -200,6 +200,148 @@ struct ConversationTitleGenerator {
     }
 }
 
+/// One answer of a side chat, and the side chat it belongs to.
+struct SideChatReply: Codable, Equatable {
+    let sideChatID: String
+    let taskID: UUID
+    let provider: ConversationProvider
+    let reply: String
+}
+
+/// The side chats the daemon is running. A side chat is a read-only provider conversation
+/// forked from a task's own conversation, where the user discusses text they selected in it.
+/// It lives only as long as its bubble: nothing is saved on the task, and a daemon restart
+/// ends it.
+@MainActor
+enum SideChatSessions {
+    struct Session {
+        let taskID: UUID
+        let provider: ConversationProvider
+        let threadID: String
+        /// The model and effort of the side chat's latest message; each message may choose its own.
+        var modelID: String
+        var effort: ConversationEffort
+        let workspace: ConversationWorkspaceContext
+        var isResponding = false
+    }
+
+    static var sessions: [String: Session] = [:]
+}
+
+extension ConversationManager {
+    /// Sends `message` to a side chat. Without `sideChatID` it opens one: the task's
+    /// provider forks its conversation, read-only, and the first message carries the
+    /// selected text. The task, its status and its own conversation are left untouched.
+    /// `modelID` and `effort` choose this message's model; without them a new side chat uses
+    /// the task's and a later message keeps the side chat's previous choice.
+    func sideChat(
+        taskID: UUID,
+        sideChatID: String?,
+        selectedText: String?,
+        message: String,
+        modelID requestedModelID: String? = nil,
+        effort requestedEffort: ConversationEffort? = nil,
+        onDelta: @escaping (String) -> Void = { _ in }
+    ) async throws -> SideChatReply {
+        let message = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Type a message for the side chat.")
+        }
+        if let requestedModelID, !Self.isValidModelID(requestedModelID) {
+            throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
+        }
+        let id: String
+        var prompt = message
+        if let sideChatID {
+            guard let existing = SideChatSessions.sessions[sideChatID], existing.taskID == taskID else {
+                throw BridgeCommandError(code: "not_found", message: "This side chat has ended. Select the text again to start a new one.")
+            }
+            guard !existing.isResponding else {
+                throw BridgeCommandError(code: "invalid_transition", message: "The side chat is still answering.")
+            }
+            // Busy from here, before anything is awaited, so a second message can't start a turn too.
+            SideChatSessions.sessions[sideChatID]?.isResponding = true
+            id = sideChatID
+        } else {
+            let selection = (selectedText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !selection.isEmpty else {
+                throw BridgeCommandError(code: "invalid_argument", message: "Select text in the conversation to start a side chat.")
+            }
+            let task = try tasks.conversationSubject(taskID)
+            guard let sourceThreadID = task.activeConversationID else {
+                throw BridgeCommandError(code: "invalid_transition", message: "This task has no conversation to discuss yet.")
+            }
+            let provider = task.conversationProvider
+            let client = clients.client(for: provider)
+            let roots = Self.launchRoots(task).compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
+            var workspace = try launchWorkspace(for: task, roots: roots)
+            workspace.isReadOnly = true
+            let modelID = try requestedModelID ?? modelID(taskID: taskID) ?? provider.defaultModelID
+            let effort = try requestedEffort ?? effort(taskID: taskID)
+            try await client.validateEffort(effort, modelID: modelID, workspace: workspace)
+            let threadID = try await client.forkThread(
+                sourceThreadID: sourceThreadID, workspace: workspace, modelID: modelID,
+                developerInstructions: TaskThreadDeveloperInstructions.sideChat(taskID: taskID)
+            )
+            id = UUID().uuidString.lowercased()
+            SideChatSessions.sessions[id] = SideChatSessions.Session(
+                taskID: taskID, provider: provider, threadID: threadID, modelID: modelID,
+                effort: effort, workspace: workspace, isResponding: true
+            )
+            PlayhouseDiagnostics.record("conversation.side_chat.opened", fields: [
+                "taskID": taskID.uuidString, "sideChatID": id, "provider": provider.rawValue,
+                "sourceThreadID": sourceThreadID, "threadID": threadID
+            ])
+            prompt = "<selected-text>\n\(selection)\n</selected-text>\n\n\(message)"
+        }
+        defer { SideChatSessions.sessions[id]?.isResponding = false }
+        if let current = SideChatSessions.sessions[id], sideChatID != nil, requestedModelID != nil || requestedEffort != nil {
+            // A follow-up's new choice is checked before it is kept for later messages.
+            try await clients.client(for: current.provider).validateEffort(
+                requestedEffort ?? current.effort, modelID: requestedModelID ?? current.modelID, workspace: current.workspace
+            )
+        }
+        // The live entry, which closing the bubble removes meanwhile; never a copy written back.
+        if let requestedModelID { SideChatSessions.sessions[id]?.modelID = requestedModelID }
+        if let requestedEffort { SideChatSessions.sessions[id]?.effort = requestedEffort }
+        guard let session = SideChatSessions.sessions[id] else {
+            throw BridgeCommandError(code: "not_found", message: "This side chat has ended. Select the text again to start a new one.")
+        }
+        let client = clients.client(for: session.provider)
+        let threadID = session.threadID
+        var answers: [String] = []
+        try await client.sendMessage(
+            prompt, imageDataURLs: [], mode: .code, modelID: session.modelID, effort: session.effort,
+            threadID: threadID, workspace: session.workspace, sessionRecoveryContext: nil,
+            developerInstructions: TaskThreadDeveloperInstructions.sideChat(taskID: taskID),
+            onDelta: onDelta,
+            onFinalMessage: { text in
+                let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty { answers.append(text) }
+            },
+            onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in }, onActionRequest: {},
+            onUserInput: { request in
+                // The bubble has no question form; the agent asks in its answer instead.
+                client.rejectUserInput(
+                    requestID: request.id, threadID: threadID,
+                    message: "The side chat can't show questions. Ask the user in your answer instead."
+                )
+            },
+            onSteerMessage: { _, _ in }, onProgressMessage: { _ in }, onTurnStarted: { _ in },
+            onTokenUsage: { _ in },
+            sensitiveUserInputAnswerValues: [], hideSensitiveRecoveryPrompt: false
+        )
+        return SideChatReply(sideChatID: id, taskID: taskID, provider: session.provider, reply: answers.joined(separator: "\n\n"))
+    }
+
+    /// Ends a side chat; its provider conversation is never used again.
+    func closeSideChat(taskID: UUID, sideChatID: String) -> Bool {
+        guard let session = SideChatSessions.sessions[sideChatID], session.taskID == taskID else { return false }
+        SideChatSessions.sessions.removeValue(forKey: sideChatID)
+        return true
+    }
+}
+
 /// Repairs a standalone-chat page signal that the active agent omitted. The
 /// helper uses only the providers' inexpensive models (Haiku or Luna at low
 /// effort) and returns a machine-readable decision rather than parsing prose.
@@ -10765,6 +10907,30 @@ final class PlayhouseBridgeRuntime {
                     historyMessageLimit: try request.optionalHistoryLimit()
                 )
                 result = try Self.value(history)
+            case "conversation.side_chat":
+                let taskID = try request.requiredUUID("taskID")
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                let reply = try await conversations.sideChat(
+                    taskID: taskID,
+                    sideChatID: request.arguments["sideChatID"]?.string,
+                    selectedText: request.arguments["selection"]?.string,
+                    message: request.arguments["message"]?.string ?? "",
+                    modelID: request.arguments["model"]?.string,
+                    effort: try request.arguments["effort"]?.string.map { value in
+                        guard let effort = ConversationEffort(rawValue: value) else {
+                            throw BridgeCommandError(code: "invalid_argument", message: "Unknown effort '\(value)'. Valid efforts: low, medium, high, xhigh.")
+                        }
+                        return effort
+                    },
+                    onDelta: { text in
+                        eventHandler(BridgeEvent(requestID: request.id, type: "text_delta", payload: .object(["text": .string(text)])))
+                    }
+                )
+                result = try Self.value(reply)
+            case "conversation.side_chat.close":
+                let taskID = try request.requiredUUID("taskID")
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = .object(["closed": .boolean(conversations.closeSideChat(taskID: taskID, sideChatID: try request.requiredString("sideChatID")))])
             case "conversation.events.subscribe":
                 // Follows the task's running turn, whoever started it, until that turn ends.
                 let taskID = try request.requiredUUID("taskID")

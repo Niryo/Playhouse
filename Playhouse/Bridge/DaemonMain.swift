@@ -216,6 +216,15 @@ enum PlayhouseBridgeDaemonMain {
         lifecycle.requestStarted()
         defer { lifecycle.requestFinished() }
 
+        // A caller in a read-only sandbox, such as a Codex side chat's CLI call, gets only board
+        // requests: the daemon runs outside that sandbox and must not do what the sandbox forbids.
+        if !SideChatReadOnlyPolicy.allowsSandboxedRequest(request), let peer = connection.peerProcessID,
+           callerIsReadOnlySandboxed(peer) {
+            let denied = BridgeResponse.failure(request, code: "forbidden", message: SideChatReadOnlyPolicy.sandboxedCallerMessage)
+            if let framed = try? BridgeFraming.frame(BridgeWireMessage.response(denied)) { try? connection.write(framed) }
+            return
+        }
+
         let semaphore = DispatchSemaphore(value: 0)
         let responseBox = ResponseBox()
         let requestTask = Task { @MainActor in
@@ -245,6 +254,18 @@ enum PlayhouseBridgeDaemonMain {
         guard let response = responseBox.response,
               let framed = try? BridgeFraming.frame(BridgeWireMessage.response(response)) else { return }
         try? connection.write(framed)
+    }
+
+    /// Whether `pid` runs in a sandbox that forbids it to write even beside the bridge sockets, as
+    /// Codex's read-only sandbox does. A sandbox that lets its process write there, such as the
+    /// UI test runner's, and a process with no sandbox are not read-only. The sandbox carries
+    /// over to every child a process starts, so a sandboxed caller can't shed it.
+    private static func callerIsReadOnlySandboxed(_ pid: pid_t) -> Bool {
+        guard playhouse_is_sandboxed(pid) == 1 else { return false }
+        // The sockets' own directory, which exists while this daemon listens in it.
+        let directory = BridgeContract.socketURL(forServiceName: BridgeContract.serviceName)
+            .deletingLastPathComponent().resolvingSymlinksInPath()
+        return playhouse_sandbox_denies_file_create(pid, directory.path) == 1
     }
 
     /// A plain reference box to hand a value out of the `@MainActor` task above

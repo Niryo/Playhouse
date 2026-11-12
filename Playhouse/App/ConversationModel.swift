@@ -227,6 +227,21 @@ struct ConversationModelOption: Codable, Identifiable, Hashable {
 }
 
 extension Array where Element == ConversationModelOption {
+    /// The efforts `modelID` supports, or every effort when it doesn't say; an empty ID is the
+    /// default model.
+    func effortChoices(for modelID: String) -> [ConversationEffort] {
+        let model = modelID.isEmpty ? first(where: \.isDefault) : first(where: { $0.id == modelID })
+        guard let supported = model?.supportedEfforts, !supported.isEmpty else { return ConversationEffort.allCases }
+        return ConversationEffort.allCases.filter(supported.contains)
+    }
+
+    /// `effort`, or the effort a newly chosen model falls back to when it doesn't support it.
+    func effort(_ effort: ConversationEffort, keptFor modelID: String) -> ConversationEffort {
+        let choices = effortChoices(for: modelID)
+        if choices.contains(effort) { return effort }
+        return choices.contains(.medium) ? .medium : choices[0]
+    }
+
     /// Keeps the newest concrete model in each family and drops aliases superseded by a versioned model.
     func newestVersionPerFamily() -> [ConversationModelOption] {
         let visibleModels = filter { $0.id.caseInsensitiveCompare("default") != .orderedSame }
@@ -560,6 +575,9 @@ protocol ConversationProviderClient: AnyObject {
     /// turns at once must not report another conversation's process or turn.
     func diagnosticFields(forThread threadID: String, _ additionalFields: [String: String]) -> [String: String]
     func startThread(workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String
+    /// A new conversation that starts with a copy of `sourceThreadID`'s whole context and
+    /// runs on its own from then on, leaving the source conversation untouched.
+    func forkThread(sourceThreadID: String, workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String
     func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption]
     func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws
     func sendMessage(

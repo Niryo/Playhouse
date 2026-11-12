@@ -120,6 +120,7 @@ bridge_inputs=(
   "${grdb_module}"
   "${shared_sources[@]}"
   "${repository_root}/Playhouse/Bridge/DaemonMain.swift"
+  "${repository_root}/Playhouse/Bridge/SandboxCheck.h"
   "${repository_root}/Playhouse/CLI/BridgeClient.swift"
   "${repository_root}/Playhouse/CLI/PlayhouseCLI.swift"
   "${architecture}-apple-macosx${deployment_target}"
@@ -173,6 +174,7 @@ xcrun --sdk macosx swiftc \
   -I "${repository_root}/Vendor/GRDB.swift/Sources/GRDBSQLite" \
   -L "${grdb_module}" \
   -lGRDB \
+  -import-objc-header "${repository_root}/Playhouse/Bridge/SandboxCheck.h" \
   "${shared_sources[@]}" \
   "${repository_root}/Playhouse/Bridge/DaemonMain.swift" \
   -o "${daemon_executable}"

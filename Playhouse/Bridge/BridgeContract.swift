@@ -264,3 +264,94 @@ enum BridgeFraming {
         return decoder
     }
 }
+
+/// What a read-only side chat may do: read, and run the Playhouse CLI's board commands, never
+/// edit files or run any other command. The CLI, the daemon and the app each compile this file.
+///
+/// Codex runs a side chat in its read-only sandbox, so the operating system stops its writes,
+/// and the daemon, which runs outside that sandbox, accepts only board requests from a
+/// read-only sandboxed caller (`allowsSandboxedRequest`), so the CLI can't do on its behalf
+/// what the sandbox stops. Claude Code has no such sandbox, so it applies the policy to each tool call
+/// twice: a `PreToolUse` hook (`playhouse-cli hook side-chat-pre-tool-use`, passed through the
+/// launch's `--settings`) runs before the user's own allow rules can approve a call, and the
+/// permission handler checks what Claude Code still asks about. A user who turns off every
+/// Claude Code hook (`disableAllHooks`) is left with the permission handler alone.
+enum SideChatReadOnlyPolicy {
+    static let hookSubcommand = ["hook", "side-chat-pre-tool-use"]
+    static let deniedTools = ["Edit", "MultiEdit", "Write", "NotebookEdit"]
+    /// The CLI commands the side chat instructions list; never a turn, outcome, progress or
+    /// repository command, which belong to the task's own conversation.
+    static let allowedCLICommands = ["task list", "task get", "task create", "task rename", "task prompt", "workspace repos list"]
+    static let denialMessage = "This side chat is read-only: it can read files and run the Playhouse CLI's board commands (task list, get, create, rename, prompt and workspace repos list), one per shell call, but it can't change files or run other commands."
+
+    /// `cliPaths` are the forms of the CLI's path a command may start with (as given and with
+    /// symlinks such as /tmp resolved).
+    static func allows(toolName: String, input: [String: Any], cliPaths: [String]) -> Bool {
+        guard !deniedTools.contains(toolName) else { return false }
+        guard toolName == "Bash" else { return true }
+        let command = (input["command"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !runsAnotherCommand(command) else { return false }
+        // The instructions quote the path, so the command starts with it, quoted or not.
+        let paths = Set(cliPaths + cliPaths.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path })
+        let invocations = paths.flatMap { [$0, "'\($0)'", "\"\($0)\""] }
+        guard let invocation = invocations.first(where: { command.hasPrefix($0 + " ") }) else { return false }
+        let subcommand = command.dropFirst(invocation.count + 1).trimmingCharacters(in: .whitespaces)
+        return allowedCLICommands.contains { subcommand == $0 || subcommand.hasPrefix($0 + " ") }
+    }
+
+    /// Whether a shell command would run more than its first command: a separator, pipe,
+    /// background `&`, redirection or command substitution outside single quotes (inside
+    /// double quotes only substitution still runs), or a quote left open. Text a quoted
+    /// argument carries, such as a task description, may contain any of them.
+    static func runsAnotherCommand(_ command: String) -> Bool {
+        var quote: Character?
+        var escaped = false
+        var previous: Character?
+        for character in command {
+            defer { previous = character }
+            if escaped { escaped = false; continue }
+            switch quote {
+            case "'":
+                if character == "'" { quote = nil }
+            case "\"":
+                if character == "\\" { escaped = true }
+                else if character == "\"" { quote = nil }
+                else if character == "`" || (previous == "$" && character == "(") { return true }
+            default:
+                if character == "\\" { escaped = true }
+                else if character == "'" || character == "\"" { quote = character }
+                else if ";&|<>`\n".contains(character) || (previous == "$" && character == "(") { return true }
+            }
+        }
+        return quote != nil || escaped
+    }
+
+    /// The `PreToolUse` hook's answer for one tool call Claude Code describes in `hookInput`:
+    /// a denial, or nil to let Claude Code's own permission flow continue.
+    /// Input it can't read is denied, so a call never passes for want of a description.
+    static func hookOutput(for hookInput: Data, cliPaths: [String]) -> Data? {
+        let input = (try? JSONSerialization.jsonObject(with: hookInput)) as? [String: Any] ?? [:]
+        let toolName = input["tool_name"] as? String ?? ""
+        guard toolName.isEmpty || !allows(toolName: toolName, input: input["tool_input"] as? [String: Any] ?? [:], cliPaths: cliPaths) else { return nil }
+        return try? JSONSerialization.data(withJSONObject: ["hookSpecificOutput": [
+            "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": denialMessage,
+        ]], options: [.sortedKeys])
+    }
+}
+
+extension SideChatReadOnlyPolicy {
+    static let sandboxedCallerMessage = "A caller in a read-only sandbox, such as a side chat, can only make board requests: task list, get, create, rename and prompt (without a status or submission), and workspace repos list."
+
+    /// The bridge requests a caller in a read-only sandbox may make: the board commands `allowedCLICommands`
+    /// lists, as the CLI sends them. A saved prompt can't also move or start its task.
+    static func allowsSandboxedRequest(_ request: BridgeRequest) -> Bool {
+        switch request.command {
+        case "task.list", "task.get", "task.create", "task.rename", "workspace.repositories.list":
+            return true
+        case "task.prompt.save":
+            return request.arguments["status"] == nil && request.arguments["submitted"] == nil
+        default:
+            return false
+        }
+    }
+}

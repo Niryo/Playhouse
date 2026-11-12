@@ -1053,6 +1053,8 @@ struct AtomEditor: View {
     var onFocusChange: (Bool) -> Void = { _ in }
     /// A pasted image reaches only native owners.
     var onPasteImage: (Data) -> Void = { _ in }
+    /// Escape reaches only native owners, and only those that set it.
+    var onCancel: (() -> Void)? = nil
     /// The selection reaches only native owners, such as the composer's plugins.
     var onSelectionChange: (NSRange) -> Void = { _ in }
     @State private var text: String
@@ -1062,9 +1064,11 @@ struct AtomEditor: View {
         props: EditorProps, common: AtomCommon = AtomCommon(), onChange: @escaping (String) -> Void,
         onSubmit: @escaping () -> Void = {}, onSteerSubmit: @escaping () -> Void = {},
         onFocusChange: @escaping (Bool) -> Void = { _ in }, onPasteImage: @escaping (Data) -> Void = { _ in },
+        onCancel: (() -> Void)? = nil,
         onSelectionChange: @escaping (NSRange) -> Void = { _ in }
     ) {
         self.props = props
+        self.onCancel = onCancel
         self.common = common
         self.onChange = onChange
         self.onSubmit = onSubmit
@@ -1089,6 +1093,7 @@ struct AtomEditor: View {
             onSubmit: onSubmit,
             onSteerSubmit: onSteerSubmit,
             onPasteImage: onPasteImage,
+            onCancel: onCancel,
             onSelectionChange: onSelectionChange
         )
         .frame(height: height)

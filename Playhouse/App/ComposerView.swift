@@ -239,59 +239,11 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
     }
 
     private var modelPicker: some View {
-        let picker = model.model
-        return AtomPopover(
-            props: PopoverProps(isPresented: picker.open, arrowEdge: "top", width: 320),
-            common: AtomCommon(testID: prefix + "model-picker-popover"),
-            onDismiss: actions.dismissModelPicker,
-            anchor: {
-                AtomButton(
-                    common: AtomCommon(
-                        testID: prefix + "model-picker-menu", label: picker.label, value: picker.name,
-                        help: "Choose a model and reasoning effort", opacity: 0.82
-                    ),
-                    action: actions.toggleModelPicker
-                ) {
-                    AtomStack(props: StackProps(axis: "h", spacing: 7)) {
-                        AtomText(props: TextProps(text: picker.name, size: 12, weight: "medium"))
-                        AtomText(props: TextProps(text: picker.effort, size: 12, weight: "medium", color: "secondary"))
-                        AtomIcon(props: IconProps(name: "chevron.down", size: 9, weight: "semibold", color: "tertiary"))
-                    }
-                }
-            },
-            content: {
-                AtomStack(props: StackProps(axis: "v", spacing: 0, align: "leading"), common: AtomCommon(padding: 13, paddingX: 5)) {
-                    ForEach(picker.models, id: \.id) { option in
-                        AtomButton(
-                            common: AtomCommon(testID: prefix + option.testID, value: option.checked ? "Selected" : "Not selected", help: option.help),
-                            action: { actions.selectModel(option.id) }
-                        ) {
-                            AtomStack(props: StackProps(axis: "h"), common: AtomCommon(minHeight: 32, fillWidth: true)) {
-                                AtomText(props: TextProps(text: option.title))
-                                AtomSpacer(props: SpacerProps())
-                                if option.checked {
-                                    AtomIcon(props: IconProps(name: "checkmark", size: 12, weight: "semibold"), common: AtomCommon(testID: prefix + option.testID + "-checked"))
-                                }
-                            }
-                        }
-                    }
-                    AtomDivider(common: AtomCommon(paddingY: 8))
-                    AtomText(
-                        props: TextProps(text: Self.title(of: picker.selectedEffort, in: picker.effortChoices), size: 14, weight: "medium", color: "accent"),
-                        common: AtomCommon(testID: prefix + "selected-model-effort")
-                    )
-                    AtomStepSlider(
-                        props: StepSliderProps(options: picker.effortChoices.map { .init(value: $0.value, label: $0.label) }, selected: picker.selectedEffort),
-                        common: AtomCommon(testID: prefix + "model-effort-slider", label: "Model effort"),
-                        onChange: actions.selectEffort
-                    )
-                }
-            }
+        ComposerModelPicker(
+            picker: model.model, prefix: prefix,
+            toggle: actions.toggleModelPicker, dismiss: actions.dismissModelPicker,
+            selectModel: actions.selectModel, selectEffort: actions.selectEffort
         )
-    }
-
-    private static func title(of value: String, in options: [ComposerModel.Option]) -> String {
-        options.first { $0.value == value }?.label ?? value
     }
 
     private func scheduleButton(_ schedule: ComposerModel.Schedule) -> some View {
@@ -349,6 +301,73 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
         ) {
             AtomIcon(props: IconProps(name: name, size: size, weight: "bold", color: "white"))
         }
+    }
+}
+
+/// The model button and its popover of models and reasoning effort, composed of plugin atoms.
+/// The composer shows it in its toolbar and the side chat bubble in its own; `prefix` starts
+/// every accessibility identifier, so the two never share one.
+struct ComposerModelPicker: View {
+    let picker: ComposerModel.ModelPicker
+    var prefix = ""
+    let toggle: () -> Void
+    let dismiss: () -> Void
+    let selectModel: (String) -> Void
+    let selectEffort: (String) -> Void
+
+    var body: some View {
+        return AtomPopover(
+            props: PopoverProps(isPresented: picker.open, arrowEdge: "top", width: 320),
+            common: AtomCommon(testID: prefix + "model-picker-popover"),
+            onDismiss: dismiss,
+            anchor: {
+                AtomButton(
+                    common: AtomCommon(
+                        testID: prefix + "model-picker-menu", label: picker.label, value: picker.name,
+                        help: "Choose a model and reasoning effort", opacity: 0.82
+                    ),
+                    action: toggle
+                ) {
+                    AtomStack(props: StackProps(axis: "h", spacing: 7)) {
+                        AtomText(props: TextProps(text: picker.name, size: 12, weight: "medium"))
+                        AtomText(props: TextProps(text: picker.effort, size: 12, weight: "medium", color: "secondary"))
+                        AtomIcon(props: IconProps(name: "chevron.down", size: 9, weight: "semibold", color: "tertiary"))
+                    }
+                }
+            },
+            content: {
+                AtomStack(props: StackProps(axis: "v", spacing: 0, align: "leading"), common: AtomCommon(padding: 13, paddingX: 5)) {
+                    ForEach(picker.models, id: \.id) { option in
+                        AtomButton(
+                            common: AtomCommon(testID: prefix + option.testID, value: option.checked ? "Selected" : "Not selected", help: option.help),
+                            action: { selectModel(option.id) }
+                        ) {
+                            AtomStack(props: StackProps(axis: "h"), common: AtomCommon(minHeight: 32, fillWidth: true)) {
+                                AtomText(props: TextProps(text: option.title))
+                                AtomSpacer(props: SpacerProps())
+                                if option.checked {
+                                    AtomIcon(props: IconProps(name: "checkmark", size: 12, weight: "semibold"), common: AtomCommon(testID: prefix + option.testID + "-checked"))
+                                }
+                            }
+                        }
+                    }
+                    AtomDivider(common: AtomCommon(paddingY: 8))
+                    AtomText(
+                        props: TextProps(text: Self.title(of: picker.selectedEffort, in: picker.effortChoices), size: 14, weight: "medium", color: "accent"),
+                        common: AtomCommon(testID: prefix + "selected-model-effort")
+                    )
+                    AtomStepSlider(
+                        props: StepSliderProps(options: picker.effortChoices.map { .init(value: $0.value, label: $0.label) }, selected: picker.selectedEffort),
+                        common: AtomCommon(testID: prefix + "model-effort-slider", label: "Model effort"),
+                        onChange: selectEffort
+                    )
+                }
+            }
+        )
+    }
+
+    private static func title(of value: String, in options: [ComposerModel.Option]) -> String {
+        options.first { $0.value == value }?.label ?? value
     }
 }
 

@@ -417,6 +417,48 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         return threadID
     }
 
+    /// Forks `sourceThreadID` into a new thread that starts with its whole history. A
+    /// read-only workspace's fork runs in Codex's read-only sandbox, with network access
+    /// so the Playhouse CLI still reaches the bridge daemon's socket.
+    func forkThread(
+        sourceThreadID: String,
+        workspace: ConversationWorkspaceContext,
+        modelID: String,
+        developerInstructions: String?
+    ) async throws -> String {
+        let developerInstructions = RuleBridgeLaunch.combined(developerInstructions, workspace.ruleBridge?.codexInstructions)
+        try await ensureInitialized(workspace: workspace)
+        var params: [String: Any] = [
+            "threadId": sourceThreadID,
+            "model": modelID,
+            "cwd": workspace.cwd.path,
+            "sandbox": workspace.isReadOnly ? "read-only" : "danger-full-access",
+            "approvalPolicy": "never",
+            "approvalsReviewer": "user",
+            // The fork's own turns are all a side chat reads, so the copied history stays on the server.
+            "excludeTurns": true
+        ]
+        if let developerInstructions { params["developerInstructions"] = developerInstructions }
+        try await applySkillBridge(workspace)
+        if let config = workspace.codexThreadConfig { params["config"] = config }
+        let response = try await request(method: "thread/fork", params: params)
+        guard let thread = response["thread"] as? [String: Any],
+              let threadID = thread["id"] as? String else {
+            throw ClientError.protocolFailure("Codex did not return a forked thread ID.")
+        }
+        try confirmModel(response["model"] as? String, expected: modelID)
+        let parameters = ResumeParameters(
+            modelID: modelID, cwd: workspace.cwd.path, roots: workspace.roots.map(\.path), developerInstructions: developerInstructions,
+            mcpServers: workspace.mcpBridge?.codexServersJSON
+        )
+        resumedThreadParameters[threadID] = parameters
+        recordServedThread(threadID, parameters)
+        PlayhouseDiagnostics.record("codex.thread.forked", fields: diagnosticFields([
+            "threadID": threadID, "sourceThreadID": sourceThreadID, "readOnly": String(workspace.isReadOnly)
+        ]))
+        return threadID
+    }
+
     /// The MCP servers Codex configures for itself, with whether each needs the
     /// user to sign in (`codex mcp login`).
     func mcpServerStatuses(workspace: ConversationWorkspaceContext) async throws -> [McpProviderStatus] {
@@ -897,25 +939,25 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         input += imageDataURLs.map { ["type": "image", "url": $0] }
         // Codex has no slash commands, so a `/skill` the message names travels as a skill input.
         input += (workspace.skillBridge?.invocations ?? []).map { ["type": "skill", "name": $0.name, "path": $0.path] }
-        let response = try await request(
-            method: "turn/start",
-            params: [
-                "threadId": threadID,
-                "input": input,
-                "model": modelID,
-                "cwd": workspace.cwd.path,
-                "runtimeWorkspaceRoots": workspace.roots.map(\.path),
-                "approvalPolicy": "never",
-                "approvalsReviewer": "user",
-                "collaborationMode": [
-                    "mode": mode.rawValue,
-                    "settings": [
-                        "model": modelID,
-                        "reasoningEffort": effort.rawValue
-                    ]
+        var turnParams: [String: Any] = [
+            "threadId": threadID,
+            "input": input,
+            "model": modelID,
+            "cwd": workspace.cwd.path,
+            "runtimeWorkspaceRoots": workspace.roots.map(\.path),
+            "approvalPolicy": "never",
+            "approvalsReviewer": "user",
+            "collaborationMode": [
+                "mode": mode.rawValue,
+                "settings": [
+                    "model": modelID,
+                    "reasoningEffort": effort.rawValue
                 ]
             ]
-        )
+        ]
+        // Every turn of a read-only thread names its sandbox, so a resume can't widen it.
+        if workspace.isReadOnly { turnParams["sandboxPolicy"] = ["type": "readOnly", "networkAccess": true] }
+        let response = try await request(method: "turn/start", params: turnParams)
 
         guard let turn = response["turn"] as? [String: Any],
               let turnID = turn["id"] as? String else {
@@ -1513,7 +1555,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                     "threadId": threadID,
                     "model": modelID,
                     "cwd": workspace.cwd.path,
-                    "sandbox": "danger-full-access",
+                    "sandbox": workspace.isReadOnly ? "read-only" : "danger-full-access",
                     "approvalPolicy": "never",
                     "approvalsReviewer": "user",
                     "runtimeWorkspaceRoots": workspace.roots.map(\.path)
@@ -2754,6 +2796,30 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
 }
 
 enum TaskThreadDeveloperInstructions {
+    /// Instructions for a side chat: a read-only copy of task `taskID`'s conversation where
+    /// the user discusses text they selected in it.
+    static func sideChat(taskID: UUID) -> String {
+        let executable = cliExecutableURL().path
+        let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return """
+        You are now in a Playhouse side chat: a separate, read-only conversation that started from a copy of the task conversation above (Playhouse task \(taskID.uuidString)). The user selected some text in that conversation and wants to discuss it with you here. Their messages quote the selected text in <selected-text> tags.
+
+        Answer briefly and conversationally: the side chat is shown in a small bubble beside the selected text. Use the earlier conversation as your context.
+
+        This side chat is read-only. Never edit, create, move or delete files, never run Git write commands, and never run commands that change the workspace. You may read files to answer.
+        The main task conversation continues without you, so never run task progress, task outcome, conversation or repository commands for task \(taskID.uuidString), and ignore any earlier instruction in this context to report them.
+
+        You can manage the Playhouse board with its CLI, running one command per shell call:
+          \(quotedExecutable) task list
+          \(quotedExecutable) task get <task-id>
+          \(quotedExecutable) task create --title "<title>" --prompt "<full description>" [--repo <repository-path>...] [--provider <codex|claude>]
+          \(quotedExecutable) task rename <task-id> --title "<title>"
+          \(quotedExecutable) task prompt <task-id> --text "<prompt>"
+          \(quotedExecutable) workspace repos list
+        When the user asks you to create a task, give it a self-contained --prompt describing the goal, the relevant context from this conversation and the selected text, requirements, and acceptance criteria, because the agent that runs it will not see this chat. Creating a task does not start it. Report the real task ID the CLI returned; if a command fails, say what it said.
+        """
+    }
+
     /// Instructions Playhouse attaches to provider conversation turns.
     static func make(
         taskID: UUID,
@@ -2882,7 +2948,7 @@ enum TaskThreadDeveloperInstructions {
     /// answered earlier in that turn must not answer a second time.
     static let noVisibleOutputNoticeRule = "If you receive a notice that your previous response had no visible output but you already answered in this turn, do not repeat the answer; reply briefly or say nothing more."
 
-    private static func cliExecutableURL() -> URL {
+    static func cliExecutableURL() -> URL {
         let fileManager = FileManager.default
         var candidate = Bundle.main.bundleURL
         for _ in 0..<5 {
