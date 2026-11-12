@@ -45,6 +45,8 @@ Pass --live-provider only when the guest has that provider's CLI and a login
 Environment:
   PLAYHOUSE_UI_TART_VM         VM name (default: playhouse-ui)
   PLAYHOUSE_UI_TART_ARTIFACTS  Host artifact root
+  PLAYHOUSE_UI_SCREEN_WIDTH    Guest screen width in points for the run (default: 1024)
+  PLAYHOUSE_UI_SCREEN_HEIGHT   Guest screen height in points for the run (default: 768)
   --live-provider <provider>   Run live UI cases against claude or codex; guest access is required
   --stop-vm-after-run          Stop the persistent VM after this run
   --reset-vm-state             Reset guest app/test processes before this run
@@ -315,6 +317,56 @@ if (( show_vm == 1 )); then
 	fi
 	printf 'The VM display is open. Configure Accessibility permission in the guest if needed, then press Return to start the UI test (Ctrl-C to cancel).\n'
 	read -r
+fi
+
+# The guest picks its screen size at boot, and it has come up both 1024 and 2560 points wide.
+# Window sizes, layout limits and scroll extents in the UI cases follow from it, so every run
+# uses the same screen. The setter is compiled once into the guest and reused.
+ui_screen_width="${PLAYHOUSE_UI_SCREEN_WIDTH:-1024}"
+ui_screen_height="${PLAYHOUSE_UI_SCREEN_HEIGHT:-768}"
+if ! tart exec -i "$vm_name" /bin/bash -c '
+	set -e
+	tool_dir="$HOME/PlayhouseUITestRuns/bin"
+	mkdir -p "$tool_dir"
+	source="$tool_dir/set-display-mode.swift"
+	cat > "$source.new"
+	if ! cmp -s "$source.new" "$source" || [[ ! -x "$tool_dir/set-display-mode" ]]; then
+		mv "$source.new" "$source"
+		xcrun swiftc -O "$source" -o "$tool_dir/set-display-mode"
+	else
+		rm -f "$source.new"
+	fi
+	"$tool_dir/set-display-mode" "$1" "$2"
+' _ "$ui_screen_width" "$ui_screen_height" <<'SWIFT'
+import CoreGraphics
+import Foundation
+
+let arguments = CommandLine.arguments
+guard arguments.count == 3, let width = Int(arguments[1]), let height = Int(arguments[2]) else {
+	FileHandle.standardError.write(Data("usage: set-display-mode <width> <height>\n".utf8))
+	exit(2)
+}
+let display = CGMainDisplayID()
+if let current = CGDisplayCopyDisplayMode(display), current.width == width, current.height == height {
+	exit(0)
+}
+let options = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
+let modes = (CGDisplayCopyAllDisplayModes(display, options) as? [CGDisplayMode]) ?? []
+guard let mode = modes.first(where: { $0.width == width && $0.height == height && $0.isUsableForDesktopGUI() }) else {
+	FileHandle.standardError.write(Data("No \(width)x\(height) display mode is available.\n".utf8))
+	exit(1)
+}
+var configuration: CGDisplayConfigRef?
+guard CGBeginDisplayConfiguration(&configuration) == .success,
+	  CGConfigureDisplayWithDisplayMode(configuration, display, mode, nil) == .success,
+	  CGCompleteDisplayConfiguration(configuration, .forSession) == .success else {
+	FileHandle.standardError.write(Data("Could not switch the display to \(width)x\(height).\n".utf8))
+	exit(1)
+}
+SWIFT
+then
+	printf 'Could not set the Tart guest screen to %sx%s points.\n' "$ui_screen_width" "$ui_screen_height" >&2
+	exit 1
 fi
 
 printf 'Running UI tests in VM-local source snapshot...\n'

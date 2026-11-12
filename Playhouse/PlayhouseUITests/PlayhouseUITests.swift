@@ -6683,10 +6683,11 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil(chatContentFillsPanel, timeout: 5), "The narrowed chat's transcript reflows to the panel once the drag ends: transcript=\(chatTranscript.frame), handle=\(chatHandle.frame)")
         chatHandleCenter().press(forDuration: 0.2, thenDragTo: chatHandleCenter().withOffset(CGVector(dx: chatNarrowed - 320, dy: 0)))
         XCTAssertTrue(waitUntil({ abs(chatWidth() - chatNarrowed) <= 6 }, timeout: 5), "Dragging right widens the chat again: \(chatWidth())")
-        chatHandleCenter().press(forDuration: 0.2, thenDragTo: chatHandleCenter().withOffset(CGVector(dx: 900, dy: 0)))
         // The chat widens only until it and the board's 980-point minimum fill the screen, and never below its 460-point default.
+        // The drag spans the whole screen so it reaches that limit on any screen size.
         let screenWidth = app.menuBars.firstMatch.frame.width
         let expectedMaximum = max(460, screenWidth - 980)
+        chatHandleCenter().press(forDuration: 0.2, thenDragTo: chatHandleCenter().withOffset(CGVector(dx: screenWidth, dy: 0)))
         XCTAssertTrue(waitUntil({ abs(chatWidth() - expectedMaximum) <= 6 }, timeout: 5), "Dragging far right stops at \(expectedMaximum) on a \(screenWidth)-point screen: \(chatWidth())")
         XCTAssertTrue(waitUntil(chatContentFillsPanel, timeout: 5), "The widened chat's transcript reflows to the panel once the drag ends: transcript=\(chatTranscript.frame), handle=\(chatHandle.frame)")
         chatHandleCenter().press(forDuration: 0.2, thenDragTo: chatHandleCenter().withOffset(CGVector(dx: chatNarrowed - expectedMaximum, dy: 0)))
@@ -6697,7 +6698,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Standalone chat reopened at its dragged width with the transcript reflowed")
         // The rest of the case asserts exact header positions at the default width. Dragging to the far right clamps to the
         // cap, which is exactly the default when the screen has no spare width; a hand-measured drag would leave a fractional width.
-        chatHandleCenter().press(forDuration: 0.2, thenDragTo: chatHandleCenter().withOffset(CGVector(dx: 900, dy: 0)))
+        chatHandleCenter().press(forDuration: 0.2, thenDragTo: chatHandleCenter().withOffset(CGVector(dx: screenWidth, dy: 0)))
         XCTAssertTrue(waitUntil({ abs(chatWidth() - expectedMaximum) <= 6 }, timeout: 5), "Dragging far right again stops at the cap: \(chatWidth())")
 
         XCTAssertTrue(try tasksFromBoardList().isEmpty, "The standalone chat must never appear on the board.")
@@ -7068,9 +7069,17 @@ final class PlayhouseUITests: XCTestCase {
 
         // Page sessions rotate, so earlier pages must stay visible rather than disappearing.
         XCTAssertTrue(revealWholeTranscript(), "The reopened chat should load its earlier pages as the reader scrolls up.")
-        XCTAssertTrue(chatPageSeparatorIsVisible("Dinner recipes"), "An earlier page stays visible after its session rotated.")
+        // Earlier pages render only near the viewport, so scroll to them as a reader would.
+        let dinnerSeparator = element("chat-sidebar")
+            .descendants(matching: .scrollView)
+            .matching(identifier: "conversation-scroll-view")
+            .firstMatch
+            .staticTexts
+            .matching(NSPredicate(format: "identifier == %@ AND (label == %@ OR value == %@)", "chat-page-separator", "Dinner recipes", "Dinner recipes"))
+            .firstMatch
+        XCTAssertTrue(scrollTranscriptUntilExists(dinnerSeparator), "An earlier page stays visible after its session rotated.")
         XCTAssertTrue(
-            element("chat-sidebar").groups["What's a good side dish?"].exists,
+            scrollTranscriptUntilExists(element("chat-sidebar").groups["What's a good side dish?"]),
             "An earlier page keeps its messages in the chat transcript."
         )
         let boardTask = try XCTUnwrap(
@@ -7223,7 +7232,8 @@ final class PlayhouseUITests: XCTestCase {
         )
         let volcanoMessageID = try XCTUnwrap(volcanoMessage["id"] as? String)
         let volcanoView = element("user-message-\(volcanoMessageID)")
-        XCTAssertTrue(volcanoView.waitToExist(timeout: 10), "An earlier page's message stays visible after rotation.")
+        XCTAssertTrue(scrollTranscriptUntilExists(volcanoView), "An earlier page's message stays visible after rotation.")
+        XCTAssertTrue(revealInConversation(volcanoView), "The earlier page's message should scroll fully into view before it is clicked.")
         volcanoView.click()
         volcanoView.typeKey("a", modifierFlags: .command)
         let commentBubble = try waitForSideChatBubble(at: volcanoView)
@@ -7255,10 +7265,11 @@ final class PlayhouseUITests: XCTestCase {
         // The transcript renders a window that starts at the latest turn, so earlier pages are
         // revealed before checking that rotating sessions kept every one of them.
         XCTAssertTrue(revealWholeTranscript(), "The whole chat transcript should load.")
-        XCTAssertTrue(chatPageSeparatorIsVisible("Volcanoes"), "Rotating sessions must not hide earlier pages.")
-        XCTAssertTrue(chatPageSeparatorIsVisible("Saturn Rings"))
+        // Earlier pages render only near the viewport, so each check scans the transcript.
+        XCTAssertTrue(transcriptScan { self.chatPageSeparatorIsVisible("Volcanoes") }, "Rotating sessions must not hide earlier pages.")
+        XCTAssertTrue(transcriptScan { self.chatPageSeparatorIsVisible("Saturn Rings") })
         XCTAssertTrue(
-            element("chat-sidebar").groups["Tell me about volcanoes"].exists,
+            transcriptScan { self.element("chat-sidebar").groups["Tell me about volcanoes"].exists },
             "Earlier pages stay visible in the chat transcript."
         )
         attachScreenshot(named: "Standalone chat pages keep separate sessions")
@@ -9764,8 +9775,9 @@ final class PlayhouseUITests: XCTestCase {
         relaunchApp()
         openTask(named: "Claude answer UI")
         XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
-        XCTAssertTrue(visibleTexts(containing: story).firstMatch.waitToExist(timeout: 10), "The saved Claude answer should persist across a relaunch.")
-        XCTAssertTrue(element("provider-boundary-codex").exists)
+        // Earlier turns render only near the viewport, so scroll to each row as a reader would.
+        XCTAssertTrue(scrollTranscriptUntilExists(visibleTexts(containing: story).firstMatch), "The saved Claude answer should persist across a relaunch.")
+        XCTAssertTrue(scrollTranscriptUntilExists(element("provider-boundary-codex")))
     }
 
     // case-contract: test_claude_resume_recovers_visible_history | A Claude turn that fails after Claude Code created its session leaves that session in place, and the next turn resumes it instead of claiming the same session ID again. After a Claude turn and Playhouse restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from Playhouse's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context.
@@ -10076,7 +10088,7 @@ final class PlayhouseUITests: XCTestCase {
         add(conversationHierarchy)
         XCTAssertTrue(revealWholeTranscript(), "The source turn should load as the reader scrolls up.")
         let userView = element("user-message-\(sourceID)")
-        XCTAssertTrue(userView.waitToExist(timeout: 10))
+        XCTAssertTrue(scrollTranscriptUntilExists(userView))
         let transcriptScrollView = element("conversation-scroll-view")
         for _ in 0..<4 where userView.frame.midY < transcriptScrollView.frame.minY + 20 {
             transcriptScrollView.swipeDown()
@@ -11315,6 +11327,12 @@ final class PlayhouseUITests: XCTestCase {
         let remoteSteer = try runCLI(["conversation", "steer", taskID, "--message", steeringText, "--image", cliImage.path])["result"] as? [String: Any]
         XCTAssertEqual(remoteSteer?["accepted"] as? Bool, true, "CLI/XPC steering should route to the UI-owned active turn.")
         XCTAssertTrue(transcriptMessage(steeringText).waitToExist(timeout: 10))
+        func userMessageID(_ text: String) -> String {
+            let bubble = app.groups.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "user-message-", text)).firstMatch
+            return bubble.exists ? String(bubble.identifier.dropFirst("user-message-".count)) : ""
+        }
+        let cliSteerID = userMessageID(steeringText)
+        XCTAssertFalse(cliSteerID.isEmpty, "The CLI/XPC steer should render as a user message.")
         let transcriptImages = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-image-"))
         XCTAssertTrue(transcriptImages.firstMatch.waitToExist(timeout: 5), "An image-bearing CLI/XPC steer should render in the visible transcript. \(app.debugDescription)")
         XCTAssertEqual(transcriptImages.count, 1)
@@ -11329,7 +11347,21 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "An image attached to a steer should remain previewed until accepted.")
         composer.typeKey(.return, modifierFlags: .command)
         XCTAssertTrue(transcriptMessage(uiSteeringText).waitToExist(timeout: 10), "Command-Return should steer the active turn with the composer text and image.")
-        XCTAssertEqual(transcriptImages.count, 2)
+        // The newer steer starts the newest turn, so the earlier steer now renders lazily and may
+        // be out of view: check each steer's own image rather than counting what is on screen.
+        let uiSteerID = userMessageID(uiSteeringText)
+        XCTAssertFalse(uiSteerID.isEmpty, "The Command-Return steer should render as a user message.")
+        XCTAssertTrue(element("chat-image-\(uiSteerID)-0").waitToExist(timeout: 5), "The Command-Return steer should show its image.")
+        XCTAssertFalse(element("chat-image-\(uiSteerID)-1").exists, "The Command-Return steer should show its one image once.")
+        // The newest turn renders eagerly, so its exact counts still hold: one bubble for the steer
+        // and one image outside the earlier steer, whether or not that steer is rendered now.
+        XCTAssertEqual(app.groups.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "user-message-", uiSteeringText)).count, 1,
+                       "The Command-Return steer should render once.")
+        XCTAssertEqual(app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND NOT (identifier BEGINSWITH %@)", "chat-image-", "chat-image-\(cliSteerID)-"
+        )).count, 1, "Only the Command-Return steer's image should join the transcript.")
+        XCTAssertTrue(scrollTranscriptUntilExists(element("chat-image-\(cliSteerID)-0")), "The earlier CLI/XPC steer should keep its image.")
+        XCTAssertFalse(element("chat-image-\(cliSteerID)-1").exists, "The earlier CLI/XPC steer should keep exactly its one image.")
         XCTAssertFalse(element("pending-chat-images").exists, "An accepted steer should clear its image preview.")
         XCTAssertEqual(composer.value as? String, "", "An accepted Command-Return steer should clear the draft.")
         try "no active turn to steer\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
@@ -11416,14 +11448,26 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: "Active turn message controls")
         XCTAssertTrue(element("queued-message-images-\(acceptedQueueID)").waitToExist(timeout: 10), "The queued row's image should persist across reopening.")
         XCTAssertFalse(element("pending-chat-images").exists, "A queued image must not return to the composer after reopening.")
-        let imagesBeforeRowSteer = transcriptImages.count
         element("steer-queued-message-\(acceptedQueueID)").click()
         XCTAssertTrue(waitUntil({
             !((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).contains { $0["id"] as? String == acceptedQueueID }
         }, timeout: 10), "Steering a queued row should remove it after successful delivery.")
-        XCTAssertFalse(element("queued-message-text-\(acceptedQueueID)").exists, "Successful steering should remove the queued text from its row.")
+        // The window applies the delivery the queue reports, so its row goes once that lands.
+        XCTAssertTrue(waitUntil({ !self.element("queued-message-text-\(acceptedQueueID)").exists }, timeout: 5), "Successful steering should remove the queued text from its row.")
         XCTAssertTrue(transcriptMessage(rowSteeringText).waitToExist(timeout: 10), "Per-row steering should appear in the active conversation.")
-        XCTAssertTrue(waitUntil({ transcriptImages.count == imagesBeforeRowSteer + 1 }, timeout: 10), "A steered queued row should show its image in the transcript. \(app.debugDescription)")
+        // Earlier steers render only near the viewport, so check the steered row's own image
+        // rather than counting what is rendered.
+        let rowSteerID = userMessageID(rowSteeringText)
+        XCTAssertFalse(rowSteerID.isEmpty, "The steered queued row should render as a user message.")
+        XCTAssertTrue(element("chat-image-\(rowSteerID)-0").waitToExist(timeout: 10), "A steered queued row should show its image in the transcript. \(app.debugDescription)")
+        XCTAssertFalse(element("chat-image-\(rowSteerID)-1").exists, "A steered queued row should show its one image once.")
+        // The steered row starts the newest turn, which renders in full, and every earlier row lies
+        // above it, so every image at or below its bubble must be its own one image: a duplicate
+        // attached to any other message of the turn would show up here.
+        let rowSteerBubble = element("user-message-\(rowSteerID)")
+        let imagesFromRowSteerDown = transcriptImages.allElementsBoundByIndex.filter { $0.frame.minY >= rowSteerBubble.frame.minY - 1 }
+        XCTAssertEqual(imagesFromRowSteerDown.map(\.identifier), ["chat-image-\(rowSteerID)-0"],
+                       "Only the steered row's image should join the transcript from its message down.")
         attachScreenshot(named: "Steered queued follow-up shows its image")
         composer.click()
         composer.typeText("Remove this queued row.")
@@ -11703,7 +11747,7 @@ final class PlayhouseUITests: XCTestCase {
         )).firstMatch
         XCTAssertTrue(followupAnswer.waitToExist(timeout: 10), "The follow-up answer should render as its own assistant message.")
         XCTAssertTrue(revealWholeTranscript(), "The earlier image turn should load as the reader scrolls up.")
-        XCTAssertTrue(element("chat-image-item_user_fixture_1-0").waitToExist(timeout: 10), "Refreshing history after another turn should keep the earlier image visible.")
+        XCTAssertTrue(scrollTranscriptUntilExists(element("chat-image-item_user_fixture_1-0")), "Refreshing history after another turn should keep the earlier image visible.")
         let refreshedHistory = try runCLI(["conversation", "history", try taskID(named: "Image conversation")])["result"] as? [String: Any]
         let refreshedUserMessages = (refreshedHistory?["messages"] as? [[String: Any]] ?? []).filter { $0["role"] as? String == "user" }
         XCTAssertEqual(refreshedUserMessages.first?["imageDataURLs"] as? [String], [pickedImage], "A fresh XPC history read should retain the earlier image after a later turn.")
@@ -11732,6 +11776,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("chat-image-\(agentJPEGID)-0").waitToExist(timeout: 10), "The specific agent-published JPEG should render in its assistant message after reopening.")
         let agentThumbnail = app.buttons["chat-image-\(agentImageID)-0"]
         XCTAssertTrue(agentThumbnail.waitToExist(timeout: 5), "An agent-published assistant image should be clickable.")
+        XCTAssertTrue(scrollFullyIntoView(agentThumbnail, in: element("conversation-scroll-view")), "The agent-published image should scroll into view before it is clicked.")
         let agentThumbnailFrame = agentThumbnail.frame
         agentThumbnail.click()
         let agentFullSizeImage = element("chat-image-full-size")
@@ -12336,7 +12381,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(revealWholeTranscript(), "The earlier turn should load as the reader scrolls up.")
         let rows = callIDs.map { element("conversation-tool-call-\($0)") }
         for row in rows {
-            XCTAssertTrue(row.waitToExist(timeout: 10), "The earlier turn's call should render inline: \(row.identifier)")
+            XCTAssertTrue(scrollTranscriptUntilExists(row), "The earlier turn's call should render inline: \(row.identifier)")
         }
         let intro = visibleText(introText)
         let middle = visibleText(middleText)
@@ -12400,7 +12445,7 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         openTask(named: title)
         XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load the earlier turn as the reader scrolls up.")
-        XCTAssertTrue(element("conversation-tool-call-\(callIDs[0])").waitToExist(timeout: 10),
+        XCTAssertTrue(scrollTranscriptUntilExists(element("conversation-tool-call-\(callIDs[0])")),
                       "The earlier turn's calls should still render inline after reopening the task.")
         XCTAssertTrue(text(of: element("conversation-tool-call-input-\(callIDs[0])")).contains("git status --short"))
     }
@@ -12872,6 +12917,169 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 20), "Jumping to the top of the history should reveal every batch above the window.")
         XCTAssertTrue(waitUntil({ isVisible(oldest) }, timeout: 5), "Jumping to the top of the history should land on its first messages.")
         attachScreenshot(named: "A jump to the top of the history lands on the first messages")
+    }
+
+    // case-contract: test_conversation_settled_history_renders_lazily | In a 120-message conversation whose history has been revealed, the messages before the newest turn render lazily: once the reader is back at the latest turn, the oldest messages that scrolled far out of view are no longer kept as views, and they render again, in order, when the reader scrolls back to them. A message scrolled away and back by the same distance lands where it was. A command an earlier turn ran stays inline after the message it followed, with its whole output in fresh CLI/XPC history, and a call the reader expanded is still expanded when its row renders again. A message holding an open side chat keeps rendering while the reader scrolls far away, so its bubble and unsent draft are still there when the reader returns. Changing the transcript's width keeps the reader on the message they were reading, with the older messages above still in order.
+    func test_conversation_settled_history_renders_lazily() throws {
+        let fixtureCopy = WorkspaceFixture.root.appendingPathComponent("codex-fixture-long-history-lazy-success")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the lazy long-history fixture before launch.")
+        codexFixtureExecutable = fixtureCopy.path
+        launchApp(defaultParent: fixture.primary.path)
+        let title = "Lazy long history"
+        try createTaskFixture(title: title, roots: [fixture.primary.path])
+        openTask(named: title)
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Create a long history.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ !self.element("codex-working-duration").exists && self.noTurnIsRunning() }, timeout: 30),
+                      "The streamed long history should settle before the conversation is reopened.")
+        let taskID = try taskID(named: title)
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        XCTAssertEqual((history["messages"] as? [[String: Any]])?.count, 120, "CLI/XPC history stays complete while the transcript renders lazily.")
+        let call = try XCTUnwrap((history["timelineActivities"] as? [[String: Any]])?.first { $0["id"] as? String == "item_long_history_command_21" },
+                                 "The earlier turn's command should be a timeline activity in fresh history.")
+        XCTAssertEqual(call["afterMessageID"] as? String, "item_long_history_user_21", "The command follows the question of its own turn.")
+        XCTAssertEqual((call["output"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n").count, 6,
+                       "Fresh history keeps the command's whole output.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitToExist(timeout: 10))
+        openTask(named: title)
+
+        let scrollView = element("conversation-scroll-view")
+        let latest = element("assistant-message-item_long_history_assistant_60")
+        let oldest = element("user-message-item_long_history_user_1")
+        let firstAssistant = element("assistant-message-item_long_history_assistant_1")
+        let intermediate = element("user-message-item_long_history_user_21")
+        let callRow = element("conversation-tool-call-item_long_history_command_21")
+        let callOutput = element("conversation-tool-call-output-item_long_history_command_21")
+        func isVisible(_ candidate: XCUIElement) -> Bool {
+            candidate.exists && scrollView.frame.intersects(candidate.frame)
+        }
+        func topInViewport(_ candidate: XCUIElement) -> CGFloat { candidate.frame.minY - scrollView.frame.minY }
+        // Wheel scrolling keeps each step deterministic: a swipe carries momentum.
+        func scrollTranscript(by delta: CGFloat, until condition: () -> Bool, limit: Int = 40, settle: TimeInterval = 0) {
+            for _ in 0..<limit where !condition() {
+                scrollView.scroll(byDeltaX: 0, deltaY: delta)
+                if settle > 0 { _ = waitUntil(condition, timeout: settle) }
+            }
+        }
+        /// Coarse steps until `target` shows, then steps shorter than the 160-point band below the
+        /// viewport's top, so the seek cannot carry it past that band.
+        func bringNearTop(_ target: XCUIElement, coarse: CGFloat) {
+            scrollTranscript(by: coarse, until: { isVisible(target) }, limit: 40, settle: 0.2)
+            let fine: CGFloat = coarse < 0 ? -100 : 100
+            scrollTranscript(by: fine, until: { isVisible(target) && topInViewport(target) < 160 && topInViewport(target) >= 0 }, limit: 20, settle: 0.2)
+        }
+        XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest 2 of 120 messages" }, timeout: 20), "Reopening should render only the latest turn.")
+        // Deep upward scrolls reveal every batch they pass, as one long scroll does.
+        scrollTranscript(by: 1500, until: { scrollView.value as? String == "Showing latest 120 of 120 messages" }, limit: 40, settle: 1)
+        XCTAssertEqual(scrollView.value as? String, "Showing latest 120 of 120 messages", "Scrolling up should reveal every earlier batch.")
+        scrollTranscript(by: 1500, until: { isVisible(oldest) }, limit: 40)
+        XCTAssertTrue(waitUntil({ isVisible(oldest) && isVisible(firstAssistant) }, timeout: 5), "The top of the revealed history should show its first messages.")
+
+        // Back at the newest turn, the oldest rows are far out of view and no longer exist as
+        // views. An eager transcript keeps every revealed row, which made scrolling, hit testing
+        // and layout cost grow with the history.
+        scrollTranscript(by: -1500, until: { isVisible(latest) }, limit: 40)
+        XCTAssertTrue(waitUntil({ isVisible(latest) }, timeout: 5))
+        XCTAssertTrue(waitUntil({ !oldest.exists && !firstAssistant.exists }, timeout: 5), "Rows scrolled far out of view should not stay rendered once the reader returns to the latest turn.")
+        XCTAssertEqual(scrollView.value as? String, "Showing latest 120 of 120 messages", "Lazy rendering must keep every revealed message in the transcript's window.")
+        // The discarded rows are rebuilt when the reader returns to them, still in order.
+        scrollTranscript(by: 1500, until: { isVisible(oldest) }, limit: 40)
+        XCTAssertTrue(waitUntil({ isVisible(oldest) && isVisible(firstAssistant) }, timeout: 5), "Scrolling back up should render the oldest messages again.")
+        XCTAssertLessThan(oldest.frame.minY, firstAssistant.frame.minY, "Rebuilt rows should keep chronological order.")
+        XCTAssertEqual(scrollView.value as? String, "Showing latest 120 of 120 messages", "Returning to discarded rows must not reload or shrink the window.")
+
+        // The earlier turn's command renders inline after its question; expanding it shows every line.
+        bringNearTop(intermediate, coarse: -300)
+        XCTAssertTrue(isVisible(intermediate), "A mid-history message should be reachable once every batch is revealed.")
+        XCTAssertTrue(waitUntil({ isVisible(callRow) }, timeout: 5), "The earlier turn's command should render inline after its question.")
+        XCTAssertLessThan(intermediate.frame.minY, callRow.frame.minY, "The command should follow the message it came after.")
+        XCTAssertTrue(scrollFullyIntoView(callRow, in: scrollView))
+        let collapsedOutputHeight = callOutput.frame.height
+        let toggle = element("conversation-tool-call-toggle-item_long_history_command_21")
+        XCTAssertTrue(toggle.waitToExist(timeout: 5), "Output past the clipped lines can expand.")
+        toggle.click()
+        XCTAssertTrue(waitUntil({ callOutput.frame.height > collapsedOutputHeight + 10 }, timeout: 5), "Expanding should show every output line.")
+        let expandedOutputHeight = callOutput.frame.height
+        bringNearTop(intermediate, coarse: 300)
+
+        // A row that leaves the viewport's surroundings becomes a box of its measured height, so
+        // scrolling away and back by the same distance lands it exactly where it was, and the
+        // call the reader expanded is still expanded when its row is rebuilt.
+        let intermediateTop = topInViewport(intermediate)
+        for _ in 0..<2 { scrollView.scroll(byDeltaX: 0, deltaY: -1500) }
+        XCTAssertTrue(waitUntil({ !intermediate.exists && !callRow.exists }, timeout: 5), "Rows scrolled far away should no longer be rendered.")
+        for _ in 0..<2 { scrollView.scroll(byDeltaX: 0, deltaY: 1500) }
+        XCTAssertTrue(waitUntil({ isVisible(intermediate) }, timeout: 5), "Scrolling back should render the message again.")
+        XCTAssertLessThanOrEqual(abs(topInViewport(intermediate) - intermediateTop), 20,
+                                 "Unrendered messages must keep their real heights, so a round trip lands the message where it was.")
+        XCTAssertTrue(waitUntil({ callOutput.exists && abs(callOutput.frame.height - expandedOutputHeight) <= 2 }, timeout: 5),
+                      "A call the reader expanded should still be expanded when its row is rebuilt.")
+        attachScreenshot(named: "Rebuilt rows land where they were with the call still expanded")
+
+        // A message holding an open side chat keeps rendering however far the reader scrolls, so
+        // its bubble, which is anchored in the message's text, keeps its unsent draft.
+        let userText = intermediate.textViews.firstMatch
+        XCTAssertTrue(userText.waitToExist(timeout: 5))
+        userText.click()
+        userText.typeKey("a", modifierFlags: .command)
+        let bubble = try waitForSideChatBubble(at: intermediate)
+        let sideChatInput = element("side-chat-input")
+        XCTAssertTrue(sideChatInput.waitToExist(timeout: 5))
+        sideChatInput.click()
+        sideChatInput.typeText("Keep this side chat draft.")
+        // Scroll from below the bubble, so the wheel reaches the transcript rather than the bubble.
+        let belowBubble = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.92))
+        for _ in 0..<2 { belowBubble.scroll(byDeltaX: 0, deltaY: -1500) }
+        XCTAssertTrue(waitUntil({ !self.element("user-message-item_long_history_user_22").exists }, timeout: 5),
+                      "The rows around the selected message should still turn into boxes once far away.")
+        XCTAssertTrue(intermediate.exists, "The message holding the side chat should keep rendering while far away.")
+        XCTAssertTrue(bubble.exists, "The side chat bubble should stay open while its message is scrolled away.")
+        for _ in 0..<2 { belowBubble.scroll(byDeltaX: 0, deltaY: 1500) }
+        XCTAssertTrue(waitUntil({ isVisible(intermediate) && bubble.exists }, timeout: 5), "Back at the message, its side chat should still be open.")
+        XCTAssertEqual(sideChatInput.value as? String, "Keep this side chat draft.", "The side chat keeps its unsent draft.")
+        attachScreenshot(named: "Side chat stays open on a message scrolled far away and back")
+        sideChatInput.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ !bubble.exists }, timeout: 5), "Escape should close the side chat.")
+
+        // A width change keeps the reader on the message they were reading, and the older
+        // messages above, whose heights were taken at the old width, still render in order.
+        // The message read sits deep in the history, so the boxes above it are tall enough that
+        // their rescaled heights, if the reader's position were not restored, would carry it far
+        // further than the tolerance below: the restore pins the message at the viewport's top
+        // to the top again, so the message read moves by at most one message.
+        let deepMessage = element("user-message-item_long_history_user_50")
+        bringNearTop(deepMessage, coarse: -300)
+        XCTAssertTrue(isVisible(deepMessage), "A message deep in the history should be reachable.")
+        let widthBeforeResize = scrollView.frame.width
+        let readingTop = topInViewport(deepMessage)
+        // The scroll content, padding included, is capped at 820 points; the rows are only as
+        // wide as that capped column, so it is the column whose width must change. Hiding the
+        // task sidebar widens the transcript whatever the screen's size, where a window drag is
+        // clamped by the screen's edge and the window's minimum width.
+        func columnWidth(_ scrollWidth: CGFloat) -> CGFloat { min(scrollWidth, 820) }
+        let hideSidebar = element("hide-task-sidebar-button")
+        XCTAssertTrue(waitUntil({ hideSidebar.exists && hideSidebar.isHittable }, timeout: 5), "The task sidebar should offer its hide button.")
+        hideSidebar.click()
+        XCTAssertTrue(waitUntil({ abs(columnWidth(scrollView.frame.width) - columnWidth(widthBeforeResize)) > 20 }, timeout: 5),
+                      "Hiding the task sidebar should change the width of the transcript's column: before=\(widthBeforeResize), after=\(scrollView.frame.width).")
+        // The boxes rescale a moment after the width changes and the restore lands 150 ms after
+        // the resize ends, so judge the position once both have had time, not on a sample taken
+        // before the boxes rescaled.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.8))
+        XCTAssertTrue(isVisible(deepMessage) && abs(topInViewport(deepMessage) - readingTop) <= 100,
+                      "A resize should keep the message being read in place; it moved from \(readingTop) to \(topInViewport(deepMessage)).")
+        attachScreenshot(named: "A resize keeps the message being read in place")
+        scrollTranscript(by: 1500, until: { isVisible(oldest) }, limit: 40)
+        XCTAssertTrue(waitUntil({ isVisible(oldest) && isVisible(firstAssistant) }, timeout: 5), "The oldest messages should render after a resize.")
+        XCTAssertLessThan(oldest.frame.minY, firstAssistant.frame.minY, "Messages measured at the old width should keep chronological order after a resize.")
+        let showSidebar = element("show-task-sidebar-button")
+        XCTAssertTrue(waitUntil({ showSidebar.exists && showSidebar.isHittable }, timeout: 5), "The hidden task sidebar should offer its show button.")
+        showSidebar.click()
+        XCTAssertTrue(waitUntil({ abs(scrollView.frame.width - widthBeforeResize) <= 2 }, timeout: 5), "Showing the task sidebar again should restore the transcript's width.")
     }
 
     // case-contract: test_sent_prompt_stays_out_of_composer_past_history_page | A sent prompt followed by a 120-message turn, so that it lies outside the newest history page, never returns to the composer when the task is reopened: the composer is empty, the task keeps hasUnsentDraft false and its last sent prompt as the saved prompt, and the CLI newest page of 80 messages leaves out the earlier messages. Only the saved draft flag decides draft restoration, so the same task restores a real unsent draft after it is typed.
@@ -15554,14 +15762,15 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 60), "The later ordinary turn should finish with an answer.")
         XCTAssertTrue(revealWholeTranscript(), "The earlier nudged turn should load as the reader scrolls up.")
         let input = element("conversation-tool-call-input-\(callID)")
-        XCTAssertTrue(input.waitToExist(timeout: 10), "After a later turn, the nudged turn's call should render inline.")
+        XCTAssertTrue(transcriptScan { input.exists }, "After a later turn, the nudged turn's call should render inline.")
         XCTAssertTrue([input.label, input.value as? String ?? ""].joined(separator: " ").contains("echo NUDGED CHECK PASSED"),
                       "The inline call should show the nudged turn's exact command.")
+        // Earlier rows render only near the viewport, so each check scans the whole transcript.
         for text in visibleTexts {
-            XCTAssertTrue(transcriptContains(text), "A later turn keeps the nudged turn's message: \(text)")
+            XCTAssertTrue(transcriptScan { self.transcriptContains(text) }, "A later turn keeps the nudged turn's message: \(text)")
         }
-        XCTAssertTrue(transcriptContains("ended without reporting a task outcome"), "A later turn keeps the nudge Playhouse sent shown.")
-        XCTAssertFalse(transcriptContains("Playhouse private outcome"), "No placeholder replaces the nudge.")
+        XCTAssertTrue(transcriptScan { self.transcriptContains("ended without reporting a task outcome") }, "A later turn keeps the nudge Playhouse sent shown.")
+        assertTranscriptLacks("No placeholder replaces the nudge.") { self.transcriptContains("Playhouse private outcome") }
         let later = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         let texts = (later["messages"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
         XCTAssertTrue(texts.contains { $0.contains("ended without reporting a task outcome") }, "History after a later turn keeps the nudge shown.")
@@ -15984,11 +16193,14 @@ final class PlayhouseUITests: XCTestCase {
         relaunchApp()
         openTask(named: "Codex recovery without a secret")
         XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
-        XCTAssertTrue(transcriptMessage("Recovered answer: Blue; no secret was required.").waitToExist(timeout: 15),
+        // Earlier rows render only near the viewport, so these checks scan the whole transcript.
+        XCTAssertTrue(transcriptScan { self.transcriptMessage("Recovered answer: Blue; no secret was required.").exists },
             "A later secret recovery must leave the earlier safe no-secret response visible after restart.")
-        XCTAssertTrue(transcriptMessage("[Response to private answer hidden]").exists,
+        XCTAssertTrue(transcriptScan { self.transcriptMessage("[Response to private answer hidden]").exists },
             "The secret recovery response must remain hidden after restart.")
-        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists)
+        assertTranscriptLacks("No row anywhere in the reopened transcript may show the secret.") {
+            self.app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists
+        }
     }
 
     // case-contract: test_codex_secret_recovery_redaction_fails_closed | When Codex recovery and a later thread-resume/history read error echo the full recovery prompt and answers, Playhouse preserves the pending question while the task stays in Waiting Response, uses a generic visible error, and redacts private content from returned history, saved task state, diagnostics, and error text across fresh CLI/XPC reads and app restarts.
@@ -16582,6 +16794,8 @@ final class PlayhouseUITests: XCTestCase {
         }
         XCTAssertTrue(element("send-message-button").isEnabled, "The later answer must be submitted after the first turn completes.")
         let laterAnswer = element("async-question-answer-item_playhouse_async_later_question-0")
+        // Later replies below the card can carry its field out of view; bring it back before typing.
+        XCTAssertTrue(revealInConversation(laterAnswer), "The later question's answer field should scroll into view.")
         laterAnswer.click()
         laterAnswer.typeText("Finish after the turn.")
         element("submit-async-questions-item_playhouse_async_later_question").click()
@@ -16596,10 +16810,9 @@ final class PlayhouseUITests: XCTestCase {
         element("back-to-board-button").click()
         openTask(named: "Async Codex question")
         XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
-        XCTAssertTrue(card.waitToExist(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Answered"].exists)
-        XCTAssertTrue(laterCard.exists)
-        XCTAssertTrue(laterCard.staticTexts["Answered"].exists, "The later question must stay answered after reopening.")
+        // Earlier rows render only near the viewport, so each card is found by scanning the transcript.
+        XCTAssertTrue(transcriptScan { card.exists && card.staticTexts["Answered"].exists }, "The first question must stay answered after reopening.")
+        XCTAssertTrue(transcriptScan { laterCard.exists && laterCard.staticTexts["Answered"].exists }, "The later question must stay answered after reopening.")
         XCTAssertEqual(element("message-composer").value as? String, "An unsent draft stays here.")
     }
 
@@ -23817,7 +24030,11 @@ final class PlayhouseUITests: XCTestCase {
         // quit and reopens them on the next launch; a plugin window left open by
         // an earlier case (or session) reopens against this case's data directory,
         // shows "has no plugin.json", and covers the board.
-        app.launchArguments = ["-ApplePersistenceIgnoreState", "YES"]
+        // The sandboxed test runner's `clearSavedWindowFrames` reaches only its own container, so
+        // the main window's saved frame in the app's defaults survives between cases and an earlier
+        // case's window size leaks into the next. An empty frame in the launch-argument domain,
+        // which takes precedence, makes every case open the main window at its default size.
+        app.launchArguments = ["-ApplePersistenceIgnoreState", "YES", "-NSWindow Frame main", ""]
         app.launch()
     }
 
@@ -24875,6 +25092,67 @@ final class PlayhouseUITests: XCTestCase {
         return counts.count == 2 && counts[0] == counts[1]
     }
 
+    /// Settled turns render lazily, so a row of an earlier turn exists only while it is near the
+    /// viewport. Scrolls the transcript up, then back down, as a reader looking for it would,
+    /// until `target` exists.
+    @discardableResult
+    private func scrollTranscriptUntilExists(_ target: XCUIElement) -> Bool {
+        if target.waitToExist(timeout: 1) { return true }
+        let scrollView = element("conversation-scroll-view")
+        for delta: CGFloat in [300, -300] {
+            for _ in 0..<60 {
+                scrollView.scroll(byDeltaX: 0, deltaY: delta)
+                if target.waitToExist(timeout: 0.3) { return true }
+            }
+        }
+        return target.exists
+    }
+
+    /// Settled turns render lazily, so a check over the whole revealed transcript has to look at
+    /// it a viewport at a time. Scrolls the conversation to its top, then down to its bottom in
+    /// steps shorter than the viewport, checking `found` at every step, and reports whether it
+    /// held at any step and whether the scan covered the whole transcript. The scroller's value
+    /// reports the position, 0 at the top and 1 at the bottom.
+    private func scanTranscript(_ found: () -> Bool) -> (found: Bool, coveredWholeTranscript: Bool) {
+        if found() { return (true, true) }
+        let scrollView = element("conversation-scroll-view")
+        let scroller = scrollView.scrollBars.firstMatch
+        func position() -> Double? {
+            guard scroller.exists else { return nil }
+            if let number = scroller.value as? NSNumber { return number.doubleValue }
+            return (scroller.value as? String).flatMap(Double.init)
+        }
+        guard position() != nil else { return (found(), false) }
+        for _ in 0..<40 where (position() ?? 0) > 0.001 {
+            scrollView.scroll(byDeltaX: 0, deltaY: 3000)
+        }
+        let reachedTop = (position() ?? 1) <= 0.001
+        let step = -max(100, scrollView.frame.height * 0.6)
+        for _ in 0..<400 {
+            // Rows near the viewport are realized a moment after a scroll lands.
+            if waitUntil(found, timeout: 0.5) { return (true, true) }
+            guard let current = position() else { return (false, false) }
+            if current >= 0.999 { return (found(), reachedTop) }
+            scrollView.scroll(byDeltaX: 0, deltaY: step)
+            // A step that does not move the scroller would end the scan short of the bottom.
+            guard let moved = position(), moved > current else { return (found(), false) }
+        }
+        return (found(), false)
+    }
+
+    /// Whether `found` holds anywhere in the transcript, scanning it a viewport at a time.
+    private func transcriptScan(_ found: () -> Bool) -> Bool {
+        scanTranscript(found).found
+    }
+
+    /// Asserts that `found` holds nowhere in the transcript. The scan must have covered it
+    /// from its top to its bottom, so a scan cut short cannot pass as an absence.
+    private func assertTranscriptLacks(_ message: String, file: StaticString = #filePath, line: UInt = #line, _ found: () -> Bool) {
+        let scan = scanTranscript(found)
+        XCTAssertTrue(scan.coveredWholeTranscript, "The transcript scan must reach both its top and its bottom: \(message)", file: file, line: line)
+        XCTAssertFalse(scan.found, message, file: file, line: line)
+    }
+
     /// A user message in the transcript, which is exposed as a labeled group.
     private func transcriptMessage(_ text: String) -> XCUIElement {
         app.groups[text].firstMatch
@@ -25603,10 +25881,12 @@ final class PlayhouseUITests: XCTestCase {
             .matching(identifier: "conversation-scroll-view")
             .firstMatch
             .staticTexts
-            .matching(identifier: "chat-page-separator")
-            .allElementsBoundByIndex
+            // One query rather than reading each separator in turn: settled rows render only
+            // near the viewport, so a separator can leave between listing it and reading it.
             // A static text reports its string as its value.
-            .contains { $0.label == title || $0.value as? String == title }
+            .matching(NSPredicate(format: "identifier == %@ AND (label == %@ OR value == %@)", "chat-page-separator", title, title))
+            .firstMatch
+            .exists
     }
 
     private func element(_ identifier: String) -> XCUIElement {

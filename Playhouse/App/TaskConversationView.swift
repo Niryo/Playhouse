@@ -528,12 +528,236 @@ private struct ChatPageRecallRow: View {
     }
 }
 
+/// Keeps the transcript's settled rows, those before the newest turn, cheap at any history length.
+/// Only the messages near the viewport render as real views; every other settled message is a blank
+/// box exactly as tall as it measured when it was last shown, so the content keeps its size as rows
+/// come and go and nothing above the reader moves. A message not yet measured renders for real
+/// until it is. SwiftUI's lazy stack was tried first: it guesses the heights of rows it has not
+/// realized, its corrections moved the content under the reader, and following the bottom while it
+/// corrected never let layout settle.
+@MainActor
+@Observable
+private final class TranscriptVirtualizer {
+    private struct Measurement {
+        var height: CGFloat
+        var width: CGFloat
+        /// What the rows showed when measured. A message whose rows change while it is a box,
+        /// such as by tool calls, a comment or a reload arriving, renders and measures again.
+        var signature: Int
+    }
+
+    /// Measured settled messages that render as real views. Only the settled rows read it, so
+    /// changing it re-renders them alone.
+    private(set) var realizedIDs: Set<String> = []
+    /// Bumped when a resize rescales the boxes, so they redraw at their new heights at once.
+    private(set) var boxRevision = 0
+    @ObservationIgnored private var measurements: [String: Measurement] = [:]
+    /// The settled messages in transcript order, as last rendered.
+    @ObservationIgnored var order: [String] = []
+    /// Top of the settled rows in the scroll content.
+    @ObservationIgnored var sectionTop: CGFloat = 0
+    @ObservationIgnored private(set) var width: CGFloat = 0
+    @ObservationIgnored private var offsetY: CGFloat?
+    @ObservationIgnored private var viewportHeight: CGFloat = 0
+    /// The content span the realized rows were chosen for.
+    @ObservationIgnored private var realizedSpan: ClosedRange<CGFloat>?
+    @ObservationIgnored private var isRecomputeScheduled = false
+    /// The settled message the reader was on when a resize began, and how far into it the
+    /// viewport's top was, restored once the resize ends.
+    @ObservationIgnored var resizeAnchor: (id: String, depth: CGFloat)?
+    @ObservationIgnored var resizeAnchorTask: Task<Void, Never>?
+    static let spacing: CGFloat = 16
+
+    /// Whether a settled message renders as a real view, given the `realized` set the caller read
+    /// in its body. The caller reads `realizedIDs` up front so it depends on it even while no row
+    /// has been measured yet; otherwise the rows would never turn into boxes once measured.
+    func isRealized(_ id: String, signature: Int, in realized: Set<String>) -> Bool {
+        guard let measurement = measurements[id], measurement.signature == signature else { return true }
+        return realized.contains(id)
+    }
+
+    /// The box a settled message takes while it is not rendered: the height it measured, scaled
+    /// for a width change, since text grows taller roughly as its width shrinks.
+    func boxHeight(_ id: String) -> CGFloat {
+        guard let measurement = measurements[id] else { return 0 }
+        guard width > 0, measurement.width > 0, abs(measurement.width - width) > 0.5 else { return measurement.height }
+        return (measurement.height * measurement.width / width).rounded()
+    }
+
+    func record(_ id: String, height: CGFloat, signature: Int) {
+        let previous = measurements[id]
+        if let previous, abs(previous.height - height) < 0.5, abs(previous.width - width) < 0.5, previous.signature == signature { return }
+        measurements[id] = Measurement(height: height, width: width, signature: signature)
+        // A row measured for the first time, or again after its content changed, may lie outside
+        // the viewport's surroundings.
+        if previous == nil || previous?.signature != signature { scheduleRecompute() }
+    }
+
+    /// Notes a width change and reports whether it is one, as opposed to the first width seen.
+    func updateWidth(_ newWidth: CGFloat) -> Bool {
+        let isResize = width > 0 && abs(width - newWidth) > 0.5
+        width = newWidth
+        if isResize {
+            invalidate()
+            DispatchQueue.main.async { [weak self] in self?.boxRevision += 1 }
+        }
+        return isResize
+    }
+
+    /// The settled rows left the transcript, as on a reload to the newest turn; the width they
+    /// report when they return is not a resize.
+    func resetWidth() {
+        width = 0
+    }
+
+    func updateViewport(offsetY: CGFloat, height: CGFloat) {
+        self.offsetY = offsetY
+        viewportHeight = height
+        guard height > 0 else { return }
+        // Rows are chosen for a span well beyond the viewport, and chosen again only once the
+        // viewport nears that span's edge, so scrolling re-renders the rows now and then rather
+        // than on every frame.
+        let needed = (offsetY - height * 0.5)...(offsetY + height * 1.5)
+        if let span = realizedSpan, span.lowerBound <= needed.lowerBound, span.upperBound >= needed.upperBound { return }
+        scheduleRecompute()
+    }
+
+    func invalidate() {
+        realizedSpan = nil
+        scheduleRecompute()
+    }
+
+    /// The settled message at the top of the viewport and how far into it the viewport's top is,
+    /// if the viewport's top is in the settled rows.
+    func topVisibleAnchor() -> (id: String, depth: CGFloat)? {
+        guard let offsetY else { return nil }
+        var y = sectionTop
+        for id in order {
+            let height = boxHeight(id)
+            if y + height > offsetY { return y <= offsetY + viewportHeight ? (id, offsetY - y) : nil }
+            y += height + Self.spacing
+        }
+        return nil
+    }
+
+    /// Whether the viewport's top has drifted off `anchor` since it was taken, by more than a
+    /// rounding of row heights. A width change that leaves the reader where they were, such as
+    /// the scroller appearing, then needs no correction: scrolling would move the transcript
+    /// under a reader who is following its bottom.
+    func hasDrifted(from anchor: (id: String, depth: CGFloat)) -> Bool {
+        guard let offsetY else { return false }
+        var y = sectionTop
+        for id in order {
+            if id == anchor.id { return abs((offsetY - y) - anchor.depth) > 40 }
+            y += boxHeight(id) + Self.spacing
+        }
+        return false
+    }
+
+    private func scheduleRecompute() {
+        guard !isRecomputeScheduled else { return }
+        isRecomputeScheduled = true
+        // Measurements and scroll samples arrive during layout, which must not change state.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            isRecomputeScheduled = false
+            recompute()
+        }
+    }
+
+    private func recompute() {
+        guard let offsetY, viewportHeight > 0 else { return }
+        let span = (offsetY - viewportHeight * 1.5)...(offsetY + viewportHeight * 2.5)
+        var y = sectionTop
+        var realized = Set<String>()
+        for id in order where measurements[id] != nil {
+            let height = boxHeight(id)
+            if y + height >= span.lowerBound, y <= span.upperBound { realized.insert(id) }
+            y += height + Self.spacing
+        }
+        realizedSpan = span
+        if realized != realizedIDs { realizedIDs = realized }
+    }
+}
+
+/// Reports a value read from a view's geometry when the view first lays out and whenever it
+/// changes. Measurements must include the first layout: a row that never changes height after
+/// appearing would otherwise never be measured, and an unmeasured row always renders in full.
+private struct GeometryValueReporter<Value: Equatable>: ViewModifier {
+    let value: (GeometryProxy) -> Value
+    let action: (Value) -> Void
+
+    func body(content: Content) -> some View {
+        content.background {
+            GeometryReader { proxy in
+                let current = value(proxy)
+                Color.clear
+                    .onAppear { action(current) }
+                    .onChange(of: current) { _, newValue in action(newValue) }
+            }
+        }
+    }
+}
+
+private extension View {
+    func reportGeometry<Value: Equatable>(_ value: @escaping (GeometryProxy) -> Value, action: @escaping (Value) -> Void) -> some View {
+        modifier(GeometryValueReporter(value: value, action: action))
+    }
+}
+
+/// The settled messages, each either rendered or a box of its measured height. A box keeps the
+/// message's ID, so scrolling to it still works.
+private struct SettledTranscriptRows: View {
+    let ids: [String]
+    /// Per message, a summary of what its rows show (see `TranscriptVirtualizer`).
+    let signatures: [Int]
+    let virtualizer: TranscriptVirtualizer
+    /// Messages that render however far they are from the viewport: one holding the reader's
+    /// text selection or an open side chat bubble, which is anchored inside the message's text
+    /// and would close, losing its chat, if the message became a box.
+    let pinnedIDs: Set<String>
+    let row: (Int) -> AnyView
+
+    var body: some View {
+        let _ = virtualizer.boxRevision
+        let realized = virtualizer.realizedIDs
+        ForEach(Array(ids.enumerated()), id: \.element) { index, id in
+            let signature = signatures[index]
+            if pinnedIDs.contains(id) || virtualizer.isRealized(id, signature: signature, in: realized) {
+                row(index)
+                    .reportGeometry({ $0.size.height }) { height in
+                        virtualizer.record(id, height: height, signature: signature)
+                    }
+            } else {
+                Color.clear
+                    .frame(height: virtualizer.boxHeight(id))
+                    .id(id)
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+}
+
+/// Which tool calls the reader expanded. It lives with the conversation rather than in each row:
+/// a settled row that scrolls far away becomes a box and is rebuilt when it returns, and a newer
+/// question moves rows out of the newest turn, and an expanded call should stay expanded through either.
+@Observable
+private final class ToolCallExpansionState {
+    var expandedIDs: Set<String> = []
+}
+
 /// One tool call in the conversation timeline: the tool's name and what the call was for, then
 /// what it was given (IN) and what it returned (OUT), clipped to a few lines until expanded.
 private struct ToolCallTimelineRow: View {
     let activity: ConversationActivity
+    let expansion: ToolCallExpansionState
 
-    @State private var isExpanded = false
+    private var isExpanded: Bool {
+        get { expansion.expandedIDs.contains(activity.id) }
+        nonmutating set {
+            if newValue { expansion.expandedIDs.insert(activity.id) } else { expansion.expandedIDs.remove(activity.id) }
+        }
+    }
 
     private static let collapsedLineLimit = 3
 
@@ -1254,6 +1478,8 @@ struct TaskConversationView: View {
     /// (the composer inside `ComposerDraftScope`), not the whole transcript. Read `draft` (or
     /// `isSendDisabled`) during body evaluation only inside that scope; handlers may read it freely.
     @State private var composerDraft = ComposerDraftModel()
+    @State private var toolCallExpansion = ToolCallExpansionState()
+    @State private var transcriptVirtualizer = TranscriptVirtualizer()
     private var draft: String {
         get { composerDraft.text }
         nonmutating set { composerDraft.text = newValue }
@@ -3670,6 +3896,28 @@ struct TaskConversationView: View {
         )
     }
 
+    /// For each settled message, a summary of everything its rows render from besides its ID, so a
+    /// box whose message changed is measured again rather than kept at a stale height.
+    private func settledRowSignatures(_ settled: ArraySlice<ConversationMessage>, context: TranscriptRowContext) -> [Int] {
+        guard !settled.isEmpty else { return [] }
+        let annotationCounts = Dictionary(grouping: annotations, by: \.messageID).mapValues(\.count)
+        let compactionCount = context.orderedContextCompactions.count
+        return settled.map { message in
+            var hasher = Hasher()
+            hasher.combine(message.text.utf16.count)
+            hasher.combine(message.imageDataURLs.count)
+            hasher.combine(message.asyncQuestions != nil)
+            hasher.combine(context.inlineTools[message.id]?.count ?? 0)
+            hasher.combine(context.boundariesByAnchorID[message.id]?.count ?? 0)
+            hasher.combine(context.goalEntriesByAnchorID[message.id]?.count ?? 0)
+            hasher.combine(annotationCounts[message.id] ?? 0)
+            hasher.combine(message.id == context.activityDisclosureAnchorID)
+            hasher.combine(isResponding && message.role == .assistant && message.text.isEmpty)
+            hasher.combine(compactionCount)
+            return hasher.finalize()
+        }
+    }
+
     /// One message of the rendered window with the rows anchored to it: its
     /// page separator and activity disclosure above, and the boundaries, goal
     /// achievements, tool calls, and compactions that follow it.
@@ -3698,7 +3946,7 @@ struct TaskConversationView: View {
             if let pageID = activity.recalledChatPageID {
                 ChatPageRecallRow(activityID: activity.id, pageID: pageID)
             } else {
-                ToolCallTimelineRow(activity: activity)
+                ToolCallTimelineRow(activity: activity, expansion: toolCallExpansion)
             }
         }
         // Most transcripts have no compaction, so the scan for the next ordered message runs only when one exists.
@@ -3760,23 +4008,87 @@ struct TaskConversationView: View {
                     }
                     .frame(height: 0)
 
-                // One stack for the whole rendered window, so rows keep their
-                // identity, and with it their state, as a newer question moves
-                // the start of the newest turn past them. The layout reserves
-                // the filler below the newest turn itself: from its question to
-                // the end of the transcript it is at least a viewport tall, less
-                // the bottom padding and end marker already below it, which lets
-                // a turn shorter than the viewport be pinned to the top, and
-                // makes that pin exactly the bottom, which following starts
-                // from. The runway above the window does the same for the other
-                // end. Sizing the filler from measurements instead, which
-                // SwiftUI reports a pass later, left it stale and opened blank
-                // overscroll below the transcript.
                 let leadingGoalEntries = goalAchievementTimelineEntries.filter { goalAchievementAnchorMessageID(for: $0) == nil }
                 // Worked out once per pass rather than once per row: each walks the whole transcript, and
                 // every row of it is rebuilt whenever the transcript's width changes, as while resizing the chat.
                 let renderedMessages = renderedConversationMessages
                 let rowContext = makeTranscriptRowContext(rendered: renderedMessages)
+                // Everything before the newest turn is settled, so only its rows near the viewport
+                // render (see `TranscriptVirtualizer`): scrolling, hit testing and layout cost what
+                // is on screen rather than everything revealed so far. The newest turn, where answers
+                // stream and rows grow, always renders in full in the layout below. When the newest
+                // turn starts before the rendered window, as when one live turn outgrows a window
+                // that was never pinned, every rendered row belongs to it and renders in full.
+                let latestTurnStartIndex = rowContext.latestTurnStartID.flatMap { id in
+                    renderedMessages.firstIndex { $0.id == id }
+                } ?? 0
+                let messageReferences = renderedMessages.indices.map { RenderedMessageReference(id: renderedMessages[$0].id, index: $0) }
+                let leadingBoundaries = providerBoundaries.filter { $0.afterMessageID == nil }
+                let hasSettledRows = !messages.isEmpty
+                    && (latestTurnStartIndex > 0 || !leadingGoalEntries.isEmpty || !leadingBoundaries.isEmpty)
+                let settledIDs = messageReferences[..<latestTurnStartIndex].map(\.id)
+                let settledSignatures = settledRowSignatures(renderedMessages[..<latestTurnStartIndex], context: rowContext)
+                let virtualizer = transcriptVirtualizer
+                let _ = { virtualizer.order = settledIDs }()
+                VStack(alignment: .leading, spacing: 16) {
+                if hasSettledRows {
+                    VStack(alignment: .leading, spacing: TranscriptVirtualizer.spacing) {
+                        ForEach(leadingGoalEntries) { entry in
+                            goalAchievementTimelineRow(entry)
+                                .id(entry.id)
+                        }
+                        ForEach(leadingBoundaries) { boundary in
+                            providerBoundaryRow(boundary)
+                        }
+                        // Positions are summed from the top of the messages themselves, below the
+                        // leading goal and boundary rows.
+                        VStack(alignment: .leading, spacing: TranscriptVirtualizer.spacing) {
+                            SettledTranscriptRows(
+                                ids: settledIDs, signatures: settledSignatures, virtualizer: virtualizer,
+                                pinnedIDs: Set([annotationSelection?.messageID, currentTextSelection?.messageID].compactMap { $0 })
+                            ) { index in
+                                // One message's rows measure as one box.
+                                AnyView(VStack(alignment: .leading, spacing: TranscriptVirtualizer.spacing) {
+                                    transcriptRows(for: renderedMessages[index], context: rowContext)
+                                })
+                            }
+                        }
+                        .reportGeometry({ $0.frame(in: .named(Self.transcriptContentCoordinateSpace)).minY }) { top in
+                            virtualizer.sectionTop = top
+                            virtualizer.invalidate()
+                        }
+                    }
+                    .onDisappear { virtualizer.resetWidth() }
+                    .reportGeometry({ $0.size.width }) { width in
+                        // Rows far from the viewport keep scaled heights until they show again,
+                        // so keep the reader on the message they were reading once a resize ends.
+                        let anchor = virtualizer.width > 0 && !lastConversationScrollSample.isFollowingLatest ? virtualizer.topVisibleAnchor() : nil
+                        guard virtualizer.updateWidth(width) else { return }
+                        if virtualizer.resizeAnchor == nil { virtualizer.resizeAnchor = anchor }
+                        virtualizer.resizeAnchorTask?.cancel()
+                        virtualizer.resizeAnchorTask = Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 150_000_000)
+                            guard !Task.isCancelled else { return }
+                            defer { virtualizer.resizeAnchor = nil }
+                            // A reveal restores its own anchor and a history load pins its turn,
+                            // as `followConversationBottom` also defers to.
+                            guard let anchor = virtualizer.resizeAnchor, !lastConversationScrollSample.isFollowingLatest,
+                                  !isRevealingOlderConversationMessages, !isLatestConversationTurnPinPending,
+                                  virtualizer.hasDrifted(from: anchor) else { return }
+                            var transaction = Transaction()
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) { scrollProxy.scrollTo(anchor.id, anchor: .top) }
+                        }
+                    }
+                }
+                // The newest turn's own stack reserves the filler below it: from its question to
+                // the end of the transcript it is at least a viewport tall, less the bottom padding
+                // and end marker already below it, which lets a turn shorter than the viewport be
+                // pinned to the top, and makes that pin exactly the bottom, which following starts
+                // from. The runway above the window does the same for the other end. Sizing the
+                // filler from measurements instead, which SwiftUI reports a pass later, left it
+                // stale and opened blank overscroll below the transcript. A newer question moves
+                // the previous turn's rows up into the settled rows, which rebuilds them once.
                 ConversationTranscriptLayout(
                     spacing: 16,
                     minimumLatestTurnHeight: max(0, viewport.size.height - Self.conversationVerticalPadding - Self.conversationScrollEndHeight)
@@ -3817,17 +4129,7 @@ struct TaskConversationView: View {
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("empty-conversation")
                     } else if !messages.isEmpty {
-                        // A plain stack: a LazyVStack of these AppKit-backed rows could keep
-                        // re-estimating its rows after a send and never finish layout. At most
-                        // a recent window of messages renders, and older batches load on demand.
-                        ForEach(leadingGoalEntries) { entry in
-                            goalAchievementTimelineRow(entry)
-                                .id(entry.id)
-                        }
-                        ForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
-                            providerBoundaryRow(boundary)
-                        }
-                        ForEach(renderedMessages.indices.map { RenderedMessageReference(id: renderedMessages[$0].id, index: $0) }) { reference in
+                        ForEach(messageReferences[latestTurnStartIndex...]) { reference in
                             transcriptRows(for: renderedMessages[reference.index], context: rowContext)
                         }
                         ForEach(liveChatPageRecalls) { activity in
@@ -3886,6 +4188,7 @@ struct TaskConversationView: View {
                         .accessibilityHidden(true)
                         .layoutValue(key: ConversationLatestTurnExtentKey.self, value: true)
                 }
+                }
                 .padding(.horizontal, 28)
                 .padding(.vertical, Self.conversationVerticalPadding)
                 // A window that holds older messages back needs the runway's
@@ -3915,7 +4218,7 @@ struct TaskConversationView: View {
                     // space carries it.
                     if #unavailable(macOS 15) {
                         GeometryReader { geometry in
-                            let frame = geometry.frame(in: .named(Self.conversationScrollCoordinateSpace))
+                            let frame = geometry.frame(in: .named(Self.conversationScrollCoordinateSpace)) // the scroll view's space
                             Color.clear.preference(
                                 key: ConversationScrollGeometryKey.self,
                                 value: ConversationScrollGeometry(
@@ -3927,6 +4230,7 @@ struct TaskConversationView: View {
                         }
                     }
                 }
+                .coordinateSpace(name: Self.transcriptContentCoordinateSpace)
             }
             .coordinateSpace(name: Self.conversationScrollCoordinateSpace)
             .accessibilityIdentifier("conversation-scroll-view")
@@ -3942,12 +4246,14 @@ struct TaskConversationView: View {
             }
             .onPreferenceChange(ConversationScrollGeometryKey.self) { geometry in
                 guard let geometry else { return }
+                transcriptVirtualizer.updateViewport(offsetY: geometry.offsetY, height: viewport.size.height)
                 let old = lastConversationScrollSample.geometry ?? geometry
                 lastConversationScrollSample.geometry = geometry
                 followConversationBottom(from: old, to: geometry, using: scrollProxy)
             }
             .modifier(ConversationScrollOffsetObserver { old, new in
                 lastConversationScrollSample.viewportHeight = viewport.size.height
+                transcriptVirtualizer.updateViewport(offsetY: new.offsetY, height: viewport.size.height)
                 followConversationBottom(from: old, to: new, using: scrollProxy)
                 guard lastConversationScrollSample.offsetY != new.offsetY else { return }
                 lastConversationScrollSample.offsetY = new.offsetY
@@ -4025,6 +4331,8 @@ struct TaskConversationView: View {
     }
 
     private static let conversationScrollCoordinateSpace = "conversation-transcript-scroll"
+    /// The scroll content's own space, in which positions stay put while the transcript scrolls.
+    private static let transcriptContentCoordinateSpace = "conversation-transcript-content"
     private static let conversationScrollEndID = "conversation-scroll-end"
     private static let conversationScrollEndHeight: CGFloat = 1
     private static let conversationVerticalPadding: CGFloat = 24
@@ -7815,10 +8123,8 @@ struct TaskConversationView: View {
             presentLatestConversationTurn(using: proxy)
             return
         }
-        // Scroll to the real latest row. A synthetic target after LazyVStack can
-        // be positioned using its estimated content height before the lazy rows
-        // have settled, leaving the viewport in the blank space below the chat.
-        let latestMessageID = renderedConversationMessages.last?.id
+        // A reader who is not following lands on the latest message itself, so the
+        // filler below a short turn never opens as blank space under the chat.
         // Defer until the state-driven content update has had a layout pass.
         let shouldAnimate = hasPresentedLatestConversation
         Task { @MainActor in
@@ -7826,11 +8132,18 @@ struct TaskConversationView: View {
             // Record the question this presentation lands on, so a newly sent
             // one is told apart from the one already in view.
             lastScrolledUserMessageID = renderedConversationMessages.last(where: { $0.role == .user && !$0.isPlayhouseSent })?.id
+            // Each scroll reads its target when it runs: a reply can stream several messages
+            // in before the settle scroll, and a target taken earlier would pull the viewport
+            // back up to an older message, which ends following as a reader scrolling up does.
             let scroll = {
-                // A pending question renders below the latest message.
-                if let latestMessageID, userInputRequest == nil {
+                if lastConversationScrollSample.isFollowingLatest {
+                    // Following already holds the bottom; its target is the very end, which
+                    // never lies above where following left the viewport.
+                    proxy.scrollTo(Self.conversationScrollEndID, anchor: .bottom)
+                } else if let latestMessageID = renderedConversationMessages.last?.id, userInputRequest == nil {
                     proxy.scrollTo(latestMessageID, anchor: .bottom)
                 } else {
+                    // A pending question renders below the latest message.
                     proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
                 }
             }
@@ -7841,9 +8154,9 @@ struct TaskConversationView: View {
                 transaction.disablesAnimations = true
                 withTransaction(transaction, scroll)
             }
-            // A LazyVStack places rows it has not realized yet from estimated
-            // heights, so the first scroll can stop short of the real last row.
-            // Scrolling again after it has been realized lands on it.
+            // Rows that render in this pass, such as settled rows measured for the
+            // first time, can still change the content's height after the first
+            // scroll; scrolling again once they have laid out lands on the real end.
             var settleTransaction = Transaction()
             settleTransaction.disablesAnimations = true
             for delay in Self.scrollSettleDelays {

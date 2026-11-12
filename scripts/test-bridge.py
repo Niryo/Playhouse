@@ -9481,6 +9481,45 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual([read["source"] for read in paged_reads], ["composed", "composed"],
                          "A Codex thread is composed from the app-server before it is paged.")
 
+    # case-contract: test_conversation_settled_history_renders_lazily | In a 120-message conversation whose history has been revealed, the messages before the newest turn render lazily: once the reader is back at the latest turn, the oldest messages that scrolled far out of view are no longer kept as views, and they render again, in order, when the reader scrolls back to them. A message scrolled away and back by the same distance lands where it was. A command an earlier turn ran stays inline after the message it followed, with its whole output in fresh CLI/XPC history, and a call the reader expanded is still expanded when its row renders again. A message holding an open side chat keeps rendering while the reader scrolls far away, so its bubble and unsent draft are still there when the reader returns. Changing the transcript's width keeps the reader on the message they were reading, with the older messages above still in order.
+    def test_conversation_settled_history_renders_lazily(self):
+        task_id = self.create_task(title="Lazy long history")["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-long-history-lazy-success"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable), "PLAYHOUSE_FIXTURE_WORKSPACE": str(self.primary)}
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Create a long history.", extra_environment=env)[0])
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        messages = history["messages"]
+        self.assertEqual([message["text"] for message in messages],
+                         [f"Long history {role} {index:02d}." for index in range(1, 61) for role in ("user", "assistant")],
+                         "The whole history is returned in order; the transcript renders it lazily.")
+        # The earlier turn's command is a timeline activity placed after the message it followed,
+        # carrying the whole output the expanded row shows.
+        calls = [activity for activity in history.get("timelineActivities", []) if activity["id"] == "item_long_history_command_21"]
+        self.assertEqual(len(calls), 1, "The mid-history command should be returned once as a timeline activity.")
+        self.assertEqual(calls[0]["afterMessageID"], "item_long_history_user_21", "The command follows the question of its own turn.")
+        self.assertEqual(calls[0]["output"].strip().splitlines(), [f"history-file-{line}.txt" for line in range(1, 7)],
+                         "Every output line is kept, not only the ones a collapsed row shows.")
+        self.assertNotIn("item_long_history_command_21", {activity["id"] for activity in history["activities"]},
+                         "An earlier turn's call is not part of the latest turn's activities.")
+        # The transcript shows a call inline only once its turn is settled, so the call's turn
+        # must be an earlier turn than the latest one, shared with the question it follows.
+        turn_by_message = {message["id"]: message.get("turnID") for message in messages}
+        self.assertIsNotNone(turn_by_message["item_long_history_user_21"])
+        self.assertNotEqual(turn_by_message["item_long_history_user_21"], turn_by_message["item_long_history_user_60"],
+                            "Each history turn is its own turn, so turn 21 is settled once turn 60 exists.")
+        self.assertEqual(calls[0].get("turnID"), turn_by_message["item_long_history_user_21"], "The call belongs to its question's turn.")
+        fresh = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertEqual([message["id"] for message in fresh["messages"]], [message["id"] for message in messages])
+        self.assertEqual([activity["id"] for activity in fresh.get("timelineActivities", [])],
+                         [activity["id"] for activity in history.get("timelineActivities", [])],
+                         "A fresh read returns the same timeline.")
+
     # case-contract: test_sent_prompt_stays_out_of_composer_past_history_page | A sent prompt followed by a 120-message turn, so that it lies outside the newest history page, never returns to the composer when the task is reopened: the composer is empty, the task keeps hasUnsentDraft false and its last sent prompt as the saved prompt, and the CLI newest page of 80 messages leaves out the earlier messages. Only the saved draft flag decides draft restoration, so the same task restores a real unsent draft after it is typed.
     def test_sent_prompt_stays_out_of_composer_past_history_page(self):
         task_id = self.create_task(title="Sent prompt past history page")["id"]

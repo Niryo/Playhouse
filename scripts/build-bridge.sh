@@ -30,6 +30,17 @@ debug_flags=()
 if [[ "${CONFIGURATION:-Debug}" == "Debug" ]]; then
   debug_flags=(-D DEBUG)
 fi
+# The tools follow the app's own SWIFT_OPTIMIZATION_LEVEL, which Xcode passes to this
+# phase, so the app and its daemon and CLI are always built alike. Run outside Xcode,
+# Debug is unoptimized like the project's Debug configuration, since the optimizer
+# more than triples the time to compile these shared sources.
+if [[ -n "${SWIFT_OPTIMIZATION_LEVEL:-}" ]]; then
+  optimization_flag="${SWIFT_OPTIMIZATION_LEVEL}"
+elif [[ "${CONFIGURATION:-Debug}" == "Debug" ]]; then
+  optimization_flag=-Onone
+else
+  optimization_flag=-O
+fi
 
 mkdir -p "${app_macos}"
 
@@ -127,6 +138,7 @@ bridge_inputs=(
   "${sdk}"
   "$(xcrun --sdk macosx swiftc -version)"
   "${CONFIGURATION:-Debug}"
+  "${optimization_flag}"
   "${PRODUCT_BUNDLE_IDENTIFIER:-com.playhouse.app}"
   "${MARKETING_VERSION:-1.0}"
   "${CURRENT_PROJECT_VERSION:-1}"
@@ -162,7 +174,7 @@ xcrun --sdk macosx swiftc \
   -swift-version 5 \
   -target "${architecture}-apple-macosx${deployment_target}" \
   -sdk "${sdk}" \
-  -O \
+  "${optimization_flag}" \
   ${debug_flags[@]+"${debug_flags[@]}"} \
   -framework Foundation \
   -framework AppKit \
@@ -183,7 +195,7 @@ xcrun --sdk macosx swiftc \
   -swift-version 5 \
   -target "${architecture}-apple-macosx${deployment_target}" \
   -sdk "${sdk}" \
-  -O \
+  "${optimization_flag}" \
   ${debug_flags[@]+"${debug_flags[@]}"} \
   -framework Foundation \
   "${repository_root}/Playhouse/Bridge/BridgeContract.swift" \
