@@ -20411,10 +20411,42 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("rule-provider-rules-override-repo:AGENTS.md-codex").exists, "Codex reads the override instead of AGENTS.md.")
         XCTAssertTrue(element("rule-provider-rules-override-repo:AGENTS.md-claude").exists, "The AGENTS.md beside the override is left to Claude.")
         attachScreenshot(named: "Rules tab lists each repository's rule files")
+        let search = element("rules-search")
+        typeIntoField(search, text: "CONVENTIONS")
+        XCTAssertTrue(waitUntil({ !self.element("rule-row-rules-catalog-repo:CLAUDE.md").exists }, timeout: 5), "Search hides rules that don't match.")
+        XCTAssertTrue(element("rule-row-\(agents)").exists, "Search keeps a rule whose summary matches, ignoring case.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("rules-empty-rules-linked-repo")), "No matching rules.",
+                       "A repository with rules but no match shows its empty state.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("rules-empty-rules-empty-repo")), "No rules in rules-empty-repo.",
+                       "A repository without rules still says so while searching.")
+        attachScreenshot(named: "Rules search keeps the matching rule")
+        search.typeKey("a", modifierFlags: .command)
+        search.typeText("naming")
+        XCTAssertTrue(element("rule-row-rules-catalog-repo:.claude/rules/style/naming.md").waitToExist(timeout: 5), "Search matches a rule's path.")
+        XCTAssertTrue(waitUntil({ !self.element("rule-row-\(agents)").exists }, timeout: 5))
+        search.typeKey("a", modifierFlags: .command)
+        search.typeText("no-rule-matches-this")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("rules-empty-rules-catalog-repo")) == "No matching rules." }, timeout: 5),
+                      "A search with no match shows its empty state.")
+        attachScreenshot(named: "Rules search with no matching rule")
+        search.typeKey("a", modifierFlags: .command)
+        search.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(element("rule-row-rules-catalog-repo:CLAUDE.md").waitToExist(timeout: 5), "Clearing the search shows every rule again.")
+        XCTAssertFalse(element("rules-empty-rules-linked-repo").exists)
 
         selectSkillsTab("Global", picker: "rules-tab-picker")
         let shared = "~/.agents/AGENTS.md"
         XCTAssertTrue(element("rule-row-\(shared)").waitToExist(timeout: 5))
+        typeIntoField(search, text: "personal")
+        XCTAssertTrue(waitUntil({ !self.element("rule-row-~/.claude/CLAUDE.md").exists }, timeout: 5), "Search filters the Global tab too.")
+        XCTAssertTrue(element("rule-row-\(shared)").exists, "The global rule whose summary matches stays.")
+        search.typeKey("a", modifierFlags: .command)
+        search.typeText("no-rule-matches-this")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("rules-empty-global")) == "No matching rules." }, timeout: 5),
+                      "A Global search with no match shows its empty state.")
+        search.typeKey("a", modifierFlags: .command)
+        search.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(element("rule-row-~/.claude/CLAUDE.md").waitToExist(timeout: 5), "Clearing the search shows every global rule again.")
         XCTAssertEqual(accessibleLabelOrValue(of: element("rule-shared-\(shared)")), "Playhouse shares it with Claude and Codex.",
                        "Neither CLI reads ~/.agents/AGENTS.md on its own.")
         for name in ["~/.claude/CLAUDE.md", "~/.claude/rules/global-style.md"] {
@@ -20477,6 +20509,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("rule-row-~/.agents/AGENTS.md").waitToExist(timeout: 10), "The new global rule shows on the Global tab.")
         XCTAssertEqual(try String(contentsOf: sharedFile, encoding: .utf8), "Answer briefly.\n", "A global rule is ~/.agents/AGENTS.md.")
 
+        typeIntoField(element("rules-search"), text: "no-rule-matches-this")
+        XCTAssertTrue(waitUntil({ !self.element("rule-row-~/.agents/AGENTS.md").exists }, timeout: 5))
         XCTAssertTrue(openPanel("new-rule-panel", with: element("new-rule-button")))
         element("new-rule-scope").click()
         XCTAssertTrue(app.menuItems["rules-manage-repo"].waitToExist(timeout: 5))
@@ -20485,7 +20519,8 @@ final class PlayhouseUITests: XCTestCase {
         typeIntoField(element("new-rule-body"), text: "Run the linter.")
         element("new-rule-create").click()
         XCTAssertTrue(waitUntil({ !self.element("new-rule-panel").exists }, timeout: 10))
-        XCTAssertTrue(element("rule-row-rules-manage-repo:AGENTS.md").waitToExist(timeout: 10), "The repository's AGENTS.md shows on the Repo tab.")
+        XCTAssertTrue(element("rule-row-rules-manage-repo:AGENTS.md").waitToExist(timeout: 10),
+                      "The repository's AGENTS.md shows on the Repo tab: creating a rule clears a search that would hide it.")
         XCTAssertEqual(try String(contentsOf: worktree.appendingPathComponent("AGENTS.md"), encoding: .utf8), "Run the linter.\n",
                        "Shared instructions in a repository are its worktree's AGENTS.md.")
 
@@ -21029,9 +21064,41 @@ final class PlayhouseUITests: XCTestCase {
                        "Neither agent reads another task repository's servers on its own.")
         XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-env-mcp-other-repo:other-api")), "Headers: Authorization")
         attachScreenshot(named: "MCP Repo tab lists each repository's servers")
+        let search = element("mcp-search")
+        typeIntoField(search, text: "docs.js")
+        XCTAssertTrue(waitUntil({ !self.element("mcp-row-\(sse)").exists }, timeout: 5), "Search hides servers that don't match.")
+        XCTAssertTrue(element("mcp-row-\(docs)").exists, "Search keeps a server whose command matches.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-empty-mcp-other-repo")), "No matching servers.",
+                       "A repository with servers but no match shows its empty state.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-empty-mcp-empty-repo")), "No MCP servers in mcp-empty-repo.",
+                       "A repository without servers still says so while searching.")
+        attachScreenshot(named: "MCP search keeps the matching server")
+        search.typeKey("a", modifierFlags: .command)
+        search.typeText("REPO-CODEX")
+        XCTAssertTrue(element("mcp-row-mcp-catalog-repo:repo-codex").waitToExist(timeout: 5), "Search matches a server's name, ignoring case.")
+        XCTAssertTrue(waitUntil({ !self.element("mcp-row-\(docs)").exists }, timeout: 5))
+        search.typeKey("a", modifierFlags: .command)
+        search.typeText("no-server-matches-this")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("mcp-empty-mcp-catalog-repo")) == "No matching servers." }, timeout: 5),
+                      "A search with no match shows its empty state.")
+        attachScreenshot(named: "MCP search with no matching server")
+        search.typeKey("a", modifierFlags: .command)
+        search.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(element("mcp-row-\(sse)").waitToExist(timeout: 5), "Clearing the search shows every server again.")
+        XCTAssertFalse(element("mcp-empty-mcp-other-repo").exists)
 
         selectSkillsTab("Global", picker: "mcp-tab-picker")
         XCTAssertTrue(element("mcp-row-shared").waitToExist(timeout: 5))
+        typeIntoField(search, text: "shared-server")
+        XCTAssertTrue(waitUntil({ !self.element("mcp-row-claude-only").exists }, timeout: 5), "Search filters the Global tab too.")
+        XCTAssertTrue(element("mcp-row-shared").exists, "The global server whose command matches stays.")
+        search.typeKey("a", modifierFlags: .command)
+        search.typeText("no-server-matches-this")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("mcp-empty-global")) == "No matching servers." }, timeout: 5),
+                      "A Global search with no match shows its empty state.")
+        search.typeKey("a", modifierFlags: .command)
+        search.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(element("mcp-row-claude-only").waitToExist(timeout: 5), "Clearing the search shows every global server again.")
         XCTAssertTrue(element("mcp-native-shared").exists, "A server both global files define the same way is one entry both CLIs start.")
         XCTAssertFalse(element("mcp-shared-shared").exists)
         XCTAssertTrue(element("mcp-conflict-clash").exists, "Two global definitions that differ are a conflict.")
@@ -21139,6 +21206,8 @@ final class PlayhouseUITests: XCTestCase {
         }
         attachScreenshot(named: "A new global server both CLIs start")
 
+        typeIntoField(element("mcp-search"), text: "no-server-matches-this")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("mcp-empty-global")) == "No matching servers." }, timeout: 5))
         XCTAssertTrue(openPanel("mcp-editor-panel", with: element("new-mcp-server-button")))
         element("mcp-editor-scope").click()
         XCTAssertTrue(app.menuItems["mcp-manage-repo"].waitToExist(timeout: 5), "New Server can save into the task's repository.")
@@ -21149,7 +21218,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(accessibleLabelOrValue(of: element("mcp-editor-target")).contains(".mcp.json"))
         element("mcp-editor-save").click()
         XCTAssertTrue(waitUntil({ !self.element("mcp-editor-panel").exists }, timeout: 10))
-        XCTAssertTrue(element("mcp-row-mcp-manage-repo:repo-search").waitToExist(timeout: 10), "The repository server shows on the Repo tab.")
+        XCTAssertTrue(element("mcp-row-mcp-manage-repo:repo-search").waitToExist(timeout: 10),
+                      "The repository server shows on the Repo tab: creating a server clears a search that would hide it.")
         XCTAssertEqual(accessibleLabelOrValue(of: element("mcp-shared-mcp-manage-repo:repo-search")), "Playhouse passes it to Codex.")
         let projectJSON = try readMcpJSON(worktree.appendingPathComponent(".mcp.json"))
         XCTAssertEqual(((projectJSON["mcpServers"] as? [String: Any])?["repo-search"] as? [String: Any])?["url"] as? String, "https://search.example.com/mcp")
@@ -21595,6 +21665,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("mcp-connector-signin-plugin:kit:helper").exists, "A signed-in plugin server has no sign-in badge.")
         XCTAssertFalse(element("mcp-connector-claude-remote").exists, "A server a file defines is not repeated.")
         attachScreenshot(named: "Servers Claude Code starts on its own")
+        let search = element("mcp-search")
+        typeIntoField(search, text: "notes")
+        XCTAssertTrue(waitUntil({ !self.element("mcp-connector-plugin:kit:helper").exists }, timeout: 5), "Search filters the servers Claude Code starts on its own.")
+        XCTAssertTrue(element("mcp-connector-claude.ai Notes").exists, "A connector whose name matches stays, ignoring case.")
+        search.typeKey("a", modifierFlags: .command)
+        search.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(element("mcp-connector-plugin:kit:helper").waitToExist(timeout: 5), "Clearing the search shows every connector again.")
 
         // Opening the page again asks again, now with Codex unable to answer.
         try "Fail the status request.\n".write(to: codexStatusFail, atomically: true, encoding: .utf8)

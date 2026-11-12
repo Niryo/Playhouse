@@ -792,6 +792,7 @@ private struct RulesSectionView: View {
 
     @State private var tab: Tab = .repo
     @State private var catalog: RuleCatalog?
+    @State private var search = ""
     @State private var errorMessage: String?
     @State private var panel: Panel?
     @State private var pendingDelete: RuleRecord?
@@ -822,6 +823,7 @@ private struct RulesSectionView: View {
                 .frame(width: 260)
                 .accessibilityIdentifier("rules-tab-picker")
                 Spacer()
+                AtomTextField(props: TextFieldProps(text: search, placeholder: "Search rules"), common: AtomCommon(testID: "rules-search", width: 200)) { search = $0 }
                 Button { setPanel(.creating) } label: { Label("New Rule", systemImage: "plus") }
                     .buttonHoverPointer()
                     .nativeHelp("Create a rule that both Claude and Codex follow")
@@ -916,6 +918,7 @@ private struct RulesSectionView: View {
                 NewRulePanel(roots: catalog?.repositories ?? [], onClose: { setPanel(nil) }) { name, paths, body, scope, root in
                     let record = try await manager.createRule(taskID: task.id, name: name, paths: paths, body: body, scope: scope, root: root)
                     tab = record.scope == .global ? .global : .repo
+                    search = ""
                     await reload()
                 }
                 .padding(.horizontal, 20)
@@ -939,27 +942,30 @@ private struct RulesSectionView: View {
                     emptyState("This task has no repositories.", identifier: "rules-empty-repo")
                 }
                 ForEach(catalog.repositories, id: \.rootPath) { section in
+                    let shown = filtered(section.rules)
                     VStack(alignment: .leading, spacing: 8) {
                         Text(section.name)
                             .font(.headline)
                             .padding(.top, 6)
                             .accessibilityIdentifier("rules-repo-section-\(section.name)")
-                        if section.rules.isEmpty {
-                            emptyState("No rules in \(section.name).", identifier: "rules-empty-\(section.name)")
+                        if shown.isEmpty {
+                            emptyState(section.rules.isEmpty ? "No rules in \(section.name)." : "No matching rules.", identifier: "rules-empty-\(section.name)")
                         }
-                        ForEach(section.rules) { row($0) }
+                        ForEach(shown) { row($0) }
                     }
                 }
             case .global:
+                let shown = filtered(catalog.global)
                 Text("Your rules for every repository. New global rules go in ~/.agents/AGENTS.md, which Playhouse shares with both agents, like ~/.agents/skills.")
                     .font(.callout).foregroundStyle(.secondary)
-                if catalog.global.isEmpty { emptyState("No global rules.", identifier: "rules-empty-global") }
-                ForEach(catalog.global) { row($0) }
+                if shown.isEmpty { emptyState(catalog.global.isEmpty ? "No global rules." : "No matching rules.", identifier: "rules-empty-global") }
+                ForEach(shown) { row($0) }
             case .managed:
+                let shown = filtered(catalog.managed)
                 Text("Your organization's managed CLAUDE.md. Claude Code always follows it, and it can't be edited or turned off here.")
                     .font(.callout).foregroundStyle(.secondary)
-                if catalog.managed.isEmpty { emptyState("No managed rules on this Mac.", identifier: "rules-empty-managed") }
-                ForEach(catalog.managed) { row($0) }
+                if shown.isEmpty { emptyState(catalog.managed.isEmpty ? "No managed rules on this Mac." : "No matching rules.", identifier: "rules-empty-managed") }
+                ForEach(shown) { row($0) }
             }
         } else {
             ProgressView().frame(maxWidth: .infinity).accessibilityIdentifier("rules-loading")
@@ -968,6 +974,13 @@ private struct RulesSectionView: View {
 
     private func emptyState(_ text: String, identifier: String) -> some View {
         Text(text).foregroundStyle(.secondary).padding(.vertical, 6).accessibilityIdentifier(identifier)
+    }
+
+    /// The rules whose path or summary contains the search, like the Skills search.
+    private func filtered(_ rules: [RuleRecord]) -> [RuleRecord] {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return rules }
+        return rules.filter { $0.name.localizedCaseInsensitiveContains(query) || $0.summary.localizedCaseInsensitiveContains(query) }
     }
 
     private func isEnabled(_ rule: RuleRecord) -> Bool { enabledOverrides[rule.id] ?? rule.enabled }
