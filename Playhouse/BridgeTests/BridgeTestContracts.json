@@ -369,7 +369,7 @@
   },
   {
     "id": "test_codex_nudged_turn_work_stays_in_conversation",
-    "expectation": "A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. The nudge prompt Playhouse sent is shown once as its own message and no placeholder replaces it, including after a later ordinary turn."
+    "expectation": "A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. Fresh history shows the nudge prompt Playhouse sent exactly once as its own message, with no placeholder replacing it; after a later ordinary turn the earlier nudge stays shown, the later turn's own nudge appears after its message, and no placeholder replaces either."
   },
   {
     "id": "test_claude_steers_turn_parked_on_background_work",
@@ -462,6 +462,10 @@
   {
     "id": "test_task_pr_conflicts_detect_without_mutation",
     "expectation": "The real Git CLI detects merge conflicts without mutation, and PR creation still publishes the task branch and reaches the normal GitHub CLI path; conflicts do not block PR creation. CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI confirms PR creation proceeds for a conflicted branch and the existing Fix Conflicts action still appears once the PR is linked."
+  },
+  {
+    "id": "test_review_probe_failure_alerts_only_while_in_review",
+    "expectation": "A Review task whose linked pull request probe fails reports it: `task pr status` fails as operation_failed with the GitHub CLI's error, and the board raises its Pull request operation failed alert naming that error. Once the task moves to Done with --allow-unmerged, which removes its worktree, it is Done with no worktree left, and a board probe that was already running when it moved raises no alert."
   },
   {
     "id": "test_review_pr_conflicts_probe_and_verify",

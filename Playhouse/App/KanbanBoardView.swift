@@ -1204,7 +1204,7 @@ struct KanbanBoardView: View {
                     } else if let error {
                         mergedReviewTaskIDs.remove(id)
                         conflictedReviewTaskIDs.remove(id)
-                        pullRequestError = error
+                        if isStillInReview(id) { pullRequestError = error }
                     }
                 }
             }
@@ -1213,6 +1213,14 @@ struct KanbanBoardView: View {
             autopilotPendingTaskIDs.formIntersection(reviewIDs)
             scheduleAutopilotPollIfNeeded()
         }
+    }
+
+    /// Whether a probe's failure is still worth reporting: a task that left Review while its
+    /// probe ran (moved to Done) has no pull request state left. The move removes the worktrees
+    /// before it saves the status this board reads, so a removed worktree counts as gone too.
+    private func isStillInReview(_ id: UUID) -> Bool {
+        guard let task = tasks.first(where: { $0.id == id }), task.status == .review else { return false }
+        return task.repositoryWorktrees.allSatisfy { $0.isPending || FileManager.default.fileExists(atPath: $0.worktreePath) }
     }
 
     /// A card keeps its last colours while a fix turn runs; they refresh on the
@@ -1303,7 +1311,7 @@ struct KanbanBoardView: View {
                     followPullRequestAutopilot(for: task.id, states: states)
                 } catch {
                     autopilotPendingTaskIDs.remove(task.id)
-                    pullRequestError = error.localizedDescription
+                    if isStillInReview(task.id) { pullRequestError = error.localizedDescription }
                 }
             }
             scheduleAutopilotPollIfNeeded()

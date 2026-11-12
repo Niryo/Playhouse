@@ -3048,7 +3048,7 @@ final class PlayhouseUITests: XCTestCase {
         // failure without depending on the gh installed in the VM or its sign-in.
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
         try "1".write(to: URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH"])), atomically: true, encoding: .utf8)
-        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment.merging(Self.prCheckCooldownEnvironment) { $1 })
         let created = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "PR conflict choice UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
             "--merge-target", "\(fixture.primary.path)=main",
@@ -3124,8 +3124,75 @@ final class PlayhouseUITests: XCTestCase {
         )
         XCTAssertTrue(waitUntil({ prButton.isEnabled }, timeout: 10))
         XCTAssertNil((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"])
-        let finalRecord = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
-        XCTAssertNil(finalRecord["pullRequestNumber"])
+
+        // The fixture creates PR 501 on the retry and reports it conflicting, so the board's
+        // review probe must bring back the Fix Conflicts action once the PR is linked.
+        let resolveButton = element("task-resolve-pr-conflicts-\(taskID)")
+        XCTAssertFalse(resolveButton.exists, "No conflict action can appear before a PR is linked.")
+        try "501=conflicting\n".write(to: URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STATE_PATH"])), atomically: true, encoding: .utf8)
+        prButton.click()
+        XCTAssertTrue(element("task-pr-link-\(taskID)-501").waitToExist(timeout: 15), "The retried PR creation should link the fixture PR.")
+        XCTAssertEqual((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"] as? Int, 501)
+        XCTAssertTrue(waitUntil({
+            if resolveButton.exists { return true }
+            activateOtherAppThenReturn()
+            return resolveButton.waitToExist(timeout: Self.prCheckCooldown + 1)
+        }, timeout: 20), "The linked conflicting PR should show the existing Fix Conflicts action.")
+        attachScreenshot(named: "A linked conflicting PR shows the Fix Conflicts action", fullScreen: true)
+    }
+
+    // case-contract: test_review_probe_failure_alerts_only_while_in_review | A Review task whose linked pull request probe fails reports it: `task pr status` fails as operation_failed with the GitHub CLI's error, and the board raises its Pull request operation failed alert naming that error. Once the task moves to Done with --allow-unmerged, which removes its worktree, it is Done with no worktree left, and a board probe that was already running when it moved raises no alert.
+    func test_review_probe_failure_alerts_only_while_in_review() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Review probe failure UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        _ = try runCLI(["task", "pr", "mode", taskID, "manual"])
+        openTask(named: "Review probe failure UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Review probe failure UI")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 10))
+        let worktreePath = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String)
+        XCTAssertTrue(terminateAppAndWait(app))
+        try seedTaskPullRequest(taskID: taskID, number: 123, url: "https://github.com/playhouse-test/fixture/pull/123")
+
+        // PR 999 is never probed, so every probe of 123 waits for it, then fails: a probe error
+        // that holds for about two seconds before it is reported.
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123, 999])
+        let startedDirectory = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_STARTED_DIRECTORY"]))
+        let started = startedDirectory.appendingPathComponent("123")
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment.merging(Self.prCheckCooldownEnvironment) { $1 })
+        let alert = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
+        XCTAssertTrue(alert.waitToExist(timeout: 15), "A failed probe of a task in Review raises the board's alert.")
+        XCTAssertTrue(alert.staticTexts["Pull request operation failed"].exists)
+        XCTAssertTrue(alert.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "did not run in parallel")).firstMatch.exists,
+                      "The alert names the probe's error.")
+        attachScreenshot(named: "A failed probe of a Review task raises the alert", fullScreen: true)
+        alert.buttons["OK"].click()
+        XCTAssertTrue(waitForDisappearance(alert))
+        // A trailing probe may still be held; let it report (the task is still in Review, so it
+        // may alert again) before the probe this step times against the move.
+        if waitUntil({ alert.exists }, timeout: 4) {
+            alert.buttons["OK"].click()
+            XCTAssertTrue(waitForDisappearance(alert))
+        }
+
+        // A probe already running when the task moves to Done fails after its worktree is gone.
+        try? FileManager.default.removeItem(at: started)
+        XCTAssertTrue(waitUntil({
+            if FileManager.default.fileExists(atPath: started.path) { return true }
+            self.activateOtherAppThenReturn()
+            return self.waitUntil({ FileManager.default.fileExists(atPath: started.path) }, timeout: Self.prCheckCooldown + 1)
+        }, timeout: 20), "A focus probe of the Review task should start.")
+        XCTAssertEqual((try runCLI(["task", "move", taskID, "Done", "--allow-unmerged"])["result"] as? [String: Any])?["status"] as? String, "Done")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktreePath), "Moving to Done removes the worktree the running probe reads.")
+        XCTAssertTrue(waitUntil({ !self.element("task-card-\(taskID)").exists }, timeout: 10), "The Done task leaves the board.")
+        // The held probe fails about two seconds after it started; give its result time to land.
+        XCTAssertFalse(waitUntil({ alert.exists }, timeout: 5), "A probe that failed after its task left Review raises no alert.")
+        attachScreenshot(named: "No alert for a probe that failed after the task moved to Done", fullScreen: true)
     }
 
     // case-contract: test_done_task_accepts_follow_up_conversation | A Done task keeps its conversation open: the UI shows the composer with an archived hint naming the merge target instead of a read-only notice, and its changes read reports no changes rather than a Git error for the removed worktree; and a follow-up sent from a Done task runs a real provider turn in the source repository of its removed worktree. The turn is told the task is archived, that a question-only turn leaves it Done, that it has no worktree for edits, and to run `task repository renew` before any Git change; its completed outcome leaves the task Done with no new worktree, the follow-up and its reply persist in the history across fresh reads, and switching the Done task's provider is still rejected.
@@ -10263,8 +10330,10 @@ final class PlayhouseUITests: XCTestCase {
         let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
         let messages = try XCTUnwrap(history?["messages"] as? [[String: Any]])
         // The reply sits below the top of the transcript, so the Add comment hint above it stays clickable.
-        let sourceMessage = try XCTUnwrap(ordinaryMessages(messages).first {
-            $0["role"] as? String == "assistant" && !($0["text"] as? String ?? "").isEmpty
+        // The latest turn's final answer: the transcript opens on that turn, so an earlier turn's reply
+        // may not be rendered, and commentary folds into the collapsed Worked for once the turn ends.
+        let sourceMessage = try XCTUnwrap(ordinaryMessages(messages).last {
+            $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" && !($0["text"] as? String ?? "").isEmpty
         })
         let sourceID = try XCTUnwrap(sourceMessage["id"] as? String)
         // Looked up on each use: the relaunch below replaces the app instance.
@@ -11728,10 +11797,14 @@ final class PlayhouseUITests: XCTestCase {
         openTask(named: title)
         let composer = element("message-composer")
         XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        let scrollView = element("conversation-scroll-view")
+        // The opening history load re-pins the newest turn when it lands; sending first lets that
+        // pin land after the reply outgrew the viewport, which is not "at the bottom".
+        XCTAssertTrue(waitUntil({ scrollView.exists && scrollView.value as? String != "Loading conversation history" }, timeout: 15),
+                      "The conversation should finish loading before the message is sent.")
         composer.click()
         composer.typeText(prompt)
         element("send-message-button").click()
-        let scrollView = element("conversation-scroll-view")
         func isInView(_ candidate: XCUIElement) -> Bool {
             candidate.exists && scrollView.frame.insetBy(dx: 0, dy: -2).contains(candidate.frame)
         }
@@ -15035,7 +15108,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Claude nudged turn work after a later turn")
     }
 
-    // case-contract: test_codex_nudged_turn_work_stays_in_conversation | A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. The nudge prompt Playhouse sent is shown once as its own message and no placeholder replaces it, including after a later ordinary turn.
+    // case-contract: test_codex_nudged_turn_work_stays_in_conversation | A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. Fresh history shows the nudge prompt Playhouse sent exactly once as its own message, with no placeholder replacing it; after a later ordinary turn the earlier nudge stays shown, the later turn's own nudge appears after its message, and no placeholder replaces either.
     func test_codex_nudged_turn_work_stays_in_conversation() throws {
         let executable = dataDirectory.appendingPathComponent("codex-fixture-nudged-work-success")
         try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
@@ -15076,6 +15149,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(messages.last?["text"] as? String, finalReport, "The nudged turn's final answer is the latest message.")
         let timeline = (history["timelineActivities"] as? [[String: Any]] ?? []).filter { $0["id"] as? String == "item_nudged_check_1" }
         XCTAssertEqual(timeline.first?["input"] as? String, "echo NUDGED CHECK PASSED", "The nudged shell command should be a timeline row.")
+        XCTAssertEqual(messages.filter { $0["role"] as? String == "user" && (($0["text"] as? String) ?? "").contains("Playhouse internal outcome nudge:") }.count, 1,
+                       "Fresh history shows the nudge Playhouse sent exactly once.")
         XCTAssertTrue(transcriptContains("ended without reporting a task outcome"), "The nudge Playhouse sent is shown in the transcript.")
         try assertAutomaticMessageBubble(taskID: nudgedTaskID, containing: "ended without reporting a task outcome")
         XCTAssertFalse(transcriptContains("Playhouse private outcome"), "No placeholder replaces the nudge.")
@@ -15097,6 +15172,10 @@ final class PlayhouseUITests: XCTestCase {
         try sendLaterTurnAndAssertNudgedCallInline(taskID: nudgedTaskID, callID: "item_nudged_check_1", visibleTexts: [finalReport, commentary])
         XCTAssertEqual(try taskRecord(id: nudgedTaskID)?["status"] as? String, "Review",
                        "The later turn's own nudge keeps working and reports completed instead of blocking the task.")
+        let laterMessages = try XCTUnwrap((try runCLI(["conversation", "history", nudgedTaskID], extraEnvironment: codexEnvironment)["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        let laterStart = try XCTUnwrap(laterMessages.lastIndex { $0["role"] as? String == "user" && $0["text"] as? String == "Thanks, that's all." })
+        XCTAssertTrue(laterMessages[(laterStart + 1)...].contains { $0["role"] as? String == "user" && (($0["text"] as? String) ?? "").contains("Playhouse internal outcome nudge:") },
+                      "The later turn's own nudge is shown after its message.")
         attachScreenshot(named: "Codex nudged turn work after a later turn")
     }
 
@@ -22336,7 +22415,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(chat.descendants(matching: .any)["plugin-add-here-conversationSidebar"].exists, "The chat has no task sidebar.")
         XCTAssertFalse(chat.descendants(matching: .any)["plugin-add-here-conversationToolbar"].exists)
         attachScreenshot(named: "Add Plugin mode in the standalone chat: only the composer's Add here")
-        element("plugin-mode-close").click()
+        // Opening the chat grows the window past a small screen's trailing edge, where the bar's
+        // Close button then sits; Close is covered on the board above, so leave from the CLI.
+        _ = try runCLI(["plugin", "mode", "--off"])
         XCTAssertTrue(waitForDisappearance(chat.descendants(matching: .any)["plugin-add-here-composerActions"]))
     }
 
@@ -23911,6 +23992,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ drawer.frame.minX >= window.frame.maxX - 24 }, timeout: 3), "The Done drawer should rest as a sliver near the window edge \(moment).", file: file, line: line)
         XCTAssertLessThanOrEqual(drawer.frame.minX, window.frame.maxX - 14, "The Done drawer must leave the window edge to the board scroller \(moment).", file: file, line: line)
         XCTAssertGreaterThanOrEqual(board.frame.maxX, window.frame.maxX - 1, "The board, and so its vertical scroller, must reach the window edge \(moment).", file: file, line: line)
+        // In a window narrower than the columns, the board scrolls sideways and the last column
+        // reaches the drawer only at the end, where the board's trailing gutter keeps it clear.
+        // The first delta may scroll the wrong way; the second then passes the start the right way.
+        for delta in [-600.0, 1200.0] where lastColumn.frame.maxX > drawer.frame.minX {
+            board.scroll(byDeltaX: delta, deltaY: 0)
+            _ = waitForStableFrame(lastColumn)
+        }
         XCTAssertGreaterThanOrEqual(drawer.frame.minX, lastColumn.frame.maxX, "The Done drawer must sit beside the board columns, never over them \(moment).", file: file, line: line)
     }
 

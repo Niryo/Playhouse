@@ -4464,6 +4464,26 @@ class PlayhouseBridgeTests(unittest.TestCase):
         idle = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], extra_environment=gh_environment)[0])
         self.assertEqual(idle["action"], "inactive", "A refused merge does not retry.")
 
+    # case-contract: test_review_probe_failure_alerts_only_while_in_review | A Review task whose linked pull request probe fails reports it: `task pr status` fails as operation_failed with the GitHub CLI's error, and the board raises its Pull request operation failed alert naming that error. Once the task moves to Done with --allow-unmerged, which removes its worktree, it is Done with no worktree left, and a board probe that was already running when it moved raises no alert.
+    def test_review_probe_failure_alerts_only_while_in_review(self):
+        task = self.create_repo_task("Review probe failure", [self.primary], materialize=True)
+        self.assertEqual(task["status"], "Review")
+        self.seed_done_task_pull_request(task["id"], number=123)
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        directory = self.data_directory / "review-probe-failure-gh"
+        directory.mkdir()
+        executable = directory / "gh"
+        executable.write_text("#!/bin/sh\necho 'fixture probe failure' >&2\nexit 1\n", encoding="utf-8")
+        executable.chmod(0o755)
+        environment = {"PATH": f"{directory}:{os.environ.get('PATH', '')}"}
+        status, _ = self.call_cli("task", "pr", "status", task["id"], expected_status=1, extra_environment=environment)
+        self.assert_failure(status, "operation_failed")
+        self.assertIn("fixture probe failure", status["error"]["message"], "The probe reports the GitHub CLI's own error.")
+        moved, _ = self.call_cli("task", "move", task["id"], "Done", "--allow-unmerged", extra_environment=environment)
+        self.assertEqual(self.assert_success(moved)["status"], "Done")
+        self.assertFalse(worktree.exists(), "Moving to Done removes the worktree a later probe would read.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Done")
+
     # case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 20 seconds, with focus events during cooldown coalesced into one trailing refresh. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
     def test_review_pr_conflicts_probe_and_verify(self):
         task = self.create_repo_task("Review PR conflict probe", [self.primary, self.secondary], materialize=True)
@@ -12128,7 +12148,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
                         "The later turn reported no outcome, so it got its own shown nudge.")
         assert_nudged_work(later["messages"][:later_start], "after a later turn")
 
-    # case-contract: test_codex_nudged_turn_work_stays_in_conversation | A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. The nudge prompt Playhouse sent is shown once as its own message and no placeholder replaces it, including after a later ordinary turn.
+    # case-contract: test_codex_nudged_turn_work_stays_in_conversation | A Codex turn that reports no outcome receives Playhouse's private status nudge, and the nudged turn keeps working, with a message the user steers into it kept too: its commentary, its shell command, and its final answer are streamed and appear in fresh history after the earlier answer, with the shell command as a timeline tool row, and the completed outcome it reports moves the task to Review. Fresh history shows the nudge prompt Playhouse sent exactly once as its own message, with no placeholder replacing it; after a later ordinary turn the earlier nudge stays shown, the later turn's own nudge appears after its message, and no placeholder replaces either.
     def test_codex_nudged_turn_work_stays_in_conversation(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-nudged-work-success"
@@ -12197,7 +12217,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_success(response)
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Review",
                          "The later turn's own nudge keeps working and reports completed instead of blocking the task.")
-        assert_nudged_work(self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0]), "later turn")
+        later = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        assert_nudged_work(later, "later turn")
+        later_start = max(i for i, m in enumerate(later["messages"]) if m["role"] == "user" and m["text"] == "Thanks, that's all.")
+        self.assertTrue(any("Playhouse internal outcome nudge:" in m["text"] for m in later["messages"][later_start + 1:] if m["role"] == "user"),
+                        "The later turn's own nudge is shown after its message.")
 
     # case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude's usage is read with Claude Code's get_usage control request, which has none for this account yet, so Claude starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Because Claude Code streams rate_limit_event only when a limit's status changes, and a usage-based plan's event has no utilization, every finished Claude turn reads the plan's usage again through get_usage (skipping the local transcript scan) without a refresh: the read replaces the windows with the plan's current ones, keeps get_usage percents as percents, shows a usage-based plan's monthly extra usage as a Spend limit row with the reset time from the stream's overage event, and is persisted; a refresh reads it too, a reply without plan usage keeps the last known rows, a reached spend limit reads as the limit reached, and a usage request that is never answered times out, keeping the last known rows, so later reads work again. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the Scheduled Tasks button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account and plan together on the row beneath the provider name, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. After a Claude turn whose usage read reports the plan's spend, the open window shows Claude's Spend limit row with its percent and reset time and the updated 5h row without a relaunch. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
     def test_agents_info_shows_provider_usage_and_accounts(self):

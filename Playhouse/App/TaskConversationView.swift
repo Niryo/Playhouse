@@ -1141,7 +1141,7 @@ struct TaskConversationView: View {
     @FocusState private var isComposerFocused: Bool
 
     private var isSendDisabled: Bool {
-        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isLoadingHistory || userInputRequest != nil
+        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isLoadingHistory || !hasLoadedConversation || userInputRequest != nil
     }
 
     /// A board task that hasn't started its conversation can be scheduled, or rescheduled.
@@ -4817,6 +4817,9 @@ struct TaskConversationView: View {
             startOffset: selection.startOffset, endBlockID: selection.endBlockID, endOffset: selection.endOffset,
             text: selection.text, comment: annotationComment.trimmingCharacters(in: .whitespacesAndNewlines)
         ))
+        // Saved here, where the user adds it, not by an `onChange(of: annotations)` on the
+        // composer: that observer stopped the transcript following the newest streamed text.
+        if !isReadOnly { persistPendingAnnotations() }
         annotationSelection = nil
         currentTextSelection = nil
         annotationComment = ""
@@ -5226,10 +5229,6 @@ struct TaskConversationView: View {
                         draft = ""
                     }
                     scheduleDraftAutosave(newValue)
-                }
-                .onChange(of: annotations) { _, _ in
-                    guard !isReadOnly, !isLoadingHistory else { return }
-                    persistPendingAnnotations()
                 }
         }
         .padding(.horizontal, 28)
@@ -5813,11 +5812,17 @@ struct TaskConversationView: View {
             }
         }
         // Sent comments are never in the saved list, but one whose clear was interrupted could be.
+        let persisted = inFlightAnnotationIDs.isEmpty ? PersistedAnnotations.decode(task.pendingAnnotationsData) : []
         annotations = PersistedAnnotations.restored(
             sent: restored,
             livePending: keepingPending ? annotations.filter(\.pending) : [],
-            persisted: inFlightAnnotationIDs.isEmpty ? PersistedAnnotations.decode(task.pendingAnnotationsData) : []
+            persisted: persisted
         )
+        // Dropping such a comment, or keeping live ones, changes what is pending; save that once.
+        if !isReadOnly, inFlightAnnotationIDs.isEmpty,
+           Set(annotations.filter(\.pending).map(\.id)) != Set(persisted.map(\.id)) {
+            persistPendingAnnotations()
+        }
     }
 
     /// Shows the cached provider model list and remembered selection without a
@@ -6108,7 +6113,7 @@ struct TaskConversationView: View {
         let pendingAnnotations = annotations.filter(\.pending)
         let usesComposerDraft = overrideText == nil
         // An empty Goal still goes to the bridge, which explains the length rule.
-        guard (!freeformText.isEmpty || (usesComposerDraft && (!pendingImages.isEmpty || isEnteringGoal)) || !pendingAnnotations.isEmpty), !isResponding, !isLoadingHistory, userInputRequest == nil else { return }
+        guard (!freeformText.isEmpty || (usesComposerDraft && (!pendingImages.isEmpty || isEnteringGoal)) || !pendingAnnotations.isEmpty), !isResponding, !isLoadingHistory, hasLoadedConversation, userInputRequest == nil else { return }
         let annotationPrompt: String
         if pendingAnnotations.isEmpty {
             annotationPrompt = freeformText
