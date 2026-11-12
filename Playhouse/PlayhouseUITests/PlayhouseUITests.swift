@@ -10464,7 +10464,8 @@ final class PlayhouseUITests: XCTestCase {
         // Reopening shows only the newest turn; the commented reply is in an earlier one.
         XCTAssertTrue(waitUntil({ firstResponseLine.exists }, timeout: 5) || revealWholeTranscript(),
                       "The commented reply should render after reopening.")
-        XCTAssertTrue(firstResponseLine.waitToExist(timeout: 10))
+        // Earlier rows render only near the viewport, so bring the reply back into view.
+        XCTAssertTrue(scrollTranscriptUntilExists(firstResponseLine), "The commented reply should be reachable after reopening.")
         XCTAssertGreaterThan(orangePixels(in: firstResponseLine), firstLineOrangeBefore + 5,
                              "Reopening should restore the cross-paragraph highlight on its first paragraph.")
         XCTAssertGreaterThan(orangePixels(in: secondResponseLine), secondLineOrangeBefore + 5,
@@ -12965,17 +12966,22 @@ final class PlayhouseUITests: XCTestCase {
                 if settle > 0 { _ = waitUntil(condition, timeout: settle) }
             }
         }
-        /// Coarse steps until `target` shows, then steps shorter than the 160-point band below the
-        /// viewport's top, so the seek cannot carry it past that band.
+        /// Coarse steps until `target` is rendered, which it is well before it reaches the
+        /// viewport, so a step cannot carry past it; then into view, then steps shorter than the
+        /// 160-point band below the viewport's top, so the seek cannot carry it past that band.
         func bringNearTop(_ target: XCUIElement, coarse: CGFloat) {
-            scrollTranscript(by: coarse, until: { isVisible(target) }, limit: 40, settle: 0.2)
+            scrollTranscript(by: coarse, until: { target.exists }, limit: 40, settle: 0.2)
+            bringIntoTranscriptViewport(target, scrollView: scrollView)
             let fine: CGFloat = coarse < 0 ? -100 : 100
             scrollTranscript(by: fine, until: { isVisible(target) && topInViewport(target) < 160 && topInViewport(target) >= 0 }, limit: 20, settle: 0.2)
         }
         XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest 2 of 120 messages" }, timeout: 20), "Reopening should render only the latest turn.")
-        // Deep upward scrolls reveal every batch they pass, as one long scroll does.
-        scrollTranscript(by: 1500, until: { scrollView.value as? String == "Showing latest 120 of 120 messages" }, limit: 40, settle: 1)
-        XCTAssertEqual(scrollView.value as? String, "Showing latest 120 of 120 messages", "Scrolling up should reveal every earlier batch.")
+        // A short scroll reveals the first older batch; one long upward scroll then reveals every
+        // batch it passes and lands on the first messages, as dragging the scroller's knob does.
+        scrollView.scroll(byDeltaX: 0, deltaY: 200)
+        XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest 42 of 120 messages" }, timeout: 10), "An upward scroll should reveal the first older batch.")
+        scrollView.scroll(byDeltaX: 0, deltaY: 40_000)
+        XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest 120 of 120 messages" }, timeout: 20), "Scrolling up should reveal every earlier batch.")
         scrollTranscript(by: 1500, until: { isVisible(oldest) }, limit: 40)
         XCTAssertTrue(waitUntil({ isVisible(oldest) && isVisible(firstAssistant) }, timeout: 5), "The top of the revealed history should show its first messages.")
 
@@ -12993,7 +12999,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(scrollView.value as? String, "Showing latest 120 of 120 messages", "Returning to discarded rows must not reload or shrink the window.")
 
         // The earlier turn's command renders inline after its question; expanding it shows every line.
-        bringNearTop(intermediate, coarse: -300)
+        bringNearTop(intermediate, coarse: -900)
         XCTAssertTrue(isVisible(intermediate), "A mid-history message should be reachable once every batch is revealed.")
         XCTAssertTrue(waitUntil({ isVisible(callRow) }, timeout: 5), "The earlier turn's command should render inline after its question.")
         XCTAssertLessThan(intermediate.frame.minY, callRow.frame.minY, "The command should follow the message it came after.")
@@ -13052,7 +13058,7 @@ final class PlayhouseUITests: XCTestCase {
         // further than the tolerance below: the restore pins the message at the viewport's top
         // to the top again, so the message read moves by at most one message.
         let deepMessage = element("user-message-item_long_history_user_50")
-        bringNearTop(deepMessage, coarse: -300)
+        bringNearTop(deepMessage, coarse: -900)
         XCTAssertTrue(isVisible(deepMessage), "A message deep in the history should be reachable.")
         let widthBeforeResize = scrollView.frame.width
         let readingTop = topInViewport(deepMessage)
@@ -15762,7 +15768,7 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 60), "The later ordinary turn should finish with an answer.")
         XCTAssertTrue(revealWholeTranscript(), "The earlier nudged turn should load as the reader scrolls up.")
         let input = element("conversation-tool-call-input-\(callID)")
-        XCTAssertTrue(transcriptScan { input.exists }, "After a later turn, the nudged turn's call should render inline.")
+        XCTAssertTrue(scrollTranscriptUntilExists(input), "After a later turn, the nudged turn's call should render inline.")
         XCTAssertTrue([input.label, input.value as? String ?? ""].joined(separator: " ").contains("echo NUDGED CHECK PASSED"),
                       "The inline call should show the nudged turn's exact command.")
         // Earlier rows render only near the viewport, so each check scans the whole transcript.
@@ -25094,18 +25100,40 @@ final class PlayhouseUITests: XCTestCase {
 
     /// Settled turns render lazily, so a row of an earlier turn exists only while it is near the
     /// viewport. Scrolls the transcript up, then back down, as a reader looking for it would,
-    /// until `target` exists.
+    /// until `target` exists, then brings it into the viewport. A row found well outside the
+    /// viewport may be one that renders only until it is measured and then becomes a box, so
+    /// callers that go on to read it need it in view, where it stays rendered.
     @discardableResult
     private func scrollTranscriptUntilExists(_ target: XCUIElement) -> Bool {
-        if target.waitToExist(timeout: 1) { return true }
         let scrollView = element("conversation-scroll-view")
+        func found() -> Bool {
+            guard target.waitToExist(timeout: 1) else { return false }
+            bringIntoTranscriptViewport(target, scrollView: scrollView)
+            return target.exists
+        }
+        if found() { return true }
         for delta: CGFloat in [300, -300] {
             for _ in 0..<60 {
                 scrollView.scroll(byDeltaX: 0, deltaY: delta)
-                if target.waitToExist(timeout: 0.3) { return true }
+                if target.waitToExist(timeout: 0.3), found() { return true }
             }
         }
-        return target.exists
+        return found()
+    }
+
+    /// Scrolls until `target`'s top lies inside the conversation's viewport, then waits for the
+    /// transcript to settle the rows around it.
+    private func bringIntoTranscriptViewport(_ target: XCUIElement, scrollView: XCUIElement) {
+        for _ in 0..<12 where target.exists {
+            let viewport = scrollView.frame
+            let top = target.frame.minY
+            if top >= viewport.minY, top < viewport.maxY - 24 { break }
+            // Wheel steps move less than their delta, so step by up to a viewport.
+            let distance = top < viewport.minY ? viewport.minY + 24 - top : top - (viewport.maxY - 24) + 24
+            scrollView.scroll(byDeltaX: 0, deltaY: (top < viewport.minY ? 1 : -1) * min(viewport.height, distance * 2))
+            _ = waitForStableFrame(target, timeout: 1)
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
     }
 
     /// Settled turns render lazily, so a check over the whole revealed transcript has to look at
