@@ -905,7 +905,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(element("message-composer").value as? String, "Protected draft")
     }
 
-    // case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory, and run.sh drops PLAYHOUSE_BRIDGE_SERVICE_NAME and PLAYHOUSE_BRIDGE_SOCKET_PATH inherited from another Playhouse app, saying so, while keeping the launching worktree's own bridge. After its build and right before it opens the app, run.sh again stops this worktree's app and bridge daemon, so a daemon started from the previous build during the build cannot serve the new app. A saved conversation remains visible after an app restart.
+    // case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory, and run.sh drops PLAYHOUSE_BRIDGE_SERVICE_NAME and PLAYHOUSE_BRIDGE_SOCKET_PATH inherited from another Playhouse app, saying so, while keeping the launching worktree's own bridge. run.sh keeps this worktree's running app open during its build and stops this worktree's app and bridge daemon only once, after the build and right before it opens the app, so a daemon started from the previous build during the build cannot serve the new app. A saved conversation remains visible after an app restart.
     func test_worktree_app_profiles_isolate_identity_and_store() throws {
         let script = repositoryRoot.appendingPathComponent("scripts/app-profile.sh")
         func profileScriptEnvironment() throws -> [String: String] {
@@ -1052,11 +1052,13 @@ final class PlayhouseUITests: XCTestCase {
         let runScript = try String(contentsOf: script.deletingLastPathComponent().appendingPathComponent("run.sh"), encoding: .utf8)
         XCTAssertTrue(runScript.contains("playhouse_clear_inherited_bridge_overrides\nopen -n"),
                       "run.sh must clear inherited bridge overrides right before it opens the app.")
-        XCTAssertTrue(runScript.contains("terminate_running_playhouse \"started from the previous build\"\nplayhouse_clear_inherited_bridge_overrides\nopen -n"),
+        XCTAssertTrue(runScript.contains("terminate_running_playhouse \"now that the new build is ready\"\nplayhouse_clear_inherited_bridge_overrides\nopen -n"),
                       "run.sh must stop a daemon started from the previous build right before it opens the app.")
         let buildIndex = try XCTUnwrap(runScript.range(of: "xcodebuild build")).lowerBound
-        let relaunchStopIndex = try XCTUnwrap(runScript.range(of: "terminate_running_playhouse \"started from the previous build\"")).lowerBound
-        XCTAssertLessThan(buildIndex, relaunchStopIndex, "run.sh must stop the previous build's processes again after xcodebuild finishes.")
+        let relaunchStopIndex = try XCTUnwrap(runScript.range(of: "terminate_running_playhouse \"now that the new build is ready\"")).lowerBound
+        XCTAssertLessThan(buildIndex, relaunchStopIndex, "run.sh must stop the previous build's processes after xcodebuild finishes.")
+        XCTAssertEqual(runScript.components(separatedBy: "\nterminate_running_playhouse ").count - 1, 1,
+                       "run.sh must keep the running app open during the build and stop it only once, after the build.")
         let launchedIdentifier = try XCTUnwrap(Bundle(url: appBundle)?.bundleIdentifier)
         let sourceProfile = try profile(for: repositoryRoot)
         XCTAssertTrue(launchedIdentifier.hasPrefix(try XCTUnwrap(sourceProfile["bundleID"]) + ".e2e."), "The test app must use the actual source checkout's identity, not a repository fixture's identity.")
