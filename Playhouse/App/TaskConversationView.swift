@@ -371,12 +371,16 @@ private struct AssistantProseLayout {
 
     /// The comment's range in `text`, or nil when it belongs to blocks outside this run.
     func range(of annotation: ConversationAnnotation) -> NSRange? {
-        guard let start = placed.first(where: { $0.block.id == annotation.blockID })?.contentRange,
-              let end = placed.first(where: { $0.block.id == annotation.endBlockID })?.contentRange,
-              (0...start.length).contains(annotation.startOffset),
-              (0...end.length).contains(annotation.endOffset) else { return nil }
-        let location = start.location + annotation.startOffset
-        let endLocation = end.location + annotation.endOffset
+        range(of: annotation.source)
+    }
+
+    func range(of source: ConversationTextSource) -> NSRange? {
+        guard let start = placed.first(where: { $0.block.id == source.blockID })?.contentRange,
+              let end = placed.first(where: { $0.block.id == source.endBlockID })?.contentRange,
+              (0...start.length).contains(source.startOffset),
+              (0...end.length).contains(source.endOffset) else { return nil }
+        let location = start.location + source.startOffset
+        let endLocation = end.location + source.endOffset
         guard endLocation > location else { return nil }
         return NSRange(location: location, length: endLocation - location)
     }
@@ -1007,7 +1011,9 @@ private class MeasuredTextView: NSTextView {
 
 /// The bubble that opens on selected conversation text: a small side chat about the
 /// selection, forked read-only from the task's conversation, whose Add comment button
-/// turns what is typed into a comment on the selection instead of sending it.
+/// turns what is typed into a comment on the selection instead of sending it. Clicking
+/// commented or side-chatted text opens it again with that comment, which it edits, and
+/// that side chat, which it continues.
 private struct SideChatBubble: View {
     private struct Message: Identifiable {
         let id = UUID()
@@ -1016,16 +1022,25 @@ private struct SideChatBubble: View {
     }
 
     let selectedText: String
+    /// The comment already made on the selection, if any.
+    let comment: String?
+    /// Whether that comment is unsent, and so can still be changed or deleted.
+    let canEditComment: Bool
     /// The task provider's models; the side chat starts on the task's model and effort.
     let models: [ConversationModelOption]
     let defaultModelName: String
     let send: (_ sideChatID: String?, _ message: String, _ modelID: String, _ effort: ConversationEffort, _ onDelta: @escaping (String) -> Void) async throws -> SideChatReply
+    /// Receives the side chat as saved after each answer.
+    let onSaved: (SavedSideChat) -> Void
     let addComment: (String) -> Void
+    /// Saves the edited comment; empty text deletes it.
+    let saveComment: (String) -> Void
     let close: (_ sideChatID: String) -> Void
     let dismiss: () -> Void
 
-    @State private var messages: [Message] = []
+    @State private var messages: [Message]
     @State private var draft = ""
+    @State private var commentDraft: String
     @State private var sideChatID: String?
     @State private var isResponding = false
     @State private var streamingText = ""
@@ -1040,24 +1055,37 @@ private struct SideChatBubble: View {
 
     init(
         selectedText: String,
+        comment: String?,
+        canEditComment: Bool,
+        savedChat: SavedSideChat?,
         models: [ConversationModelOption],
         defaultModelName: String,
         modelID: String,
         effort: ConversationEffort,
         send: @escaping (_ sideChatID: String?, _ message: String, _ modelID: String, _ effort: ConversationEffort, _ onDelta: @escaping (String) -> Void) async throws -> SideChatReply,
+        onSaved: @escaping (SavedSideChat) -> Void,
         addComment: @escaping (String) -> Void,
+        saveComment: @escaping (String) -> Void,
         close: @escaping (_ sideChatID: String) -> Void,
         dismiss: @escaping () -> Void
     ) {
         self.selectedText = selectedText
+        self.comment = comment
+        self.canEditComment = canEditComment
         self.models = models
         self.defaultModelName = defaultModelName
         self.send = send
+        self.onSaved = onSaved
         self.addComment = addComment
+        self.saveComment = saveComment
         self.close = close
         self.dismiss = dismiss
-        _modelID = State(initialValue: modelID)
-        _effort = State(initialValue: effort)
+        _messages = State(initialValue: (savedChat?.messages ?? []).map { Message(isUser: $0.isUser, text: $0.text) })
+        _commentDraft = State(initialValue: comment ?? "")
+        _sideChatID = State(initialValue: savedChat?.id)
+        // A saved side chat continues on the model its last message chose.
+        _modelID = State(initialValue: savedChat?.modelID ?? modelID)
+        _effort = State(initialValue: savedChat?.effort ?? effort)
     }
 
     /// The bubble opens compact and grows as the chat does: wider once it has messages, taller
@@ -1074,6 +1102,7 @@ private struct SideChatBubble: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
+            commentEditor
             transcript
             composer
         }
@@ -1122,6 +1151,47 @@ private struct SideChatBubble: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     // Its value is the whole selection, however much of it the three lines show.
                     .accessibilityIdentifier("side-chat-selected-text")
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// The comment already made on the selection: a field that changes it while it is unsent,
+    /// where saving it empty deletes it, or its text once sent.
+    @ViewBuilder
+    private var commentEditor: some View {
+        if let comment {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Comment")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                if canEditComment {
+                    HStack(alignment: .bottom, spacing: 8) {
+                        TextField("Empty, saving deletes the comment", text: $commentDraft, axis: .vertical)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12.5))
+                            .lineLimit(1...5)
+                            .onSubmit { saveComment(commentDraft) }
+                            .onExitCommand(perform: dismiss)
+                            .accessibilityLabel("Comment")
+                            .accessibilityIdentifier("side-chat-comment-field")
+                        Button("Save") { saveComment(commentDraft) }
+                            .controlSize(.small)
+                            .disabled(commentDraft == comment)
+                            .buttonHoverPointer()
+                            .nativeHelp("Save the comment. Saving it empty deletes it.")
+                            .accessibilityIdentifier("side-chat-comment-save")
+                    }
+                    .padding(.horizontal, 9).padding(.vertical, 7)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
+                    .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.orange.opacity(0.45)))
+                } else {
+                    Text(verbatim: comment)
+                        .font(.system(size: 12.5))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("side-chat-comment-text")
+                }
             }
             .fixedSize(horizontal: false, vertical: true)
         }
@@ -1219,15 +1289,19 @@ private struct SideChatBubble: View {
                 onCancel: dismiss
             )
             AtomStack(props: StackProps(axis: "h", spacing: 8)) {
-                AtomButton(
-                    common: AtomCommon(testID: "add-comment-button", label: "Comment", help: "Add what you typed as a comment on the selected text"),
-                    action: { addComment(draft.trimmingCharacters(in: .whitespacesAndNewlines)) }
-                ) {
-                    AtomStack(
-                        props: StackProps(axis: "h", fill: "primary", fillOpacity: 0.1, capsule: true),
-                        common: AtomCommon(height: 26, paddingX: 10)
+                // An unsent comment is changed in its own field above instead; a sent one can't
+                // be, so another comment can still be added on its text.
+                if !canEditComment {
+                    AtomButton(
+                        common: AtomCommon(testID: "add-comment-button", label: "Comment", help: "Add what you typed as a comment on the selected text"),
+                        action: { addComment(draft.trimmingCharacters(in: .whitespacesAndNewlines)) }
                     ) {
-                        AtomLabel(props: LabelProps(text: "Comment", icon: "text.bubble", size: 12, weight: "semibold"))
+                        AtomStack(
+                            props: StackProps(axis: "h", fill: "primary", fillOpacity: 0.1, capsule: true),
+                            common: AtomCommon(height: 26, paddingX: 10)
+                        ) {
+                            AtomLabel(props: LabelProps(text: "Comment", icon: "text.bubble", size: 12, weight: "semibold"))
+                        }
                     }
                 }
                 AtomSpacer(props: SpacerProps(minLength: 0))
@@ -1299,6 +1373,7 @@ private struct SideChatBubble: View {
             do {
                 let reply = try await send(sideChatID, text, modelID, effort) { delta in streamingText += delta }
                 sideChatID = reply.sideChatID
+                onSaved(reply.sideChat)
                 let answer = reply.reply.isEmpty ? streamingText : reply.reply
                 messages.append(Message(isUser: false, text: answer.trimmingCharacters(in: .whitespacesAndNewlines)))
             } catch {
@@ -1312,6 +1387,8 @@ private struct SideChatBubble: View {
 
 private final class CommentTrackingTextView: MeasuredTextView {
     var hoverTrackingOwner: AnyObject?
+    /// A single click that leaves nothing selected, with the index of the character it hit.
+    var onClickWithoutSelection: ((Int) -> Void)?
     /// The whole message this block belongs to; copying a fully selected block copies it all.
     var wholeMessageText: String?
     /// The prose blocks laid out in this view, exposed as their own accessibility elements so
@@ -1384,6 +1461,33 @@ private final class CommentTrackingTextView: MeasuredTextView {
         window?.acceptsMouseMovedEvents = true
     }
 
+    private var pendingClick: DispatchWorkItem?
+
+    /// The text view tracks the drag that selects text until the mouse goes up, so the
+    /// selection is settled by the time `super` returns. The click is reported once the
+    /// double-click interval passes without another, so double-clicking still selects a word.
+    override func mouseDown(with event: NSEvent) {
+        pendingClick?.cancel()
+        pendingClick = nil
+        let point = convert(event.locationInWindow, from: nil)
+        super.mouseDown(with: event)
+        guard event.clickCount == 1, selectedRange().length == 0, onClickWithoutSelection != nil,
+              let layoutManager, let textContainer, layoutManager.numberOfGlyphs > 0 else { return }
+        let containerPoint = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+        let glyph = layoutManager.glyphIndex(for: containerPoint, in: textContainer, fractionOfDistanceThroughGlyph: nil)
+        // A click on the character itself, not on the empty end of its line.
+        guard layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: textContainer)
+            .contains(containerPoint) else { return }
+        let index = layoutManager.characterIndexForGlyph(at: glyph)
+        let click = DispatchWorkItem { [weak self] in
+            guard let self, self.selectedRange().length == 0 else { return }
+            self.pendingClick = nil
+            self.onClickWithoutSelection?(index)
+        }
+        pendingClick = click
+        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: click)
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         guard hoverTrackingArea == nil, let hoverTrackingOwner else { return }
@@ -1410,6 +1514,16 @@ private struct AnnotationSelection: Identifiable {
     let endOffset: Int
     let text: String
     let bounds: CGRect
+    /// Set when clicking commented or side-chatted text reopens its bubble: the comment
+    /// and side chat it shows, which a new selection has neither of.
+    var annotationID: UUID? = nil
+    var sideChatID: String? = nil
+
+    var isReopened: Bool { annotationID != nil || sideChatID != nil }
+
+    var source: ConversationTextSource {
+        ConversationTextSource(messageID: messageID, blockID: blockID, startOffset: startOffset, endBlockID: endBlockID, endOffset: endOffset)
+    }
 }
 
 struct TaskConversationView: View {
@@ -1572,6 +1686,8 @@ struct TaskConversationView: View {
     @State private var inFlightAnnotationIDs: Set<UUID> = []
     @State private var annotationSelection: AnnotationSelection?
     @State private var currentTextSelection: AnnotationSelection?
+    /// The side chats saved on the task; ones with a source highlight their text purple.
+    @State private var sideChats: [SavedSideChat] = []
     @State private var activities: [ConversationActivity] = []
     /// Tool calls from every loaded turn, each shown in the timeline after the
     /// message it followed.
@@ -5048,10 +5164,16 @@ struct TaskConversationView: View {
                         .accessibilityIdentifier("playhouse-message-label-\(message.id)")
                 }
                 if !visibleText.isEmpty {
+                    let userMessageRange: (ConversationTextSource) -> NSRange? = { source in
+                        source.blockID == 0 && source.endBlockID == 0
+                            ? NSRange(location: source.startOffset, length: source.endOffset - source.startOffset) : nil
+                    }
                     SelectableAnnotationText(
                         text: visibleText,
-                        highlightedRanges: annotations.filter { $0.messageID == message.id && $0.blockID == 0 }.map {
-                            NSRange(location: $0.startOffset, length: $0.endOffset - $0.startOffset)
+                        highlightedRanges: annotations.filter { $0.messageID == message.id }.compactMap { userMessageRange($0.source) },
+                        chatRanges: sideChatRanges(messageID: message.id, rangeOf: userMessageRange),
+                        onHighlightClick: { range, bounds in
+                            reopenHighlight(range, bounds: bounds, messageID: message.id, anchorID: 0, rangeOf: userMessageRange)
                         },
                         textColor: isPlayhouseSent ? .secondaryLabelColor : .labelColor,
                         onSelection: { range, selectedText, bounds in
@@ -5227,13 +5349,19 @@ struct TaskConversationView: View {
                             set: { isPresented in
                                 if !isPresented, annotationSelection?.id == selection.id {
                                     annotationSelection = nil
+                                    // A reopened bubble selected nothing, so no hint is left behind.
+                                    if selection.isReopened, currentTextSelection?.id == selection.id { currentTextSelection = nil }
                                 }
                             }
                         // Above the selected lines, where it covers what was read rather than what
                         // follows; AppKit moves it below them when the screen has no room above.
                         ), arrowEdge: .top) {
+                            let comment = selection.annotationID.flatMap { id in annotations.first { $0.id == id } }
                             SideChatBubble(
                                 selectedText: selection.text,
+                                comment: comment?.comment,
+                                canEditComment: comment.map { !isReadOnly && $0.pending && !inFlightAnnotationIDs.contains($0.id) } ?? false,
+                                savedChat: selection.sideChatID.flatMap { id in sideChats.first { $0.id == id } },
                                 models: modelOptions,
                                 defaultModelName: provider.defaultModelName,
                                 modelID: selectedModelID,
@@ -5242,15 +5370,19 @@ struct TaskConversationView: View {
                                     try await conversationManager.sideChat(
                                         taskID: task.id, sideChatID: sideChatID,
                                         selection: sideChatID == nil ? selection.text : nil,
+                                        source: sideChatID == nil ? selection.source : nil,
                                         message: message, modelID: modelID, effort: effort, onDelta: onDelta
                                     )
                                 },
+                                onSaved: keepSideChat,
                                 addComment: { comment in addAnnotation(selection, comment: comment) },
+                                saveComment: { text in if let comment { editAnnotation(comment.id, comment: text) } },
                                 close: { sideChatID in
                                     Task { await conversationManager.closeSideChat(taskID: task.id, sideChatID: sideChatID) }
                                 },
                                 dismiss: {
                                     if annotationSelection?.id == selection.id { annotationSelection = nil }
+                                    if selection.isReopened, currentTextSelection?.id == selection.id { currentTextSelection = nil }
                                 }
                             )
                         }
@@ -5261,7 +5393,10 @@ struct TaskConversationView: View {
                     // The hint that opens the bubble, centered above the selection, gone while it is open.
                     if !isBubbleOpen {
                         Button {
-                            annotationSelection = selection
+                            // Text already commented or side-chatted reopens with them.
+                            let opened = withSavedNotes(selection)
+                            currentTextSelection = opened
+                            annotationSelection = opened
                         } label: {
                             Label("Side chat", systemImage: "bubble.left.and.text.bubble.right")
                                 .font(.system(size: 13, weight: .medium))
@@ -5368,6 +5503,10 @@ struct TaskConversationView: View {
         return SelectableAnnotationText(
             text: layout.text.string,
             highlightedRanges: annotations.filter { $0.messageID == messageID }.compactMap(layout.range(of:)),
+            chatRanges: sideChatRanges(messageID: messageID, rangeOf: layout.range(of:)),
+            onHighlightClick: { range, bounds in
+                reopenHighlight(range, bounds: bounds, messageID: messageID, anchorID: layout.id, rangeOf: layout.range(of:))
+            },
             responseAnnotations: responseAnnotations,
             responseCommentSourcePrefix: "\(messageID):\(layout.id)",
             isAssistantText: true,
@@ -5427,6 +5566,70 @@ struct TaskConversationView: View {
         )
             .fixedSize(horizontal: false, vertical: true)
             .frame(width: ceil(markerWidth) + 4, alignment: .leading)
+    }
+
+    /// The ranges of a message's text that saved side chats discuss.
+    private func sideChatRanges(messageID: String, rangeOf: (ConversationTextSource) -> NSRange?) -> [NSRange] {
+        sideChats.compactMap { sideChat in
+            guard !sideChat.messages.isEmpty, let source = sideChat.source, source.messageID == messageID else { return nil }
+            return rangeOf(source)
+        }
+    }
+
+    /// `selection` with the comment and side chat already made on exactly that text, which
+    /// its bubble opens with.
+    private func withSavedNotes(_ selection: AnnotationSelection) -> AnnotationSelection {
+        var selection = selection
+        let source = selection.source
+        let matching = annotations.filter { $0.source == source }
+        selection.annotationID = (matching.last(where: \.pending) ?? matching.last)?.id
+        selection.sideChatID = sideChats.last { $0.source == source && !$0.messages.isEmpty }?.id
+        return selection
+    }
+
+    /// Opens the bubble on the commented or side-chatted text `range` that was clicked, with
+    /// its comment and side chat.
+    private func reopenHighlight(
+        _ range: NSRange, bounds: CGRect, messageID: String, anchorID: Int,
+        rangeOf: (ConversationTextSource) -> NSRange?
+    ) {
+        let source = annotations.last { $0.messageID == messageID && rangeOf($0.source) == range }?.source
+            ?? sideChats.last { $0.source?.messageID == messageID && !$0.messages.isEmpty && $0.source.flatMap(rangeOf) == range }?.source
+        guard let source else { return }
+        let text = annotations.last { $0.source == source }?.text ?? sideChats.last { $0.source == source }?.selectedText ?? ""
+        let selection = withSavedNotes(AnnotationSelection(
+            messageID: messageID, anchorID: anchorID, blockID: source.blockID, startOffset: source.startOffset,
+            endBlockID: source.endBlockID, endOffset: source.endOffset, text: text, bounds: bounds
+        ))
+        guard selection.isReopened else { return }
+        currentTextSelection = selection
+        annotationSelection = selection
+    }
+
+    /// Changes an unsent comment's text; saving it empty deletes the comment.
+    private func editAnnotation(_ id: UUID, comment: String) {
+        guard let index = annotations.firstIndex(where: { $0.id == id && $0.pending }),
+              !inFlightAnnotationIDs.contains(id) else { return }
+        let comment = comment.trimmingCharacters(in: .whitespacesAndNewlines)
+        if comment.isEmpty {
+            annotations.remove(at: index)
+        } else {
+            annotations[index].comment = comment
+        }
+        annotationSelection = nil
+        currentTextSelection = nil
+        guard !isReadOnly else { return }
+        let taskID = task.id
+        let taskManager = BoardTaskManager(modelContext: modelContext)
+        let previousSave = composerDraft.annotationSaveTask
+        composerDraft.annotationSaveTask = Task { @MainActor in
+            await previousSave?.value
+            do {
+                try await taskManager.editPendingAnnotation(taskID, annotationID: id, comment: comment)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     private func addAnnotation(_ selection: AnnotationSelection, comment: String) {
@@ -6299,6 +6502,7 @@ struct TaskConversationView: View {
             // visible instead of letting that older snapshot clear it.
             userInputRequest = savedUserInputRequest ?? liveUserInputRequest
             restoreAnnotations(from: history.messages)
+            loadSideChats()
             answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
             activities = history.activities
             timelineActivities = []
@@ -6403,6 +6607,24 @@ struct TaskConversationView: View {
                request.threadID == task.activeConversationID, !answeredUserInputRequestIDs.contains(request.id) {
                 showUserInputRequest(request)
             }
+        }
+    }
+
+    private func loadSideChats() {
+        let taskID = task.id
+        Task { @MainActor in
+            guard let saved = try? await conversationManager.savedSideChats(taskID: taskID), task.id == taskID else { return }
+            sideChats = saved
+        }
+    }
+
+    /// Keeps the side chat a bubble just saved, so its text highlights while the bubble is
+    /// open and reopens with it after the bubble closes.
+    private func keepSideChat(_ sideChat: SavedSideChat) {
+        if let index = sideChats.firstIndex(where: { $0.id == sideChat.id }) {
+            sideChats[index] = sideChat
+        } else {
+            sideChats.append(sideChat)
         }
     }
 
@@ -8430,6 +8652,11 @@ private struct SelectableAnnotationText: NSViewRepresentable {
     let text: String
     /// Commented ranges of `text`, rendered orange.
     let highlightedRanges: [NSRange]
+    /// Ranges of `text` a side chat discusses, rendered purple unless a comment covers them too.
+    var chatRanges: [NSRange] = []
+    /// A click inside a commented or side-chatted range, selecting nothing, reports that range
+    /// (a commented one first) and where it is in the text.
+    var onHighlightClick: ((NSRange, CGRect) -> Void)? = nil
     var responseAnnotations: [ResponseAnnotationReference] = []
     var responseCommentSourcePrefix = ""
     var isAssistantText = false
@@ -8472,6 +8699,11 @@ private struct SelectableAnnotationText: NSViewRepresentable {
         context.coordinator.anchorView = view
         view.hoverTrackingOwner = context.coordinator
         view.accessibilityBlocks = accessibilityBlocks
+        view.onClickWithoutSelection = { [weak coordinator = context.coordinator, weak view] index in
+            guard let coordinator, let view else { return }
+            coordinator.highlightClicked(at: index, in: view)
+        }
+        updateHighlightClicks(context.coordinator)
         view.updateTrackingAreas()
         update(view, coordinator: context.coordinator)
         context.coordinator.renderedKey = renderKey
@@ -8484,6 +8716,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
         context.coordinator.onSelection = onSelection
         context.coordinator.responseCommentSourcePrefix = responseCommentSourcePrefix
         context.coordinator.anchorView = view
+        updateHighlightClicks(context.coordinator)
         guard context.coordinator.renderedKey != renderKey else {
             return
         }
@@ -8501,7 +8734,13 @@ private struct SelectableAnnotationText: NSViewRepresentable {
 
     private var renderKey: String {
         responseCommentSourcePrefix + "|" + text + highlightedRanges.map { "\($0.location):\($0.length)" }.joined(separator: ",")
+            + "|" + chatRanges.map { "\($0.location):\($0.length)" }.joined(separator: ",")
             + responseAnnotations.map { "\($0.text):\($0.comment)" }.joined(separator: "|")
+    }
+
+    private func updateHighlightClicks(_ coordinator: Coordinator) {
+        coordinator.onHighlightClick = onHighlightClick
+        coordinator.highlightRanges = onHighlightClick == nil ? [] : highlightedRanges + chatRanges
     }
 
     private func update(_ view: NSTextView, coordinator: Coordinator) {
@@ -8528,9 +8767,12 @@ private struct SelectableAnnotationText: NSViewRepresentable {
                 .paragraphStyle: style
             ])
         }
-        for range in highlightedRanges {
-            guard range.location >= 0, range.length >= 0, NSMaxRange(range) <= value.length else { continue }
-            value.addAttribute(.foregroundColor, value: NSColor.systemOrange, range: range)
+        // Purple first, so a range that is commented as well ends up orange.
+        for (ranges, color) in [(chatRanges, NSColor.systemPurple), (highlightedRanges, NSColor.systemOrange)] {
+            for range in ranges {
+                guard range.location >= 0, range.length >= 0, NSMaxRange(range) <= value.length else { continue }
+                value.addAttribute(.foregroundColor, value: color, range: range)
+            }
         }
         Self.replaceResponseAnnotationMarkers(in: value, references: responseAnnotations)
         // Setting these restyles all of the text already shown, which would defeat replacing only
@@ -8578,6 +8820,9 @@ private struct SelectableAnnotationText: NSViewRepresentable {
 
     final class Coordinator: NSResponder, NSTextViewDelegate, NSPopoverDelegate {
         var onSelection: (NSRange, String, CGRect) -> Void
+        var onHighlightClick: ((NSRange, CGRect) -> Void)?
+        /// The commented ranges, then the side-chatted ones, in the order a click checks them.
+        var highlightRanges: [NSRange] = []
         var responseCommentSourcePrefix: String
         weak var anchorView: NSTextView?
         var renderedKey = ""
@@ -8770,6 +9015,18 @@ private struct SelectableAnnotationText: NSViewRepresentable {
             let text = (view.string as NSString).substring(with: range)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return }
+            onSelection(range, text, bounds(of: range, in: view))
+        }
+
+        func highlightClicked(at index: Int, in view: NSTextView) {
+            guard let onHighlightClick,
+                  let range = highlightRanges.first(where: { NSLocationInRange(index, $0) }),
+                  NSMaxRange(range) <= (view.string as NSString).length else { return }
+            onHighlightClick(range, bounds(of: range, in: view))
+        }
+
+        /// Where `range` is in the view, as the Side chat hint and bubble anchor on it.
+        private func bounds(of range: NSRange, in view: NSTextView) -> CGRect {
             let glyphs = view.layoutManager?.glyphRange(forCharacterRange: range, actualCharacterRange: nil) ?? NSRange(location: 0, length: 0)
             var bounds = view.layoutManager?.boundingRect(forGlyphRange: glyphs, in: view.textContainer!) ?? .zero
             bounds.origin.x += view.textContainerOrigin.x
@@ -8782,7 +9039,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
                 bounds.size.height = bounds.maxY - top
                 bounds.origin.y = top
             }
-            onSelection(range, text, bounds)
+            return bounds
         }
     }
 }
