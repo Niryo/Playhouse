@@ -2699,10 +2699,14 @@ def main():
                     # The sent prompt is the first stored user message, outside the newest history page.
                     contents.append({"id": "item_sent_prompt", "type": "userMessage", "content": [{"type": "text", "text": "Create a long history."}]})
                 for index in range(1, 61):
-                    contents.extend([
-                        {"id": f"item_long_history_user_{index}", "type": "userMessage", "content": [{"type": "text", "text": f"Long history user {index:02d}."}]},
-                        {"id": f"item_long_history_assistant_{index}", "type": "agentMessage", "phase": "final_answer", "text": f"Long history assistant {index:02d}."},
-                    ])
+                    contents.append({"id": f"item_long_history_user_{index}", "type": "userMessage", "content": [{"type": "text", "text": f"Long history user {index:02d}."}]})
+                    if index == 21 and "-lazy-" in mode:
+                        # A mid-history call whose output runs past the clipped lines, so the UI can
+                        # expand it and check it stays expanded after its row is rendered lazily again.
+                        contents.append({"id": "item_long_history_command_21", "type": "commandExecution", "command": "ls fixture-history",
+                                         "cwd": "/tmp/playhouse-fixture", "status": "completed", "exitCode": 0, "durationMs": 5,
+                                         "aggregatedOutput": "".join(f"history-file-{line}.txt\n" for line in range(1, 7))})
+                    contents.append({"id": f"item_long_history_assistant_{index}", "type": "agentMessage", "phase": "final_answer", "text": f"Long history assistant {index:02d}."})
             if mode.endswith("-tool-activity"):
                 # A concurrent `thread/items/list` read — a second CLI call, or a
                 # window reopening the same thread mid-turn — rebuilds its snapshot
@@ -2858,6 +2862,10 @@ def main():
                         turn_id = saved_turns[turn_index].get("turnID", TURN_ID)
                         if turn_index in ordinary_turn_indexes and ordinary_turn_indexes.index(turn_index) == 1:
                             item["createdAt"] = "2026-10-26T12:34:00Z"
+                if "-long-history-lazy-" in mode and item_id.startswith("item_long_history_"):
+                    # Each history turn is its own turn, as in a real multi-turn thread, so the app
+                    # treats every turn but the last as settled and shows its calls inline.
+                    turn_id = f"turn_long_history_{item_id.rsplit('_', 1)[1]}"
                 if unassociated_restart_question and item.get("type") == "userMessage":
                     entries.append({"item": item})
                 else:

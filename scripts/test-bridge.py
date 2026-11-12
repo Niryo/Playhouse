@@ -2883,7 +2883,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["savedPrompt"], "Protected draft")
 
-    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory, and run.sh drops PLAYHOUSE_BRIDGE_SERVICE_NAME and PLAYHOUSE_BRIDGE_SOCKET_PATH inherited from another Playhouse app, saying so, while keeping the launching worktree's own bridge. After its build and right before it opens the app, run.sh again stops this worktree's app and bridge daemon, so a daemon started from the previous build during the build cannot serve the new app. A saved conversation remains visible after an app restart.
+    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory, and run.sh drops PLAYHOUSE_BRIDGE_SERVICE_NAME and PLAYHOUSE_BRIDGE_SOCKET_PATH inherited from another Playhouse app, saying so, while keeping the launching worktree's own bridge. run.sh keeps this worktree's running app open during its build and stops this worktree's app and bridge daemon only once, after the build and right before it opens the app, so a daemon started from the previous build during the build cannot serve the new app. A saved conversation remains visible after an app restart.
     def test_worktree_app_profiles_isolate_identity_and_store(self):
         script = Path(__file__).resolve().parent / "app-profile.sh"
         linked = self.fixture / "existing-worktree"
@@ -2990,10 +2990,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn("playhouse_clear_inherited_bridge_overrides\nopen -n", (Path(script).parent / "run.sh").read_text(encoding="utf-8"),
                       "run.sh must clear inherited bridge overrides right before it opens the app.")
         run_script = (Path(script).parent / "run.sh").read_text(encoding="utf-8")
-        self.assertIn('terminate_running_playhouse "started from the previous build"\nplayhouse_clear_inherited_bridge_overrides\nopen -n', run_script,
+        self.assertIn('terminate_running_playhouse "now that the new build is ready"\nplayhouse_clear_inherited_bridge_overrides\nopen -n', run_script,
                       "run.sh must stop a daemon started from the previous build right before it opens the app.")
-        self.assertLess(run_script.index("xcodebuild build"), run_script.index('terminate_running_playhouse "started from the previous build"'),
-                        "run.sh must stop the previous build's processes again after xcodebuild finishes.")
+        self.assertLess(run_script.index("xcodebuild build"), run_script.index('terminate_running_playhouse "now that the new build is ready"'),
+                        "run.sh must stop the previous build's processes after xcodebuild finishes.")
+        self.assertEqual(run_script.count("\nterminate_running_playhouse "), 1,
+                         "run.sh must keep the running app open during the build and stop it only once, after the build.")
         # The bridge daemon and CLI ship flat in Contents/MacOS and resolve
         # their identity from this same Info.plist via `Bundle.main` (no
         # separate XPC bundle/Info.plist to cross-check anymore); the service
@@ -7622,7 +7624,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assertEqual(after.get(field), before.get(field), f"The side chat must not change the task's {field}.")
         return after
 
-    def assert_side_chat_validation(self, task, environment, side_chat_id):
+    def assert_side_chat_validation(self, task, environment, side_chat_id, fork_id):
         self.assert_failure(self.call_cli(
             "conversation", "side-chat", task["id"], "--side-chat", side_chat_id, "--message", "   ",
             extra_environment=environment, expected_status=2,
@@ -7640,14 +7642,26 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "conversation", "side-chat", task["id"], "--side-chat", "no-such-side-chat", "--message", "Hello?",
             extra_environment=environment, expected_status=3,
         )[0], "not_found")
+        saved_before = next(chat for chat in self.assert_success(self.call_cli(
+            "conversation", "side-chats", task["id"], extra_environment=environment)[0]) if chat["id"] == side_chat_id)
         closed = self.assert_success(self.call_cli("conversation", "side-chat-close", task["id"], side_chat_id, extra_environment=environment)[0])
         self.assertEqual(closed, {"closed": True})
-        self.assert_failure(self.call_cli(
+        # Closing ends the live session only: the saved side chat continues its forked conversation.
+        resumed = self.assert_success(self.call_cli(
             "conversation", "side-chat", task["id"], "--side-chat", side_chat_id, "--message", "Still there?",
-            extra_environment=environment, expected_status=3,
-        )[0], "not_found")
+            extra_environment=environment,
+        )[0])
+        self.assertEqual(resumed["sideChatID"], side_chat_id)
+        self.assertRegex(resumed["reply"], rf"^Side chat follow-up \d+ on {re.escape(fork_id)}: Still there\?$",
+                         "A closed side chat must continue the same forked provider conversation.")
+        saved_after = next(chat for chat in self.assert_success(self.call_cli(
+            "conversation", "side-chats", task["id"], extra_environment=environment)[0]) if chat["id"] == side_chat_id)
+        self.assertEqual(saved_after["threadID"], fork_id)
+        self.assertEqual(saved_after["messages"], saved_before["messages"] + [
+            {"isUser": True, "text": "Still there?"}, {"isUser": False, "text": resumed["reply"]}])
+        self.assertEqual(resumed["sideChat"], saved_after, "The reply carries the side chat as saved.")
 
-    # case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a Side chat hint centered above the selection, and no bubble opens until it is clicked; clicking it hides the hint and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls. The bubble shows the selected text and a compact chat with no subtitle, whose composer has a Comment button, the conversation's model picker and a send button but no Skills button or mode menu. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown or closed side chat rejects follow-ups, and closing the bubble with Escape ends its side chat without adding a comment.
+    # case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a Side chat hint centered above the selection, and no bubble opens until it is clicked; clicking it hides the hint and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls. The bubble shows the selected text and a compact chat with no subtitle, whose composer has a Comment button, the conversation's model picker and a send button but no Skills button or mode menu. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown side chat rejects follow-ups, and closing the bubble with Escape ends its live session without adding a comment, while the saved side chat's next follow-up continues the same forked session.
     def test_side_chat_forks_claude_conversation_read_only(self):
         task, executable, environment = self.open_side_chat_task("claude", "claude-fixture-side-chat")
         source_session = task["claudeSessionID"]
@@ -7732,9 +7746,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_side_chat_leaves_task_alone(task, task, environment)
         self.assertEqual(self.history_texts(task["id"], environment)[0], history_before,
                          "The side chat's messages must not reach the task's conversation.")
-        self.assert_side_chat_validation(task, environment, opened["sideChatID"])
+        self.assert_side_chat_validation(task, environment, opened["sideChatID"], fork_session)
 
-    # case-contract: test_side_chat_forks_codex_conversation_read_only | The first side chat message on a Codex task's selected text forks the task's Codex thread with thread/fork into Codex's read-only sandbox (excluding turns from the response, with approvals off and the side chat developer instructions), and every side chat turn names a read-only sandbox policy with network access, so the Playhouse CLI still reaches the bridge daemon. The answer streams, names the forked source thread and quotes the selected text; a follow-up continues the same forked thread with the model and effort chosen for it, reloading the fork in the read-only sandbox when the model changes, and asking it to create a task really creates one through the CLI, run inside the read-only sandbox, where the daemon accepts only board requests from a sandboxed caller, so the same side chat's task delete is refused as forbidden and the task stays. The task's own conversation, Codex thread, status and history are unchanged. In the app the bubble opens on the selection, shows the question and the answer below the selected text, and a follow-up adds a second exchange.
+    # case-contract: test_side_chat_forks_codex_conversation_read_only | The first side chat message on a Codex task's selected text forks the task's Codex thread with thread/fork into Codex's read-only sandbox (excluding turns from the response, with approvals off and the side chat developer instructions), and every side chat turn names a read-only sandbox policy with network access, so the Playhouse CLI still reaches the bridge daemon. The answer streams, names the forked source thread and quotes the selected text; a follow-up continues the same forked thread with the model and effort chosen for it, reloading the fork in the read-only sandbox when the model changes, and asking it to create a task really creates one through the CLI, run inside the read-only sandbox, where the daemon accepts only board requests from a sandboxed caller, so the same side chat's task delete is refused as forbidden and the task stays. The task's own conversation, Codex thread, status and history are unchanged. In the app the bubble opens on the selection, shows the question and the answer below the selected text, and a follow-up adds a second exchange. Closing a side chat keeps it saved, and its next follow-up continues the same forked thread.
     def test_side_chat_forks_codex_conversation_read_only(self):
         task, executable, environment = self.open_side_chat_task("codex", "codex-fixture-side-chat-success")
         source_thread = task["codexThreadID"]
@@ -7806,7 +7820,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_side_chat_leaves_task_alone(task, task, environment)
         self.assertEqual(self.history_texts(task["id"], environment)[0], history_before,
                          "The side chat's messages must not reach the task's conversation.")
-        self.assert_side_chat_validation(task, environment, opened["sideChatID"])
+        self.assert_side_chat_validation(task, environment, opened["sideChatID"], fork["threadId"])
 
     # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages, including wrapped multiline selections, shows a Side chat hint above the selected lines in place of the Add comment hint; clicking it opens the side chat bubble at the selected lines, and the bubble's Comment button adds what is typed in its composer as a comment on the selection and closes it. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and closing the bubble with Escape leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details. Consecutive paragraphs, headings, and list items of a reply form one selectable text: the comment reply's lines share one text with a paragraph each, and selecting across them adds one comment that highlights every covered paragraph, records the block it ends in alongside its start block and offsets (a comment inside one block keeps the original source fields), and is restored after reopening the conversation; the cross-block source survives CLI/XPC history reload. User messages render in a neutral gray, input-style bubble with a thin light border and light text rather than the blue accent fill.
     def test_conversation_adds_ordered_text_annotations(self):
@@ -7927,7 +7941,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             [item for item in ordinary_messages(comment_only_history["messages"]) if item["role"] == "assistant"][-1]["text"],
         )
 
-    # case-contract: test_conversation_persists_unsent_comments | Unsent conversation comments are saved with the task draft. Through CLI/XPC, a saved comment list reports its count on a fresh read, malformed input is rejected with invalid_argument and leaves the saved comments unchanged, a later draft save keeps them, appending a list adds only comments not already saved (how a send that ends without delivering its comments returns them without overwriting newer ones), and an empty list clears them. Saving comments after a sent prompt leaves hasUnsentDraft false, so the sent prompt never returns to the composer as a draft. In the app, comments added to a conversation are saved as they are added and survive switching to another task and back and quitting and relaunching: the composer shows the pending comment count and the highlights are restored. Sending them delivers their source ranges, clears the saved comments, and reopening the task shows no pending comment and no duplicate.
+    # case-contract: test_conversation_persists_unsent_comments | Unsent conversation comments are saved with the task draft. Through CLI/XPC, a saved comment list reports its count on a fresh read, malformed input is rejected with invalid_argument and leaves the saved comments unchanged, a later draft save keeps them, appending a list adds only comments not already saved (how a send that ends without delivering its comments returns them without overwriting newer ones), and an empty list clears them. Saving comments after a sent prompt leaves hasUnsentDraft false, so the sent prompt never returns to the composer as a draft. In the app, comments added to a conversation are saved as they are added and survive switching to another task and back and quitting and relaunching: the composer shows the pending comment count and the highlights are restored. Sending them delivers their source ranges, clears the saved comments, and reopening the task shows no pending comment and no duplicate. Once sent, a comment can no longer be edited (task comments edit reports not_found), and clicking its text reopens it read-only in the side chat bubble, whose Comment button can still add a new comment there.
     def test_conversation_persists_unsent_comments(self):
         task = self.create_repo_task("Unsent comments", [self.primary])
         sent_prompt = "Already sent prompt."
@@ -7971,6 +7985,80 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(cleared["pendingCommentCount"], 0)
         self.assertEqual(cleared["savedPrompt"], "A typed draft", "Clearing comments leaves the typed draft alone.")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["pendingCommentCount"], 0)
+        # A send clears the saved comments the same way, after which they are no longer editable.
+        self.assert_failure(self.call_cli(
+            "task", "comments", task["id"], "edit", pending[0]["id"], "--text", "Too late", expected_status=3,
+        )[0], "not_found")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["pendingCommentCount"], 0,
+                         "Editing a sent comment must not bring it back.")
+
+    # case-contract: test_side_chat_and_comment_reopen_from_highlighted_text | Clicking commented or side-chatted conversation text, without selecting any, reopens its bubble with that selection's comment and side chat. A side chat opened on a selection is saved on the task with its source range, selected text, provider conversation, model and every answered exchange; closing its bubble keeps it, its text renders purple while no comment covers it and orange once a comment does, and reopening it shows its history and continues the same forked conversation, so its next answer is saved after the earlier ones. An unsent comment opens in an editable field: saving changed text keeps the comment with the new text, and clearing it and saving deletes it, leaving the side chat and its purple text. Through CLI/XPC, conversation side-chats lists the saved side chats, a side chat's source must name a message and a non-empty range, task comments edit changes an unsent comment's text, empty text deletes it, and an unknown comment is not_found. Edits and side chats survive a fresh read and relaunching the app.
+    def test_side_chat_and_comment_reopen_from_highlighted_text(self):
+        task, _, environment = self.open_side_chat_task("claude", "claude-fixture-side-chat")
+        _, history = self.history_texts(task["id"], environment)
+        reply = next(message for message in reversed(history["messages"]) if message["role"] == "assistant" and message["text"])
+        source = {"messageID": reply["id"], "blockID": 0, "startOffset": 0, "endBlockID": 0, "endOffset": 10}
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "side-chats", task["id"], extra_environment=environment)[0]), [],
+                         "A task starts with no saved side chats.")
+        for bad_source in ("not json", json.dumps({**source, "messageID": ""}), json.dumps({**source, "endOffset": 0})):
+            self.assert_failure(self.call_cli(
+                "conversation", "side-chat", task["id"], "--selection", "the parser", "--source", bad_source,
+                "--message", "Why?", extra_environment=environment, expected_status=2,
+            )[0], "invalid_argument")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "side-chats", task["id"], extra_environment=environment)[0]), [],
+                         "A rejected side chat is not saved.")
+
+        opened = self.assert_success(self.call_cli(
+            "conversation", "side-chat", task["id"], "--selection", "the parser", "--source", json.dumps(source),
+            "--message", "What does this mean?", extra_environment=environment,
+        )[0])
+        saved = opened["sideChat"]
+        self.assertEqual(saved["id"], opened["sideChatID"])
+        self.assertEqual(saved["source"], source)
+        self.assertEqual(saved["selectedText"], "the parser")
+        self.assertEqual(saved["provider"], "claude")
+        self.assertEqual(saved["messages"], [{"isUser": True, "text": "What does this mean?"}, {"isUser": False, "text": opened["reply"]}])
+        fork_session = saved["threadID"]
+        self.assertNotEqual(fork_session, task["claudeSessionID"])
+        self.assert_success(self.call_cli("conversation", "side-chat-close", task["id"], opened["sideChatID"], extra_environment=environment)[0])
+        listed = self.assert_success(self.call_cli("conversation", "side-chats", task["id"], extra_environment=environment)[0])
+        self.assertEqual(listed, [saved], "A closed side chat stays saved on its task.")
+
+        continued = self.assert_success(self.call_cli(
+            "conversation", "side-chat", task["id"], "--side-chat", opened["sideChatID"], "--message", "And then?",
+            extra_environment=environment,
+        )[0])
+        self.assertEqual(continued["reply"], f"Side chat follow-up 2 on {fork_session}: And then?",
+                         "Reopening continues the side chat's own forked session.")
+        self.assertEqual([message["text"] for message in continued["sideChat"]["messages"]],
+                         ["What does this mean?", opened["reply"], "And then?", continued["reply"]])
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "side-chats", task["id"], extra_environment=environment)[0]),
+                         [continued["sideChat"]], "The next exchange is saved after the earlier ones.")
+        self.assertEqual(self.task_for(task["id"], environment)["claudeSessionID"], task["claudeSessionID"],
+                         "Saving a side chat leaves the task's own session alone.")
+        self.assert_failure(self.call_cli(
+            "conversation", "side-chat", task["id"], "--source", json.dumps(source), "--side-chat", opened["sideChatID"],
+            "--message", "Both?", extra_environment=environment, expected_status=2,
+        )[0], "invalid_argument")
+
+        comment = {"id": "44444444-4444-4444-4444-444444444444", **source, "text": "the parser", "comment": "Explain this", "pending": True}
+        other = {**comment, "id": "55555555-5555-5555-5555-555555555555", "comment": "Keep this one"}
+        self.assert_success(self.call_cli("task", "comments", task["id"], "--json", json.dumps([comment, other]))[0])
+        edited = self.assert_success(self.call_cli("task", "comments", task["id"], "edit", comment["id"], "--text", "  Explain it again  ")[0])
+        self.assertEqual(edited["pendingCommentCount"], 2, "Editing keeps the comment.")
+        self.assert_failure(self.call_cli(
+            "task", "comments", task["id"], "edit", "66666666-6666-6666-6666-666666666666", "--text", "Nobody", expected_status=3,
+        )[0], "not_found")
+        deleted = self.assert_success(self.call_cli("task", "comments", task["id"], "edit", other["id"], "--text", "  ")[0])
+        self.assertEqual(deleted["pendingCommentCount"], 1, "Saving a comment empty deletes it.")
+        # The saved list keeps the edited text: appending it back again adds nothing.
+        appended = self.assert_success(self.call_cli(
+            "task", "comments", task["id"], "--json", json.dumps([{**comment, "comment": "Explain it again"}]), "--append")[0])
+        self.assertEqual(appended["pendingCommentCount"], 1)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["pendingCommentCount"], 1,
+                         "The edit and the deletion survive a fresh read.")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "side-chats", task["id"], extra_environment=environment)[0]),
+                         [continued["sideChat"]], "Editing comments leaves the side chat saved.")
 
     # case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged.
     def test_claude_auto_branch_uses_generated_title_and_fallback(self):
@@ -9480,6 +9568,45 @@ class PlayhouseBridgeTests(unittest.TestCase):
                        and event.get("messageLimit") == "80"]
         self.assertEqual([read["source"] for read in paged_reads], ["composed", "composed"],
                          "A Codex thread is composed from the app-server before it is paged.")
+
+    # case-contract: test_conversation_settled_history_renders_lazily | In a 120-message conversation whose history has been revealed, the messages before the newest turn render lazily: once the reader is back at the latest turn, the oldest messages that scrolled far out of view are no longer kept as views, and they render again, in order, when the reader scrolls back to them. A message scrolled away and back by the same distance lands where it was. A command an earlier turn ran stays inline after the message it followed, with its whole output in fresh CLI/XPC history, and a call the reader expanded is still expanded when its row renders again. A message holding an open side chat keeps rendering while the reader scrolls far away, so its bubble and unsent draft are still there when the reader returns. Changing the transcript's width keeps the reader on the message they were reading, with the older messages above still in order.
+    def test_conversation_settled_history_renders_lazily(self):
+        task_id = self.create_task(title="Lazy long history")["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-long-history-lazy-success"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable), "PLAYHOUSE_FIXTURE_WORKSPACE": str(self.primary)}
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Create a long history.", extra_environment=env)[0])
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        messages = history["messages"]
+        self.assertEqual([message["text"] for message in messages],
+                         [f"Long history {role} {index:02d}." for index in range(1, 61) for role in ("user", "assistant")],
+                         "The whole history is returned in order; the transcript renders it lazily.")
+        # The earlier turn's command is a timeline activity placed after the message it followed,
+        # carrying the whole output the expanded row shows.
+        calls = [activity for activity in history.get("timelineActivities", []) if activity["id"] == "item_long_history_command_21"]
+        self.assertEqual(len(calls), 1, "The mid-history command should be returned once as a timeline activity.")
+        self.assertEqual(calls[0]["afterMessageID"], "item_long_history_user_21", "The command follows the question of its own turn.")
+        self.assertEqual(calls[0]["output"].strip().splitlines(), [f"history-file-{line}.txt" for line in range(1, 7)],
+                         "Every output line is kept, not only the ones a collapsed row shows.")
+        self.assertNotIn("item_long_history_command_21", {activity["id"] for activity in history["activities"]},
+                         "An earlier turn's call is not part of the latest turn's activities.")
+        # The transcript shows a call inline only once its turn is settled, so the call's turn
+        # must be an earlier turn than the latest one, shared with the question it follows.
+        turn_by_message = {message["id"]: message.get("turnID") for message in messages}
+        self.assertIsNotNone(turn_by_message["item_long_history_user_21"])
+        self.assertNotEqual(turn_by_message["item_long_history_user_21"], turn_by_message["item_long_history_user_60"],
+                            "Each history turn is its own turn, so turn 21 is settled once turn 60 exists.")
+        self.assertEqual(calls[0].get("turnID"), turn_by_message["item_long_history_user_21"], "The call belongs to its question's turn.")
+        fresh = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertEqual([message["id"] for message in fresh["messages"]], [message["id"] for message in messages])
+        self.assertEqual([activity["id"] for activity in fresh.get("timelineActivities", [])],
+                         [activity["id"] for activity in history.get("timelineActivities", [])],
+                         "A fresh read returns the same timeline.")
 
     # case-contract: test_sent_prompt_stays_out_of_composer_past_history_page | A sent prompt followed by a 120-message turn, so that it lies outside the newest history page, never returns to the composer when the task is reopened: the composer is empty, the task keeps hasUnsentDraft false and its last sent prompt as the saved prompt, and the CLI newest page of 80 messages leaves out the earlier messages. Only the saved draft flag decides draft restoration, so the same task restores a real unsent draft after it is typed.
     def test_sent_prompt_stays_out_of_composer_past_history_page(self):
@@ -16733,7 +16860,7 @@ function Context() {
 Playhouse.render(h(Context));
 """
 
-    # case-contract: test_plugin_add_mode_toggles_and_shows_placeholders | Add Plugin mode is off by default; the Plugins menu's Add Plugin Mode item and `plugin mode --on` turn it on, `plugin mode` reports the saved state to a fresh CLI process, `--off` turns it off, and any other option is refused as invalid_argument. While it is on, a bar across the top of the window explains the mode and its Close button turns it off; the board's sidebar shows a labeled Add here button below Scheduled Tasks; an open task shows its sidebar expanded even when the sidebar was collapsed, with a labeled Add here button in the sidebar, an Add here icon beside the Terminal button and an Add here icon beside the composer's Skills button; and the standalone chat shows only the composer's Add here icon. Turning the mode off from the CLI removes every placeholder live and returns the sidebar to its saved collapsed state.
+    # case-contract: test_plugin_add_mode_toggles_and_shows_placeholders | Add Plugin mode is off by default; the Plugins menu's Add Plugin Mode item and `plugin mode --on` turn it on, `plugin mode` reports the saved state to a fresh CLI process, `--off` turns it off, and any other option is refused as invalid_argument. While it is on, a bar across the top of the window explains the mode and its Close button turns it off; the board's sidebar shows a labeled Add here button below Scheduled Tasks; an open task shows its sidebar expanded even when the sidebar was collapsed, with a labeled Add here button as the sidebar's first section, above Changes, an Add here icon beside the Terminal button and an Add here icon beside the composer's Skills button; and the standalone chat shows only the composer's Add here icon. Turning the mode off from the CLI removes every placeholder live and returns the sidebar to its saved collapsed state.
     def test_plugin_add_mode_toggles_and_shows_placeholders(self):
         self.assertEqual(self.assert_success(self.call_cli("plugin", "mode")[0]), {"enabled": False}, "Add Plugin mode starts off.")
         self.assertEqual(self.assert_success(self.call_cli("plugin", "mode", "--on")[0]), {"enabled": True})

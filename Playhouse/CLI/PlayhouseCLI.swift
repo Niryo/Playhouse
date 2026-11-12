@@ -292,6 +292,14 @@ enum PlayhouseCLI {
             case "comments":
                 guard let id = tail.first else { throw CLIError.usage("Use: playhouse task comments <task-id> --json <comments-array> [--append]") }
                 let rest = Array(tail.dropFirst())
+                if rest.first == "edit" {
+                    guard rest.count >= 2 else { throw CLIError.usage("Use: playhouse task comments <task-id> edit <comment-id> --text <text>") }
+                    let flags = try parseFlags(Array(rest.dropFirst(2)), valueFlags: ["--text"])
+                    return BridgeRequest(command: "task.comments.edit", arguments: [
+                        "taskID": .string(id), "commentID": .string(rest[1]),
+                        "text": .string(try requiredFlag("--text", flags: flags).first!)
+                    ])
+                }
                 let flags = try parseFlags(rest.filter { $0 != "--append" }, valueFlags: ["--json"])
                 return BridgeRequest(command: "task.comments.save", arguments: [
                     "taskID": .string(id),
@@ -916,17 +924,22 @@ enum PlayhouseCLI {
                     "answers": .object(answers.mapValues { .array($0.map(BridgeValue.string)) })
                 ])
             case "side-chat":
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--selection", "--side-chat", "--model", "--effort"])
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--selection", "--source", "--side-chat", "--model", "--effort"])
                 guard let message = flags["--message"]?.first,
-                      (flags["--selection"]?.first != nil) != (flags["--side-chat"]?.first != nil) else {
-                    throw CLIError.usage("Use: playhouse conversation side-chat <task-id> --message <text> (--selection <text> | --side-chat <side-chat-id>) [--model <model-id>] [--effort <low|medium|high|xhigh>]")
+                      (flags["--selection"]?.first != nil) != (flags["--side-chat"]?.first != nil),
+                      flags["--source"] == nil || flags["--selection"] != nil else {
+                    throw CLIError.usage("Use: playhouse conversation side-chat <task-id> --message <text> (--selection <text> [--source <json>] | --side-chat <side-chat-id>) [--model <model-id>] [--effort <low|medium|high|xhigh>]")
                 }
                 var arguments: [String: BridgeValue] = ["taskID": .string(id), "message": .string(message)]
                 if let model = flags["--model"]?.first { arguments["model"] = .string(model) }
                 if let effort = flags["--effort"]?.first { arguments["effort"] = .string(effort) }
                 if let selection = flags["--selection"]?.first { arguments["selection"] = .string(selection) }
+                if let source = flags["--source"]?.first { arguments["source"] = .string(source) }
                 if let sideChatID = flags["--side-chat"]?.first { arguments["sideChatID"] = .string(sideChatID) }
                 return BridgeRequest(command: "conversation.side_chat", arguments: arguments)
+            case "side-chats":
+                guard tail.count == 1 else { throw CLIError.usage("Use: playhouse conversation side-chats <task-id>") }
+                return BridgeRequest(command: "conversation.side_chats.list", arguments: ["taskID": .string(id)])
             case "side-chat-close":
                 guard tail.count == 2 else { throw CLIError.usage("Use: playhouse conversation side-chat-close <task-id> <side-chat-id>") }
                 return BridgeRequest(command: "conversation.side_chat.close", arguments: ["taskID": .string(id), "sideChatID": .string(tail[1])])
@@ -1086,6 +1099,7 @@ enum PlayhouseCLI {
       playhouse task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]
       playhouse task draft <task-id> --text <draft> [--image <path>...]
       playhouse task comments <task-id> --json <comments-array> [--append]   (save unsent review comments with the draft; [] clears; --append adds only new ones)
+      playhouse task comments <task-id> edit <comment-id> --text <text>   (change an unsent comment; empty text deletes it)
       playhouse task roots get <task-id>
       playhouse task roots set <task-id> --root <path> [--root <path>...]
       playhouse task terminal <task-id>
@@ -1172,7 +1186,8 @@ enum PlayhouseCLI {
       playhouse conversation stop <task-id>
       playhouse conversation provider <task-id> [set <codex|claude>|capabilities]
       playhouse conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]
-      playhouse conversation side-chat <task-id> --message <text> (--selection <text> | --side-chat <side-chat-id>) [--model <model-id>] [--effort <low|medium|high|xhigh>]
+      playhouse conversation side-chat <task-id> --message <text> (--selection <text> [--source <json>] | --side-chat <side-chat-id>) [--model <model-id>] [--effort <low|medium|high|xhigh>]
+      playhouse conversation side-chats <task-id>
       playhouse conversation side-chat-close <task-id> <side-chat-id>
       playhouse conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...] [--context-page <page-id>]...
 

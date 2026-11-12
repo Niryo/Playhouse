@@ -80,7 +80,7 @@ codex_fixtures=(
   progress-hold-release progress-hold-release-failed progress-hold-release-interrupted unique-turns-progress-hold-release
   in-progress-continuation-hold-release in-progress-cap-hold-release in-progress-stop-hold-release in-progress-queue-hold-release
   progress-question progress-user-question success-wait store-write-success-wait concurrent-serial-success-wait restart-question restart-question-no-secret unassociated-restart-question
-  status-transition-ui nonblocking-slow nonblocking-restart-question async-question async-question-queued subagent context-compaction tool-activity long-history-success long-history-with-prompt-success markdown steer-queue-serial-success-wait draft-serial-success-wait
+  status-transition-ui nonblocking-slow nonblocking-restart-question async-question async-question-queued subagent context-compaction tool-activity long-history-success long-history-lazy-success long-history-with-prompt-success markdown steer-queue-serial-success-wait draft-serial-success-wait
 )
 for fixture in "${codex_fixtures[@]}"; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
@@ -102,7 +102,7 @@ cp "${repository_root}/scripts/fixtures/claude-code-fixture.py" "${fixture_root}
 chmod 755 "${fixture_root}/claude-fixture-ui-aliases-only"
 cp "${repository_root}/scripts/fixtures/claude-code-fixture.py" "${fixture_root}/claude-fixture-reattach"
 chmod 755 "${fixture_root}/claude-fixture-reattach"
-for fixture in subagent context-compaction tool-activity long-history-success long-history-with-prompt-success markdown async-question async-question-queued goal-success; do
+for fixture in subagent context-compaction tool-activity long-history-success long-history-lazy-success long-history-with-prompt-success markdown async-question async-question-queued goal-success; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
   xattr -d com.apple.quarantine "${fixture_path}" 2>/dev/null || true
   xattr -d com.apple.provenance "${fixture_path}" 2>/dev/null || true

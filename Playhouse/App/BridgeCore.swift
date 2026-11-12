@@ -200,27 +200,59 @@ struct ConversationTitleGenerator {
     }
 }
 
-/// One answer of a side chat, and the side chat it belongs to.
+/// A side chat saved on its task, so closing its bubble keeps it: the selected text it
+/// discusses, where that text is, its exchanges, and the provider conversation it continues.
+struct SavedSideChat: Codable, Equatable, Identifiable {
+    struct Message: Codable, Equatable {
+        let isUser: Bool
+        let text: String
+    }
+
+    let id: String
+    let provider: ConversationProvider
+    let threadID: String
+    var modelID: String
+    var effort: ConversationEffort
+    let selectedText: String
+    /// Nil for a side chat opened on text alone, which no transcript range highlights.
+    let source: ConversationTextSource?
+    var messages: [Message]
+    let createdAt: Date
+}
+
+/// Encoding rules for the side chats saved with a task.
+enum SavedSideChats {
+    static func encode(_ sideChats: [SavedSideChat]) -> Data? {
+        sideChats.isEmpty ? nil : try? JSONEncoder().encode(sideChats)
+    }
+
+    /// Missing or unreadable data is an empty list, so tasks stored before the field existed load.
+    static func decode(_ data: Data?) -> [SavedSideChat] {
+        guard let data, let decoded = try? JSONDecoder().decode([SavedSideChat].self, from: data) else { return [] }
+        return decoded
+    }
+}
+
+/// One answer of a side chat, and the side chat it belongs to, as saved with the answer.
 struct SideChatReply: Codable, Equatable {
     let sideChatID: String
     let taskID: UUID
     let provider: ConversationProvider
     let reply: String
+    let sideChat: SavedSideChat
 }
 
 /// The side chats the daemon is running. A side chat is a read-only provider conversation
 /// forked from a task's own conversation, where the user discusses text they selected in it.
-/// It lives only as long as its bubble: nothing is saved on the task, and a daemon restart
-/// ends it.
+/// Each answered exchange is saved on the task (`SavedSideChat`), so a side chat whose bubble
+/// closed, or whose daemon restarted, continues its provider conversation on its next message.
 @MainActor
 enum SideChatSessions {
     struct Session {
         let taskID: UUID
-        let provider: ConversationProvider
-        let threadID: String
-        /// The model and effort of the side chat's latest message; each message may choose its own.
-        var modelID: String
-        var effort: ConversationEffort
+        /// The side chat as saved, whose model and effort are its latest message's; each
+        /// message may choose its own.
+        var saved: SavedSideChat
         let workspace: ConversationWorkspaceContext
         var isResponding = false
     }
@@ -231,13 +263,15 @@ enum SideChatSessions {
 extension ConversationManager {
     /// Sends `message` to a side chat. Without `sideChatID` it opens one: the task's
     /// provider forks its conversation, read-only, and the first message carries the
-    /// selected text. The task, its status and its own conversation are left untouched.
+    /// selected text, which `source` places in the transcript. The task, its status and its
+    /// own conversation are left untouched; only the side chat is saved on it.
     /// `modelID` and `effort` choose this message's model; without them a new side chat uses
     /// the task's and a later message keeps the side chat's previous choice.
     func sideChat(
         taskID: UUID,
         sideChatID: String?,
         selectedText: String?,
+        source: ConversationTextSource? = nil,
         message: String,
         modelID requestedModelID: String? = nil,
         effort requestedEffort: ConversationEffort? = nil,
@@ -253,6 +287,9 @@ extension ConversationManager {
         let id: String
         var prompt = message
         if let sideChatID {
+            if SideChatSessions.sessions[sideChatID] == nil {
+                try resumeSavedSideChat(taskID: taskID, sideChatID: sideChatID)
+            }
             guard let existing = SideChatSessions.sessions[sideChatID], existing.taskID == taskID else {
                 throw BridgeCommandError(code: "not_found", message: "This side chat has ended. Select the text again to start a new one.")
             }
@@ -267,15 +304,17 @@ extension ConversationManager {
             guard !selection.isEmpty else {
                 throw BridgeCommandError(code: "invalid_argument", message: "Select text in the conversation to start a side chat.")
             }
+            if let source, source.messageID.isEmpty || source.startOffset < 0 || source.endOffset < 0
+                || (source.endBlockID == source.blockID && source.endOffset <= source.startOffset) {
+                throw BridgeCommandError(code: "invalid_argument", message: "The side chat's source must name a message and a non-empty range of its text.")
+            }
             let task = try tasks.conversationSubject(taskID)
             guard let sourceThreadID = task.activeConversationID else {
                 throw BridgeCommandError(code: "invalid_transition", message: "This task has no conversation to discuss yet.")
             }
             let provider = task.conversationProvider
             let client = clients.client(for: provider)
-            let roots = Self.launchRoots(task).compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
-            var workspace = try launchWorkspace(for: task, roots: roots)
-            workspace.isReadOnly = true
+            let workspace = try sideChatWorkspace(for: task)
             let modelID = try requestedModelID ?? modelID(taskID: taskID) ?? provider.defaultModelID
             let effort = try requestedEffort ?? effort(taskID: taskID)
             try await client.validateEffort(effort, modelID: modelID, workspace: workspace)
@@ -285,8 +324,12 @@ extension ConversationManager {
             )
             id = UUID().uuidString.lowercased()
             SideChatSessions.sessions[id] = SideChatSessions.Session(
-                taskID: taskID, provider: provider, threadID: threadID, modelID: modelID,
-                effort: effort, workspace: workspace, isResponding: true
+                taskID: taskID,
+                saved: SavedSideChat(
+                    id: id, provider: provider, threadID: threadID, modelID: modelID, effort: effort,
+                    selectedText: selection, source: source, messages: [], createdAt: .now
+                ),
+                workspace: workspace, isResponding: true
             )
             PlayhouseDiagnostics.record("conversation.side_chat.opened", fields: [
                 "taskID": taskID.uuidString, "sideChatID": id, "provider": provider.rawValue,
@@ -297,21 +340,21 @@ extension ConversationManager {
         defer { SideChatSessions.sessions[id]?.isResponding = false }
         if let current = SideChatSessions.sessions[id], sideChatID != nil, requestedModelID != nil || requestedEffort != nil {
             // A follow-up's new choice is checked before it is kept for later messages.
-            try await clients.client(for: current.provider).validateEffort(
-                requestedEffort ?? current.effort, modelID: requestedModelID ?? current.modelID, workspace: current.workspace
+            try await clients.client(for: current.saved.provider).validateEffort(
+                requestedEffort ?? current.saved.effort, modelID: requestedModelID ?? current.saved.modelID, workspace: current.workspace
             )
         }
         // The live entry, which closing the bubble removes meanwhile; never a copy written back.
-        if let requestedModelID { SideChatSessions.sessions[id]?.modelID = requestedModelID }
-        if let requestedEffort { SideChatSessions.sessions[id]?.effort = requestedEffort }
+        if let requestedModelID { SideChatSessions.sessions[id]?.saved.modelID = requestedModelID }
+        if let requestedEffort { SideChatSessions.sessions[id]?.saved.effort = requestedEffort }
         guard let session = SideChatSessions.sessions[id] else {
             throw BridgeCommandError(code: "not_found", message: "This side chat has ended. Select the text again to start a new one.")
         }
-        let client = clients.client(for: session.provider)
-        let threadID = session.threadID
+        let client = clients.client(for: session.saved.provider)
+        let threadID = session.saved.threadID
         var answers: [String] = []
         try await client.sendMessage(
-            prompt, imageDataURLs: [], mode: .code, modelID: session.modelID, effort: session.effort,
+            prompt, imageDataURLs: [], mode: .code, modelID: session.saved.modelID, effort: session.saved.effort,
             threadID: threadID, workspace: session.workspace, sessionRecoveryContext: nil,
             developerInstructions: TaskThreadDeveloperInstructions.sideChat(taskID: taskID),
             onDelta: onDelta,
@@ -331,14 +374,43 @@ extension ConversationManager {
             onTokenUsage: { _ in },
             sensitiveUserInputAnswerValues: [], hideSensitiveRecoveryPrompt: false
         )
-        return SideChatReply(sideChatID: id, taskID: taskID, provider: session.provider, reply: answers.joined(separator: "\n\n"))
+        let reply = answers.joined(separator: "\n\n")
+        let saved = try await tasks.appendSideChatExchange(taskID, session.saved, exchange: [
+            SavedSideChat.Message(isUser: true, text: message), SavedSideChat.Message(isUser: false, text: reply)
+        ])
+        SideChatSessions.sessions[id]?.saved = saved
+        return SideChatReply(sideChatID: id, taskID: taskID, provider: saved.provider, reply: reply, sideChat: saved)
     }
 
-    /// Ends a side chat; its provider conversation is never used again.
+    /// Ends a side chat's live session. Its saved exchanges stay on the task, and its next
+    /// message continues the same provider conversation.
     func closeSideChat(taskID: UUID, sideChatID: String) -> Bool {
         guard let session = SideChatSessions.sessions[sideChatID], session.taskID == taskID else { return false }
         SideChatSessions.sessions.removeValue(forKey: sideChatID)
         return true
+    }
+
+    /// The side chats saved on the task, oldest first.
+    func savedSideChats(taskID: UUID) throws -> [SavedSideChat] {
+        try tasks.sideChats(taskID)
+    }
+
+    /// Starts a live session again for a side chat saved on the task, in the read-only
+    /// workspace its turns run in. An unknown id leaves no session.
+    private func resumeSavedSideChat(taskID: UUID, sideChatID: String) throws {
+        guard let saved = try tasks.sideChats(taskID).first(where: { $0.id == sideChatID }) else { return }
+        let workspace = try sideChatWorkspace(for: try tasks.conversationSubject(taskID))
+        SideChatSessions.sessions[sideChatID] = SideChatSessions.Session(taskID: taskID, saved: saved, workspace: workspace)
+        PlayhouseDiagnostics.record("conversation.side_chat.resumed", fields: [
+            "taskID": taskID.uuidString, "sideChatID": sideChatID, "provider": saved.provider.rawValue, "threadID": saved.threadID
+        ])
+    }
+
+    private func sideChatWorkspace(for task: any ConversationSubject) throws -> ConversationWorkspaceContext {
+        let roots = Self.launchRoots(task).compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
+        var workspace = try launchWorkspace(for: task, roots: roots)
+        workspace.isReadOnly = true
+        return workspace
     }
 }
 
@@ -2215,6 +2287,7 @@ final class BoardTaskManager {
                 chat.hasUnsentDraft = task.hasUnsentDraft
                 chat.draftImageDataURLsData = task.draftImageDataURLsData
                 chat.pendingAnnotationsData = task.pendingAnnotationsData
+                chat.sideChatsData = task.sideChatsData
                 chat.conversationActivityDurationsData = task.conversationActivityDurationsData
                 chat.answeredAsyncQuestionIDsData = task.answeredAsyncQuestionIDsData
                 modelContext.insert(chat)
@@ -4134,6 +4207,53 @@ final class BoardTaskManager {
             task.pendingAnnotationsData = encoded
             try await saveTaskContext(taskID: id)
             return BoardTaskRecord(task: task)
+        }
+    }
+
+    /// Changes the text of one unsent comment; text that is empty once trimmed deletes it.
+    @discardableResult
+    func editPendingAnnotation(_ id: UUID, annotationID: UUID, comment: String) async throws -> BoardTaskRecord {
+        try await withTaskOperationLock(id) {
+            let task = try requireSubject(id)
+            var annotations = PersistedAnnotations.decode(task.pendingAnnotationsData)
+            guard let index = annotations.firstIndex(where: { $0.id == annotationID }) else {
+                throw BridgeCommandError(code: "not_found", message: "No unsent comment \(annotationID.uuidString) on this task.")
+            }
+            let comment = comment.trimmingCharacters(in: .whitespacesAndNewlines)
+            if comment.isEmpty {
+                annotations.remove(at: index)
+            } else {
+                annotations[index].comment = comment
+            }
+            task.pendingAnnotationsData = PersistedAnnotations.encode(annotations)
+            try await saveTaskContext(taskID: id)
+            PlayhouseDiagnostics.record(comment.isEmpty ? "task.comment.deleted" : "task.comment.edited", fields: [
+                "taskID": id.uuidString, "commentID": annotationID.uuidString
+            ])
+            return BoardTaskRecord(task: task)
+        }
+    }
+
+    /// The side chats saved on the task, oldest first.
+    func sideChats(_ id: UUID) throws -> [SavedSideChat] {
+        SavedSideChats.decode(try requireSubject(id).sideChatsData)
+    }
+
+    /// Adds `exchange` to the side chat saved with `sideChat`'s id, or saves `sideChat` with it
+    /// when it isn't saved yet, keeping `sideChat`'s model and effort. Returns the saved copy.
+    func appendSideChatExchange(_ id: UUID, _ sideChat: SavedSideChat, exchange: [SavedSideChat.Message]) async throws -> SavedSideChat {
+        try await withTaskOperationLock(id) {
+            let task = try requireSubject(id)
+            var sideChats = SavedSideChats.decode(task.sideChatsData)
+            let index = sideChats.firstIndex(where: { $0.id == sideChat.id })
+            var saved = index.map { sideChats[$0] } ?? sideChat
+            saved.modelID = sideChat.modelID
+            saved.effort = sideChat.effort
+            saved.messages += exchange
+            if let index { sideChats[index] = saved } else { sideChats.append(saved) }
+            task.sideChatsData = SavedSideChats.encode(sideChats)
+            try await saveTaskContext(taskID: id)
+            return saved
         }
     }
 
@@ -10295,6 +10415,12 @@ final class PlayhouseBridgeRuntime {
                 result = try Self.value(try await taskManager.savePendingAnnotations(
                     request.requiredUUID("taskID"), data: data, appending: request.arguments["append"]?.bool ?? false
                 ))
+            case "task.comments.edit":
+                // Empty text deletes the comment.
+                result = try Self.value(try await taskManager.editPendingAnnotation(
+                    request.requiredUUID("taskID"), annotationID: request.requiredUUID("commentID"),
+                    comment: request.arguments["text"]?.string ?? ""
+                ))
             case "task.delete":
                 try await taskManager.delete(request.requiredUUID("taskID"), diagnostics: conversationClients().codex.diagnosticFields())
                 result = .object(["deleted": .boolean(true)])
@@ -10936,6 +11062,13 @@ final class PlayhouseBridgeRuntime {
                     taskID: taskID,
                     sideChatID: request.arguments["sideChatID"]?.string,
                     selectedText: request.arguments["selection"]?.string,
+                    source: try request.arguments["source"]?.string.map { json in
+                        guard let data = json.data(using: .utf8),
+                              let source = try? JSONDecoder().decode(ConversationTextSource.self, from: data) else {
+                            throw BridgeCommandError(code: "invalid_argument", message: "Pass the source as a JSON object with messageID, blockID, startOffset, endBlockID and endOffset.")
+                        }
+                        return source
+                    },
                     message: request.arguments["message"]?.string ?? "",
                     modelID: request.arguments["model"]?.string,
                     effort: try request.arguments["effort"]?.string.map { value in
@@ -10949,6 +11082,10 @@ final class PlayhouseBridgeRuntime {
                     }
                 )
                 result = try Self.value(reply)
+            case "conversation.side_chats.list":
+                let taskID = try request.requiredUUID("taskID")
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try Self.value(try conversations.savedSideChats(taskID: taskID))
             case "conversation.side_chat.close":
                 let taskID = try request.requiredUUID("taskID")
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)

@@ -25,6 +25,7 @@ struct McpServersSectionView: View {
 
     @State private var tab: Tab = .repo
     @State private var catalog: McpCatalog?
+    @State private var search = ""
     @State private var status: McpStatusReport?
     @State private var isCheckingStatus = false
     @State private var recheckRequested = false
@@ -69,6 +70,7 @@ struct McpServersSectionView: View {
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("mcp-checking-status")
                 }
+                AtomTextField(props: TextFieldProps(text: search, placeholder: "Search servers"), common: AtomCommon(testID: "mcp-search", width: 200)) { search = $0 }
                 Button { setPanel(.creating) } label: { Label("New Server", systemImage: "plus") }
                     .buttonHoverPointer()
                     .nativeHelp("Add an MCP server that both Claude and Codex can use")
@@ -177,6 +179,7 @@ struct McpServersSectionView: View {
                 McpServerEditorPanel(server: nil, config: McpServerConfig(transport: .stdio), roots: catalog?.repositories ?? [], onClose: { setPanel(nil) }) { name, config, scope, root in
                     let record = try await manager.createMcpServer(taskID: task.id, name: name, config: config, scope: scope, root: root)
                     tab = record.scope == .global ? .global : .repo
+                    search = ""
                     await reload()
                 }
                 .padding(.horizontal, 20)
@@ -206,27 +209,30 @@ struct McpServersSectionView: View {
                     emptyState("This task has no repositories.", identifier: "mcp-empty-repo")
                 }
                 ForEach(catalog.repositories, id: \.rootPath) { section in
+                    let shown = filtered(section.servers)
                     VStack(alignment: .leading, spacing: 8) {
                         Text(section.name)
                             .font(.headline)
                             .padding(.top, 6)
                             .accessibilityIdentifier("mcp-repo-section-\(section.name)")
-                        if section.servers.isEmpty {
-                            emptyState("No MCP servers in \(section.name).", identifier: "mcp-empty-\(section.name)")
+                        if shown.isEmpty {
+                            emptyState(section.servers.isEmpty ? "No MCP servers in \(section.name)." : "No matching servers.", identifier: "mcp-empty-\(section.name)")
                         }
-                        ForEach(section.servers) { row($0) }
+                        ForEach(shown) { row($0) }
                     }
                 }
             case .global:
+                let shown = filtered(catalog.global)
                 Text("Your servers for every repository, from Claude Code's ~/.claude.json and Codex's config.toml. New global servers are written into both, so both CLIs start them.")
                     .font(.callout).foregroundStyle(.secondary)
-                if catalog.global.isEmpty { emptyState("No global MCP servers.", identifier: "mcp-empty-global") }
-                ForEach(catalog.global) { row($0) }
+                if shown.isEmpty { emptyState(catalog.global.isEmpty ? "No global MCP servers." : "No matching servers.", identifier: "mcp-empty-global") }
+                ForEach(shown) { row($0) }
             case .managed:
+                let shown = filtered(catalog.managed)
                 Text("Your organization's managed servers. Claude Code always starts them, and they can't be edited or turned off here.")
                     .font(.callout).foregroundStyle(.secondary)
-                if catalog.managed.isEmpty { emptyState("No managed MCP servers on this Mac.", identifier: "mcp-empty-managed") }
-                ForEach(catalog.managed) { row($0) }
+                if shown.isEmpty { emptyState(catalog.managed.isEmpty ? "No managed MCP servers on this Mac." : "No matching servers.", identifier: "mcp-empty-managed") }
+                ForEach(shown) { row($0) }
                 connectors(catalog)
             }
         } else {
@@ -239,7 +245,8 @@ struct McpServersSectionView: View {
     @ViewBuilder
     private func connectors(_ catalog: McpCatalog) -> some View {
         let known = Set(catalog.allServers.map(\.name))
-        let others = (status?.claude ?? []).filter { !known.contains($0.name) }
+        let query = searchQuery
+        let others = (status?.claude ?? []).filter { !known.contains($0.name) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) }
         Text("Also started by Claude Code")
             .font(.headline)
             .padding(.top, 10)
@@ -305,6 +312,15 @@ struct McpServersSectionView: View {
 
     private func emptyState(_ text: String, identifier: String) -> some View {
         Text(text).foregroundStyle(.secondary).padding(.vertical, 6).accessibilityIdentifier(identifier)
+    }
+
+    private var searchQuery: String { search.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// The servers whose name or command line contains the search, like the Skills search.
+    private func filtered(_ servers: [McpServerRecord]) -> [McpServerRecord] {
+        let query = searchQuery
+        guard !query.isEmpty else { return servers }
+        return servers.filter { $0.name.localizedCaseInsensitiveContains(query) || $0.summary.localizedCaseInsensitiveContains(query) }
     }
 
     private func isEnabled(_ server: McpServerRecord) -> Bool { enabledOverrides[server.id] ?? server.enabled }

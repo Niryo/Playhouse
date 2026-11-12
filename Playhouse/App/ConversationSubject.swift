@@ -195,6 +195,8 @@ protocol ConversationSubject: AnyObject, Observable {
     var draftImageDataURLsData: Data? { get set }
     /// JSON-encoded review comments written but not yet sent; part of the unsent draft.
     var pendingAnnotationsData: Data? { get set }
+    /// JSON-encoded side chats held on the selected text they discuss (`SavedSideChats`).
+    var sideChatsData: Data? { get set }
     var conversationActivityDurationsData: Data? { get set }
     var answeredAsyncQuestionIDsData: Data? { get set }
 
@@ -380,6 +382,7 @@ final class StandaloneChat {
     var hasUnsentDraft: Bool = false
     var draftImageDataURLsData: Data?
     var pendingAnnotationsData: Data?
+    var sideChatsData: Data?
     var conversationActivityDurationsData: Data?
     var answeredAsyncQuestionIDsData: Data?
     var totalInputTokens: Int = 0
@@ -423,8 +426,13 @@ struct ConversationAnnotation: Identifiable, Codable, Equatable {
     let endBlockID: Int
     let endOffset: Int
     let text: String
-    let comment: String
+    var comment: String
     var pending = true
+
+    /// Where in the transcript the comment's selection is.
+    var source: ConversationTextSource {
+        ConversationTextSource(messageID: messageID, blockID: blockID, startOffset: startOffset, endBlockID: endBlockID, endOffset: endOffset)
+    }
 
     /// True when both comments quote the same selection with the same comment, whatever their ids.
     func sameComment(as other: ConversationAnnotation) -> Bool {
@@ -432,6 +440,16 @@ struct ConversationAnnotation: Identifiable, Codable, Equatable {
             && endBlockID == other.endBlockID && endOffset == other.endOffset
             && text == other.text && comment == other.comment
     }
+}
+
+/// A selection of transcript text: it starts `startOffset` into `blockID`'s text and ends
+/// `endOffset` into `endBlockID`'s, in the message `messageID`.
+struct ConversationTextSource: Codable, Equatable {
+    let messageID: String
+    let blockID: Int
+    let startOffset: Int
+    let endBlockID: Int
+    let endOffset: Int
 }
 
 /// Encoding and restore rules for the unsent comments saved with a task's draft.
