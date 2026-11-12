@@ -85,6 +85,7 @@ shared_sources=(
   "${repository_root}/Playhouse/App/BoardTask.swift"
   "${repository_root}/Playhouse/App/ConversationSubject.swift"
   "${repository_root}/Playhouse/App/WorkspaceSupport.swift"
+  "${repository_root}/Playhouse/App/HoverRevealScrollers.swift"
   "${repository_root}/Playhouse/App/WorkspaceChanges.swift"
   "${repository_root}/Playhouse/App/CodexAppServerClient.swift"
   "${repository_root}/Playhouse/App/CodexSocketConnection.swift"

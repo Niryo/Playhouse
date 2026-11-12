@@ -28,7 +28,7 @@ struct NativeChatEditor: NSViewRepresentable {
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        scroll.scrollerStyle = .overlay
+        HoverRevealScrollers.install(on: scroll)
         let editor = ChatEditorTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 28))
         editor.isRichText = false
         // Prompts carry code and commands; send exactly the quotes and dashes the user typed.

@@ -2496,7 +2496,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try runGitOutput(remote, "show", "refs/heads/\(branch):\(conflictPath)"), "resolved local and remote versions")
     }
 
-    // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done removes its managed worktree and keeps its branch and target commit without committing or merging. When the worktree holds uncommitted changes the move is refused until the user confirms discarding them: declining keeps the task in Review with its files intact, and confirming removes them. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns and just left of the board scroller, which keeps the window edge, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
+    // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done removes its managed worktree and keeps its branch and target commit without committing or merging. When the worktree holds uncommitted changes the move is refused until the user confirms discarding them: declining keeps the task in Review with its files intact, and confirming removes them. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns (once a board wider than its window is scrolled to its trailing end) and just left of the board scroller, which keeps the window edge, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
     func test_task_done_preserves_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3699,7 +3699,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
 
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, washes only the Waiting Response column in its purple tint (its pixels read purple where the other columns read neutral), allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize. Each board column is built from plugin atoms: the empty In Progress and Review columns show their empty state while the populated Backlog does not, and the Backlog's Add button opens a new task conversation.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, washes only the Waiting Response column in its purple tint (its pixels read purple where the other columns read neutral), allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing. The board's columns stay centered and clickable where they draw after a sideways scroll followed by a new card, without needing a window resize. The board's scroller stays hidden until the pointer is over the board, then shows at a subdued opacity while the pointer rests there, and hides again once the pointer leaves; holding its knob makes it clearly more opaque than the same knob hovered, and releasing returns it to the subdued opacity. Each board column is built from plugin atoms: the empty In Progress and Review columns show their empty state while the populated Backlog does not, and the Backlog's Add button opens a new task conversation.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         let waitingFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: waitingFixture.path))
@@ -3926,6 +3926,54 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("task-view-title").waitToExist(timeout: 10), "Clicking the card where it draws should open the task.")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
+        // Last, since holding the scroller's knob scrolls the board, which the click above must not see.
+        let boardTitle = element("board-title")
+        try assertScrollerRevealsOnlyOnHover(boardViewport, elsewhere: boardTitle, named: "board")
+        // Holding the knob raises it to full opacity, and releasing it returns it to the subdued
+        // opacity. AppKit widens a scroller under the pointer, so the knob is compared with itself
+        // hovered but not held, after the drag, where every capture shares the same scroll offset.
+        let boardScroller = try verticalScroller(of: boardViewport)
+        let boardScrollerStrip = boardScroller.frame.intersection(boardViewport.frame)
+        func boardKnob() -> XCUIElement { boardScroller.descendants(matching: .valueIndicator).firstMatch }
+        boardViewport.hover()
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertTrue(boardKnob().exists, "The board scroller should expose its knob.")
+        let knob = boardKnob().coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        knob.hover()
+        Thread.sleep(forTimeInterval: 1)
+        // The press-drag-hold below blocks while it runs, but it spins the main run loop, so a
+        // timer captures the screen while the knob is held. (`screencapture` can't read the
+        // display in the UI VM.)
+        var heldScreenshot: XCUIScreenshot?
+        let heldTimer = Timer(timeInterval: 2, repeats: false) { _ in heldScreenshot = XCUIScreen.main.screenshot() }
+        RunLoop.main.add(heldTimer, forMode: .common)
+        knob.press(forDuration: 0.3, thenDragTo: knob.withOffset(CGVector(dx: 0, dy: 40)), withVelocity: .default, thenHoldForDuration: 3.5)
+        heldTimer.invalidate()
+        let heldShot = try XCTUnwrap(heldScreenshot, "The screen should be captured while the knob is held.")
+        let heldAttachment = XCTAttachment(screenshot: heldShot)
+        heldAttachment.name = "Board scroller knob held: fully opaque"
+        heldAttachment.lifetime = .keepAlways
+        add(heldAttachment)
+        let held = try luminance(in: boardScrollerStrip, of: screenBitmap(heldShot))
+        Thread.sleep(forTimeInterval: 1)
+        let released = try luminance(in: boardScrollerStrip, of: captureScreenBitmap())
+        boardTitle.hover()
+        Thread.sleep(forTimeInterval: 2)
+        let hiddenAfterDrag = try luminance(in: boardScrollerStrip, of: captureScreenBitmap())
+        boardKnob().coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).hover()
+        Thread.sleep(forTimeInterval: 2)
+        let knobHovered = try luminance(in: boardScrollerStrip, of: captureScreenBitmap())
+        attachScreenshot(named: "Board scroller knob hovered but not held: subdued")
+        let heldChange = largestLuminanceChange(hiddenAfterDrag, held)
+        let knobHoveredChange = largestLuminanceChange(hiddenAfterDrag, knobHovered)
+        XCTAssertGreaterThan(knobHoveredChange, 0.06, "Hovering the knob should show the scroller (change \(knobHoveredChange)).")
+        XCTAssertGreaterThan(heldChange, knobHoveredChange * 1.5, "A held knob should be clearly more opaque than the same knob hovered (held \(heldChange), hovered \(knobHoveredChange)).")
+        let releaseChange = largestLuminanceChange(knobHovered, released)
+        XCTAssertLessThan(releaseChange, 0.05, "Releasing the knob should return it to the subdued opacity (change \(releaseChange)).")
+        let addBacklogTask = element("add-backlog-task-button")
+        for _ in 0..<20 where !addBacklogTask.isHittable {
+            boardViewport.scroll(byDeltaX: 0, deltaY: 300)
+        }
         element("add-backlog-task-button").click()
         XCTAssertTrue(element("empty-conversation").waitToExist(timeout: 10), "The Backlog's Add button should open a new task conversation.")
     }
@@ -7853,7 +7901,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Never-started prompt returns with its image")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. As content is typed in short increments through successive wrapped lines after a line break, the newest insertion remains inside the visible composer viewport while its internal document follows the caret without scrolling backward. Typed straight quotes, apostrophes, and double hyphens stay literal rather than being substituted. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. In the UI the transcript's scroller stays hidden while the pointer is over the composer, shows at a subdued opacity only while the transcript is hovered, and hides again when the pointer leaves. As content is typed in short increments through successive wrapped lines after a line break, the newest insertion remains inside the visible composer viewport while its internal document follows the caret without scrolling backward. Typed straight quotes, apostrophes, and double hyphens stay literal rather than being substituted. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         executionTimeAllowance = 360 // This long case covers several restarts and title-generation flows.
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
@@ -8101,6 +8149,7 @@ final class PlayhouseUITests: XCTestCase {
             let earlierPosition = longPromptMessage.frame.minY
             transcriptScrollView.swipeUp()
             XCTAssertTrue(waitUntil({ longPromptMessage.frame.minY < earlierPosition - 20 }, timeout: 5), "Scrolling down should return to later content in the long message.")
+            try assertScrollerRevealsOnlyOnHover(transcriptScrollView, elsewhere: element("message-composer"), named: "transcript")
             _ = try runCLI(["task", "rename", titleTaskID, "--title", "Generated title success"])
             element("back-to-board-button").click()
 
@@ -23907,6 +23956,11 @@ final class PlayhouseUITests: XCTestCase {
         let lastColumn = element("column-review")
         let window = app.windows.firstMatch
         XCTAssertTrue(drawer.waitToExist(timeout: 5), "The Done drawer should exist \(moment).", file: file, line: line)
+        // In a window narrower than the columns the board scrolls sideways, and the gutter left
+        // for the drawer clears the last column once the board is scrolled to its trailing end.
+        for _ in 0..<10 where lastColumn.frame.maxX > drawer.frame.minX {
+            board.scroll(byDeltaX: -400, deltaY: 0)
+        }
         // The sliver is 5 points wide and sits left of a scroller lane of 11 to 16 points.
         XCTAssertTrue(waitUntil({ drawer.frame.minX >= window.frame.maxX - 24 }, timeout: 3), "The Done drawer should rest as a sliver near the window edge \(moment).", file: file, line: line)
         XCTAssertLessThanOrEqual(drawer.frame.minX, window.frame.maxX - 14, "The Done drawer must leave the window edge to the board scroller \(moment).", file: file, line: line)
@@ -25493,6 +25547,72 @@ final class PlayhouseUITests: XCTestCase {
             }
         }
         return try XCTUnwrap(samples > 0 ? total / samples : nil, "No pixels sampled in \(column).")
+    }
+
+    /// A scroll view's vertical scroller. Its frame is reported whether or not it is drawn.
+    private func verticalScroller(of scrollView: XCUIElement) throws -> XCUIElement {
+        let bars = scrollView.scrollBars.allElementsBoundByIndex
+        return try XCTUnwrap(bars.first { $0.frame.height > $0.frame.width }, "\(scrollView) should expose a vertical scroller: \(bars.map(\.frame)).")
+    }
+
+    private func screenBitmap(_ screenshot: XCUIScreenshot) throws -> NSBitmapImageRep {
+        let image = try XCTUnwrap(screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil), "Could not read the screen's pixels.")
+        return NSBitmapImageRep(cgImage: image)
+    }
+
+    private func captureScreenBitmap() throws -> NSBitmapImageRep {
+        try screenBitmap(XCUIScreen.main.screenshot())
+    }
+
+    /// Luminance samples across `region` (screen points) of a screen capture, in reading order, so
+    /// two captures of the same unscrolled region compare pixel for pixel.
+    private func luminance(in region: CGRect, of bitmap: NSBitmapImageRep) throws -> [CGFloat] {
+        let screenFrame = try XCTUnwrap(NSScreen.main?.frame)
+        let scaleX = CGFloat(bitmap.pixelsWide) / screenFrame.width
+        let scaleY = CGFloat(bitmap.pixelsHigh) / screenFrame.height
+        var samples: [CGFloat] = []
+        for y in stride(from: region.minY + 1, to: region.maxY - 1, by: 2) {
+            for x in stride(from: region.minX + 1, to: region.maxX - 1, by: 1) {
+                guard let color = bitmap.colorAt(x: Int(x * scaleX), y: Int(y * scaleY))?.usingColorSpace(.deviceRGB) else { continue }
+                samples.append(0.299 * color.redComponent + 0.587 * color.greenComponent + 0.114 * color.blueComponent)
+            }
+        }
+        XCTAssertFalse(samples.isEmpty, "No pixels sampled in \(region).")
+        return samples
+    }
+
+    /// The largest per-pixel luminance change between two samplings of the same region.
+    private func largestLuminanceChange(_ first: [CGFloat], _ second: [CGFloat]) -> CGFloat {
+        zip(first, second).map { abs($0 - $1) }.max() ?? 0
+    }
+
+    /// Asserts that `scrollView`'s scroller stays hidden while the pointer is over `elsewhere`,
+    /// shows at a subdued opacity for as long as the pointer rests over `scrollView`, and hides
+    /// again once the pointer returns to `elsewhere`. Each sampling waits out AppKit's own fade
+    /// after a scroll, so a scroller that only flashed reads as hidden. Returns the change that
+    /// revealing the scroller made, which sizes a subdued scroller for later comparisons.
+    @discardableResult
+    private func assertScrollerRevealsOnlyOnHover(_ scrollView: XCUIElement, elsewhere: XCUIElement, named name: String) throws -> CGFloat {
+        let strip = try verticalScroller(of: scrollView).frame.intersection(scrollView.frame)
+        XCTAssertFalse(strip.isNull, "The \(name) scroller should lie inside its scroll view.")
+        elsewhere.hover()
+        Thread.sleep(forTimeInterval: 2)
+        let away = try luminance(in: strip, of: captureScreenBitmap())
+        attachScreenshot(named: "The \(name) scroller is hidden while the pointer is elsewhere")
+        scrollView.hover()
+        Thread.sleep(forTimeInterval: 2)
+        let hovered = try luminance(in: strip, of: captureScreenBitmap())
+        attachScreenshot(named: "The \(name) scroller shows at a subdued opacity while its content is hovered")
+        elsewhere.hover()
+        Thread.sleep(forTimeInterval: 2)
+        let awayAgain = try luminance(in: strip, of: captureScreenBitmap())
+        attachScreenshot(named: "The \(name) scroller hides again once the pointer leaves")
+        let revealChange = largestLuminanceChange(away, hovered)
+        XCTAssertGreaterThan(revealChange, 0.06, "Hovering the \(name) should draw its scroller and keep it drawn while the pointer rests there (change \(revealChange)).")
+        XCTAssertLessThan(revealChange, 0.4, "A hovered \(name) scroller that is not being dragged should be subdued, not fully opaque (change \(revealChange)).")
+        let hideChange = largestLuminanceChange(away, awayAgain)
+        XCTAssertLessThan(hideChange, 0.03, "Moving the pointer off the \(name) should hide its scroller again (change \(hideChange)).")
+        return revealChange
     }
 
     private func attachScreenshot(named name: String, fullScreen: Bool = false) {

@@ -1759,6 +1759,7 @@ struct WorkspaceRootSelector: View {
                             .accessibilityIdentifier("repository-suggestion-\(repository.lastPathComponent)")
                         }
                     }
+                    .hoverRevealScrollers()
                 }
                 .frame(maxHeight: 142)
                 .background(WorkspaceTheme.panelBackground.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
@@ -1872,6 +1873,8 @@ struct WorkspaceSettingsView: View {
                 }
                 .accessibilityIdentifier("appearance-picker")
                 .accessibilityValue(appearance)
+                // The Form's first row carries its scroller reveal.
+                .hoverRevealScrollers()
             }
             Section("Token usage") {
                 Text("A task card's dot warms from green to red as the task's token use approaches this total.")

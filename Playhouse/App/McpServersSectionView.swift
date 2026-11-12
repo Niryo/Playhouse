@@ -94,6 +94,7 @@ struct McpServersSectionView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) { content }
                     .padding(20)
+                    .hoverRevealScrollers()
             }
             .accessibilityIdentifier("mcp-list")
         }
