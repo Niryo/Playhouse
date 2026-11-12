@@ -4381,7 +4381,7 @@ struct TaskConversationView: View {
             }
 
             ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
-                if let image = Self.image(fromDataURL: dataURL) {
+                if let image = Self.chatImage(fromDataURL: dataURL, messageID: message.id, index: index) {
                     Button { selectedChatImage = image } label: {
                         Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 520, maxHeight: 420)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -4414,7 +4414,7 @@ struct TaskConversationView: View {
         return ZStack(alignment: .topLeading) {
             VStack(alignment: .trailing, spacing: 8) {
                 ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
-                    if let image = Self.image(fromDataURL: dataURL) {
+                    if let image = Self.chatImage(fromDataURL: dataURL, messageID: message.id, index: index) {
                         Button { selectedChatImage = image } label: {
                             Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 260, maxHeight: 220)
                                 .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -6930,6 +6930,25 @@ struct TaskConversationView: View {
     private static func image(fromDataURL value: String) -> NSImage? {
         guard let comma = value.firstIndex(of: ","), let data = Data(base64Encoded: String(value[value.index(after: comma)...])) else { return nil }
         return NSImage(data: data)
+    }
+
+    /// Decoded transcript images. The bubbles render inside `body`, which reruns on every keystroke in
+    /// the composer; a new `NSImage` each time made Core Animation decode the whole PNG again on every
+    /// frame. Reusing one image per attachment lets it keep the bitmap it already decoded.
+    private static let chatImageCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        return cache
+    }()
+
+    /// The image attached to a transcript message. The key names the attachment instead of hashing its
+    /// data URL, which can run to megabytes; its length and tail tell apart images that share a slot.
+    private static func chatImage(fromDataURL value: String, messageID: String, index: Int) -> NSImage? {
+        let key = "\(messageID)#\(index)#\(value.utf8.count)#\(value.suffix(48))" as NSString
+        if let cached = chatImageCache.object(forKey: key) { return cached }
+        guard let image = image(fromDataURL: value) else { return nil }
+        chatImageCache.setObject(image, forKey: key)
+        return image
     }
 
     private func saveAndBack() {
