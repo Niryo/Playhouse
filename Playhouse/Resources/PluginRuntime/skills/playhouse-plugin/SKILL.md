@@ -84,6 +84,15 @@ It uses these globals:
     `composer.replaceSelection(text)` and `composer.focus()` work on the
     composer, in conversation placements. From `mainSidebar` they reject with
     `unavailable`.
+- `fetch(url, {method, headers, body, timeout})`, like the web's, for `http`
+  and `https` URLs from any placement. It resolves with a response that has
+  `ok`, `status`, `statusText`, `url`, `redirected`, `headers.get(name)`,
+  `text()` and `json()`; bodies are text, up to 10 MB. An HTTP error status
+  still resolves with `ok` false. A request that can't be made rejects with an
+  Error whose `code` is `invalid_argument` (not an `http`/`https` URL) or
+  `network_error`. Plain `http` only reaches IP addresses and local hosts; use
+  `https` for other hosts. While `plugin refresh` validates a plugin, `fetch`
+  rejects with `unavailable`, so handle the rejection.
 - `setTimeout`, `setInterval`, `console`.
 
 Compose only atoms. Raw strings go only inside a `Text`. The atoms, their props

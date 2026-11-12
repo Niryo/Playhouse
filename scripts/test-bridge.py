@@ -19,10 +19,12 @@ import sqlite3
 import stat
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unittest
+import urllib.request
 import uuid
 import zlib
 from pathlib import Path
@@ -16844,6 +16846,129 @@ Playhouse.render(h(Context));
         self.assert_failure(self.call_cli("plugin", "render", "--plugin", "no-such-plugin", expected_status=3)[0], "not_found")
         self.assert_failure(self.call_cli("plugin", "render", "--file", self.plugins_folder() / "props-dump" / "index.js", "--task", task["id"], expected_status=2)[0], "invalid_argument")
         self.assert_failure(self.call_cli("plugin", "render", "--plugin", "props-dump", "--page", "Text", expected_status=2)[0], "invalid_argument")
+
+    # The UI case's pluginFetchSource is the same script.
+    PLUGIN_FETCH_SOURCE = """
+function Fetcher() {
+  var greeting = React.useState("loading");
+  var status = React.useState("idle");
+  React.useEffect(function () {
+    fetch(BASE + "/greeting").then(function (response) { return response.json(); })
+      .then(function (body) { greeting[1](body.message); }, function (error) { greeting[1]("error: " + error.code); });
+  }, []);
+  function report(promise) {
+    promise.then(function (text) { status[1](text); }, function (error) { status[1]("error: " + error.code); });
+  }
+  return h(Stack, { spacing: 6 },
+    h(Text, { testID: "fetch-greeting" }, greeting[0]),
+    h(Text, { testID: "fetch-status" }, status[0]),
+    h(Button, { testID: "fetch-get", onPress: function () {
+      report(fetch(BASE + "/greeting").then(function (r) {
+        return r.json().then(function (body) { return r.status + " " + r.headers.get("X-Fixture") + " " + body.message; });
+      }));
+    } }, h(Text, null, "Get")),
+    h(Button, { testID: "fetch-post", onPress: function () {
+      report(fetch(BASE + "/echo", { method: "POST", headers: { "X-Token": "secret", "Content-Type": "application/json" }, body: JSON.stringify({ n: 1 }) })
+        .then(function (r) { return r.json(); })
+        .then(function (echo) { return echo.method + " " + echo.token + " " + echo.body; }));
+    } }, h(Text, null, "Post")),
+    h(Button, { testID: "fetch-missing", onPress: function () {
+      report(fetch(BASE + "/missing").then(function (r) {
+        return r.text().then(function (text) { return r.status + " " + r.ok + " " + text; });
+      }));
+    } }, h(Text, null, "Missing")),
+    h(Button, { testID: "fetch-redirect", onPress: function () {
+      report(fetch(BASE + "/redirect").then(function (r) { return r.redirected + " " + r.url.split("/").pop() + " " + r.status; }));
+    } }, h(Text, null, "Redirect")),
+    h(Button, { testID: "fetch-bare", onPress: function () {
+      report(fetch(BASE).then(function (r) { return r.redirected + " " + r.status; }));
+    } }, h(Text, null, "Bare")),
+    h(Button, { testID: "fetch-refused", onPress: function () {
+      report(fetch(CLOSED + "/greeting").then(function () { return "reached"; }));
+    } }, h(Text, null, "Refused")),
+    h(Button, { testID: "fetch-file", onPress: function () {
+      report(fetch("file:///etc/hosts").then(function () { return "read"; }));
+    } }, h(Text, null, "File")));
+}
+Playhouse.render(h(Fetcher));
+"""
+
+    def start_plugin_fetch_server(self):
+        """The local server the fetch plugin reaches; it stops when its stdin closes."""
+        server = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve().parent / "fixtures" / "plugin-fetch-server.py")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        def stop():
+            server.stdin.close()
+            server.wait(timeout=10)
+        self.addCleanup(stop)
+        ports = json.loads(server.stdout.readline())
+        return f"http://127.0.0.1:{ports['port']}", f"http://127.0.0.1:{ports['closedPort']}"
+
+    # case-contract: test_plugin_fetch_reaches_the_network | Plugins have a fetch(url, options) global that makes HTTP and HTTPS requests from every placement, answered by the same core in the window and in `plugin render`; the cases reach a local fixture server instead of the internet. A fetch on mount shows the server's greeting; a GET resolves with its status, a response header read case-insensitively and a JSON body; a POST sends its method, headers and text body, which the server receives; a 404 resolves with ok false and its text body; a redirect is followed and reported as redirected with the final URL, while a URL with no path is not; a refused connection rejects with network_error; and a non-http URL such as file:// rejects with invalid_argument without any request. `plugin render` records each fetch in hostCalls as net.fetch with its arguments and result, and `plugin refresh` keeps a plugin that fetches on mount valid. In the window a page plugin from the board's sidebar shows the fetched greeting and each button's result.
+    def test_plugin_fetch_reaches_the_network(self):
+        base, closed = self.start_plugin_fetch_server()
+        source = f'var BASE = "{base}";\nvar CLOSED = "{closed}";\n' + self.PLUGIN_FETCH_SOURCE
+        self.write_installed_plugin("fetcher", source, placement="mainSidebar", presentation="page")
+        plugins = self.assert_success(self.call_cli("plugin", "refresh")[0])["plugins"]
+        self.assertEqual([(plugin["id"], plugin["valid"], plugin["errors"]) for plugin in plugins], [("fetcher", True, [])],
+                         "A plugin that fetches on mount stays valid.")
+
+        def press(event):
+            rendered = self.assert_success(self.call_cli("plugin", "render", "--plugin", "fetcher", "--event", f"{event}:onPress")[0])
+            self.assertEqual(rendered["errors"], [])
+            self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "fetch-greeting")), "hello from the fixture",
+                             "The fetch on mount settles before the first render is reported.")
+            return rendered
+
+        got = press("fetch-get")
+        self.assertEqual(self.plugin_text(self.plugin_node(got["tree"], "fetch-status")), "200 playhouse hello from the fixture")
+        self.assertEqual([(call["kind"], call["name"], call["ok"]) for call in got["hostCalls"]], [("net", "fetch", True)] * 2)
+        call = got["hostCalls"][1]
+        self.assertEqual(call["arguments"], {"url": f"{base}/greeting", "method": "GET", "headers": {}})
+        self.assertEqual(call["result"]["status"], 200)
+        self.assertEqual(call["result"]["url"], f"{base}/greeting")
+        self.assertFalse(call["result"]["redirected"])
+        self.assertEqual(call["result"]["headers"]["x-fixture"], "playhouse", "Response headers arrive lowercased.")
+        self.assertEqual(json.loads(call["result"]["body"]), {"message": "hello from the fixture"})
+
+        posted = press("fetch-post")
+        self.assertEqual(self.plugin_text(self.plugin_node(posted["tree"], "fetch-status")), 'POST secret {"n":1}')
+        self.assertEqual(posted["hostCalls"][1]["arguments"], {
+            "url": f"{base}/echo", "method": "POST", "body": '{"n":1}',
+            "headers": {"X-Token": "secret", "Content-Type": "application/json"},
+        })
+        with urllib.request.urlopen(f"{base}/requests", timeout=10) as response:
+            received = json.loads(response.read())
+        self.assertIn({"method": "POST", "path": "/echo", "token": "secret", "body": '{"n":1}'}, received,
+                      "The request reached the server with its header and body.")
+
+        missing = press("fetch-missing")
+        self.assertEqual(self.plugin_text(self.plugin_node(missing["tree"], "fetch-status")), "404 false nothing here",
+                         "An HTTP error status resolves; only ok is false.")
+        self.assertTrue(missing["hostCalls"][1]["ok"])
+
+        redirected = press("fetch-redirect")
+        self.assertEqual(self.plugin_text(self.plugin_node(redirected["tree"], "fetch-status")), "true greeting 200")
+        self.assertTrue(redirected["hostCalls"][1]["result"]["redirected"])
+        self.assertEqual(redirected["hostCalls"][1]["result"]["url"], f"{base}/greeting", "The response reports the URL after the redirect.")
+        bare = press("fetch-bare")
+        self.assertEqual(self.plugin_text(self.plugin_node(bare["tree"], "fetch-status")), "false 404",
+                         "A URL the loader normalizes (a trailing slash) is not reported as redirected.")
+
+        refused = press("fetch-refused")
+        self.assertEqual(self.plugin_text(self.plugin_node(refused["tree"], "fetch-status")), "error: network_error")
+        self.assertFalse(refused["hostCalls"][1]["ok"])
+        self.assertEqual(refused["hostCalls"][1]["error"]["code"], "network_error")
+
+        with urllib.request.urlopen(f"{base}/requests", timeout=10) as response:
+            before = len(json.loads(response.read()))
+        local = press("fetch-file")
+        self.assertEqual(self.plugin_text(self.plugin_node(local["tree"], "fetch-status")), "error: invalid_argument")
+        self.assertEqual(local["hostCalls"][1]["error"]["code"], "invalid_argument")
+        with urllib.request.urlopen(f"{base}/requests", timeout=10) as response:
+            self.assertEqual(len(json.loads(response.read())), before + 1, "Only the mount's greeting reached the server; file:// made no request.")
 
     # case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover, Modal, Page, SidePanel), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
     def test_debug_highlight_native_atoms_outlines_atoms(self):

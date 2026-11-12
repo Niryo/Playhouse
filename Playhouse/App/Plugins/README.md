@@ -127,6 +127,7 @@ A plugin is one script. The runtime defines these globals:
   Two samples may not share a field.
 - `Playhouse.render(element)`: mounts the root.
 - `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`, `queueMicrotask`, `console`.
+- `fetch(url, options)`: an HTTP or HTTPS request (see Network below).
 
 There is no JSX, TypeScript or bundler. Write plain `createElement` calls:
 
@@ -304,6 +305,29 @@ Installed plugins also get host calls. Each returns a Promise:
 | `Playhouse.ui.composer.setDraft(text)`, `.insertText(text)`, `.replaceSelection(text)`, `.focus()` | Edit the composer at the conversation placements; elsewhere they reject |
 
 `plugin render` records the `ui` calls in its `hostCalls` output. Both hosts refuse calls by the same rules, `PluginHostRules` in `Core/PluginLibrary.swift`: `plugin.render` is `invalid_argument`, and a composer call from the board's sidebar is `unavailable`.
+
+### Network
+
+Every plugin, at every placement, has a `fetch(url, options)` global shaped
+like the web's. `options` takes `method` (`GET` default), `headers` (an
+object, an array of pairs, or anything with `forEach`), `body` (sent as text;
+a `GET` or `HEAD` can't have one) and `timeout` (seconds, 30 default). It
+resolves with a response carrying `ok`, `status`, `statusText`, `url` (after
+redirects, which are followed), `redirected`, `headers` (`get` and `has`,
+case-insensitive, `keys`, `forEach`), and `text()` and `json()`. Bodies are
+text: a response is read as UTF-8, up to 10 MB. An HTTP error status still
+resolves, with `ok` false. A request that can't be made rejects with an Error
+whose `code` is `invalid_argument` (a URL that isn't absolute `http` or
+`https`, a bad method, header or timeout) or `network_error` (no connection,
+a timeout, a response over 10 MB).
+
+`fetch` is the host call `net.fetch`. Both hosts answer it with
+`PluginNetwork` in `Core/PluginNetwork.swift`, an ephemeral `URLSession` that
+shares no cookies or cache, so the window and `plugin render` make the same
+request; `plugin render` lists it in `hostCalls` with its arguments and
+result. Validating a plugin answers it with `unavailable`, like any host
+call. App Transport Security applies: plain `http` reaches IP addresses and
+local hosts, while other hosts need `https`.
 
 The runtime sends each host call through `__native.hostCall` and settles its
 promise with `PluginRuntime.answerHostCall`. `PluginRuntime.updateProps`
