@@ -2,6 +2,8 @@
 
 These rules govern development work in this repository. They describe the development process; they are not features of the Playhouse app.
 
+For Swift exploration, use the `swift-nav` skill in `.agents/skills/swift-nav` (mirrored in `.claude/skills/swift-nav`): outline large files before reading and use symbol-level reads and references.
+
 ## Git write operations
 
 - Do not run Git commands that change the working tree, index, refs, or repository history unless the user explicitly authorizes the specific operation in the current conversation.
