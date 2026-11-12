@@ -10419,7 +10419,7 @@ final class PlayhouseUITests: XCTestCase {
         let compact = opened.bubble.frame
         XCTAssertLessThanOrEqual(compact.maxY, opened.reply.frame.minY + 4,
                                  "The bubble should open above the selected text (bubble \(compact), selection \(opened.reply.frame)).")
-        XCTAssertLessThan(compact.width, 380, "A new side chat bubble should start compact (\(compact)).")
+        XCTAssertLessThan(compact.width, 480, "A new side chat bubble should start compact (\(compact)).")
         XCTAssertLessThan(compact.height, 300, "A new side chat bubble should start compact (\(compact)).")
         let bubbleElements = opened.bubble.descendants(matching: .any)
         XCTAssertTrue(bubbleElements.matching(identifier: "add-comment-button").firstMatch.exists,
@@ -25463,8 +25463,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !hint.exists }, timeout: 3), "The Side chat hint should go away once its bubble is open.", file: file, line: line)
         XCTAssertTrue(waitForStableFrame(bubble), "The side chat bubble should settle before it is measured.", file: file, line: line)
         let frame = bubble.frame
-        // Its accessibility frame is its content, inside the bubble's 14pt padding: 312 to 412 points wide.
-        XCTAssertTrue((300...430).contains(frame.width), "The side chat bubble should be 340 to 440 points wide with its padding (\(frame)).", file: file, line: line)
+        // Its accessibility frame is its content, inside the bubble's 14pt padding: 414 to 544 points wide.
+        XCTAssertTrue((400...560).contains(frame.width), "The side chat bubble should be 442 to 572 points wide with its padding (\(frame)).", file: file, line: line)
         XCTAssertTrue((100...600).contains(frame.height), "The side chat bubble should fit its chat, up to its maximum height (\(frame)).", file: file, line: line)
         if let selection {
             let selected = selection.frame
