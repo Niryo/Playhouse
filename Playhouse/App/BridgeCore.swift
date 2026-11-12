@@ -2653,6 +2653,30 @@ final class BoardTaskManager {
         return prepared
     }
 
+    /// Moves a Done task back to In Progress for a follow-up turn, so a task an agent is
+    /// working on sits in the board's columns rather than the archive. Moving to Done removed
+    /// its managed worktrees, so each one is renewed from the merge target first.
+    @discardableResult
+    func reopenDoneTask(_ id: UUID) async throws -> BoardTask {
+        let task = try requireTask(id)
+        guard task.status == .done else { return task }
+        if let removed = task.repositoryWorktrees.first(where: {
+            !$0.isPending && !FileManager.default.fileExists(atPath: $0.worktreePath)
+        }) {
+            return try await renewRepository(id, repositoryPath: removed.repositoryPath)
+        }
+        return try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.status == .done else { return task }
+            task.status = .inProgress
+            task.lifecycleRevision += 1
+            task.statusMessage = nil
+            try await saveTaskContext(taskID: id)
+            PlayhouseDiagnostics.record("task.reopened", fields: ["taskID": id.uuidString])
+            return task
+        }
+    }
+
     /// Removes a worktree the task no longer uses once its current turn ends, because the
     /// turn's provider may still run in it. A restart picks the intent up through
     /// `reconcileDeferredRepositoryRemovals`.
@@ -4145,7 +4169,7 @@ final class BoardTaskManager {
                 task.hasUnsentDraft = !submitted && !replacingDraft && (task.savedPrompt != nil || !task.draftImageDataURLs.isEmpty)
             }
             task.pendingSubmittedPrompt = submitted ? prompt : nil
-            // A follow-up on a Done task leaves it Done until a worktree is renewed.
+            // A Done task stays Done until its follow-up's send reopens it (`reopenDoneTask`).
             if let status, task.status != .done {
                 task.status = status
                 if status != .inProgress { clearProgressReport(task) }
@@ -8931,8 +8955,8 @@ final class ConversationManager {
                 }
             }
         } else if (try? tasks.conversationSubject(taskID).status) == .done {
-            // A follow-up on a Done task that never renewed a worktree has nothing to
-            // sync or review, so every outcome leaves it Done.
+            // A follow-up reopens a Done task before its turn, so a task still Done here has
+            // no worktree to sync or review, and every outcome leaves it Done.
         } else if let outcome = statusOutcome.flatMap(TurnOutcome.init(rawValue:)) {
             switch outcome {
             case .inProgress:
@@ -9006,8 +9030,7 @@ final class ConversationManager {
         guard Self.isValidModelID(modelID) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
         }
-        // A Done task keeps its conversation: follow-up questions run against the source
-        // repositories, and Git work first renews a worktree (`task repository renew`).
+        // A Done task keeps its conversation; a follow-up reopens it below, once validated.
         let availableRoots = Self.launchRoots(task).compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
         let validationWorkspace = try ConversationWorkspaceContext(roots: availableRoots)
         let effort = ConversationEffort(rawValue: task.conversationEffort) ?? .medium
@@ -9026,31 +9049,53 @@ final class ConversationManager {
                 client.clearTurnStarting(threadID: threadID)
             }
         }
-        // A task with explicit workspace roots is self-contained and may be
-        // sent through CLI/XPC before the UI has initialized the global
-        // default-parent setting. Rootless tasks still require that setting,
-        // except standalone chat, which has no repository at all and must stay
-        // usable even when no default repository parent is configured.
-        let repositoryRoot: URL? = task.isStandaloneChat ? nil : try (Self.launchRoots(task)
-            .compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
-            .first ?? settingsManager.requireRepositoryRootFolder())
+        // A follow-up on a Done task moves it back to In Progress in fresh worktrees, so the
+        // board shows it while the agent works. A failed send then leaves it waiting for the
+        // user rather than Done with worktrees that the archive does not account for.
+        let reopensDoneTask = !isPlayhouseNudge && !task.isStandaloneChat && task.status == .done
+        if reopensDoneTask {
+            do {
+                try await tasks.reopenDoneTask(taskID)
+                task = try tasks.conversationSubject(taskID)
+            } catch {
+                // A reopen that failed after leaving Done waits for the user; either way the
+                // follow-up returns to the composer as the unsent draft.
+                if (try? tasks.conversationSubject(taskID).status) != .done {
+                    _ = try? await tasks.setLifecycleStatus(taskID, to: .waitingResponse, message: error.localizedDescription)
+                }
+                try? await tasks.returnUnsentSubmittedPromptToDraft(taskID)
+                throw error
+            }
+        }
         let shouldGenerateTitle = !isPlayhouseNudge
             && !normalizedText.isEmpty
             && ["Untitled task", "Generating title…"].contains(task.title)
         // A caller that already saved the submitted prompt (the composer does,
         // so it survives navigation) supplies the status it replaced.
-        let priorStatus = statusBeforeSubmission ?? task.status
+        let priorStatus = reopensDoneTask ? .waitingResponse : statusBeforeSubmission ?? task.status
         let priorStatusMessage = task.statusMessage
-        if !isPlayhouseNudge {
-            _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
-        }
         let resolveTitleBeforeWorktree: Bool
         let workspace: ConversationWorkspaceContext
         let titleGeneration: Task<Void, Never>?
+        var repositoryRoot: URL? = nil
         var resolvedWorktreeTitle: String? = ["Untitled task", "Generating title…"].contains(task.title)
             ? nil
             : task.title
         do {
+            if reopensDoneTask {
+                _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
+            }
+            // A task with explicit workspace roots is self-contained and may be
+            // sent through CLI/XPC before the UI has initialized the global
+            // default-parent setting. Rootless tasks still require that setting,
+            // except standalone chat, which has no repository at all and must stay
+            // usable even when no default repository parent is configured.
+            repositoryRoot = task.isStandaloneChat ? nil : try (Self.launchRoots(task)
+                .compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
+                .first ?? settingsManager.requireRepositoryRootFolder())
+            if !isPlayhouseNudge && !reopensDoneTask {
+                _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
+            }
             // Resolve the first submitted prompt's title before preparing any
             // repositories. The app's model context can lag repository changes
             // made through the bridge, so using this snapshot to detect an auto

@@ -3302,7 +3302,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "No alert for a probe that failed after the task moved to Done", fullScreen: true)
     }
 
-    // case-contract: test_done_task_accepts_follow_up_conversation | A Done task keeps its conversation open: the UI shows the composer with an archived hint naming the merge target instead of a read-only notice, and its changes read reports no changes rather than a Git error for the removed worktree; and a follow-up sent from a Done task runs a real provider turn in the source repository of its removed worktree. The turn is told the task is archived, that a question-only turn leaves it Done, that it has no worktree for edits, and to run `task repository renew` before any Git change; its completed outcome leaves the task Done with no new worktree, the follow-up and its reply persist in the history across fresh reads, and switching the Done task's provider is still rejected.
+    // case-contract: test_done_task_accepts_follow_up_conversation | A Done task keeps its conversation open: the UI shows the composer with an archived hint saying a follow-up reopens the task in a fresh worktree from the merge target, instead of a read-only notice; its changes read reports no changes rather than a Git error for the removed worktree, and switching its provider is rejected. A follow-up sent from a Done task moves it back to In Progress before the turn starts, so it shows in the board's In Progress column while the agent works, with a fresh worktree renewed for the removed one. The real provider turn runs in that fresh worktree and is told it as an active task worktree rather than that the task is archived; its completed outcome moves the task to Review, the removed worktree stays removed, and the follow-up and its reply persist in the history across fresh reads. A Done task with no worktree to renew (one with only a context root) reopens to In Progress for its follow-up the same way, keeps that root, and its completed outcome moves it to Review.
     func test_done_task_accepts_follow_up_conversation() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3322,11 +3322,11 @@ final class PlayhouseUITests: XCTestCase {
         element("done-archive-button").click()
         let archived = element("done-archive-task-\(taskID)")
         XCTAssertTrue(archived.waitToExist(timeout: 10))
-        archived.click()
+        archived.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
         let hint = element("archived-conversation-follow-up-hint")
         XCTAssertTrue(hint.waitToExist(timeout: 10), "A Done task shows the archived follow-up hint above its composer.")
         let hintText = accessibleLabelOrValue(of: hint)
-        XCTAssertTrue(hintText.contains("follow-up changes open a fresh worktree from main"), "The hint names the merge target: \(hintText)")
+        XCTAssertTrue(hintText.contains("a follow-up reopens this task in a fresh worktree from main"), "The hint names the merge target: \(hintText)")
         XCTAssertTrue(element("workspace-changes-empty").waitToExist(timeout: 10), "A Done task's changes load as no changes.")
         XCTAssertFalse(element("workspace-changes-error").exists, "A Done task shows no Git error for its removed worktree.")
         XCTAssertFalse(element("archived-conversation-read-only").exists, "A Done task's conversation is no longer read only.")
@@ -3334,17 +3334,33 @@ final class PlayhouseUITests: XCTestCase {
         let providerMenu = element("conversation-provider-menu")
         XCTAssertTrue(providerMenu.waitToExist(timeout: 10))
         XCTAssertFalse(providerMenu.isEnabled, "A Done task still offers no provider switch.")
+        let doneSwitch = try runCLI(["conversation", "provider", taskID, "set", "claude"], expectedStatus: 2)
+        XCTAssertTrue(((doneSwitch["error"] as? [String: Any])?["message"] as? String ?? "").contains("Done tasks are closed"))
         attachScreenshot(named: "Done task keeps its composer with the archived follow-up hint")
+        attachElementScreenshot(hint, named: "Archived hint says a follow-up reopens the task")
 
         let question = "Which files did this archived task change?"
+        var freshWorktreePath: String?
         try completeCurrentTaskWithFixtureAnswers(
             taskTitle: "Archived follow-up UI",
             prompt: question,
-            expectedFinalStatus: "Done",
-            runningStatus: "Done"
+            whileTurnHeld: { [self] in
+                // While the agent works on the follow-up, the task is back on the board.
+                let running = try XCTUnwrap(taskRecord(id: taskID))
+                XCTAssertEqual(running["status"] as? String, "In Progress", "A follow-up moves the Done task back to In Progress.")
+                let fresh = try XCTUnwrap((running["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String)
+                XCTAssertNotEqual(fresh, worktreePath, "The reopened task works in a fresh worktree.")
+                XCTAssertTrue(FileManager.default.fileExists(atPath: fresh), "The fresh worktree exists while the follow-up runs.")
+                freshWorktreePath = fresh
+                XCTAssertTrue(waitUntil({ !self.element("archived-conversation-follow-up-hint").exists }, timeout: 10), "The reopened task is no longer archived.")
+                assertTaskVisible("Archived follow-up UI", inColumn: "In Progress")
+                attachScreenshot(named: "Follow-up moves the Done task back to In Progress")
+                attachElementScreenshot(element("task-card-\(taskID.uppercased())"), named: "Reopened task card in the In Progress column")
+                openTask(named: "Archived follow-up UI")
+            }
         )
         let sentQuestion = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", question)).firstMatch
-        XCTAssertTrue(sentQuestion.waitToExist(timeout: 10), "The follow-up question stays in the Done task's conversation.")
+        XCTAssertTrue(sentQuestion.waitToExist(timeout: 10), "The follow-up question stays in the task's conversation.")
         let replies = app.descendants(matching: .any).matching(NSPredicate(
             format: "identifier BEGINSWITH %@ AND label == %@", "assistant-message-", "Answers received: Blue / fixture-secret."
         ))
@@ -3354,39 +3370,146 @@ final class PlayhouseUITests: XCTestCase {
             replies.allElementsBoundByIndex.contains { $0.frame.minY > sentQuestion.frame.maxY }
         }
         XCTAssertTrue(waitUntil(followUpReplyBelowQuestion, timeout: 10), "The follow-up's reply appears below the follow-up question.")
+        let freshWorktree = try XCTUnwrap(freshWorktreePath)
         let history = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))) as? [String: Any]
         let followUp = try XCTUnwrap((history?["turns"] as? [[String: Any]])?.last)
         XCTAssertTrue((followUp["userMessage"] as? String ?? "").contains(question))
-        XCTAssertEqual(followUp["cwd"] as? String, repositoryPath, "The follow-up runs in the source repository of the removed worktree.")
+        XCTAssertEqual(followUp["cwd"] as? String, freshWorktree, "The follow-up runs in the fresh worktree.")
         let instructions = try XCTUnwrap((history?["threadResumeDeveloperInstructions"] as? [Any])?.last as? String)
-        XCTAssertTrue(instructions.contains("This task is Done (archived)"))
-        XCTAssertTrue(instructions.contains("A question-only turn leaves the task Done"))
-        XCTAssertTrue(instructions.contains("task repository renew \(taskID) --repo <path>"))
-        XCTAssertTrue(instructions.contains("Active task worktrees for edits: none"))
+        XCTAssertFalse(instructions.contains("This task is Done (archived)"), "The follow-up runs as an active task.")
+        XCTAssertTrue(instructions.contains("Active task worktrees for edits: \(repositoryPath) -> \(freshWorktree)"))
+        XCTAssertFalse(element("archived-conversation-follow-up-hint").exists)
+        attachScreenshot(named: "Reopened task answers the follow-up in Review")
+        assertTaskVisible("Archived follow-up UI", inColumn: "Review")
         let current = try XCTUnwrap(taskRecord(id: taskID))
-        XCTAssertEqual(current["status"] as? String, "Done", "The follow-up's completed outcome leaves the task Done.")
-        XCTAssertEqual((current["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String, worktreePath, "A question-only turn creates no worktree.")
-        XCTAssertTrue(element("archived-conversation-follow-up-hint").exists)
-        attachScreenshot(named: "Done task answers the follow-up and stays Done")
-        let doneSwitch = try runCLI(["conversation", "provider", taskID, "set", "claude"], expectedStatus: 2)
-        XCTAssertTrue(((doneSwitch["error"] as? [String: Any])?["message"] as? String ?? "").contains("Done tasks are closed"))
-        element("back-to-board-button").click()
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
+        XCTAssertEqual(current["status"] as? String, "Review", "The follow-up's completed outcome moves the reopened task to Review.")
+        XCTAssertEqual((current["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String, freshWorktree)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktreePath), "The removed worktree stays removed.")
         // A fresh history load keeps the follow-up and both replies.
-        element("done-archive-button").click()
-        let reopened = element("done-archive-task-\(taskID)")
-        XCTAssertTrue(reopened.waitToExist(timeout: 10))
-        reopened.click()
-        XCTAssertTrue(element("archived-conversation-follow-up-hint").waitToExist(timeout: 10))
+        openTask(named: "Archived follow-up UI")
         XCTAssertTrue(sentQuestion.waitToExist(timeout: 10), "The follow-up persists in the reopened conversation.")
-        XCTAssertTrue(element("workspace-changes-empty").waitToExist(timeout: 10), "The reopened Done task still loads no changes.")
-        XCTAssertFalse(element("workspace-changes-error").exists)
         XCTAssertTrue(waitUntil(followUpReplyBelowQuestion, timeout: 10), "The follow-up's reply persists below it in the reopened conversation.")
-        attachScreenshot(named: "Reopened Done task keeps the follow-up and its reply")
+        attachScreenshot(named: "Reopened task keeps the follow-up and its reply")
+        element("back-to-board-button").click()
+
+        // A task with only a context root has no worktree to renew; its follow-up still reopens it.
+        let rooted = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Archived rooted follow-up UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path,
+        ])["result"] as? [String: Any])
+        let rootedID = try XCTUnwrap(rooted["id"] as? String)
+        openTask(named: "Archived rooted follow-up UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Archived rooted follow-up UI")
+        element("back-to-board-button").click()
+        moveTaskToDone(taskID: rootedID)
+        element("done-archive-button").click()
+        let rootedArchived = element("done-archive-task-\(rootedID)")
+        XCTAssertTrue(rootedArchived.waitToExist(timeout: 10))
+        rootedArchived.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(element("archived-conversation-follow-up-hint").waitToExist(timeout: 10))
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Archived rooted follow-up UI", prompt: "One more question.", whileTurnHeld: { [self] in
+            let running = try XCTUnwrap(taskRecord(id: rootedID))
+            XCTAssertEqual(running["status"] as? String, "In Progress", "A follow-up reopens a Done task that has no worktree to renew.")
+            XCTAssertEqual((running["repositoryWorktrees"] as? [Any])?.count, 0)
+            XCTAssertEqual(running["workspaceRoots"] as? [String], [fixture.primary.path])
+            assertTaskVisible("Archived rooted follow-up UI", inColumn: "In Progress")
+        }, reloadConversationAfterTurn: true)
+        assertTaskVisible("Archived rooted follow-up UI", inColumn: "Review")
+        XCTAssertEqual(try taskRecord(id: rootedID)?["status"] as? String, "Review")
+    }
+
+    // case-contract: test_done_task_follow_up_reopen_failure_keeps_task_done | A follow-up to a Done task whose merge target no longer exists cannot renew its removed worktree: the send fails with the missing merge target error, the task stays Done with no new worktree and no provider turn, and the follow-up is not left pending as a submitted prompt, so the UI composer keeps its text.
+    func test_done_task_follow_up_reopen_failure_keeps_task_done() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let target = "reopen-failure-target"
+        try runGit(fixture.primary, "branch", target, "main")
+        addTeardownBlock { [self] in
+            if !((try? runGitOutput(fixture.primary, "branch", "--list", target)) ?? "").isEmpty {
+                try? runGit(fixture.primary, "branch", "-D", target)
+            }
+        }
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Reopen failure UI", "--prompt", "Fixture task description.",
+            "--repo", fixture.primary.path, "--merge-target", "\(fixture.primary.path)=\(target)",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Reopen failure UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Reopen failure UI")
+        let record = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let worktreePath = try XCTUnwrap(record["worktreePath"] as? String)
+        element("back-to-board-button").click()
+        moveTaskToDone(taskID: taskID)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktreePath))
+        try runGit(fixture.primary, "branch", "-D", target)
+        let historyURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
+        let turnsBefore = ((try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any])?["turns"] as? [Any])?.count
+        element("done-archive-button").click()
+        let archived = element("done-archive-task-\(taskID)")
+        XCTAssertTrue(archived.waitToExist(timeout: 10))
+        archived.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(element("archived-conversation-follow-up-hint").waitToExist(timeout: 10))
+        let followUp = "Can you follow up on this?"
+        element("message-composer").click()
+        element("message-composer").typeText(followUp)
+        element("send-message-button").click()
+        let error = element("codex-chat-error")
+        XCTAssertTrue(error.waitToExist(timeout: 15), "The failed reopen shows its error.")
+        XCTAssertTrue(accessibleLabelOrValue(of: error).contains("The merge target '\(target)' doesn't exist"), accessibleLabelOrValue(of: error))
+        XCTAssertTrue(waitUntil({ self.element("message-composer").value as? String == followUp }, timeout: 10), "The composer keeps the failed follow-up.")
+        XCTAssertTrue(element("archived-conversation-follow-up-hint").exists, "The task stays archived.")
+        attachScreenshot(named: "Failed reopen keeps the Done task and the follow-up")
+        attachElementScreenshot(error, named: "Missing merge target error")
+        let current = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertEqual(current["status"] as? String, "Done", "A follow-up that cannot reopen the task leaves it Done.")
+        XCTAssertEqual((current["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String, worktreePath, "A failed reopen creates no worktree.")
+        XCTAssertNil(current["pendingSubmittedPrompt"] as? String, "The failed follow-up is not left pending.")
+        let turnsAfter = ((try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any])?["turns"] as? [Any])?.count
+        XCTAssertEqual(turnsAfter, turnsBefore, "No provider turn runs.")
         element("back-to-board-button").click()
     }
 
-    // case-contract: test_merged_task_renew_opens_fresh_worktree_and_new_pr | `task repository renew` starts follow-up Git work after a pull request merged. It is rejected while the repository has no linked pull request, while the linked pull request is unmerged, and while the merged worktree has uncommitted changes, leaving the task unchanged. A merged PR status read persists that it merged, and the next turn is told the merged branch is finished and to renew before Git changes. Renewing from inside the agent's turn retires the record with its merged PR to the task's past repositories, keeps the merged branch, removes the old worktree once that turn ends, and creates a fresh worktree on a new suffixed branch based on the merge target as just fetched from the remote, so it holds the merged commits even when the local target is stale. A new pull request then opens from the fresh worktree, and the card shows the merged PR in purple beside the new one; once the task is Done, the archive row lists both. A Done task renews too, from inside its follow-up turn: it returns to In Progress with a fresh worktree for every repository whose worktree was removed (a past link only for records that had a pull request), and that turn's completed outcome moves it to Review, keeping both merged PRs on fresh reads.
+    // case-contract: test_done_task_follow_up_setup_failure_restores_draft | A Done task with only a context folder reopens without creating a worktree, but if that folder disappears and no default parent is configured, a bridge follow-up send fails before a provider turn starts; the task moves to Waiting Response, and the submitted prompt returns to its draft. The test then restores the folder so the UI can reopen the task and display the returned draft.
+    func test_done_task_follow_up_setup_failure_restores_draft() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let contextRoot = dataDirectory.appendingPathComponent("removed-follow-up-context", isDirectory: true)
+        try FileManager.default.createDirectory(at: contextRoot, withIntermediateDirectories: true)
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Missing follow-up root UI", "--prompt", "Fixture task description.", "--root", contextRoot.path,
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Missing follow-up root UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Missing follow-up root UI")
+        element("back-to-board-button").click()
+        moveTaskToDone(taskID: taskID)
+        element("done-archive-button").click()
+        let archived = element("done-archive-task-\(taskID)")
+        XCTAssertTrue(archived.waitToExist(timeout: 10))
+        archived.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(element("message-composer").waitToExist(timeout: 10))
+        try FileManager.default.removeItem(at: contextRoot)
+        _ = try runCLI(["settings", "clear-parent"])
+        let followUp = "Follow up after the context folder vanished."
+        let failure = try runCLI(["conversation", "send", taskID, "--message", followUp], expectedStatus: 1)
+        XCTAssertTrue(((failure["error"] as? [String: Any])?["message"] as? String ?? "").lowercased().contains("repository root folder"))
+        let current = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertEqual(current["status"] as? String, "Waiting Response")
+        XCTAssertNil(current["pendingSubmittedPrompt"] as? String)
+        XCTAssertTrue(current["hasUnsentDraft"] as? Bool == true)
+        XCTAssertEqual(current["savedPrompt"] as? String, followUp)
+        XCTAssertEqual((current["repositoryWorktrees"] as? [Any])?.count, 0)
+        try FileManager.default.createDirectory(at: contextRoot, withIntermediateDirectories: true)
+        element("back-to-board-button").click()
+        assertTaskVisible("Missing follow-up root UI", inColumn: "Waiting Response")
+        attachScreenshot(named: "Failed archived follow-up moves to Waiting Response")
+        attachElementScreenshot(element("task-card-\(taskID.uppercased())"), named: "Task card in Waiting Response after setup fails")
+        openTask(named: "Missing follow-up root UI")
+        XCTAssertTrue(waitUntil({ self.element("message-composer").value as? String == followUp }, timeout: 10), "The UI restores the submitted follow-up in the composer.")
+        attachScreenshot(named: "Failed setup restores the follow-up in the composer")
+        attachElementScreenshot(element("message-composer"), named: "Restored follow-up draft in the composer")
+    }
+
+    // case-contract: test_merged_task_renew_opens_fresh_worktree_and_new_pr | `task repository renew` starts follow-up Git work after a pull request merged. It is rejected while the repository has no linked pull request, while the linked pull request is unmerged, and while the merged worktree has uncommitted changes, leaving the task unchanged. A merged PR status read persists that it merged, and the next turn is told the merged branch is finished and to renew before Git changes. Renewing from inside the agent's turn retires the record with its merged PR to the task's past repositories, keeps the merged branch, removes the old worktree once that turn ends, and creates a fresh worktree on a new suffixed branch based on the merge target as just fetched from the remote, so it holds the merged commits even when the local target is stale. A new pull request then opens from the fresh worktree, and the card shows the merged PR in purple beside the new one; once the task is Done, the archive row lists both. A Done task renews too: a follow-up to it returns it to In Progress before its turn starts, and `task repository renew` on a Done task does the same, each with a fresh worktree for every repository whose worktree was removed (a past link only for records that had a pull request); that turn's completed outcome moves it to Review, keeping both merged PRs on fresh reads.
     func test_merged_task_renew_opens_fresh_worktree_and_new_pr() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
@@ -3504,12 +3627,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(archivedNew.waitToExist(timeout: 10), "The Done archive row lists the new PR beside it.")
         XCTAssertLessThan(archivedMerged.frame.minX, archivedNew.frame.minX, "The earlier merged PR comes first.")
         attachScreenshot(named: "Done archive lists the merged PR beside the new one")
-        element("done-archive-task-\(taskID)").click()
+        element("done-archive-task-\(taskID)").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
         XCTAssertTrue(element("archived-conversation-follow-up-hint").waitToExist(timeout: 10))
         var reopenedRecord: [String: Any]?
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Renew merged work UI", prompt: "Please make one more change.", whileTurnHeld: { [self] in
-            reopenedRecord = try runCLI(renew, extraEnvironment: ghEnvironment)["result"] as? [String: Any]
-            XCTAssertEqual(reopenedRecord?["status"] as? String, "In Progress", "Renewing a Done task moves it back to In Progress.")
+            // The follow-up itself renewed the removed worktree before its turn started.
+            reopenedRecord = try taskRecord(id: taskID)
+            XCTAssertEqual(reopenedRecord?["status"] as? String, "In Progress", "A follow-up moves the Done task back to In Progress.")
         })
         XCTAssertFalse(element("archived-conversation-follow-up-hint").exists, "The reopened task is no longer archived.")
         element("back-to-board-button").click()
@@ -24725,7 +24849,7 @@ final class PlayhouseUITests: XCTestCase {
         expectedFinalStatus: String? = nil,
         settleTimeout: TimeInterval = 10,
         whileTurnHeld: (() throws -> Void)? = nil,
-        runningStatus: String = "In Progress"
+        reloadConversationAfterTurn: Bool = false
     ) throws {
         let taskID = try taskID(named: taskTitle)
         let executablePath = try XCTUnwrap(codexFixtureExecutable, "The task fixture has no Codex executable.")
@@ -24753,12 +24877,15 @@ final class PlayhouseUITests: XCTestCase {
         try whileTurnHeld?()
         if reportCompletedOutcome {
             XCTAssertTrue(waitUntil({
-                (try? self.taskRecord(id: taskID)?["status"] as? String) == runningStatus
-            }, timeout: 10), "The task should be \(runningStatus) before reporting the fixture outcome.")
+                (try? self.taskRecord(id: taskID)?["status"] as? String) == "In Progress"
+            }, timeout: 10), "The task should be In Progress before reporting the fixture outcome.")
             let outcome = try runCLI(["task", "outcome", taskID, "completed"])
             XCTAssertEqual((outcome["result"] as? [String: Any])?["outcome"] as? String, "completed")
         }
         try "Release the answered fixture turn.\n".write(to: release, atomically: true, encoding: .utf8)
+        if reloadConversationAfterTurn {
+            openTask(named: taskTitle)
+        }
         let answer = app.descendants(matching: .any).matching(
             NSPredicate(
                 format: "identifier BEGINSWITH %@ AND label == %@",

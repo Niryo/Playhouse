@@ -1858,7 +1858,7 @@ struct TaskConversationView: View {
 
     private var archivedFollowUpHint: String {
         let target = task.repositoryWorktrees.compactMap(\.mergeTarget).first
-        return "Archived · follow-up changes open a fresh worktree from \(target ?? "the merge target")"
+        return "Archived · a follow-up reopens this task in a fresh worktree from \(target ?? "the merge target")"
     }
 
     /// Provider switches wait for active turns and queued follow-ups to settle.
@@ -3237,7 +3237,7 @@ struct TaskConversationView: View {
                         .accessibilityIdentifier("archived-conversation-read-only")
                 } else {
                     if task.status == .done {
-                        // A Done task keeps its conversation; Git work renews a worktree first.
+                        // A Done task keeps its conversation; a follow-up reopens it in fresh worktrees.
                         Label(archivedFollowUpHint, systemImage: "archivebox")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
