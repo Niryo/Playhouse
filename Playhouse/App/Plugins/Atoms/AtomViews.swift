@@ -1399,7 +1399,7 @@ struct AtomPage<Base: View, Content: View>: View {
                 .allowsHitTesting(props.isPresented)
                 .animation(.spring(response: 0.34, dampingFraction: 0.92), value: props.isPresented)
             }
-            .accessibilityElement(children: .contain)
+            // No accessibility container around base and page, as with a SidePanel.
             .atomCommon(common.presentationLayout, atom: .page)
     }
 }
@@ -1436,8 +1436,9 @@ struct AtomSidePanel<Base: View, Content: View>: View {
                 .allowsHitTesting(props.isPresented)
                 .animation(.easeInOut(duration: 0.24), value: props.isPresented)
             }
-            // One container, in which the panel's priority orders it first.
-            .accessibilityElement(children: .contain)
+            // No accessibility container around base and panel: the conversation view is a
+            // base, and one around it split its labels' icons into separate elements and kept
+            // native tooltips from showing even while nothing was presented.
             .atomCommon(common.presentationLayout(owningHeight: false), atom: .sidePanel)
     }
 
