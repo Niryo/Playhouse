@@ -2827,7 +2827,9 @@ enum TaskThreadDeveloperInstructions {
         contextFolders: [String] = [],
         repositoryRootPath: String? = nil,
         isStandaloneChat: Bool = false,
-        isArchived: Bool = false
+        isArchived: Bool = false,
+        pluginPlacement: String? = nil,
+        pluginsDirectory: String? = nil
     ) -> String {
         let executable = cliExecutableURL().path
         let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
@@ -2847,6 +2849,7 @@ enum TaskThreadDeveloperInstructions {
               \(quotedExecutable) task rename <task-id> --title "<title>"
               \(quotedExecutable) task prompt <task-id> --text "<prompt>"   (replace the saved description of an existing task)
               \(quotedExecutable) workspace repos list
+              \(quotedExecutable) plugin mode --on   (Add Plugin mode: the user picks where a new plugin's button goes; --off leaves it)
             A task created with no repository is a plain card; add repositories only when the user asks for work in a specific repo. Creating a task does not start it — the user runs it from the board.
 
             `task create` requires --prompt: it is the task's full description, saved on the card in the same command. Never create a task with only a title. `--prompt` only saves the description: never submit or start the task (no `task prompt --submitted true`, no status change, no move), so it stays in Backlog. A good description is self-contained, because the agent that runs the task will not see this chat. Include the goal; background and context from this conversation (findings, numbers, file paths, decisions the user made); concrete requirements; where to look in the code; and acceptance criteria. Do this every time, without the user asking.
@@ -2885,7 +2888,7 @@ enum TaskThreadDeveloperInstructions {
         For already selected repositories, make changes in their corresponding active task worktrees above. For folder-only tasks, use the selected additional context folder; with no repository or folder context, treat the task as standalone unless the user asks for files that clearly belong in a repository. Playhouse starts the provider conversation with the active task worktree as cwd and runtime workspace root. Temporary files under /tmp and other non-repository directories remain available when useful.
         Use the workspace repos list API for repository discovery; do not search the configured root to find repositories yourself. Once the API returns a repository path, you may inspect that repository's contents read-only without adding it. For read-only inspection of returned source paths, you do not need to add a repository.
         A selected repository can be a sticky default from an earlier task, and the user may have forgotten to change it. Do not interrupt the user or ask them to confirm the selection merely because the task appears unrelated. Use workspace repos list to discover alternatives when needed. Read-only inspection of returned source paths does not require adding repositories. Add a repository only when you intend to make or commit changes there, and use its task worktreePath for every edit. Do not replace or remove selected repositories unless the user explicitly asks; adding a worktree for a change is sufficient. Never silently edit a source repository path.
-        \(mergedWorkInstructions(id: id, executable: quotedExecutable, repositories: repositories, isArchived: isArchived))Repository context commands for this task:
+        \(mergedWorkInstructions(id: id, executable: quotedExecutable, repositories: repositories, isArchived: isArchived))\(pluginAuthoringInstructions(placement: pluginPlacement, executable: quotedExecutable, pluginsDirectory: pluginsDirectory))Repository context commands for this task:
         \(quotedExecutable) task get \(id)
         \(quotedExecutable) task repository add \(id) --repo <path>
         \(quotedExecutable) task repository add-batch \(id) --repo <path> [--repo <path>...]
@@ -2901,6 +2904,24 @@ enum TaskThreadDeveloperInstructions {
         Write your user-visible final reply after the outcome call returns. That reply is the last thing in the turn: never end a turn on a tool call.
         Reporting an outcome is required for every successful turn. If you end a turn without one, Playhouse privately nudges you to report your current status, up to \(TurnOutcome.maxContinuations) times per request. Answer a nudge with an outcome call rather than by repeating finished work. If the nudges run out without the work settling, Playhouse marks the task Blocked.
         \(noVisibleOutputNoticeRule)
+        """
+    }
+
+    /// The skill an Add Plugin mode task uses.
+    static let pluginSkillName = "playhouse-plugin"
+
+    /// Guidance for a task started from an Add Plugin mode placeholder: where the
+    /// plugin goes, what it receives, and how to install and check it.
+    static func pluginAuthoringInstructions(placement rawPlacement: String?, executable: String, pluginsDirectory: String?) -> String {
+        guard let rawPlacement, let placement = PluginPlacement(rawValue: rawPlacement) else { return "" }
+        let directory = pluginsDirectory ?? "the plugins folder"
+        return """
+
+        Plugin authoring: this task builds a new Playhouse plugin whose entry button goes in the \(placement.title) placement (`\(placement.rawValue)`). Use the /\(pluginSkillName) skill for the plugin system's details, and ask the user for anything the request leaves open (what the plugin does, its name and icon, and whether it opens as a popover, modal, sidebar or page) before writing it.
+        - Write the plugin to \(directory)/<plugin-id>/ as plugin.json (id, name, icon, placement "\(placement.rawValue)", presentation) and index.js. That folder is this task's context folder; it is not a Git repository and needs no worktree or pull request.
+        - Context the plugin receives in Playhouse.props at this placement: \(placement.contextDescription)
+        - Check it headlessly with \(executable) plugin render --plugin <plugin-id> [--task <task-id>] [--event <testID>:<event>[:<value>]], then install it with \(executable) plugin refresh, which validates every plugin and shows the valid ones in the app immediately. Fix every reported error before you finish.
+
         """
     }
 

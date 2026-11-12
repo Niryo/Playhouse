@@ -10,6 +10,7 @@ struct PlayhouseApp: App {
     @StateObject private var conversationRuntime: ConversationRuntimeModel
     @StateObject private var cpuUsageModel: TaskCPUUsageModel
     @StateObject private var agentUsageModel = AgentUsageModel(client: DaemonClient())
+    @State private var pluginRegistry = PluginRegistry()
 
     private var windowTitle: String {
         let configuredTitle = ProcessInfo.processInfo.environment["PLAYHOUSE_WINDOW_TITLE"]?
@@ -71,7 +72,7 @@ struct PlayhouseApp: App {
                 .help("Search tasks")
                 .keyboardShortcut("f", modifiers: .command)
             }
-            CommandMenu("Plugins") { PluginsMenuContent() }
+            CommandMenu("Plugins") { PluginsMenuContent(registry: pluginRegistry) }
             CommandMenu("Debug") {
                 DebugConversationImportMenu(modelContainer: modelContainer) // DEBUG-IMPORT:
                 #if DEBUG
@@ -101,6 +102,7 @@ struct PlayhouseApp: App {
             .environment(\.conversationRuntimeModel, conversationRuntime)
             .environmentObject(cpuUsageModel)
             .environmentObject(agentUsageModel)
+            .environment(pluginRegistry)
             .atomHighlightRoot()
             .defaultAppStorage(appPreferences)
     }
@@ -131,6 +133,9 @@ private final class PlayhouseApplicationDelegate: NSObject, NSApplicationDelegat
 
 private struct MainWindowView: View {
     @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) private var appearance = "dark"
+    @AppStorage(WorkspaceSettings.pluginAddModeKey, store: WorkspaceSettings.preferencesStore) private var isPluginAddModeOn = false
+    @AppStorage(WorkspaceSettings.pluginsRevisionKey, store: WorkspaceSettings.preferencesStore) private var pluginsRevision = 0
+    @Environment(PluginRegistry.self) private var pluginRegistry
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
     @EnvironmentObject private var cpuUsageModel: TaskCPUUsageModel
@@ -138,6 +143,18 @@ private struct MainWindowView: View {
     @State private var isLifecycleReady = false
 
     var body: some View {
+        VStack(spacing: 0) {
+            if isPluginAddModeOn, isLifecycleReady {
+                PluginModeBanner()
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+            content
+        }
+        .animation(.easeInOut(duration: 0.2), value: isPluginAddModeOn)
+        .task(id: pluginsRevision) { await pluginRegistry.reload() }
+    }
+
+    private var content: some View {
         Group {
             if isLifecycleReady {
                 KanbanBoardView()
@@ -171,13 +188,56 @@ private struct MainWindowView: View {
     }
 }
 
-/// The app menu's Plugins menu.
+/// The app menu's Plugins menu: Add Plugin mode, the Plugin Catalog, and
+/// each installed plugin with its placement, its first error, and Delete.
 struct PluginsMenuContent: View {
+    let registry: PluginRegistry
     @Environment(\.openWindow) private var openWindow
+    @AppStorage(WorkspaceSettings.pluginAddModeKey, store: WorkspaceSettings.preferencesStore) private var isAddModeOn = false
 
     var body: some View {
+        Toggle("Add Plugin Mode", isOn: Binding(get: { isAddModeOn }, set: { PluginRegistry.setAddMode($0) }))
+            .help("Show where a new plugin's button can go")
         Button("Plugin Catalog") { openWindow(id: "plugin-catalog") }
             .buttonHoverPointer()
             .help("Open the Plugin Catalog")
+        if !registry.plugins.isEmpty {
+            Divider()
+            // Flat rows rather than per-plugin submenus, so an invalid plugin's error
+            // and every Delete show as soon as the menu opens: each plugin's name and
+            // placement, its first error when it is invalid, and Delete.
+            ForEach(registry.plugins) { plugin in
+                Label("\(plugin.name) — \(PluginPlacement(rawValue: plugin.placement)?.title ?? plugin.placement)",
+                      systemImage: plugin.valid ? plugin.icon : "exclamationmark.triangle")
+                if let problem = plugin.errors.first {
+                    Text(problem)
+                }
+                Button("Delete \(plugin.name)…") { confirmDelete(plugin) }
+                    .buttonHoverPointer()
+                    .help("Delete this plugin's folder")
+            }
+            Divider()
+            Button("Reload Plugins") { Task { await registry.reload() } }
+                .buttonHoverPointer()
+                .help("Read the plugins folder again")
+        }
+    }
+
+    private func confirmDelete(_ plugin: PluginRecord) {
+        let alert = NSAlert()
+        alert.messageText = "Delete the plugin \(plugin.name)?"
+        alert.informativeText = "Its folder is removed: \(plugin.folder)"
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        Task { @MainActor in
+            do {
+                try await registry.delete(plugin.id)
+            } catch {
+                let failure = NSAlert(error: error)
+                failure.runModal()
+            }
+        }
     }
 }

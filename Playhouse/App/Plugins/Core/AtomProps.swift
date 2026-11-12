@@ -32,6 +32,9 @@ enum AtomType: String, CaseIterable, Sendable {
     case editor = "Editor"
     case popover = "Popover"
     case stepSlider = "StepSlider"
+    case modal = "Modal"
+    case page = "Page"
+    case sidePanel = "SidePanel"
 
     /// The events each atom raises; a plugin's handler for any other name is never called.
     var events: Set<String> {
@@ -46,16 +49,17 @@ enum AtomType: String, CaseIterable, Sendable {
         case .menu: ["onMenu"]
         case .pressArea: ["onPress", "onLongPress"]
         case .editor: ["onChange", "onSubmit", "onSteerSubmit", "onFocusChange"]
-        case .popover: ["onDismiss"]
+        case .popover, .modal: ["onDismiss"]
         case .stepSlider: ["onChange"]
-        case .stack, .text, .icon, .label, .link, .spinner, .spacer, .panel, .meter, .scroll, .divider, .overlay: []
+        case .scroll: ["onEndReached"]
+        case .stack, .text, .icon, .label, .link, .spinner, .spacer, .panel, .meter, .divider, .overlay, .page, .sidePanel: []
         }
     }
 
     /// Whether the atom shows atom children. A Text holds only raw strings.
     var takesAtomChildren: Bool {
         switch self {
-        case .stack, .button, .link, .card, .disclosure, .panel, .scroll, .pressArea, .overlay, .popover: true
+        case .stack, .button, .link, .card, .disclosure, .panel, .scroll, .pressArea, .overlay, .popover, .modal, .page, .sidePanel: true
         case .text, .icon, .label, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar, .toggle, .textField, .segmented, .menu, .editor, .stepSlider: false
         }
     }
@@ -65,7 +69,7 @@ enum AtomType: String, CaseIterable, Sendable {
     /// children but is a leaf. The debug atom highlight colors the two apart.
     var isContainer: Bool {
         switch self {
-        case .stack, .panel, .card, .scroll, .disclosure, .overlay, .popover: true
+        case .stack, .panel, .card, .scroll, .disclosure, .overlay, .popover, .modal, .page, .sidePanel: true
         case .text, .icon, .label, .button, .link, .spinner, .spacer, .pillPicker, .meter, .divider, .choiceBar,
              .toggle, .textField, .segmented, .menu, .pressArea, .editor, .stepSlider: false
         }
@@ -110,6 +114,9 @@ enum AtomType: String, CaseIterable, Sendable {
         case .editor: Self.keys(EditorProps.CodingKeys.self)
         case .popover: Self.keys(PopoverProps.CodingKeys.self)
         case .stepSlider: Self.keys(StepSliderProps.CodingKeys.self)
+        case .modal: Self.keys(ModalProps.CodingKeys.self)
+        case .page: Self.keys(PageProps.CodingKeys.self)
+        case .sidePanel: Self.keys(SidePanelProps.CodingKeys.self)
         }
     }
 
@@ -158,6 +165,9 @@ enum AtomType: String, CaseIterable, Sendable {
             case .editor: _ = try EditorProps.decode(props)
             case .popover: _ = try PopoverProps.decode(props)
             case .stepSlider: _ = try StepSliderProps.decode(props)
+            case .modal: _ = try ModalProps.decode(props)
+            case .page: _ = try PageProps.decode(props)
+            case .sidePanel: _ = try SidePanelProps.decode(props)
             }
         } catch let error as DecodingError {
             throw PluginTreeError(message: "<\(type)> has an invalid prop: \(Self.describe(error))")
@@ -465,7 +475,10 @@ struct MeterProps: AtomPropsDecodable, Equatable {
 /// Token Stats sections), stretched to the available width. `height` (a
 /// common prop) fixes its height; `maxHeight` lets it shrink to its content.
 /// `inset` pads the column inside the scroll view, and `lazy` builds only
-/// the children in view (the Skills page's gallery).
+/// the children in view (the Skills page's gallery). It raises `onEndReached`
+/// each time the end of its content comes into view (and once when the
+/// content fits), so its owner can append the next page (the Done archive's
+/// 40 at a time).
 struct ScrollProps: AtomPropsDecodable, Equatable {
     var spacing: Double?
     var maxHeight: Double?
@@ -512,13 +525,16 @@ struct ToggleProps: AtomPropsDecodable, Equatable {
 /// edit calls `onChange` with the new text. `placeholder` shows while it is
 /// empty, and `autoFocus` gives it the keyboard focus when it appears. With
 /// a handler, Return calls `onSubmit` and the Up and Down arrows call
-/// `onArrow` with "up" or "down" instead of moving the caret.
+/// `onArrow` with "up" or "down" instead of moving the caret. `style`
+/// `plain` drops the rounded border, for a field inside a decorated `Stack`
+/// (the Done archive's search); `rounded` is the default.
 struct TextFieldProps: AtomPropsDecodable, Equatable {
     var text: String
     var placeholder: String?
     var autoFocus: Bool?
+    var style: String?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case text, placeholder, autoFocus }
+    enum CodingKeys: String, CodingKey, CaseIterable { case text, placeholder, autoFocus, style }
 }
 
 /// A segmented control (the Skills page's Skills | Rules | MCP and source
@@ -663,4 +679,48 @@ struct StepSliderProps: AtomPropsDecodable, Equatable {
     var selected: String
 
     enum CodingKeys: String, CodingKey, CaseIterable { case options, selected }
+}
+
+/// A modal sheet over the window, presented from its first child, which stays
+/// laid out as usual, and showing the rest in a leading column (the Token
+/// Stats modal; a native owner gives any content). It is controlled: it is
+/// open while `isPresented` is true, and Escape (or a native owner's content
+/// dismissing itself) calls `onDismiss`, after which the owner sets
+/// `isPresented` false. `width` and `height` fix the sheet's
+/// size; without them it fits its content. Its `testID` names the sheet's
+/// content column.
+struct ModalProps: AtomPropsDecodable, Equatable {
+    var isPresented: Bool
+    var width: Double?
+    var height: Double?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, width, height }
+}
+
+/// A page that slides in from the trailing edge over its first child and
+/// covers all of it (the Scheduled Tasks page over the board), showing the
+/// rest in a leading column on the window background. The first child stays
+/// laid out as usual and sizes the atom. It is controlled: the page shows
+/// while `isPresented` is true, and the owner closes it with its own control
+/// (the page's Back button). Its `testID` names the page.
+struct PageProps: AtomPropsDecodable, Equatable {
+    var isPresented: Bool
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented }
+}
+
+/// A full-height panel that slides in over one edge of its first child (the
+/// Done archive over the board), showing the rest in a column with no
+/// spacing on the window background, a hairline along its inner edge and a
+/// shadow over what it covers. `edge` is `trailing` (the default) or
+/// `leading`; `width` is the panel's (340 by default). The first child stays
+/// laid out as usual and sizes the atom. It is controlled: the panel shows
+/// while `isPresented` is true, and the owner closes it with its own control
+/// (the archive's close button). Its `testID` names the panel.
+struct SidePanelProps: AtomPropsDecodable, Equatable {
+    var isPresented: Bool
+    var edge: String?
+    var width: Double?
+
+    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, edge, width }
 }

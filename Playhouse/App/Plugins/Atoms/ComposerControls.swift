@@ -20,6 +20,8 @@ struct NativeChatEditor: NSViewRepresentable {
     let onPasteImage: (Data) -> Void
     /// Escape, for a native owner that closes on it; without one the text view keeps its own.
     var onCancel: (() -> Void)? = nil
+    /// The selected range, in UTF-16 offsets, whenever it changes.
+    var onSelectionChange: (NSRange) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -115,6 +117,11 @@ struct NativeChatEditor: NSViewRepresentable {
             guard let editor = notification.object as? ChatEditorTextView else { return }
             parent.text = editor.string
             (editor.enclosingScrollView as? ChatEditorScrollView)?.requestTextLayout()
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let editor = notification.object as? NSTextView else { return }
+            parent.onSelectionChange(editor.selectedRange())
         }
 
         func textDidBeginEditing(_ notification: Notification) { parent.isFocused = true }

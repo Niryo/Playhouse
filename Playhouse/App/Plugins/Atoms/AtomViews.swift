@@ -720,26 +720,102 @@ struct AtomMeter: View {
 /// A vertical scroll view around a leading column that fills its width.
 /// `maxHeight` caps it while letting it shrink to its content; the common
 /// `height` fixes it.
+///
+/// With `onEndReached`, a zero-height marker after the column reports where it
+/// sits in the scroll view's own visible bounds, and the end is reported each
+/// time that marker moves into view (or the content fits). It reads geometry
+/// rather than the marker's appearance: a lazy stack inside a scroll view
+/// nested in another one (a catalog page) never makes a scrolled-to marker
+/// appear.
 struct AtomScroll<Content: View>: View {
     var props = ScrollProps()
     var common = AtomCommon()
+    var onEndReached: (() -> Void)?
     @ViewBuilder var content: () -> Content
+    @State private var viewportHeight: CGFloat?
+    /// Only whether the end is in view is state, so scrolling redraws nothing.
+    @State private var endInView = false
+    @State private var lastEndOffset = EndOffsetBox()
+    @State private var space = UUID()
 
     var body: some View {
         ScrollView {
-            Group {
-                if props.lazy == true {
-                    LazyVStack(alignment: .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
-                } else {
-                    VStack(alignment: .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
+            VStack(alignment: .leading, spacing: 0) {
+                Group {
+                    if props.lazy == true {
+                        LazyVStack(alignment: .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
+                    } else {
+                        VStack(alignment: .leading, spacing: props.spacing.map { CGFloat($0) }, content: content)
+                    }
+                }
+                if onEndReached != nil {
+                    Color.clear
+                        .frame(height: 0)
+                        .background(GeometryReader { proxy in
+                            Color.clear.preference(key: AtomScrollEndOffsetKey.self, value: proxy.frame(in: .named(space)).minY)
+                        })
+                        .accessibilityHidden(true)
                 }
             }
             .padding(CGFloat(props.inset ?? 0))
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .coordinateSpace(name: space)
+        .background(GeometryReader { proxy in
+            Color.clear.preference(key: AtomScrollViewportHeightKey.self, value: proxy.size.height)
+        })
+        .onPreferenceChange(AtomScrollEndOffsetKey.self) { offset in
+            lastEndOffset.value = offset
+            checkEnd()
+        }
+        .onPreferenceChange(AtomScrollViewportHeightKey.self) { height in
+            viewportHeight = height
+            checkEnd()
+        }
+        // An outer Scroll reads only its own marker and viewport.
+        .transformPreference(AtomScrollEndOffsetKey.self) { $0 = nil }
+        .transformPreference(AtomScrollViewportHeightKey.self) { $0 = nil }
+        // A Scroll that goes away reports no pending end.
+        .onDisappear { lastEndOffset.generation += 1 }
         .modifier(Applied(when: props.maxHeight != nil) { $0.frame(maxHeight: CGFloat(props.maxHeight ?? 0)) })
         .atomCommon(common, atom: .scroll)
     }
+
+    /// Reports the end once each time it comes into view. A lazy stack sizes
+    /// itself over several layout passes as it builds rows, which can show the
+    /// marker for a moment (the board's archive then asked for a second page),
+    /// so the end counts as reached only while it is still in view 0.15 s later.
+    private func checkEnd() {
+        guard onEndReached != nil, let viewportHeight, let endOffset = lastEndOffset.value, viewportHeight > 0 else { return }
+        let inView = endOffset <= viewportHeight
+        guard inView != endInView else { return }
+        endInView = inView
+        let box = lastEndOffset
+        box.generation += 1
+        guard inView else { return }
+        let generation = box.generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            guard box.generation == generation else { return }
+            onEndReached?()
+        }
+    }
+
+    /// The marker's latest offset, and a count of the end's moves in and out
+    /// of view that cancels a pending report, kept out of SwiftUI's state.
+    final class EndOffsetBox {
+        var value: CGFloat?
+        var generation = 0
+    }
+}
+
+private struct AtomScrollEndOffsetKey: PreferenceKey {
+    static let defaultValue: CGFloat? = nil
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) { value = nextValue() ?? value }
+}
+
+private struct AtomScrollViewportHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat? = nil
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) { value = nextValue() ?? value }
 }
 
 struct AtomDivider: View {
@@ -842,12 +918,7 @@ struct AtomTextField: View {
     }
 
     var body: some View {
-        TextField(props.placeholder ?? "", text: Binding(get: { text }, set: { edited in
-            guard edited != text else { return }
-            text = edited
-            onChange(edited)
-        }))
-            .textFieldStyle(.roundedBorder)
+        styledField
             .focused($isFocused)
             .defaultFocus($isFocused, props.autoFocus == true)
             .onKeyPress { press in
@@ -868,6 +939,20 @@ struct AtomTextField: View {
                 if owned != text { text = owned }
             }
             .atomCommon(common, atom: .textField)
+    }
+
+    @ViewBuilder
+    private var styledField: some View {
+        let field = TextField(props.placeholder ?? "", text: Binding(get: { text }, set: { edited in
+            guard edited != text else { return }
+            text = edited
+            onChange(edited)
+        }))
+        if props.style == "plain" {
+            field.textFieldStyle(.plain)
+        } else {
+            field.textFieldStyle(.roundedBorder)
+        }
     }
 }
 
@@ -969,6 +1054,8 @@ struct AtomEditor: View {
     var onPasteImage: (Data) -> Void = { _ in }
     /// Escape reaches only native owners, and only those that set it.
     var onCancel: (() -> Void)? = nil
+    /// The selection reaches only native owners, such as the composer's plugins.
+    var onSelectionChange: (NSRange) -> Void = { _ in }
     @State private var text: String
     @State private var height: CGFloat = 28
 
@@ -976,7 +1063,8 @@ struct AtomEditor: View {
         props: EditorProps, common: AtomCommon = AtomCommon(), onChange: @escaping (String) -> Void,
         onSubmit: @escaping () -> Void = {}, onSteerSubmit: @escaping () -> Void = {},
         onFocusChange: @escaping (Bool) -> Void = { _ in }, onPasteImage: @escaping (Data) -> Void = { _ in },
-        onCancel: (() -> Void)? = nil
+        onCancel: (() -> Void)? = nil,
+        onSelectionChange: @escaping (NSRange) -> Void = { _ in }
     ) {
         self.props = props
         self.onCancel = onCancel
@@ -986,6 +1074,7 @@ struct AtomEditor: View {
         self.onSteerSubmit = onSteerSubmit
         self.onFocusChange = onFocusChange
         self.onPasteImage = onPasteImage
+        self.onSelectionChange = onSelectionChange
         _text = State(initialValue: props.text)
     }
 
@@ -1003,7 +1092,8 @@ struct AtomEditor: View {
             onSubmit: onSubmit,
             onSteerSubmit: onSteerSubmit,
             onPasteImage: onPasteImage,
-            onCancel: onCancel
+            onCancel: onCancel,
+            onSelectionChange: onSelectionChange
         )
         .frame(height: height)
         .overlay(alignment: .topLeading) {
@@ -1227,5 +1317,175 @@ struct AtomOverlay<Base: View, Over: View>: View {
         case "bottomTrailing": .bottomTrailing
         default: .center
         }
+    }
+}
+
+/// The layout props of a presentation atom (a Modal, Page or SidePanel),
+/// applied around what it is presented over; its accessibility props name
+/// what it presents instead.
+private extension AtomCommon {
+    var presentationLayout: AtomCommon {
+        var copy = self
+        copy.testID = nil
+        copy.label = nil
+        copy.value = nil
+        copy.hint = nil
+        return copy
+    }
+
+    /// The layout props of a Modal or SidePanel without the ones it owns: its
+    /// own `width` (and the Modal's `height`) size what it presents, and,
+    /// applied around the presenter too, they framed it to the panel's width,
+    /// so the covered view spilled out of the atom and the panel sat in the
+    /// middle of it.
+    func presentationLayout(owningHeight: Bool) -> AtomCommon {
+        var copy = presentationLayout
+        copy.width = nil
+        if owningHeight { copy.height = nil }
+        return copy
+    }
+
+    var presentationAccessibility: AtomCommon {
+        AtomCommon(testID: testID, label: label, value: value, hint: hint)
+    }
+}
+
+/// A modal sheet presented from `base`, open while `props.isPresented`.
+/// Escape, which the sheet handles itself, or a native owner's content
+/// closing it (an `@Environment(\.dismiss)`), calls `onDismiss`. Native owners give any SwiftUI
+/// content; a plugin's is every child after the first.
+struct AtomModal<Base: View, Content: View>: View {
+    var props: ModalProps
+    var common = AtomCommon()
+    let onDismiss: () -> Void
+    @ViewBuilder var base: () -> Base
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        base()
+            .sheet(isPresented: Binding(get: { props.isPresented }, set: { if !$0 && props.isPresented { onDismiss() } })) {
+                content()
+                    .modifier(Applied(when: props.width != nil || props.height != nil) {
+                        $0.frame(width: props.width.map { CGFloat($0) }, height: props.height.map { CGFloat($0) })
+                    })
+                    .modifier(AtomAccessibility(common: common.presentationAccessibility, group: true, combine: false))
+            }
+            .atomCommon(common.presentationLayout(owningHeight: true), atom: .modal)
+    }
+}
+
+/// A page that slides in from the trailing edge over all of `base`, on the
+/// window background, while `props.isPresented` (the Scheduled Tasks page
+/// over the board). `base` sizes the atom; the owner closes the page.
+struct AtomPage<Base: View, Content: View>: View {
+    var props: PageProps
+    var common = AtomCommon()
+    @ViewBuilder var base: () -> Base
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        base()
+            .background(AccessibilityHitTestAnchor())
+            .overlay {
+                ZStack {
+                    if props.isPresented {
+                        content()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .background(WorkspaceTheme.windowBackground)
+                            .shadow(color: .black.opacity(0.25), radius: 16, x: -4)
+                            .modifier(AtomAccessibility(common: common.presentationAccessibility, group: true, combine: false))
+                            // Ahead of the covered view, as a SidePanel's panel is.
+                            .accessibilitySortPriority(1)
+                            .transition(.move(edge: .trailing))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+                .allowsHitTesting(props.isPresented)
+                .animation(.spring(response: 0.34, dampingFraction: 0.92), value: props.isPresented)
+            }
+            .accessibilityElement(children: .contain)
+            .atomCommon(common.presentationLayout, atom: .page)
+    }
+}
+
+/// A full-height panel that slides in over the `edge` of `base` (trailing
+/// by default), `width` wide (340 by default), on the window background with
+/// a hairline along its inner edge and a shadow, while `props.isPresented`
+/// (the Done archive over the board). `base` sizes the atom; the owner
+/// closes the panel.
+struct AtomSidePanel<Base: View, Content: View>: View {
+    var props: SidePanelProps
+    var common = AtomCommon()
+    @ViewBuilder var base: () -> Base
+    @ViewBuilder var content: () -> Content
+
+    private var leading: Bool { props.edge == "leading" }
+
+    var body: some View {
+        base()
+            .background(AccessibilityHitTestAnchor())
+            .overlay {
+                // A full-size stack aligned to the edge, holding the panel while it shows.
+                ZStack(alignment: leading ? .leading : .trailing) {
+                    if props.isPresented {
+                        panel
+                            // Ahead of the covered view, so an accessibility hit test over the
+                            // panel finds its controls even when the covered view is one
+                            // accessibility group (a plugin's base Stack with `group`).
+                            .accessibilitySortPriority(1)
+                            .transition(.move(edge: leading ? .leading : .trailing).combined(with: .opacity))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: leading ? .leading : .trailing)
+                .allowsHitTesting(props.isPresented)
+                .animation(.easeInOut(duration: 0.24), value: props.isPresented)
+            }
+            // One container, in which the panel's priority orders it first.
+            .accessibilityElement(children: .contain)
+            .atomCommon(common.presentationLayout(owningHeight: false), atom: .sidePanel)
+    }
+
+    private var panel: some View {
+        content()
+            .frame(width: CGFloat(props.width ?? 340))
+            .frame(maxHeight: .infinity, alignment: .top)
+            .background(WorkspaceTheme.windowBackground)
+            .overlay(alignment: leading ? .trailing : .leading) {
+                Rectangle().fill(Color.primary.opacity(0.10)).frame(width: 1)
+            }
+            .shadow(color: .black.opacity(0.16), radius: 18, x: leading ? 6 : -6, y: 0)
+            .modifier(AtomAccessibility(common: common.presentationAccessibility, group: true, combine: false))
+    }
+}
+
+/// An empty, zero-size AppKit view kept behind what a Page or SidePanel covers.
+/// Without a platform view there, accessibility hit tests over the presented
+/// content resolve to the covered view underneath: its controls still take
+/// clicks, but XCUITest (and so assistive clients) don't find them. Found by
+/// bisecting the board's Done archive (#156); the AppKit mechanism is not
+/// confirmed. test_task_done_removes_worktree_and_preserves_branch guards it on
+/// the board; test_plugin_presentation_atoms_open_modal_page_and_side_panel and
+/// test_plugin_done_archive_renders_from_atoms_like_native guard a plugin's
+/// SidePanel over a grouped base.
+struct AccessibilityHitTestAnchor: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+extension View {
+    /// This view as an `AtomModal`'s base: native owners present a modal from what they already show.
+    func atomModal(_ props: ModalProps, common: AtomCommon = AtomCommon(), onDismiss: @escaping () -> Void, @ViewBuilder content: @escaping () -> some View) -> some View {
+        AtomModal(props: props, common: common, onDismiss: onDismiss, base: { self }, content: content)
+    }
+
+    /// This view as an `AtomPage`'s base.
+    func atomPage(_ props: PageProps, common: AtomCommon = AtomCommon(), @ViewBuilder content: @escaping () -> some View) -> some View {
+        AtomPage(props: props, common: common, base: { self }, content: content)
+    }
+
+    /// This view as an `AtomSidePanel`'s base.
+    func atomSidePanel(_ props: SidePanelProps, common: AtomCommon = AtomCommon(), @ViewBuilder content: @escaping () -> some View) -> some View {
+        AtomSidePanel(props: props, common: common, base: { self }, content: content)
     }
 }

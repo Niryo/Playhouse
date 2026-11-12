@@ -289,6 +289,15 @@ enum PlayhouseCLI {
                     "prompt": .string(prompt),
                     "images": .array(try (flags["--image"] ?? []).map(draftImageDataURL))
                 ])
+            case "comments":
+                guard let id = tail.first else { throw CLIError.usage("Use: playhouse task comments <task-id> --json <comments-array> [--append]") }
+                let rest = Array(tail.dropFirst())
+                let flags = try parseFlags(rest.filter { $0 != "--append" }, valueFlags: ["--json"])
+                return BridgeRequest(command: "task.comments.save", arguments: [
+                    "taskID": .string(id),
+                    "comments": .string(try requiredFlag("--json", flags: flags).first!),
+                    "append": .boolean(rest.contains("--append"))
+                ])
             case "delete":
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.delete", arguments: ["taskID": .string(id)])
@@ -414,20 +423,48 @@ enum PlayhouseCLI {
                 "parent": .string(try requiredFlag("--parent", flags: flags).first!)
             ])
         case "plugin":
-            let usage = "Use: playhouse plugin render (--file <plugin.js> | --page <catalog-page>) [--props <json>] [--event <testID>:<event>[:<value>]...] [--advance <seconds>]"
-            guard rest.first == "render" else { throw CLIError.usage(usage) }
-            let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--file", "--page", "--props", "--event", "--advance"])
-            guard (flags["--file"] == nil) != (flags["--page"] == nil) else { throw CLIError.usage(usage) }
+            let renderUsage = "Use: playhouse plugin render (--file <plugin.js> | --page <catalog-page> | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>]...] [--advance <seconds>]"
+            let usage = "Use: playhouse plugin mode [--on|--off] | list | refresh | delete --id <plugin-id> | author --placement <\(pluginPlacements)> [--provider <codex|claude>] | render …"
+            switch rest.first {
+            case "mode":
+                let options = Array(rest.dropFirst())
+                switch options {
+                case []: return BridgeRequest(command: "plugin.mode")
+                case ["--on"]: return BridgeRequest(command: "plugin.mode", arguments: ["enabled": .boolean(true)])
+                case ["--off"]: return BridgeRequest(command: "plugin.mode", arguments: ["enabled": .boolean(false)])
+                default: throw CLIError.usage("Use: playhouse plugin mode [--on|--off]")
+                }
+            case "list", "refresh":
+                guard rest.count == 1 else { throw CLIError.usage(usage) }
+                return BridgeRequest(command: "plugin.\(rest[0])")
+            case "delete":
+                let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--id"])
+                return BridgeRequest(command: "plugin.delete", arguments: ["pluginID": .string(try requiredFlag("--id", flags: flags).first!)])
+            case "author":
+                let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--placement", "--provider"])
+                var arguments: [String: BridgeValue] = ["placement": .string(try requiredFlag("--placement", flags: flags).first!)]
+                arguments["provider"] = flags["--provider"]?.first.map(BridgeValue.string)
+                return BridgeRequest(command: "plugin.author", arguments: arguments)
+            case "render":
+                break
+            default:
+                throw CLIError.usage(usage)
+            }
+            let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--file", "--page", "--plugin", "--task", "--props", "--event", "--advance"])
+            guard [flags["--file"], flags["--page"], flags["--plugin"]].compactMap({ $0 }).count == 1 else { throw CLIError.usage(renderUsage) }
+            guard flags["--task"] == nil || flags["--plugin"] != nil else { throw CLIError.usage(renderUsage) }
             var arguments: [String: BridgeValue] = [:]
             // The daemon resolves paths from its own working directory, so send an absolute one.
             arguments["file"] = flags["--file"]?.first.map { path in
                 .string(URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)).standardizedFileURL.path)
             }
             arguments["page"] = flags["--page"]?.first.map(BridgeValue.string)
+            arguments["pluginID"] = flags["--plugin"]?.first.map(BridgeValue.string)
+            arguments["taskID"] = flags["--task"]?.first.map(BridgeValue.string)
             arguments["props"] = flags["--props"]?.first.map(BridgeValue.string)
             arguments["events"] = flags["--event"].map { .array($0.map(BridgeValue.string)) }
             if let advance = flags["--advance"]?.first {
-                guard let seconds = Double(advance), seconds >= 0 else { throw CLIError.usage(usage) }
+                guard let seconds = Double(advance), seconds >= 0 else { throw CLIError.usage(renderUsage) }
                 arguments["advance"] = .decimal(seconds)
             }
             return BridgeRequest(command: "plugin.render", arguments: arguments)
@@ -934,6 +971,8 @@ enum PlayhouseCLI {
         }
     }
 
+    private static let pluginPlacements = "mainSidebar|conversationSidebar|conversationToolbar|composerActions"
+
     private static func parseFlags(_ args: [String], valueFlags: Set<String>) throws -> [String: [String]] {
         var result: [String: [String]] = [:]
         var index = 0
@@ -1040,6 +1079,7 @@ enum PlayhouseCLI {
       playhouse task repository recent <task-id>
       playhouse task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]
       playhouse task draft <task-id> --text <draft> [--image <path>...]
+      playhouse task comments <task-id> --json <comments-array> [--append]   (save unsent review comments with the draft; [] clears; --append adds only new ones)
       playhouse task roots get <task-id>
       playhouse task roots set <task-id> --root <path> [--root <path>...]
       playhouse task terminal <task-id>
@@ -1059,7 +1099,11 @@ enum PlayhouseCLI {
       playhouse chat page close-turn <chat-id> --continues <true|false> [--new-title <title>] [--summary-hint <text>]
       playhouse workspace suggest --parent <path>
       playhouse workspace repos list
-      playhouse plugin render (--file <plugin.js> | --page <catalog-page>) [--props <json>] [--event <testID>:<event>[:<value>]...] [--advance <seconds>]
+      playhouse plugin mode [--on|--off]
+      playhouse plugin list|refresh
+      playhouse plugin delete --id <plugin-id>
+      playhouse plugin author --placement <mainSidebar|conversationSidebar|conversationToolbar|composerActions> [--provider <codex|claude>]
+      playhouse plugin render (--file <plugin.js> | --page <catalog-page> | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>]...] [--advance <seconds>]
       playhouse usage get [--refresh|--watch]|login <codex|claude>|switch-account <codex|claude>
       playhouse skills list [--task <task-id>] [--include-bundled true]
       playhouse skills get --skill <skill-id> [--task <task-id>]

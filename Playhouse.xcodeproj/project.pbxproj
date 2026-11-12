@@ -26,6 +26,7 @@
 		A1000000000000000000F304 /* RepositoryChipsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F304 /* RepositoryChipsView.swift */; };
 		A1000000000000000000F305 /* ComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F305 /* ComposerView.swift */; };
 		A1000000000000000000F306 /* KanbanColumnSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F306 /* KanbanColumnSection.swift */; };
+		A1000000000000000000F307 /* DoneArchiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F307 /* DoneArchiveView.swift */; };
 		A1000000000000000000F401 /* TaskSchedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F401 /* TaskSchedule.swift */; };
 		A1000000000000000000F402 /* ScheduledTasksPageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F402 /* ScheduledTasksPageView.swift */; };
 		A1000000000000000000F201 /* AgentUsageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F201 /* AgentUsageStore.swift */; };
@@ -91,6 +92,7 @@
 		A2000000000000000000F304 /* RepositoryChipsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryChipsView.swift; sourceTree = "<group>"; };
 		A2000000000000000000F305 /* ComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerView.swift; sourceTree = "<group>"; };
 		A2000000000000000000F306 /* KanbanColumnSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanbanColumnSection.swift; sourceTree = "<group>"; };
+		A2000000000000000000F307 /* DoneArchiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoneArchiveView.swift; sourceTree = "<group>"; };
 		A2000000000000000000F401 /* TaskSchedule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskSchedule.swift; sourceTree = "<group>"; };
 		A2000000000000000000F402 /* ScheduledTasksPageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduledTasksPageView.swift; sourceTree = "<group>"; };
 		A2000000000000000000F201 /* AgentUsageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentUsageStore.swift; sourceTree = "<group>"; };
@@ -216,6 +218,7 @@
 				A2000000000000000000F304 /* RepositoryChipsView.swift */,
 				A2000000000000000000F305 /* ComposerView.swift */,
 				A2000000000000000000F306 /* KanbanColumnSection.swift */,
+				A2000000000000000000F307 /* DoneArchiveView.swift */,
 				A2000000000000000000F401 /* TaskSchedule.swift */,
 				A2000000000000000000F402 /* ScheduledTasksPageView.swift */,
 				A2000000000000000000F201 /* AgentUsageStore.swift */,
@@ -515,6 +518,7 @@
 				A1000000000000000000F304 /* RepositoryChipsView.swift in Sources */,
 				A1000000000000000000F305 /* ComposerView.swift in Sources */,
 				A1000000000000000000F306 /* KanbanColumnSection.swift in Sources */,
+				A1000000000000000000F307 /* DoneArchiveView.swift in Sources */,
 				A1000000000000000000F401 /* TaskSchedule.swift in Sources */,
 				A1000000000000000000F402 /* ScheduledTasksPageView.swift in Sources */,
 				A1000000000000000000F201 /* AgentUsageStore.swift in Sources */,

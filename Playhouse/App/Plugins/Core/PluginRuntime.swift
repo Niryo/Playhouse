@@ -23,6 +23,16 @@ final class PluginRuntime {
         var message: String
     }
 
+    /// A call the plugin made to its host: `Playhouse.bridge(command, arguments)`
+    /// (`kind` "bridge") or `Playhouse.ui.<name>(…)` (`kind` "ui"). The plugin
+    /// waits on a promise until the host answers it with `answerHostCall`.
+    struct HostCall: Equatable {
+        var id: Int
+        var kind: String
+        var name: String
+        var arguments: PluginValue
+    }
+
     /// The vendored modules, in the order they are defined.
     static let vendorModules = ["react", "scheduler", "react-reconciler"]
 
@@ -36,6 +46,10 @@ final class PluginRuntime {
     /// Script errors, uncaught exceptions and invalid commits, oldest first.
     private(set) var errors: [String] = []
     @ObservationIgnored private(set) var log: [LogEntry] = []
+    /// Host calls not answered yet, oldest first.
+    @ObservationIgnored private(set) var pendingHostCalls: [HostCall] = []
+    /// Called for each host call as the plugin makes it; it stays pending until answered.
+    @ObservationIgnored var onHostCall: ((HostCall) -> Void)?
 
     @ObservationIgnored private let context: JSContext
     @ObservationIgnored private let timerMode: Timers
@@ -87,6 +101,26 @@ final class PluginRuntime {
         return dispatcher?.call(withArguments: arguments)?.toBool() ?? false
     }
 
+    /// Replaces `Playhouse.props` and tells `Playhouse.useProps` subscribers,
+    /// whose updates commit as one batch.
+    func updateProps(_ props: [String: PluginValue]) {
+        context.objectForKeyedSubscript("__playhouseSetProps")?.call(withArguments: [PluginValue.object(props).javaScriptValue(in: context)])
+    }
+
+    /// Resolves (or rejects) the promise of host call `id`.
+    func answerHostCall(_ id: Int, result: Result<PluginValue, PluginHostError>) {
+        guard pendingHostCalls.contains(where: { $0.id == id }) else { return }
+        pendingHostCalls.removeAll { $0.id == id }
+        let answer = context.objectForKeyedSubscript("__playhouseAnswerHostCall")
+        switch result {
+        case .success(let value):
+            answer?.call(withArguments: [id, true, value.javaScriptValue(in: context)])
+        case .failure(let error):
+            let failure = PluginValue.object(["code": .string(error.code), "message": .string(error.message)])
+            answer?.call(withArguments: [id, false, failure.javaScriptValue(in: context)])
+        }
+    }
+
     /// With `.manual` timers: advances the clock by `seconds` and fires every
     /// timer that came due, including ones those timers schedule.
     func runDueTimers(advancing seconds: Double = 0) {
@@ -123,6 +157,13 @@ final class PluginRuntime {
             self?.pendingTimers.removeValue(forKey: id)?.cancel()
             self?.manualTimers.removeAll { $0.id == id }
         }
+        let hostCall: @convention(block) (Int, String, String, JSValue) -> Void = { [weak self] id, kind, name, arguments in
+            guard let self else { return }
+            let call = HostCall(id: id, kind: kind, name: name, arguments: (try? PluginValue(javaScript: arguments)) ?? .null)
+            pendingHostCalls.append(call)
+            onHostCall?(call)
+        }
+        native.setObject(hostCall, forKeyedSubscript: "hostCall" as NSString)
         native.setObject(commit, forKeyedSubscript: "commit" as NSString)
         native.setObject(log, forKeyedSubscript: "log" as NSString)
         native.setObject(setTimer, forKeyedSubscript: "setTimer" as NSString)
@@ -160,4 +201,11 @@ final class PluginRuntime {
         }
         return message
     }
+}
+
+/// Why the host turned down a plugin's call; the plugin's promise rejects
+/// with an Error carrying this `code` and `message`.
+struct PluginHostError: Error, Equatable, Sendable {
+    var code: String
+    var message: String
 }

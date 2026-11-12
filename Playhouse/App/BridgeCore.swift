@@ -1000,6 +1000,8 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let savedPrompt: String?
     let pendingSubmittedPrompt: String?
     let hasUnsentDraft: Bool
+    /// Unsent review comments saved with the draft.
+    let pendingCommentCount: Int
     let workspaceRoots: [String]
     let repositoryWorktrees: [RepositoryWorktreeRecord]
     /// Records retired by `task repository renew`; their merged PRs stay on the card.
@@ -1012,6 +1014,8 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let schedule: TaskScheduleRecord?
     /// The recurring schedule that started this task, if any.
     let scheduleSourceTaskID: UUID?
+    /// The plugin placement an Add Plugin mode task builds for, if any.
+    let pluginPlacement: String?
 
     /// Accepts any conversation owner: a board task, or the standalone chat, which reports
     /// empty workspace roots and worktrees because it has none.
@@ -1019,6 +1023,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         let boardTask = task as? BoardTask
         schedule = boardTask.flatMap(TaskScheduleRecord.init(task:))
         scheduleSourceTaskID = boardTask?.scheduleSourceTaskID
+        pluginPlacement = boardTask?.pluginPlacement
         id = task.id
         title = task.title
         status = task.status.rawValue
@@ -1034,6 +1039,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         savedPrompt = task.savedPrompt
         pendingSubmittedPrompt = task.pendingSubmittedPrompt
         hasUnsentDraft = task.hasUnsentDraft
+        pendingCommentCount = PersistedAnnotations.decode(task.pendingAnnotationsData).count
         workspaceRoots = task.workspaceRootPaths
         repositoryWorktrees = task.repositoryWorktrees
         pastRepositoryWorktrees = boardTask?.pastRepositoryWorktrees ?? []
@@ -1041,6 +1047,34 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         draftImageDataURLs = includeDraftImages ? task.draftImageDataURLs : nil
         autoCreatePullRequestOnReview = task.autoCreatePullRequestOnReview
         pullRequestMode = task.pullRequestMode.rawValue
+    }
+}
+
+extension BridgeValue {
+    /// A plugin's value as a bridge argument, through the JSON both encode.
+    init(plugin value: PluginValue) {
+        self = (try? JSONDecoder().decode(BridgeValue.self, from: JSONEncoder().encode(value))) ?? .null
+    }
+}
+
+extension PluginValue {
+    /// A bridge result as a plugin's value, through the JSON both encode.
+    init(bridge value: BridgeValue) {
+        self = (try? JSONDecoder().decode(PluginValue.self, from: JSONEncoder().encode(value))) ?? .null
+    }
+}
+
+extension PluginTaskContext {
+    /// The details a conversation placement hands its plugins.
+    init(task: any ConversationSubject) {
+        self.init(
+            id: task.id.uuidString, title: task.title, status: task.status.rawValue,
+            provider: task.conversationProvider.rawValue, isStandaloneChat: task.isStandaloneChat,
+            repositories: task.repositoryWorktrees.map {
+                .init(repositoryPath: $0.repositoryPath, worktreePath: $0.worktreePath, branch: $0.branch)
+            },
+            contextFolders: task.contextFolderPaths
+        )
     }
 }
 
@@ -2097,7 +2131,7 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, pullRequestMode: PullRequestMode = .pullRequest, prompt: String? = nil) async throws -> BoardTaskRecord {
+    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, pullRequestMode: PullRequestMode = .pullRequest, prompt: String? = nil, pluginPlacement: String? = nil) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw PlayhouseManagerError.invalidTitle }
         let folders = try Self.normalizeOptionalRoots(contextFolders)
@@ -2118,6 +2152,7 @@ final class BoardTaskManager {
         task.autoCreatePullRequestOnReview = pullRequestMode != .manual
         task.pullRequestAutopilot = pullRequestMode == .autopilot || pullRequestMode == .merge
         task.pullRequestAutoMerge = pullRequestMode == .merge
+        task.pluginPlacement = pluginPlacement
         // A prompt given at creation has not been sent, so it is the composer's draft.
         if let prompt, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             task.savedPrompt = prompt
@@ -2179,6 +2214,7 @@ final class BoardTaskManager {
                 chat.pendingSubmittedPrompt = task.pendingSubmittedPrompt
                 chat.hasUnsentDraft = task.hasUnsentDraft
                 chat.draftImageDataURLsData = task.draftImageDataURLsData
+                chat.pendingAnnotationsData = task.pendingAnnotationsData
                 chat.conversationActivityDurationsData = task.conversationActivityDurationsData
                 chat.answeredAsyncQuestionIDsData = task.answeredAsyncQuestionIDsData
                 modelContext.insert(chat)
@@ -4078,6 +4114,29 @@ final class BoardTaskManager {
         }
     }
 
+    /// Saves the unsent review comments with the draft. An empty `data` clears them. Comments
+    /// leave `hasUnsentDraft` alone: that flag says whether `savedPrompt` and the images are a
+    /// draft, and a comment added after a send must not turn the sent prompt back into one.
+    /// `appending` adds only comments not already saved, keeping the rest; a send that ends
+    /// without delivering its comments returns them this way, so it never overwrites comments a
+    /// newer view of the task saved meanwhile.
+    @discardableResult
+    func savePendingAnnotations(_ id: UUID, data: Data?, appending: Bool = false) async throws -> BoardTaskRecord {
+        try await withTaskOperationLock(id) {
+            let task = try requireSubject(id)
+            var annotations = PersistedAnnotations.decode(data)
+            if appending {
+                let saved = PersistedAnnotations.decode(task.pendingAnnotationsData)
+                annotations = saved + annotations.filter { added in !saved.contains { $0.id == added.id } }
+            }
+            let encoded = PersistedAnnotations.encode(annotations)
+            guard task.pendingAnnotationsData != encoded else { return BoardTaskRecord(task: task) }
+            task.pendingAnnotationsData = encoded
+            try await saveTaskContext(taskID: id)
+            return BoardTaskRecord(task: task)
+        }
+    }
+
     /// Images sent with a prompt stay in the draft until its turn starts, so a restart before
     /// then returns them with the prompt. Once the turn starts they leave the draft, unless the
     /// user has since saved a new draft. A draft saved in that short window replaces the sent
@@ -4960,6 +5019,23 @@ final class WorkspaceSettingsManager {
         return appearance
     }
 
+    var pluginAddMode: Bool { defaults.bool(forKey: WorkspaceSettings.pluginAddModeKey) }
+
+    func setPluginAddMode(_ enabled: Bool) {
+        defaults.set(enabled, forKey: WorkspaceSettings.pluginAddModeKey)
+        PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "pluginAddMode", "value": String(enabled)])
+    }
+
+    var pluginsRevision: Int { defaults.integer(forKey: WorkspaceSettings.pluginsRevisionKey) }
+
+    /// Tells every window to reload the installed plugins.
+    @discardableResult
+    func bumpPluginsRevision() -> Int {
+        let revision = pluginsRevision + 1
+        defaults.set(revision, forKey: WorkspaceSettings.pluginsRevisionKey)
+        return revision
+    }
+
     func setAppearance(_ value: String) throws {
         PlayhouseDiagnostics.record("settings.write.started", fields: ["setting": "appearance", "value": value])
         guard value == "dark" || value == "light" else {
@@ -5593,9 +5669,7 @@ final class ConversationManager {
     private func launchWorkspace(for task: any ConversationSubject, roots: [URL], message: String = "") throws -> ConversationWorkspaceContext {
         var workspace = try ConversationWorkspaceContext(roots: roots)
         if let skills = clients.skills {
-            let skillRoots = SkillRoot.roots(for: task)
-            var bridge = skills.bridge(roots: skillRoots)
-            bridge.invocations = skills.invocations(in: message, roots: skillRoots)
+            let bridge = skills.bridge(for: task, message: message)
             workspace.skillBridge = bridge
         }
         if let rules = clients.rules {
@@ -6196,7 +6270,9 @@ final class ConversationManager {
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: repositoryRoot?.path,
                     isStandaloneChat: task.isStandaloneChat,
-                    isArchived: task.status == .done
+                    isArchived: task.status == .done,
+                    pluginPlacement: (task as? BoardTask)?.pluginPlacement,
+                    pluginsDirectory: clients.skills?.pluginsDirectory
                 ),
                 sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
                 sensitiveConversation: hasSensitiveRecoveryState,
@@ -6855,7 +6931,9 @@ final class ConversationManager {
                     repositories: task.repositoryWorktrees,
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: task.isStandaloneChat ? nil : settingsManager.defaultParentFolderURL?.path,
-                    isStandaloneChat: task.isStandaloneChat
+                    isStandaloneChat: task.isStandaloneChat,
+                    pluginPlacement: (task as? BoardTask)?.pluginPlacement,
+                    pluginsDirectory: clients.skills?.pluginsDirectory
                 )
             )
             _ = try await tasks.persistConversationID(taskID, provider: .codex, id: id)
@@ -8967,7 +9045,9 @@ final class ConversationManager {
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: repositoryRoot?.path,
                     isStandaloneChat: task.isStandaloneChat,
-                    isArchived: task.status == .done
+                    isArchived: task.status == .done,
+                    pluginPlacement: (task as? BoardTask)?.pluginPlacement,
+                    pluginsDirectory: clients.skills?.pluginsDirectory
                 )
             }
             let threadID: String
@@ -9087,7 +9167,9 @@ final class ConversationManager {
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: repositoryRoot?.path,
                     isStandaloneChat: task.isStandaloneChat,
-                    isArchived: task.status == .done
+                    isArchived: task.status == .done,
+                    pluginPlacement: (task as? BoardTask)?.pluginPlacement,
+                    pluginsDirectory: clients.skills?.pluginsDirectory
                 ),
                 onDelta: callbacks.onDelta,
                 onFinalMessage: callbacks.onFinalMessage,
@@ -9768,6 +9850,12 @@ final class PlayhouseBridgeRuntime {
                     observesGoalTurns: guiRuntime
                 )
             }
+            func pluginLibrary() throws -> PluginLibrary {
+                guard let storeDirectory else {
+                    throw BridgeCommandError(code: "operation_failed", message: "Playhouse has no data directory for plugins.")
+                }
+                return PluginLibrary(dataDirectory: storeDirectory)
+            }
             func skillRoots() throws -> [SkillRoot] {
                 guard request.arguments["taskID"]?.string?.isEmpty == false else { return [] }
                 return SkillRoot.roots(for: try taskManager.conversationSubject(request.requiredUUID("taskID")))
@@ -10184,6 +10272,15 @@ final class PlayhouseBridgeRuntime {
                     prompt: prompt,
                     imageDataURLs: request.arguments["images"]?.strings ?? []
                 ))
+            case "task.comments.save":
+                // `comments` is a JSON array of pending review comments; an empty array clears them.
+                guard let json = request.arguments["comments"]?.string, let data = json.data(using: .utf8),
+                      (try? JSONDecoder().decode([ConversationAnnotation].self, from: data)) != nil else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Pass comments as a JSON array of comment objects.")
+                }
+                result = try Self.value(try await taskManager.savePendingAnnotations(
+                    request.requiredUUID("taskID"), data: data, appending: request.arguments["append"]?.bool ?? false
+                ))
             case "task.delete":
                 try await taskManager.delete(request.requiredUUID("taskID"), diagnostics: conversationClients().codex.diagnosticFields())
                 result = .object(["deleted": .boolean(true)])
@@ -10348,6 +10445,48 @@ final class PlayhouseBridgeRuntime {
                     taskID: request.requiredUUID("taskID"),
                     provider: ConversationProvider.parse(request.requiredString("provider"))
                 ))
+            case "plugin.mode":
+                if let enabled = request.arguments["enabled"]?.bool {
+                    settings.setPluginAddMode(enabled)
+                }
+                result = .object(["enabled": .boolean(settings.pluginAddMode)])
+            case "plugin.list", "plugin.refresh":
+                let library = try pluginLibrary()
+                let plugins = await Task.detached { library.list() }.value
+                let revision = request.command == "plugin.refresh" ? settings.bumpPluginsRevision() : settings.pluginsRevision
+                result = .object([
+                    "directory": .string(library.directory.path),
+                    "revision": .integer(revision),
+                    "plugins": try Self.value(plugins)
+                ])
+            case "plugin.delete":
+                let library = try pluginLibrary()
+                let id = try request.requiredString("pluginID")
+                do {
+                    try library.delete(id: id)
+                } catch let error as PluginLibraryError {
+                    throw BridgeCommandError(code: "not_found", message: error.localizedDescription)
+                } catch let error as PluginTreeError {
+                    throw BridgeCommandError(code: "invalid_argument", message: error.message)
+                }
+                result = .object(["deleted": .string(id), "revision": .integer(settings.bumpPluginsRevision())])
+            // The task an Add Plugin mode placeholder opens: its agent builds a plugin for the placement.
+            case "plugin.author":
+                let placement: PluginPlacement
+                do {
+                    placement = try PluginPlacement.parse(request.requiredString("placement"))
+                } catch let error as PluginTreeError {
+                    throw BridgeCommandError(code: "invalid_argument", message: error.message)
+                }
+                let library = try pluginLibrary()
+                try FileManager.default.createDirectory(at: library.directory, withIntermediateDirectories: true)
+                let provider = try request.arguments["provider"]?.string.map(ConversationProvider.parse) ?? settings.defaultConversationProvider
+                let prompt = "/\(TaskThreadDeveloperInstructions.pluginSkillName) Create a new plugin in the \(placement.title) placement (\(placement.rawValue))."
+                let created = try await taskManager.create(
+                    title: "New plugin: \(placement.title)", repositories: [], contextFolders: [library.directory.path],
+                    provider: provider, pullRequestMode: .manual, prompt: prompt, pluginPlacement: placement.rawValue
+                )
+                result = .object(["task": try Self.value(created), "prompt": .string(prompt)])
             // A plugin runs headlessly off the main actor; its runtime lives only for this request.
             case "plugin.render":
                 do {
@@ -10355,6 +10494,36 @@ final class PlayhouseBridgeRuntime {
                     command.file = request.arguments["file"]?.string
                     command.page = request.arguments["page"]?.string
                     command.propsJSON = request.arguments["props"]?.string
+                    // An installed plugin renders with its placement's real context.
+                    if let pluginID = request.arguments["pluginID"]?.string {
+                        let plugin: PluginRecord
+                        do {
+                            plugin = try pluginLibrary().plugin(id: pluginID, validate: false)
+                        } catch let error as PluginLibraryError {
+                            throw BridgeCommandError(code: "not_found", message: error.localizedDescription)
+                        }
+                        if let problem = plugin.errors.first { throw BridgeCommandError(code: "invalid_argument", message: problem) }
+                        let task = try request.arguments["taskID"]?.string.map { _ in
+                            PluginTaskContext(task: try taskManager.conversationSubject(request.requiredUUID("taskID")))
+                        }
+                        command.file = plugin.entryPath
+                        command.placement = PluginPlacement(rawValue: plugin.placement)
+                        command.baseProps = PluginContext.props(plugin: plugin, appearance: settings.appearance, task: task, composer: nil)
+                    }
+                    // The plugin's Playhouse.bridge calls run as requests of this caller,
+                    // against the same managers the CLI reaches.
+                    let caller = request
+                    command.bridge = { command, arguments in
+                        var nested = caller
+                        nested.id = UUID().uuidString
+                        nested.command = command
+                        nested.arguments = caller.arguments.filter { $0.key.hasPrefix("__") }.merging(BridgeValue(plugin: arguments).object ?? [:]) { _, new in new }
+                        let response = await PlayhouseBridgeRuntime().perform(nested) { _ in }
+                        guard response.ok else {
+                            throw PluginHostError(code: response.error?.code ?? "operation_failed", message: response.error?.message ?? "The bridge command failed.")
+                        }
+                        return PluginValue(bridge: response.result ?? .null)
+                    }
                     if case .array(let events)? = request.arguments["events"] {
                         command.events = try events.map { try PluginRenderCommand.Event(parsing: $0.string ?? "") }
                     }
@@ -10364,7 +10533,7 @@ final class PlayhouseBridgeRuntime {
                     default: break
                     }
                     let render = command
-                    result = try Self.value(try await Task.detached { try render.run() }.value)
+                    result = try Self.value(try await Task.detached { try await render.run() }.value)
                 } catch let error as PluginTreeError {
                     throw BridgeCommandError(code: "invalid_argument", message: error.message)
                 }
@@ -10446,10 +10615,15 @@ final class PlayhouseBridgeRuntime {
             case "skills.unlink":
                 result = try Self.value(skills.unlink(id: request.requiredString("skillID"), roots: skillRoots()))
             case "skills.bridge":
-                let roots = try skillRoots()
-                var bridge = skills.bridge(roots: roots)
-                bridge.invocations = skills.invocations(in: request.arguments["message"]?.string ?? "", roots: roots)
-                result = try Self.value(bridge)
+                // A task's report matches what its launch passes, Playhouse skills included.
+                if request.arguments["taskID"]?.string?.isEmpty == false {
+                    let task = try taskManager.conversationSubject(request.requiredUUID("taskID"))
+                    result = try Self.value(skills.bridge(for: task, message: request.arguments["message"]?.string ?? ""))
+                } else {
+                    var bridge = skills.bridge(roots: [])
+                    bridge.invocations = skills.invocations(in: request.arguments["message"]?.string ?? "", roots: [])
+                    result = try Self.value(bridge)
+                }
             case "rules.list":
                 result = try Self.value(rules.catalog(roots: skillRoots()))
             case "rules.get":

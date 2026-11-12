@@ -1855,7 +1855,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "A task keeps its resolved branch when another task already used the slug")
     }
 
-    // case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable archive, whose conversation keeps its composer for follow-up questions; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged.
+    // case-contract: test_task_done_removes_worktree_and_preserves_branch | Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion removes managed worktrees while preserving their branches, does not merge into the local target, retains conversation history, and exposes the task in the searchable archive, whose conversation keeps its composer for follow-up questions; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls. While only some linked PRs are merged, each merged PR's number shows in merged purple and the task offers no completion checkmark until all are merged. The archive slides in from the board header's archive button as a 340-point SidePanel atom (done-archive-panel) along the window's trailing edge, and its close button slides it away until the button opens it again.
     func test_task_done_removes_worktree_and_preserves_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture().merging(Self.prCheckCooldownEnvironment) { $1 }
@@ -2065,6 +2065,19 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(archiveResult.exists, "Older tasks should not be loaded into the first archive page.")
         for _ in 0..<8 where !archiveResult.isHittable { archiveList.swipeUp() }
         XCTAssertTrue(waitUntil({ archiveResult.isHittable && archiveList.frame.intersects(archiveResult.frame) }, timeout: 10), "Scrolling should load older completed tasks into the archive viewport.")
+        // The archive is a SidePanel atom along the window's trailing edge; its close button slides it away.
+        let archivePanel = element("done-archive-panel")
+        let boardWindow = app.windows.firstMatch
+        XCTAssertTrue(archivePanel.exists, "The archive is presented in its SidePanel.")
+        XCTAssertEqual(archivePanel.frame.width, 340, accuracy: 1, "The archive's side panel is 340 points wide.")
+        XCTAssertEqual(archivePanel.frame.maxX, boardWindow.frame.maxX, accuracy: 2, "The side panel slides in along the window's trailing edge.")
+        XCTAssertTrue(archivePanel.frame.contains(archiveList.frame), "The list sits inside the side panel.")
+        attachScreenshot(named: "Board Done archive in its SidePanel")
+        element("close-done-archive-button").click()
+        XCTAssertTrue(waitUntil({ !archivePanel.exists && !archiveList.exists }, timeout: 5), "The close button slides the archive away.")
+        archiveButton.click()
+        XCTAssertTrue(archivePanel.waitToExist(timeout: 5), "The archive button opens the side panel again.")
+        XCTAssertTrue(element("done-archive-task-\(titleMatchID)").waitToExist(timeout: 10), "The reopened archive lists the newest completed task.")
         let archiveSearch = element("done-archive-search")
         archiveSearch.click()
         archiveSearch.typeText("no-such-archive-task")
@@ -2483,7 +2496,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try runGitOutput(remote, "show", "refs/heads/\(branch):\(conflictPath)"), "resolved local and remote versions")
     }
 
-    // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done removes its managed worktree and keeps its branch and target commit without committing or merging. When the worktree holds uncommitted changes the move is refused until the user confirms discarding them: declining keeps the task in Review with its files intact, and confirming removes them. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
+    // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done removes its managed worktree and keeps its branch and target commit without committing or merging. When the worktree holds uncommitted changes the move is refused until the user confirms discarding them: declining keeps the task in Review with its files intact, and confirming removes them. A reviewed task stays in Review until it is moved; in the UI the Done drawer rests as a thin sliver beside, not over, the board columns and just left of the board scroller, which keeps the window edge, opens only while a reviewed card is dragged, and returns to rest both after a card is dropped on Done and when a card is dropped back in place without moving the task.
     func test_task_done_preserves_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -7017,6 +7030,9 @@ final class PlayhouseUITests: XCTestCase {
             "A page quoted by a comment travels with the turn that quotes it."
         )
 
+        // The transcript renders a window that starts at the latest turn, so earlier pages are
+        // revealed before checking that rotating sessions kept every one of them.
+        XCTAssertTrue(revealWholeTranscript(), "The whole chat transcript should load.")
         XCTAssertTrue(chatPageSeparatorIsVisible("Volcanoes"), "Rotating sessions must not hide earlier pages.")
         XCTAssertTrue(chatPageSeparatorIsVisible("Saturn Rings"))
         XCTAssertTrue(
@@ -10419,6 +10435,112 @@ final class PlayhouseUITests: XCTestCase {
         let historyAfter = try XCTUnwrap((try runCLI(["conversation", "history", opened.taskID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
         XCTAssertEqual(historyAfter.compactMap { $0["text"] as? String }, historyBefore.compactMap { $0["text"] as? String },
                        "The side chat's messages must not reach the task's conversation.")
+    }
+
+    // case-contract: test_conversation_persists_unsent_comments | Unsent conversation comments are saved with the task draft. Through CLI/XPC, a saved comment list reports its count on a fresh read, malformed input is rejected with invalid_argument and leaves the saved comments unchanged, a later draft save keeps them, appending a list adds only comments not already saved (how a send that ends without delivering its comments returns them without overwriting newer ones), and an empty list clears them. Saving comments after a sent prompt leaves hasUnsentDraft false, so the sent prompt never returns to the composer as a draft. In the app, comments added to a conversation are saved as they are added and survive switching to another task and back and quitting and relaunching: the composer shows the pending comment count and the highlights are restored. Sending them delivers their source ranges, clears the saved comments, and reopening the task shows no pending comment and no duplicate.
+    func test_conversation_persists_unsent_comments() throws {
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-goal-success").path
+        let fixtureStateDirectory = dataDirectory.appendingPathComponent("unsent-comments-fixture-state", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixtureStateDirectory, withIntermediateDirectories: true)
+        codexFixtureStateDirectory = fixtureStateDirectory
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Unsent comments", roots: [fixture.primary.path])
+        try createTaskFixture(title: "Other task", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Unsent comments")
+        let sourceText = "Comment on these words in a user message."
+        _ = try runCLI(["conversation", "send", taskID, "--message", sourceText])
+        // The fixture turn and its outcome nudge settle before the message ids are read.
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response"
+        }, timeout: 60), "The source turn should finish before it is commented on.")
+        openTask(named: "Unsent comments")
+        let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let messages = try XCTUnwrap(history?["messages"] as? [[String: Any]])
+        // The reply sits below the top of the transcript, so the Side chat hint above it stays clickable.
+        // The reply to this task's own prompt: the shared fixture's ids keep counting across cases.
+        let ordinary = ordinaryMessages(messages)
+        let promptIndex = try XCTUnwrap(ordinary.firstIndex { ($0["role"] as? String) == "user" && ($0["text"] as? String) == sourceText })
+        let sourceMessage = try XCTUnwrap(ordinary[(promptIndex + 1)...].first {
+            $0["role"] as? String == "assistant" && !($0["text"] as? String ?? "").isEmpty
+        })
+        let sourceID = try XCTUnwrap(sourceMessage["id"] as? String)
+        // Looked up on each use: the relaunch below replaces the app instance.
+        var sourceView: XCUIElement { element("assistant-message-\(sourceID)").descendants(matching: .staticText).firstMatch }
+        XCTAssertTrue(sourceView.waitToExist(timeout: 10))
+        XCTAssertTrue(waitForStableFrame(sourceView), "The source message should settle before it is measured.")
+        let orangeBefore = orangePixelCount(in: sourceView.screenshot())
+        let selectedText = (sourceView.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertFalse(selectedText.isEmpty, "The reply should expose its selectable text.")
+        sourceView.click()
+        sourceView.typeKey("a", modifierFlags: .command)
+        let bubble = try waitForSideChatBubble(at: sourceView)
+        let field = element("side-chat-input")
+        XCTAssertTrue(field.waitToExist(timeout: 5))
+        field.typeText("Keep this unsent comment")
+        element("add-comment-button").click()
+        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["pendingCommentCount"] as? Int) == 1
+        }, timeout: 10), "An added comment should be saved with the task draft.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["hasUnsentDraft"] as? Bool, false,
+                       "A comment must not turn the last sent prompt into a draft.")
+        attachScreenshot(named: "Unsent comment added")
+
+        func assertCommentRestored(_ context: String) {
+            XCTAssertTrue(sourceView.waitToExist(timeout: 10), "The source message should render \(context).")
+            XCTAssertTrue(waitUntil({
+                self.accessibleLabelOrValue(of: self.element("pending-comment-count")).contains("1 comment")
+            }, timeout: 10), "The composer should show the restored pending comment \(context).")
+            XCTAssertTrue(waitForStableFrame(sourceView))
+            XCTAssertGreaterThan(orangePixelCount(in: sourceView.screenshot()), orangeBefore + 5,
+                                 "The restored comment should highlight its text \(context).")
+            XCTAssertTrue(element("send-message-button").isEnabled, "A restored comment should be sendable \(context).")
+            XCTAssertTrue((app.textViews["message-composer"].value as? String ?? "").isEmpty,
+                          "The sent prompt must not return to the composer \(context).")
+        }
+
+        element("back-to-board-button").click()
+        openTask(named: "Other task")
+        XCTAssertFalse(element("pending-comment-count").waitToExist(timeout: 2), "Another task should not show these comments.")
+        element("back-to-board-button").click()
+        openTask(named: "Unsent comments")
+        assertCommentRestored("after switching tasks")
+        attachScreenshot(named: "Unsent comment restored after switching tasks")
+
+        app.terminate()
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Unsent comments")
+        assertCommentRestored("after relaunching")
+        attachScreenshot(named: "Unsent comment restored after relaunch")
+
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            guard (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response",
+                  let history = try? self.runCLI(["conversation", "history", taskID])["result"] as? [String: Any],
+                  let messages = history["messages"] as? [[String: Any]] else { return false }
+            return self.ordinaryMessages(messages).contains {
+                ($0["role"] as? String) == "user" && ($0["text"] as? String ?? "").contains("Keep this unsent comment")
+            }
+        }, timeout: 60), "The restored comment should be sent and its turn should finish.")
+        let sentHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let sentMessages = try XCTUnwrap(sentHistory["messages"] as? [[String: Any]])
+        let sentPrompt = try XCTUnwrap(ordinaryMessages(sentMessages).last(where: { ($0["role"] as? String) == "user" })?["text"] as? String)
+        XCTAssertTrue(sentPrompt.contains("\"messageId\":\"\(sourceID)\""), "The restored comment should keep its source message.")
+        XCTAssertTrue(sentPrompt.contains("\"startOffset\":0") && sentPrompt.contains("\"text\":\"\(selectedText.prefix { $0 != "/" })"),
+                      "The restored comment should keep its source range and quoted text.")
+        XCTAssertEqual(sentPrompt.components(separatedBy: "Keep this unsent comment").count - 1, 1, "The comment should be sent once.")
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["pendingCommentCount"] as? Int) == 0
+        }, timeout: 10), "Sending should clear the saved comments.")
+        XCTAssertFalse(element("pending-comment-count").exists, "No pending comment should remain after sending.")
+
+        element("back-to-board-button").click()
+        openTask(named: "Unsent comments")
+        XCTAssertTrue(sourceView.waitToExist(timeout: 10) || revealWholeTranscript())
+        XCTAssertFalse(element("pending-comment-count").waitToExist(timeout: 3),
+                       "Reopening after the send should show no stale pending comment.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["pendingCommentCount"] as? Int, 0)
+        attachScreenshot(named: "Sent comment reopened without a pending duplicate")
     }
 
     // case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged.
@@ -17114,8 +17236,10 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Sidebar command row with the terminal button on the right")
 
         let window = app.windows.firstMatch
-        let conversation = element("empty-conversation")
+        // The whole conversation area, not its centered empty state, whose edges move with the window's width.
+        let conversation = element("conversation-scroll-view")
         XCTAssertTrue(conversation.exists)
+        XCTAssertTrue(element("empty-conversation").exists)
         XCTAssertGreaterThan(conversation.frame.maxX, window.frame.maxX - 470, "Before the panel opens, the conversation reaches into the space the panel will take.")
         let conversationFrameBefore = conversation.frame
         toggle.click()
@@ -21232,7 +21356,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(switched["conversationProvider"] as? String, liveProvider)
     }
 
-    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips and Composer examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors. The Button page also shows a link-style Button and a large one (taller than a regular Button), each running onPress, the Menu page's disabled Run Now item is shown but can't be chosen, and the Icon page draws the app logo asset in its own colors (original) in a 50-point frame with its accessibility label; a mistyped original or Menu item disabled is reported with its path.
+    // case-contract: test_plugin_renderer_commits_minimal_ops_and_runs_handlers | The Plugins menu opens the Plugin Catalog, whose sidebar lists every atom (Stack, Text, Icon, Label, Button, Link, Spinner, Spacer, PillPicker, Card, Disclosure, Panel, Meter, Scroll, Divider, ChoiceBar, Toggle, TextField, Segmented, Menu, PressArea, Overlay, Editor, Popover, StepSlider, Modal, Page, SidePanel) and the Task Item, Agents Info, Token Stats, Skills Page, Repository Chips, Composer and Done Archive examples; each atom page renders its JavaScript page through the React renderer into native SwiftUI with no plugin error and lists the atom's props. Clicking a Button atom runs its JavaScript onPress handler, whose state change commits a single text op on that Text's string node, and clicking a Disclosure's title runs its onToggle handler, which collapses it (its children hide while staying in the tree: one commit updating only the Disclosure's props and the state readout) and expands it again, and clicking a ChoiceBar's option runs its onChange handler with that option's value, which selects it (one commit updating only the ChoiceBar's props and the readout), while clicking the option already selected commits nothing, and the Scroll page's scroll view shrinks to its four rows, then, once added rows pass its 120-point maxHeight, stays 120 points tall and scrolls to reach the last row. On the Skills page's controls' pages, clicking the Toggle runs its onToggle handler, which flips it (one commit updating only the Toggle's props and the readout), typing in the TextField runs onChange with the new text, Return in it runs onSubmit and an arrow key runs onArrow with its direction, choosing a Segmented segment runs onChange with its value, choosing a Menu item runs onMenu with that item's id, and the PressArea tells a click (onPress) from a press and hold (onLongPress). On the Overlay page, the badge drawn over the chip's top trailing corner leaves the chip its own size and runs its own onPress. `plugin render` runs a plugin headlessly through the same runtime and node tree: the first render is one commit, each event sent by testID runs its handler and commits only the ops for the nodes that changed (a toggled label is one text op on one node), an interval advanced with --advance updates only its own node, and every bundled catalog page renders without errors. An unknown atom, an unknown or mistyped prop, a missing required prop, an event the atom doesn't raise, a child the atom can't hold, a string outside a Text, or a handler that throws is reported in errors with exit 1 (a mistyped or missing prop, decoded straight from the plugin's values, names its path and what is wrong, such as size: expected a number, found a string or options.0.label: missing), and an event for a missing testID, an event the atom has no handler for, or an unknown catalog page is refused as invalid_argument. Commits, the plugin's props and event values cross between JavaScript and Swift as JavaScript values with JSON.stringify's rules: props keep their types and nesting, NaN becomes null, a Date becomes its ISO string, undefined, function and inherited fields are left out of nested values, toJSON is called once per value (one that returns itself gives an empty object), an event value arrives as a string, and a circular prop or an op whose node id is out of range is reported in errors. The Button page also shows a link-style Button and a large one (taller than a regular Button), each running onPress, the Menu page's disabled Run Now item is shown but can't be chosen, and the Icon page draws the app logo asset in its own colors (original) in a 50-point frame with its accessibility label; a mistyped original or Menu item disabled is reported with its path. The Scroll page's lazy paged list raises onEndReached each time its end scrolls into view: it starts at 1 pages loaded, and scrolling to its end appends a page and then, scrolled to the new end, another (2, then 3 pages loaded); in `plugin render` each onEndReached is one commit that adds the page's rows and changes the readout. The TextField page's plain field (style plain) draws no border on its rounded Stack, so it is shorter than the rounded field, and typing in it runs its onChange.
     func test_plugin_renderer_commits_minimal_ops_and_runs_handlers() throws {
         executionTimeAllowance = 360 // It opens and checks every atom's catalog page, then exercises each control.
         launchApp(defaultParent: fixture.parent.path)
@@ -21244,11 +21368,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("plugin-catalog-skills-page").exists, "The sidebar lists the Skills Page example.")
         XCTAssertTrue(element("plugin-catalog-repository-chips").exists, "The sidebar lists the Repository Chips example.")
         XCTAssertTrue(element("plugin-catalog-composer").exists, "The sidebar lists the Composer example.")
+        XCTAssertTrue(element("plugin-catalog-done-archive").exists, "The sidebar lists the Done Archive example.")
 
         let rendered = try XCTUnwrap(try runCLI(["plugin", "render", "--page", "Stack"])["result"] as? [String: Any])
         let atoms = try XCTUnwrap(rendered["atoms"] as? [String])
         XCTAssertEqual(atoms, ["Stack", "Text", "Icon", "Label", "Button", "Link", "Spinner", "Spacer", "PillPicker", "Card", "Disclosure", "Panel", "Meter",
-                               "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Overlay", "Editor", "Popover", "StepSlider"])
+                               "Scroll", "Divider", "ChoiceBar", "Toggle", "TextField", "Segmented", "Menu", "PressArea", "Overlay", "Editor", "Popover", "StepSlider",
+                               "Modal", "Page", "SidePanel"])
         try assertPluginValuesCrossWithJSONRules()
         for atom in atoms {
             let row = catalogSidebarRow("plugin-catalog-atom-\(atom)")
@@ -21356,6 +21482,22 @@ final class PlayhouseUITests: XCTestCase {
         }
         XCTAssertLessThanOrEqual(lastRow.frame.maxY, scroll.frame.maxY + 1, "Scrolling inside the Scroll brings its last row into view.")
         attachScreenshot(named: "Scroll atom capped at 120 points and scrolled to its last row")
+        // A lazy Scroll raises onEndReached each time its end scrolls into view.
+        let paged = element("scroll-paged")
+        let pages = element("scroll-pages")
+        XCTAssertTrue(paged.waitToExist(timeout: 5))
+        XCTAssertEqual(pluginText(pages), "1 pages loaded", "The paged list's end starts out of view.")
+        for expected in ["2 pages loaded", "3 pages loaded"] {
+            for _ in 0..<40 where pluginText(pages) != expected {
+                paged.scroll(byDeltaX: 0, deltaY: -200)
+            }
+            XCTAssertTrue(waitUntil({ self.pluginText(pages) == expected }, timeout: 5), "Scrolling to the end loads the next page: \(pluginText(pages))")
+        }
+        // The list is lazy, so the third page's last row is built only once it scrolls near.
+        let pagedLastRow = element("scroll-paged-row-60")
+        for _ in 0..<20 where !pagedLastRow.exists { paged.scroll(byDeltaX: 0, deltaY: -200) }
+        XCTAssertTrue(pagedLastRow.exists, "The third page's rows are in the list.")
+        attachScreenshot(named: "Lazy Scroll appended two pages as its end scrolled into view")
 
         // The Skills page's controls.
         catalogSidebarRow("plugin-catalog-atom-Toggle").click()
@@ -21374,6 +21516,14 @@ final class PlayhouseUITests: XCTestCase {
         field.click()
         field.typeText("release")
         XCTAssertTrue(waitUntil({ self.pluginText(self.element("text-field-value")) == "Text: release" }, timeout: 5), "onChange received the typed text.")
+        let plainField = element("text-field-plain")
+        XCTAssertTrue(plainField.waitToExist(timeout: 5))
+        XCTAssertLessThan(plainField.frame.height, field.frame.height - 1, "The plain field draws no border, so it is shorter than the rounded one.")
+        XCTAssertTrue(element("text-field-plain-box").frame.contains(plainField.frame), "The plain field sits inside its rounded Stack.")
+        plainField.click()
+        plainField.typeText("quiet")
+        XCTAssertTrue(waitUntil({ self.pluginText(self.element("text-field-plain-value")) == "Plain: quiet" }, timeout: 5), "Typing in the plain field runs its onChange.")
+        field.click()
         field.typeKey(.downArrow, modifierFlags: [])
         XCTAssertTrue(waitUntil({ self.pluginText(self.element("text-field-key")) == "Key: down" }, timeout: 5), "Down ran onArrow with its direction.")
         field.typeKey(.upArrow, modifierFlags: [])
@@ -21892,6 +22042,204 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Kanban columns: Add pressed in both")
     }
 
+    // case-contract: test_plugin_presentation_atoms_open_modal_page_and_side_panel | Plugins present UI the three ways the board does, each a controlled atom whose first child is what it is presented from and stays laid out as usual. On the Plugin Catalog's Modal page, the Open modal button runs onPress (Last: open) and opens a 320-point sheet over the window showing the modal's title and a Done button; Done closes it (Last: done), and Escape closes it again through onDismiss (Last: dismiss). On the Page page, Open page (Last: open) slides a page over the whole 420 by 220 point view below it, covering that view's frame and showing its title, and its Back button closes it (Last: back), uncovering the view. On the SidePanel page, Open trailing (Last: open trailing) slides a 200-point panel as tall as the 480 by 240 point view below it in over that view's trailing edge, Open leading (Last: open leading) over its leading edge, and the panel's close button closes it (Last: close). `plugin render` keeps each atom's presented content in the tree after its first child, and opening or closing is one commit that updates only the presentation atom's props and the readout. Only a Modal raises onDismiss: a Page or SidePanel given an onDismiss handler, or a Modal, Page or SidePanel without isPresented or with a mistyped width or edge, is reported in errors.
+    func test_plugin_presentation_atoms_open_modal_page_and_side_panel() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Plugin Catalog")
+        func open(_ atom: String) {
+            let row = catalogSidebarRow("plugin-catalog-atom-\(atom)")
+            row.click()
+            let title = element("plugin-catalog-title")
+            XCTAssertTrue(waitUntil({ title.exists && self.pluginText(title) == atom }, timeout: 10), "Selecting \(atom) shows its page.")
+            XCTAssertFalse(element("plugin-error").exists, "The \(atom) page renders without errors.")
+        }
+
+        // Modal: a sheet over the window, closed by its Done button or Escape.
+        open("Modal")
+        let modalLast = element("modal-last")
+        XCTAssertFalse(element("modal-title").exists, "The modal starts closed.")
+        XCTAssertLessThan(element("modal-open").frame.width, 200, "The Modal's width sizes its sheet, not the button it is presented from.")
+        element("modal-open").click()
+        let modalTitle = element("modal-title")
+        XCTAssertTrue(modalTitle.waitToExist(timeout: 5), "Open modal presents the sheet.")
+        XCTAssertEqual(pluginText(modalLast), "Last: open")
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitToExist(timeout: 5), "The modal is a sheet over the catalog window.")
+        XCTAssertEqual(element("modal-demo").frame.width, 320, accuracy: 1, "The sheet's content is the modal's 320-point width.")
+        XCTAssertTrue(sheet.frame.contains(element("modal-done").frame), "The Done button is in the sheet.")
+        attachScreenshot(named: "Modal atom: sheet open", fullScreen: true)
+        element("modal-done").click()
+        XCTAssertTrue(waitUntil({ !modalTitle.exists && self.pluginText(modalLast) == "Last: done" }, timeout: 5), "Done closes the sheet through its handler.")
+        element("modal-open").click()
+        XCTAssertTrue(modalTitle.waitToExist(timeout: 5), "The modal opens again.")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ !modalTitle.exists && self.pluginText(modalLast) == "Last: dismiss" }, timeout: 5), "Escape runs onDismiss, which closes the sheet.")
+
+        // Page: slides over all of the view below it, closed by its Back button.
+        open("Page")
+        let pageBase = element("page-base")
+        let page = element("page-demo")
+        XCTAssertTrue(pageBase.waitToExist(timeout: 5))
+        XCTAssertEqual(pageBase.frame.width, 420, accuracy: 1)
+        XCTAssertEqual(pageBase.frame.height, 220, accuracy: 1)
+        XCTAssertFalse(page.exists, "The page starts closed.")
+        element("page-open").click()
+        XCTAssertTrue(element("page-title").waitToExist(timeout: 5), "Open page slides the page in.")
+        XCTAssertEqual(pluginText(element("page-last")), "Last: open")
+        XCTAssertTrue(waitUntil({ abs(page.frame.minX - pageBase.frame.minX) < 1 }, timeout: 5), "The page finishes sliding in over the view.")
+        XCTAssertEqual(page.frame.width, pageBase.frame.width, accuracy: 1, "The page covers the view's width.")
+        XCTAssertEqual(page.frame.height, pageBase.frame.height, accuracy: 1, "The page covers the view's height.")
+        XCTAssertEqual(page.frame.minY, pageBase.frame.minY, accuracy: 1)
+        attachScreenshot(named: "Page atom: page over its view")
+        element("page-back").click()
+        XCTAssertTrue(waitUntil({ !page.exists && self.pluginText(self.element("page-last")) == "Last: back" }, timeout: 5), "Back closes the page.")
+        XCTAssertTrue(element("page-open").isHittable, "The view is uncovered again.")
+
+        // SidePanel: slides in over either edge of the view below it; its controls are reachable.
+        func pressPanelClose() {
+            let close = element("side-panel-close")
+            XCTAssertTrue(close.waitToExist(timeout: 5))
+            XCTAssertTrue(waitUntil({ close.isHittable }, timeout: 5), "The panel's close button is hittable, so assistive clients reach it.")
+            close.click()
+        }
+        open("SidePanel")
+        let panelBase = element("side-panel-base")
+        let panel = element("side-panel-demo")
+        XCTAssertTrue(panelBase.waitToExist(timeout: 5))
+        XCTAssertFalse(panel.exists, "The panel starts closed.")
+        element("side-panel-open-trailing").click()
+        XCTAssertTrue(element("side-panel-title").waitToExist(timeout: 5), "Open trailing slides the panel in.")
+        XCTAssertEqual(pluginText(element("side-panel-last")), "Last: open trailing")
+        XCTAssertTrue(waitUntil({ abs(panel.frame.maxX - panelBase.frame.maxX) < 1 }, timeout: 5), "The panel rests along the view's trailing edge.")
+        XCTAssertEqual(panel.frame.width, 200, accuracy: 1, "The panel is its 200-point width.")
+        XCTAssertEqual(panel.frame.height, panelBase.frame.height, accuracy: 1, "The panel is as tall as the view.")
+        XCTAssertEqual(panel.frame.minY, panelBase.frame.minY, accuracy: 1)
+        attachScreenshot(named: "SidePanel atom: trailing panel")
+        pressPanelClose()
+        XCTAssertTrue(waitUntil({ !panel.exists && self.pluginText(self.element("side-panel-last")) == "Last: close" }, timeout: 5), "The close button closes the panel.")
+        element("side-panel-open-leading").click()
+        XCTAssertTrue(element("side-panel-title").waitToExist(timeout: 5), "Open leading slides the panel in.")
+        XCTAssertEqual(pluginText(element("side-panel-last")), "Last: open leading")
+        XCTAssertTrue(waitUntil({ abs(panel.frame.minX - panelBase.frame.minX) < 1 }, timeout: 5), "The panel rests along the view's leading edge.")
+        XCTAssertEqual(panel.frame.width, 200, accuracy: 1)
+        attachScreenshot(named: "SidePanel atom: leading panel")
+        pressPanelClose()
+        XCTAssertTrue(waitUntil({ !panel.exists }, timeout: 5), "The close button closes the leading panel too.")
+    }
+
+    // case-contract: test_plugin_done_archive_renders_from_atoms_like_native | The Plugin Catalog's Done Archive page shows the board's Done archive composed in JavaScript from atoms above the native SwiftUI archive the board presents, built from the same atoms and sample model, each opened by the board header's archive button (the bordered Button atom with the archivebox icon, labelled Done tasks) into a 340-point SidePanel over the trailing edge of a 560 by 460 point stand-in for the board, open at first. Both show the Done tasks title and its close button, the search field with its Search tasks and conversations placeholder, and a list of five rows, each a button opening its task with the done checkmark, its title and its date, beside its pull request actions: a #227 link, a PR button beside a #228 link, a PRs button, a disabled busy PR button showing a spinner, and nothing for a task without repositories, each at the same size in both and with the board archive's identifiers (done-archive-task, done-archive-create-pr, done-archive-pr-link, done-archive-search, and done-archive-list valued 5 tasks loaded). The JavaScript tree uses only atoms (SidePanel, Stack, Text, Icon, Button, Link, Spinner, Spacer, Divider, TextField, Scroll), its search a plain TextField on a rounded Stack. The list's end is in view, so its onEndReached runs on both sides (End reached). Typing in the JavaScript search runs onChange (Last: search followed by the text), narrows the rows to the matching title and shows the clear button, which clears the search and brings every row back; a search that matches nothing shows No matching tasks instead of the list. A PR button runs its handler with its task (Last: create pr followed by the title), a row runs open (Last: open followed by the title) and slides the panel away, the archive button opens it again (Last: toggle open), and the close button closes it (Last: close), while the native archive keeps its own state. The list raises no onPress, so pressing it is refused as invalid_argument.
+    func test_plugin_done_archive_renders_from_atoms_like_native() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Plugin Catalog")
+        let example = catalogSidebarRow("plugin-catalog-done-archive")
+        XCTAssertTrue(example.waitToExist(timeout: 15), "Plugins ▸ Plugin Catalog lists the Done Archive example.")
+        example.click()
+        let jsSide = element("plugin-catalog-js-done-archive")
+        let nativeSide = element("plugin-catalog-native-done-archive")
+        XCTAssertTrue(jsSide.waitToExist(timeout: 10), "The page shows the JavaScript archive.")
+        XCTAssertTrue(nativeSide.waitToExist(timeout: 10), "The page shows the native archive.")
+        XCTAssertFalse(element("plugin-error").exists, "The JavaScript archive renders without errors.")
+
+        // The board window behind the catalog has the same identifiers, so every
+        // lookup is scoped to its catalog column.
+        func js(_ identifier: String) -> XCUIElement {
+            jsSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        func native(_ identifier: String) -> XCUIElement {
+            nativeSide.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        }
+        // The side panel's controls are reachable: each must be hittable before it is clicked.
+        func press(_ control: XCUIElement) {
+            XCTAssertTrue(control.waitToExist(timeout: 5), "\(control) exists.")
+            XCTAssertTrue(waitUntil({ control.isHittable }, timeout: 5), "\(control) is hittable, so assistive clients reach it.")
+            control.click()
+        }
+        func assertSameSize(_ identifier: String) {
+            let jsElement = js(identifier), nativeElement = native("native-\(identifier)")
+            XCTAssertTrue(jsElement.waitToExist(timeout: 10), "The JavaScript archive has \(identifier).")
+            XCTAssertTrue(nativeElement.waitToExist(timeout: 10), "The native archive has \(identifier).")
+            XCTAssertEqual(jsElement.frame.width, nativeElement.frame.width, accuracy: 1, "\(identifier) has the same width in both.")
+            XCTAssertEqual(jsElement.frame.height, nativeElement.frame.height, accuracy: 1, "\(identifier) has the same height in both.")
+        }
+        let ids = (1...5).map { "4F3A2C10-0000-4000-8000-00000000000\($0)" }
+        let titles = ["Fix Skills page tab row layout", "Purple tint for the Waiting Response column", "Update the clean-mac AMI and monitoring",
+                      "Investigate and fix a task error", "Plan the next release notes"]
+        for side in [jsSide, nativeSide] {
+            let prefix = side == jsSide ? "" : "native-"
+            let panel = side.descendants(matching: .any).matching(identifier: "\(prefix)done-archive-panel").firstMatch
+            let board = side.descendants(matching: .any).matching(identifier: "\(prefix)done-archive-board").firstMatch
+            XCTAssertTrue(panel.waitToExist(timeout: 10), "The archive starts open in its side panel.")
+            XCTAssertEqual(board.frame.width, 560, accuracy: 1)
+            XCTAssertEqual(board.frame.height, 460, accuracy: 1)
+            XCTAssertTrue(waitUntil({ abs(panel.frame.maxX - board.frame.maxX) < 1 }, timeout: 5), "The panel rests along the board's trailing edge.")
+            XCTAssertEqual(panel.frame.width, 340, accuracy: 1, "The archive's side panel is 340 points wide.")
+            XCTAssertEqual(panel.frame.height, board.frame.height, accuracy: 1, "The side panel is as tall as the board.")
+            let button = side.descendants(matching: .any).matching(identifier: "\(prefix)done-archive-button").firstMatch
+            XCTAssertEqual(button.label, "Done tasks", "The archive button is labelled Done tasks.")
+        }
+        for identifier in ["done-archive-button", "done-archive-panel", "done-archive-title", "close-done-archive-button", "done-archive-search", "done-archive-list",
+                           "done-archive-pr-link-\(ids[0])-227", "done-archive-create-pr-\(ids[1])", "done-archive-pr-link-\(ids[1])-228",
+                           "done-archive-create-pr-\(ids[2])", "done-archive-create-pr-\(ids[3])"] + ids.map({ "done-archive-task-\($0)" }) {
+            assertSameSize(identifier)
+        }
+        XCTAssertEqual(pluginText(js("done-archive-title")), "Done tasks")
+        XCTAssertEqual(js("done-archive-search").placeholderValue, "Search tasks and conversations")
+        XCTAssertEqual(js("done-archive-list").value as? String, "5 tasks loaded")
+        XCTAssertEqual(native("native-done-archive-list").value as? String, "5 tasks loaded")
+        // A row's button may expose its texts as children or join them into its own label.
+        func shows(_ row: XCUIElement, _ text: String) -> Bool {
+            row.staticTexts[text].exists || accessibleLabelOrValue(of: row).contains(text)
+        }
+        for (id, title) in zip(ids, titles) {
+            XCTAssertTrue(shows(js("done-archive-task-\(id)"), title), "The JavaScript row shows \(title).")
+            XCTAssertTrue(shows(native("native-done-archive-task-\(id)"), title), "The native row shows \(title).")
+        }
+        XCTAssertTrue(shows(js("done-archive-task-\(ids[0])"), "10 November 2026"), "A row shows its task's date.")
+        XCTAssertTrue(shows(native("native-done-archive-task-\(ids[0])"), "10 November 2026"))
+        XCTAssertFalse(js("done-archive-create-pr-\(ids[3])").isEnabled, "The busy PR button is disabled.")
+        XCTAssertFalse(native("native-done-archive-create-pr-\(ids[3])").isEnabled)
+        XCTAssertFalse(js("done-archive-create-pr-\(ids[4])").exists, "A task without repositories has no pull request actions.")
+        XCTAssertFalse(js("clear-archive-search-button").exists, "An empty search has no clear button.")
+        XCTAssertTrue(waitUntil({ self.pluginText(js("js-end-reached")) == "End reached" }, timeout: 5), "The JavaScript list's end is in view, so onEndReached ran.")
+        XCTAssertTrue(waitUntil({ self.pluginText(native("native-end-reached")) == "End reached" }, timeout: 5), "The native list's end is in view too.")
+        attachScreenshot(named: "Done archive: JavaScript above native")
+
+        // Searching narrows the rows; clearing brings them back.
+        let search = js("done-archive-search")
+        press(search)
+        search.typeText("release")
+        XCTAssertTrue(waitUntil({ self.pluginText(js("js-last-action")) == "Last: search release" }, timeout: 5), "Typing runs onChange.")
+        XCTAssertTrue(waitUntil({ !js("done-archive-task-\(ids[0])").exists && js("done-archive-task-\(ids[4])").exists }, timeout: 5), "The search narrows the rows.")
+        XCTAssertTrue(native("native-done-archive-task-\(ids[0])").exists, "The native archive keeps its own search.")
+        XCTAssertTrue(js("clear-archive-search-button").exists, "A search shows the clear button.")
+        attachScreenshot(named: "Done archive: search narrows the JavaScript rows")
+        press(js("clear-archive-search-button"))
+        XCTAssertTrue(waitUntil({ js("done-archive-task-\(ids[0])").exists && (js("done-archive-search").value as? String ?? "").isEmpty }, timeout: 5), "Clear brings every row back.")
+        press(search)
+        search.typeText("nothing-matches")
+        XCTAssertTrue(js("done-archive-empty-state").waitToExist(timeout: 5), "A search with no matches shows the empty state.")
+        XCTAssertEqual(pluginText(js("done-archive-empty-state")), "No matching tasks")
+        XCTAssertFalse(js("done-archive-list").exists, "No list while nothing matches.")
+        attachScreenshot(named: "Done archive: no matching tasks")
+        press(js("clear-archive-search-button"))
+        XCTAssertTrue(js("done-archive-list").waitToExist(timeout: 5))
+
+        // Each control runs its own side's handler.
+        press(js("done-archive-create-pr-\(ids[1])"))
+        XCTAssertTrue(waitUntil({ self.pluginText(js("js-last-action")) == "Last: create pr \(titles[1])" }, timeout: 5), "A PR button runs its handler with its task.")
+        press(js("done-archive-task-\(ids[0])"))
+        XCTAssertTrue(waitUntil({ self.pluginText(js("js-last-action")) == "Last: open \(titles[0])" }, timeout: 5), "A row runs open with its task.")
+        XCTAssertTrue(waitUntil({ !js("done-archive-panel").exists }, timeout: 5), "Opening a task slides the panel away.")
+        XCTAssertTrue(native("native-done-archive-panel").exists, "The native archive stays open.")
+        attachScreenshot(named: "Done archive: JavaScript panel closed after opening a task")
+        js("done-archive-button").click()
+        XCTAssertTrue(js("done-archive-panel").waitToExist(timeout: 5), "The archive button opens it again.")
+        XCTAssertEqual(pluginText(js("js-last-action")), "Last: toggle open")
+        press(js("close-done-archive-button"))
+        XCTAssertTrue(waitUntil({ !js("done-archive-panel").exists && self.pluginText(js("js-last-action")) == "Last: close" }, timeout: 5), "The close button closes it.")
+        XCTAssertEqual(pluginText(native("native-last-action")), "Last: none", "The native archive keeps its own state.")
+    }
+
     // case-contract: test_plugin_token_stats_renders_from_atoms_like_native | The Plugin Catalog's Token Stats page shows the Token Stats modal composed in JavaScript from atoms above the native SwiftUI modal the board presents, built from the same atoms and sample data, each opened by the task item's token counter (the same overhanging Button atom, labelled with its description and hinted Open Token Stats). Both show the title and the task's title, the View raw input… button, a section bar of Overview, Wasters, Tools & MCP and Overhead with Overview selected, the call headlines (Final transcript size, Total sent (incl. subagents), Excluding cache reads (incl. subagents)), the main-agent and subagent split, the call and output lines, the total, the four buckets, the per-tool rollup and the per-turn rows, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Label, Button, Spacer, ChoiceBar, Divider, Scroll, Meter) with the board modal's identifiers. Choosing Wasters in the JavaScript section bar runs onChange with its value (Last: section wasters) and shows the largest items, each with a 72-point share bar, its kind, the removed-by-compaction flag, its request count and a small Show button, then the repeated result and the cache miss, while the native modal stays on Overview until its own bar moves it, after which both show the same rows at the same size. Show runs its JavaScript handler with the item's raw input target (Last: raw input claude #14) and View raw input… with the final transcript (Last: raw input final transcript), without re-rendering any row. Tools & MCP lists each tool's bar, calls and total and the MCP server, and Overhead lists what every request carries and each agent. The overview scrolls within at most 320 points and each map section within a fixed 420. Done closes the JavaScript modal (Last: done) and leaves the native one open, and the counter opens it again (Last: open). The section bar raises no onPress, so pressing it is refused as invalid_argument.
     func test_plugin_token_stats_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
@@ -22041,13 +22389,397 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Token Stats: the counter reopened the JavaScript modal")
     }
 
-    // case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
+    // Installed plugins and Add Plugin mode
+
+    private var pluginsFolder: URL { dataDirectory.appendingPathComponent("plugins", isDirectory: true) }
+
+    /// Writes a plugin folder the way an authoring agent does: plugin.json and index.js.
+    private func writeInstalledPlugin(_ id: String, source: String?, placement: String = "composerActions", presentation: String = "popover", name: String? = nil, icon: String = "puzzlepiece.extension") throws {
+        let folder = pluginsFolder.appendingPathComponent(id, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let manifest: [String: Any] = ["id": id, "name": name ?? id.split(separator: "-").map { $0.capitalized }.joined(separator: " "),
+                                       "icon": icon, "placement": placement, "presentation": presentation]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: folder.appendingPathComponent("plugin.json"))
+        if let source { try source.write(to: folder.appendingPathComponent("index.js"), atomically: true, encoding: .utf8) }
+    }
+
+    private func pluginMode() throws -> Bool {
+        try XCTUnwrap((try runCLI(["plugin", "mode"])["result"] as? [String: Any])?["enabled"] as? Bool)
+    }
+
+    private func installedPluginIDs() throws -> [String] {
+        let plugins = try XCTUnwrap((try runCLI(["plugin", "list"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+        return plugins.compactMap { $0["id"] as? String }
+    }
+
+    /// The same context plugin the CLI case renders headlessly.
+    private static let pluginContextSource = """
+    function Context() {
+      var props = Playhouse.useProps();
+      var state = React.useState("idle");
+      function report(promise, label) {
+        promise.then(function () { state[1](label + ": ok"); }, function (error) { state[1](label + ": " + error.code); });
+      }
+      var task = props.task;
+      var composer = props.composer;
+      return h(Stack, { spacing: 6 },
+        h(Text, { testID: "plugin-placement" }, props.plugin.placement),
+        h(Text, { testID: "plugin-task" }, task ? task.title : "no task"),
+        h(Text, { testID: "plugin-repositories" }, props.repositories ? props.repositories.map(function (r) { return r.repositoryPath.split("/").pop(); }).join(",") : "no repositories"),
+        h(Text, { testID: "plugin-draft" }, composer ? composer.draft : "no composer"),
+        h(Text, { testID: "plugin-selection" }, composer ? composer.selection.text : "no selection"),
+        h(Text, { testID: "plugin-status" }, state[0]),
+        h(Button, { testID: "plugin-rename", onPress: function () {
+          Playhouse.bridge("task.rename", { taskID: task.id, title: "Renamed by plugin" })
+            .then(function (result) { state[1]("renamed: " + result.title); });
+        } }, h(Text, null, "Rename")),
+        h(Button, { testID: "plugin-upper", onPress: function () {
+          Playhouse.ui.composer.replaceSelection(composer.selection.text.toUpperCase());
+        } }, h(Text, null, "Uppercase")),
+        h(Button, { testID: "plugin-count", onPress: function () {
+          Playhouse.bridge("task.list", {}).then(function (result) { state[1]("tasks: " + result.tasks.length); }, function (error) { state[1]("count: " + error.code + " " + error.message); });
+        } }, h(Text, null, "Count")),
+        h(Button, { testID: "plugin-set-draft", onPress: function () { report(Playhouse.ui.composer.setDraft("fresh draft"), "setDraft"); } }, h(Text, null, "Set draft")),
+        h(Button, { testID: "plugin-insert", onPress: function () { report(Playhouse.ui.composer.insertText("!"), "insert"); } }, h(Text, null, "Insert")),
+        h(Button, { testID: "plugin-focus", onPress: function () { report(Playhouse.ui.composer.focus(), "focus"); } }, h(Text, null, "Focus")),
+        h(Button, { testID: "plugin-recursive", onPress: function () { report(Playhouse.bridge("plugin.render", { page: "Text" }), "render"); } }, h(Text, null, "Render")),
+        h(Button, { testID: "plugin-open", onPress: function () {
+          Playhouse.bridge("task.list", {}).then(function (result) { return Playhouse.ui.openTask(result.tasks[0].id); });
+        } }, h(Text, null, "Open")),
+        h(Button, { testID: "plugin-close", onPress: function () { Playhouse.ui.close(); } }, h(Text, null, "Close")));
+    }
+    Playhouse.render(h(Context));
+    """
+
+    // case-contract: test_plugin_add_mode_toggles_and_shows_placeholders | Add Plugin mode is off by default; the Plugins menu's Add Plugin Mode item and `plugin mode --on` turn it on, `plugin mode` reports the saved state to a fresh CLI process, `--off` turns it off, and any other option is refused as invalid_argument. While it is on, a bar across the top of the window explains the mode and its Close button turns it off; the board's sidebar shows a labeled Add here button below Scheduled Tasks; an open task shows its sidebar expanded even when the sidebar was collapsed, with a labeled Add here button in the sidebar, an Add here icon beside the Terminal button and an Add here icon beside the composer's Skills button; and the standalone chat shows only the composer's Add here icon. Turning the mode off from the CLI removes every placeholder live and returns the sidebar to its saved collapsed state.
+    func test_plugin_add_mode_toggles_and_shows_placeholders() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["task", "create", "--title", "Plugin mode task", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
+        let scheduled = element("scheduled-tasks-button")
+        XCTAssertTrue(scheduled.waitToExist(timeout: 15))
+        XCTAssertFalse(try pluginMode(), "Add Plugin mode starts off.")
+        XCTAssertFalse(element("plugin-mode-banner").exists)
+        XCTAssertFalse(element("plugin-add-here-mainSidebar").exists, "No placeholder shows while the mode is off.")
+
+        clickPluginsMenuItem("Add Plugin Mode")
+        XCTAssertTrue(element("plugin-mode-banner").waitToExist(timeout: 10), "The mode's bar appears across the top of the window.")
+        XCTAssertTrue(pluginText(element("plugin-mode-banner-text")).contains("Add here"))
+        XCTAssertTrue(try pluginMode(), "The menu item turns the mode on for the CLI too.")
+        let boardPlaceholder = element("plugin-add-here-mainSidebar")
+        XCTAssertTrue(boardPlaceholder.waitToExist(timeout: 5), "The board's sidebar shows its placeholder.")
+        XCTAssertEqual(boardPlaceholder.label, "Add here")
+        XCTAssertGreaterThan(boardPlaceholder.frame.width, 120, "The sidebar placeholder is a labeled button as wide as the sidebar.")
+        XCTAssertGreaterThanOrEqual(boardPlaceholder.frame.minY, scheduled.frame.maxY - 1, "The placeholder sits below Scheduled Tasks.")
+        XCTAssertLessThan(abs(boardPlaceholder.frame.minX - scheduled.frame.minX), 2, "The placeholder lines up with Scheduled Tasks.")
+        attachScreenshot(named: "Add Plugin mode on the board: the bar and the sidebar's Add here")
+
+        element("plugin-mode-close").click()
+        XCTAssertTrue(waitForDisappearance(element("plugin-mode-banner")), "Close leaves the mode.")
+        XCTAssertTrue(waitForDisappearance(boardPlaceholder))
+        XCTAssertFalse(try pluginMode())
+
+        // A collapsed task sidebar shows expanded while the mode is on, without changing the saved state.
+        openTask(named: "Plugin mode task")
+        let hideSidebar = element("hide-task-sidebar-button")
+        XCTAssertTrue(waitUntil({ hideSidebar.isHittable }, timeout: 10))
+        hideSidebar.click()
+        XCTAssertTrue(element("task-sidebar-collapsed").waitToExist(timeout: 5))
+        _ = try runCLI(["plugin", "mode", "--on"])
+        XCTAssertTrue(element("task-sidebar").waitToExist(timeout: 10), "Add Plugin mode shows the sidebar expanded.")
+        XCTAssertFalse(element("task-sidebar-collapsed").exists)
+        let sidebarPlaceholder = element("plugin-add-here-conversationSidebar")
+        let toolbarPlaceholder = element("plugin-add-here-conversationToolbar")
+        let composerPlaceholder = element("plugin-add-here-composerActions")
+        for placeholder in [sidebarPlaceholder, toolbarPlaceholder, composerPlaceholder] {
+            XCTAssertTrue(placeholder.waitToExist(timeout: 10), "\(placeholder) shows in the open task.")
+            XCTAssertEqual(placeholder.label, "Add here")
+        }
+        XCTAssertGreaterThan(sidebarPlaceholder.frame.width, 120, "The sidebar placeholder is a labeled button.")
+        XCTAssertLessThan(toolbarPlaceholder.frame.width, 40, "The toolbar placeholder is only an icon.")
+        XCTAssertLessThan(composerPlaceholder.frame.width, 40, "The composer placeholder is only an icon.")
+        XCTAssertTrue(element("plugin-mode-banner").exists)
+        let terminal = element("toggle-terminal-button")
+        XCTAssertLessThanOrEqual(toolbarPlaceholder.frame.maxX, terminal.frame.minX + 1, "The toolbar placeholder sits beside the Terminal button.")
+        XCTAssertLessThan(abs(toolbarPlaceholder.frame.midY - terminal.frame.midY), 4, "It shares the Terminal button's row.")
+        let skills = element("open-skills-button")
+        XCTAssertGreaterThanOrEqual(composerPlaceholder.frame.minX, skills.frame.maxX - 1, "The composer placeholder sits beside the Skills button.")
+        XCTAssertLessThan(abs(composerPlaceholder.frame.midY - skills.frame.midY), 4, "It shares the Skills button's row.")
+        XCTAssertGreaterThan(sidebarPlaceholder.frame.minY, element("hide-task-sidebar-button").frame.maxY, "The sidebar placeholder is a section below the header.")
+        XCTAssertLessThan(sidebarPlaceholder.frame.maxY, terminal.frame.minY, "It sits above the command row.")
+        attachScreenshot(named: "Add Plugin mode in a task: sidebar, toolbar and composer placeholders")
+
+        _ = try runCLI(["plugin", "mode", "--off"])
+        for placeholder in [sidebarPlaceholder, toolbarPlaceholder, composerPlaceholder] {
+            XCTAssertTrue(waitForDisappearance(placeholder, timeout: 10), "Turning the mode off from the CLI removes \(placeholder).")
+        }
+        XCTAssertTrue(element("task-sidebar-collapsed").waitToExist(timeout: 5), "The sidebar returns to its saved collapsed state.")
+        XCTAssertFalse(element("plugin-mode-banner").exists)
+        attachScreenshot(named: "Add Plugin mode off: the sidebar collapsed again")
+        element("show-task-sidebar-button").click()
+        XCTAssertTrue(element("task-sidebar").waitToExist(timeout: 5))
+
+        // The standalone chat has only the composer's placement.
+        returnToBoard()
+        _ = try runCLI(["plugin", "mode", "--on"])
+        // The mode's bar slides in above the board, moving the header down; click once it rests.
+        XCTAssertTrue(element("plugin-mode-banner").waitToExist(timeout: 10))
+        let chatButton = element("chat-sidebar-button")
+        XCTAssertTrue(waitForStableFrame(chatButton), "The Chat button stops moving once the bar is in.")
+        chatButton.click()
+        let chat = element("chat-sidebar")
+        XCTAssertTrue(chat.waitToExist(timeout: 10))
+        XCTAssertTrue(chat.descendants(matching: .any)["plugin-add-here-composerActions"].waitToExist(timeout: 10), "The chat's composer shows its placeholder.")
+        XCTAssertFalse(chat.descendants(matching: .any)["plugin-add-here-conversationSidebar"].exists, "The chat has no task sidebar.")
+        XCTAssertFalse(chat.descendants(matching: .any)["plugin-add-here-conversationToolbar"].exists)
+        attachScreenshot(named: "Add Plugin mode in the standalone chat: only the composer's Add here")
+        element("plugin-mode-close").click()
+        XCTAssertTrue(waitForDisappearance(chat.descendants(matching: .any)["plugin-add-here-composerActions"]))
+    }
+
+    // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Pressing an Add here placeholder, or `plugin author --placement <placement>`, creates a Backlog task titled New plugin: <placement title> with no repository, the plugins folder in the data directory as its context folder, the placement saved on the task, and the prompt `/playhouse-plugin Create a new plugin in the <title> placement (<id>).`; the window turns Add Plugin mode off, opens that task, and sends the prompt. An unknown placement is refused as invalid_argument. The task's turns carry plugin authoring instructions naming the placement, its context, the plugins folder and the plugin refresh and render commands, and Playhouse's bundled playhouse-plugin skill reaches the agent without being installed anywhere: Claude Code gets it through a Playhouse-owned --add-dir wrapper and loads it, and Codex gets it among the app-server's extra skill roots with the /playhouse-plugin message sent as a structured skill input naming its SKILL.md. An ordinary task's turn gets neither the instructions nor the skill.
+    func test_plugin_authoring_task_starts_with_placement_and_skill() throws {
+        let environment = try installClaudeFixture(named: "claude-fixture-plugin-author")
+        let historyURL = URL(fileURLWithPath: try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]) + ".history")
+        func turns() -> [[String: Any]] {
+            guard let data = try? Data(contentsOf: historyURL),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+            return (history["turns"] as? [[String: Any]] ?? []).filter { ($0["userText"] as? String)?.isEmpty == false }
+        }
+        launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["task", "create", "--title", "Plugin source task", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
+        let tasksBefore = try boardTaskRecords().count
+        assertCLIError(try runCLI(["plugin", "author", "--placement", "titleBar"], expectedStatus: 2), code: "invalid_argument")
+        XCTAssertEqual(try boardTaskRecords().count, tasksBefore, "A refused placement opens no task.")
+
+        // From the board's sidebar.
+        _ = try runCLI(["plugin", "mode", "--on"])
+        let boardPlaceholder = element("plugin-add-here-mainSidebar")
+        XCTAssertTrue(boardPlaceholder.waitToExist(timeout: 15))
+        boardPlaceholder.click()
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "New plugin: Main sidebar" }, timeout: 15),
+                      "Pressing Add here opens the new plugin task.")
+        XCTAssertTrue(waitForDisappearance(element("plugin-mode-banner"), timeout: 5), "Choosing a placement ends Add Plugin mode.")
+        XCTAssertFalse(try pluginMode())
+        let boardPrompt = "/playhouse-plugin Create a new plugin in the Main sidebar placement (mainSidebar)."
+        XCTAssertTrue(waitUntil({ turns().contains { $0["userText"] as? String == boardPrompt } }, timeout: 20), "The task sends its prompt as it opens.")
+        let boardTask = try XCTUnwrap(try boardTaskRecords().first { $0["title"] as? String == "New plugin: Main sidebar" })
+        XCTAssertEqual(boardTask["pluginPlacement"] as? String, "mainSidebar")
+        XCTAssertEqual((boardTask["repositoryWorktrees"] as? [Any])?.count, 0, "A plugin task needs no repository.")
+        XCTAssertEqual(((boardTask["contextFolders"] as? [String]) ?? []).map(realPath), [realPath(pluginsFolder.path)], "The plugins folder is its context folder.")
+        XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String ?? "").isEmpty }, timeout: 10), "The sent prompt leaves the composer.")
+        attachScreenshot(named: "The plugin task opened from the board's Add here, its prompt sent")
+
+        let turn = try XCTUnwrap(turns().first { $0["userText"] as? String == boardPrompt })
+        let arguments = try XCTUnwrap(turn["arguments"] as? [String])
+        let instructions = arguments[try XCTUnwrap(arguments.firstIndex(of: "--append-system-prompt")) + 1]
+        XCTAssertTrue(instructions.contains("Main sidebar placement (`mainSidebar`)"), "The turn carries the plugin authoring instructions.")
+        XCTAssertTrue(instructions.contains("plugin refresh"))
+        let directories = arguments.indices.filter { arguments[$0] == "--add-dir" }.map { arguments[$0 + 1] }
+        XCTAssertTrue(directories.contains { FileManager.default.fileExists(atPath: $0 + "/.claude/skills/playhouse-plugin/SKILL.md") },
+                      "Claude Code gets the bundled plugin skill through a Playhouse wrapper.")
+        XCTAssertTrue((turn["skills"] as? [String] ?? []).contains("playhouse-plugin"), "Claude Code loads the plugin skill.")
+
+        // From an open task's composer.
+        openTask(named: "Plugin source task")
+        _ = try runCLI(["plugin", "mode", "--on"])
+        let composerPlaceholder = element("plugin-add-here-composerActions")
+        XCTAssertTrue(composerPlaceholder.waitToExist(timeout: 10))
+        attachScreenshot(named: "Add here beside the composer's Skills button")
+        composerPlaceholder.click()
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "New plugin: Chat input actions" }, timeout: 15),
+                      "The composer's Add here opens its own plugin task.")
+        let composerPrompt = "/playhouse-plugin Create a new plugin in the Chat input actions placement (composerActions)."
+        XCTAssertTrue(waitUntil({ turns().contains { $0["userText"] as? String == composerPrompt } }, timeout: 20))
+        XCTAssertEqual(turns().filter { $0["userText"] as? String == composerPrompt }.count, 1, "The prompt is sent exactly once.")
+        XCTAssertFalse(element("plugin-mode-banner").exists)
+        let composerTask = try XCTUnwrap(try boardTaskRecords().first { $0["title"] as? String == "New plugin: Chat input actions" })
+        XCTAssertEqual(composerTask["pluginPlacement"] as? String, "composerActions")
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'user-message-'")).firstMatch.waitToExist(timeout: 10),
+                      "The prompt shows in the new task's conversation.")
+        attachScreenshot(named: "The plugin task opened from the composer's Add here")
+    }
+
+    // case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports none at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. After a refresh the window shows the valid plugin's button at its placement and the Plugins menu lists every plugin with its placement, an invalid one with its first error. Deleting a plugin from the Plugins menu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
+    func test_plugin_install_refresh_and_delete() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        XCTAssertTrue(element("scheduled-tasks-button").waitToExist(timeout: 15))
+        XCTAssertEqual(try installedPluginIDs(), [])
+        let hello = #"Playhouse.render(h(Text, { testID: "hello" }, "Hello from a plugin"));"#
+        try writeInstalledPlugin("hello-board", source: hello, placement: "mainSidebar", presentation: "page", name: "Hello Board", icon: "hand.wave")
+        try writeInstalledPlugin("throws", source: #"throw new Error("Plugin exploded");"#)
+        try writeInstalledPlugin("bad-placement", source: hello, placement: "titleBar")
+        XCTAssertFalse(element("plugin-entry-hello-board").exists, "A plugin shows only after a refresh.")
+
+        let refreshed = try XCTUnwrap(try runCLI(["plugin", "refresh"])["result"] as? [String: Any])
+        XCTAssertEqual(refreshed["revision"] as? Int, 1)
+        let entry = element("plugin-entry-hello-board")
+        XCTAssertTrue(entry.waitToExist(timeout: 10), "After a refresh the valid plugin's button shows at its placement.")
+        XCTAssertEqual(entry.label, "Hello Board")
+        XCTAssertGreaterThanOrEqual(entry.frame.minY, element("scheduled-tasks-button").frame.maxY - 1, "Its button sits below Scheduled Tasks.")
+        XCTAssertFalse(element("plugin-entry-throws").exists, "An invalid plugin shows no button.")
+        attachScreenshot(named: "An installed plugin's button in the board's sidebar")
+
+        let menu = app.menuBars.menuBarItems["Plugins"]
+        menu.click()
+        let helloItem = menu.menuItems["Hello Board — Main sidebar"]
+        XCTAssertTrue(helloItem.waitToExist(timeout: 5), "The Plugins menu lists the installed plugin with its placement.")
+        XCTAssertTrue(menu.menuItems["Throws — Chat input actions"].exists, "The Plugins menu lists an invalid plugin too.")
+        XCTAssertTrue(menu.menuItems["Bad Placement — titleBar"].exists)
+        XCTAssertTrue(menu.menuItems.matching(NSPredicate(format: "title CONTAINS %@", "Plugin exploded")).firstMatch.exists,
+                      "An invalid plugin shows its first error.")
+        XCTAssertEqual(menu.menuItems.matching(NSPredicate(format: "title CONTAINS %@", "Unknown placement")).count, 1,
+                       "Only the invalid plugins show an error, each its own.")
+        XCTAssertFalse(helloItem.isEnabled, "A plugin's row is a label, not a command.")
+        attachScreenshot(named: "The Plugins menu lists installed plugins with their placement")
+        menu.menuItems["Delete Hello Board…"].click()
+        let confirm = app.dialogs.buttons["Delete"].firstMatch
+        XCTAssertTrue(confirm.waitToExist(timeout: 5), "Deleting from the Plugins menu asks for confirmation.")
+        XCTAssertTrue(app.dialogs.staticTexts["Delete the plugin Hello Board?"].exists, "The confirmation names the plugin.")
+        attachScreenshot(named: "Deleting a plugin asks for confirmation")
+        confirm.click()
+        XCTAssertTrue(waitForDisappearance(entry, timeout: 10), "Deleting removes the plugin's button.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: pluginsFolder.appendingPathComponent("hello-board").path), "Deleting removes its folder.")
+        XCTAssertFalse(try installedPluginIDs().contains("hello-board"))
+
+        _ = try runCLI(["plugin", "delete", "--id", "throws"])
+        menu.click()
+        XCTAssertTrue(menu.menuItems["Bad Placement — titleBar"].waitToExist(timeout: 5))
+        XCTAssertTrue(waitUntil({ !menu.menuItems["Delete Throws…"].exists && !menu.menuItems["Delete Hello Board…"].exists }, timeout: 10),
+                      "The menu drops deleted plugins.")
+        attachScreenshot(named: "The Plugins menu after deleting plugins")
+        app.typeKey(.escape, modifierFlags: [])
+        assertCLIError(try runCLI(["plugin", "delete", "--id", "throws"], expectedStatus: 3), code: "not_found")
+        assertCLIError(try runCLI(["plugin", "delete", "--id", "../plugins"], expectedStatus: 2), code: "invalid_argument")
+    }
+
+    // case-contract: test_plugin_surfaces_receive_context_and_host_access | An installed plugin receives its placement's context in Playhouse.props: the plugin and the appearance everywhere, the task with its repositories and context folders in the conversation placements, and the composer's draft and selected text in the composer placement, while the board's sidebar gets no task. `plugin render --plugin <id> --task <id>` renders it headlessly with that real context. Playhouse.bridge runs any bridge command but plugin render against the real store (a rename is seen by a fresh CLI process) and rejects a failing one with its code; Playhouse.ui close, openTask and the composer's setDraft, insertText, replaceSelection and focus are recorded headlessly; a composer call from the board's sidebar and a plugin render call are refused the same way in both hosts; and --task without --plugin or an unknown plugin is refused. In the window a page plugin from the board's sidebar covers the board, reads the real board, and its openTask opens that task without sending anything; a composer popover plugin opens anchored to its button showing the draft and the selected text, and its replaceSelection replaces the selected text in the composer; a sidebar plugin from the conversation sidebar slides in at the trailing edge showing the task's title and repository, inserts text after the selection, replaces the draft, renames the task, and closes with its close button; and a modal plugin beside the Terminal button opens as a sheet with the task's context and closes itself with Playhouse.ui.close.
+    func test_plugin_surfaces_receive_context_and_host_access() throws {
+        try writeInstalledPlugin("context-composer", source: Self.pluginContextSource, placement: "composerActions", presentation: "popover", name: "Context Composer", icon: "textformat")
+        try writeInstalledPlugin("context-sidebar", source: Self.pluginContextSource, placement: "conversationSidebar", presentation: "sidebar", name: "Context Sidebar", icon: "sidebar.right")
+        try writeInstalledPlugin("context-board", source: Self.pluginContextSource, placement: "mainSidebar", presentation: "page", name: "Context Board", icon: "rectangle.stack")
+        try writeInstalledPlugin("context-toolbar", source: Self.pluginContextSource, placement: "conversationToolbar", presentation: "modal", name: "Context Toolbar", icon: "wrench")
+        launchApp(defaultParent: fixture.parent.path)
+        let plugins = try XCTUnwrap((try runCLI(["plugin", "refresh"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+        XCTAssertTrue(plugins.allSatisfy { $0["valid"] as? Bool == true }, "\(plugins)")
+        let task = try XCTUnwrap(try runCLI(["task", "create", "--title", "Plugin context task", "--prompt", "Fixture task description.", "--repo", fixture.primary.path])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let window = app.windows.firstMatch
+
+        // A page plugin from the board's sidebar: no task, real bridge access, the shared refusals, and openTask.
+        let boardEntry = element("plugin-entry-context-board")
+        XCTAssertTrue(boardEntry.waitToExist(timeout: 15))
+        boardEntry.click()
+        let page = element("plugin-surface-context-board")
+        XCTAssertTrue(page.waitToExist(timeout: 10), "The page plugin opens.")
+        XCTAssertTrue(waitForStableFrame(page), "The page finishes sliding in before it is clicked.")
+        XCTAssertGreaterThan(page.frame.width, window.frame.width - 4, "The page covers the board from edge to edge.")
+        XCTAssertGreaterThan(page.frame.height, window.frame.height / 2, "The page covers the board's height.")
+        XCTAssertEqual(pluginText(page.descendants(matching: .any)["plugin-task"]), "no task", "The board's sidebar hands the plugin no task.")
+        page.descendants(matching: .any)["plugin-count"].click()
+        XCTAssertTrue(waitUntil({ self.pluginText(page.descendants(matching: .any)["plugin-status"]) == "tasks: 1" }, timeout: 10),
+                      "Playhouse.bridge reads the real board.")
+        attachScreenshot(named: "A page plugin from the board's sidebar, after a bridge call")
+        page.descendants(matching: .any)["plugin-focus"].click()
+        XCTAssertTrue(waitUntil({ self.pluginText(page.descendants(matching: .any)["plugin-status"]) == "focus: unavailable" }, timeout: 10),
+                      "The board's sidebar has no composer.")
+        page.descendants(matching: .any)["plugin-recursive"].click()
+        XCTAssertTrue(waitUntil({ self.pluginText(page.descendants(matching: .any)["plugin-status"]) == "render: invalid_argument" }, timeout: 10),
+                      "A plugin can't render plugins.")
+        page.descendants(matching: .any)["plugin-open"].click()
+        XCTAssertTrue(waitForDisappearance(page, timeout: 10), "openTask closes the page.")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Plugin context task" }, timeout: 15),
+                      "openTask opens the task.")
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'user-message-'")).firstMatch.exists,
+                       "openTask sends nothing.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Backlog", "The opened task did not start.")
+
+        // A popover plugin beside the composer's Skills button sees the draft and the selection.
+        composer.click()
+        composer.typeText("make this loud")
+        for _ in 0..<4 { composer.typeKey(.leftArrow, modifierFlags: [.shift]) }
+        let composerEntry = element("plugin-entry-context-composer")
+        XCTAssertTrue(composerEntry.waitToExist(timeout: 5))
+        XCTAssertGreaterThanOrEqual(composerEntry.frame.minX, element("open-skills-button").frame.maxX - 1, "Its button sits beside the Skills button.")
+        composerEntry.click()
+        let popover = app.popovers.descendants(matching: .any)["plugin-surface-context-composer"]
+        XCTAssertTrue(popover.waitToExist(timeout: 10), "The plugin opens in a popover.")
+        XCTAssertTrue(waitForStableFrame(popover), "The popover finishes opening before it is clicked.")
+        let popoverFrame = app.popovers.firstMatch.frame
+        XCTAssertTrue(popoverFrame.minX <= composerEntry.frame.midX && composerEntry.frame.midX <= popoverFrame.maxX,
+                      "The popover is anchored over its button: \(popoverFrame) vs \(composerEntry.frame).")
+        XCTAssertLessThan(min(abs(popoverFrame.minY - composerEntry.frame.maxY), abs(composerEntry.frame.minY - popoverFrame.maxY)), 30,
+                          "The popover's arrow edge meets its button.")
+        XCTAssertEqual(pluginText(popover.descendants(matching: .any)["plugin-placement"]), "composerActions")
+        XCTAssertEqual(pluginText(popover.descendants(matching: .any)["plugin-task"]), "Plugin context task")
+        XCTAssertTrue(waitUntil({ self.pluginText(popover.descendants(matching: .any)["plugin-draft"]) == "make this loud" }, timeout: 5), "The plugin sees the draft.")
+        XCTAssertEqual(pluginText(popover.descendants(matching: .any)["plugin-selection"]), "loud", "The plugin sees the selected text.")
+        attachScreenshot(named: "A composer plugin's popover showing the draft and the selected text")
+        popover.descendants(matching: .any)["plugin-upper"].click()
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "make this LOUD" }, timeout: 10), "replaceSelection replaces the selected text in the composer.")
+        attachScreenshot(named: "The composer after the plugin replaced the selection")
+        // The composer took the keyboard back, so the plugin closes its own popover.
+        popover.descendants(matching: .any)["plugin-close"].click()
+        XCTAssertTrue(waitForDisappearance(popover, timeout: 5), "Playhouse.ui.close dismisses the popover.")
+
+        // A sidebar plugin from the conversation sidebar: the task's context and composer edits.
+        let sidebarEntry = element("plugin-entry-context-sidebar")
+        XCTAssertTrue(sidebarEntry.waitToExist(timeout: 5))
+        XCTAssertEqual(sidebarEntry.label, "Context Sidebar")
+        XCTAssertGreaterThan(sidebarEntry.frame.width, 120, "A sidebar placement's button is labeled.")
+        sidebarEntry.click()
+        let panel = element("plugin-surface-context-sidebar")
+        XCTAssertTrue(panel.waitToExist(timeout: 10), "The sidebar plugin slides in.")
+        XCTAssertTrue(waitForStableFrame(panel), "The panel finishes sliding in before it is clicked.")
+        XCTAssertTrue(waitUntil({ abs(panel.frame.maxX - window.frame.maxX) < 4 }, timeout: 5), "It sits against the window's trailing edge.")
+        XCTAssertLessThan(abs(panel.frame.width - 360), 4, "It is a 360-point panel, not a page or a sheet.")
+        XCTAssertTrue(app.sheets.count == 0 && app.popovers.count == 0)
+        XCTAssertEqual(pluginText(panel.descendants(matching: .any)["plugin-task"]), "Plugin context task")
+        XCTAssertEqual(pluginText(panel.descendants(matching: .any)["plugin-repositories"]), fixture.primary.lastPathComponent)
+        XCTAssertEqual(pluginText(panel.descendants(matching: .any)["plugin-draft"]), "no composer", "Only the composer placement gets the draft.")
+        panel.descendants(matching: .any)["plugin-insert"].click()
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "make this LOUD!" }, timeout: 10), "insertText inserts after the selection.")
+        panel.descendants(matching: .any)["plugin-set-draft"].click()
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "fresh draft" }, timeout: 10), "setDraft replaces the draft.")
+        XCTAssertEqual(pluginText(panel.descendants(matching: .any)["plugin-status"]), "setDraft: ok")
+        panel.descendants(matching: .any)["plugin-rename"].click()
+        XCTAssertTrue(waitUntil({ self.pluginText(panel.descendants(matching: .any)["plugin-status"]) == "renamed: Renamed by plugin" }, timeout: 10))
+        XCTAssertEqual(try taskRecord(id: taskID)?["title"] as? String, "Renamed by plugin", "The plugin's bridge call renamed the task in the store.")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Renamed by plugin" }, timeout: 10),
+                      "The open task shows the new title.")
+        attachScreenshot(named: "A sidebar plugin with the task's context, after editing the draft and renaming the task")
+        panel.descendants(matching: .any)["plugin-surface-close"].click()
+        XCTAssertTrue(waitForDisappearance(panel, timeout: 5), "The sidebar closes with its close button.")
+
+        // A modal plugin beside the Terminal button opens as a sheet and closes itself.
+        let toolbarEntry = element("plugin-entry-context-toolbar")
+        let terminal = element("toggle-terminal-button")
+        XCTAssertTrue(toolbarEntry.waitToExist(timeout: 5))
+        XCTAssertLessThanOrEqual(toolbarEntry.frame.maxX, terminal.frame.minX + 1, "Its icon sits beside the Terminal button.")
+        XCTAssertLessThan(abs(toolbarEntry.frame.midY - terminal.frame.midY), 4)
+        XCTAssertLessThan(toolbarEntry.frame.width, 40, "A toolbar entry is only an icon.")
+        toolbarEntry.click()
+        let sheet = app.sheets.descendants(matching: .any)["plugin-surface-context-toolbar"]
+        XCTAssertTrue(sheet.waitToExist(timeout: 10), "The modal plugin opens as a sheet.")
+        XCTAssertTrue(waitForStableFrame(sheet), "The sheet finishes opening before it is clicked.")
+        XCTAssertEqual(pluginText(sheet.descendants(matching: .any)["plugin-task"]), "Renamed by plugin", "The toolbar placement gets the task.")
+        XCTAssertEqual(pluginText(sheet.descendants(matching: .any)["plugin-draft"]), "no composer")
+        attachScreenshot(named: "A modal plugin from the sidebar toolbar")
+        sheet.descendants(matching: .any)["plugin-close"].click()
+        XCTAssertTrue(waitForDisappearance(sheet, timeout: 5), "Playhouse.ui.close dismisses the sheet.")
+        XCTAssertEqual(app.sheets.count, 0)
+    }
+
+    // case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover, Modal, Page, SidePanel), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.
     func test_debug_highlight_native_atoms_outlines_atoms() throws {
+        executionTimeAllowance = 360 // It opens and checks every atom's catalog page.
         launchApp(defaultParent: fixture.parent.path)
         let rendered = try XCTUnwrap(try runCLI(["plugin", "render", "--page", "Card"])["result"] as? [String: Any])
         let atoms = try XCTUnwrap(rendered["atoms"] as? [String])
         let containers = Set(try XCTUnwrap(rendered["containerAtoms"] as? [String]))
-        XCTAssertEqual(containers, ["Stack", "Panel", "Card", "Scroll", "Disclosure", "Overlay", "Popover"], "Only the structural atoms are containers.")
+        XCTAssertEqual(containers, ["Stack", "Panel", "Card", "Scroll", "Disclosure", "Overlay", "Popover", "Modal", "Page", "SidePanel"], "Only the structural atoms are containers.")
         XCTAssertTrue(containers.isSubset(of: Set(atoms)), "Every container is a known atom.")
         let highlight = NSPredicate(format: "identifier IN %@", ["atom-highlight-container", "atom-highlight-leaf"])
         func outlines(in root: XCUIElement, _ atom: String? = nil) -> XCUIElementQuery {
@@ -23332,8 +24064,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("task-done-drop-target").waitToExist(timeout: 5), "The Done drawer should always be present at the board edge.")
         let source = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         // The drawer's tab slides open once the drag begins and is then centered 32 points
-        // in from the window edge.
-        let doneTarget = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.5)).withOffset(CGVector(dx: -32, dy: 0))
+        // in from the board scroller's lane, which is about 16 points wide at the window edge.
+        let doneTarget = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.5)).withOffset(CGVector(dx: -48, dy: 0))
         source.press(forDuration: 0.5, thenDragTo: doneTarget, withVelocity: .default, thenHoldForDuration: 1.5)
     }
 
@@ -23363,14 +24095,19 @@ final class PlayhouseUITests: XCTestCase {
         add(attachment)
     }
 
-    /// The Done drawer shows only a thin sliver beside the board while nothing is dragged.
+    /// The Done drawer shows only a thin sliver beside the columns while nothing is dragged,
+    /// just left of the board's vertical scroller, which keeps the window edge.
     private func assertDoneDrawerResting(_ moment: String, file: StaticString = #filePath, line: UInt = #line) {
         let drawer = element("task-done-drop-target")
         let board = element("board-columns-scroll-view")
+        let lastColumn = element("column-review")
         let window = app.windows.firstMatch
         XCTAssertTrue(drawer.waitToExist(timeout: 5), "The Done drawer should exist \(moment).", file: file, line: line)
-        XCTAssertTrue(waitUntil({ drawer.frame.minX >= window.frame.maxX - 6 }, timeout: 3), "The Done drawer should rest as a sliver at the window edge \(moment).", file: file, line: line)
-        XCTAssertGreaterThanOrEqual(drawer.frame.minX, board.frame.maxX - 1, "The Done drawer must sit beside the board columns, never over them \(moment).", file: file, line: line)
+        // The sliver is 5 points wide and sits left of a scroller lane of 11 to 16 points.
+        XCTAssertTrue(waitUntil({ drawer.frame.minX >= window.frame.maxX - 24 }, timeout: 3), "The Done drawer should rest as a sliver near the window edge \(moment).", file: file, line: line)
+        XCTAssertLessThanOrEqual(drawer.frame.minX, window.frame.maxX - 14, "The Done drawer must leave the window edge to the board scroller \(moment).", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(board.frame.maxX, window.frame.maxX - 1, "The board, and so its vertical scroller, must reach the window edge \(moment).", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(drawer.frame.minX, lastColumn.frame.maxX, "The Done drawer must sit beside the board columns, never over them \(moment).", file: file, line: line)
     }
 
     /// Installs the Claude Code protocol fixture for this case and returns the

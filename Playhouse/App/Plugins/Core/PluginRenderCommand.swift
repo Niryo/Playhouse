@@ -24,7 +24,14 @@ struct PluginRenderCommand: Sendable {
 
     var file: String?
     var page: String?
+    /// Props under `propsJSON`, such as an installed plugin's placement context.
+    var baseProps: [String: PluginValue] = [:]
     var propsJSON: String?
+    /// Answers the plugin's `Playhouse.bridge` calls; without one they are
+    /// rejected. `Playhouse.ui` calls are recorded and resolved with null.
+    var bridge: (@Sendable (String, PluginValue) async throws -> PluginValue)?
+    /// An installed plugin's placement, which decides what its host refuses.
+    var placement: PluginPlacement?
     var events: [Event] = []
     var advance: Double = 0
     var resources = PluginRuntime.bundledResources
@@ -63,12 +70,14 @@ struct PluginRenderCommand: Sendable {
         return (source, props)
     }
 
-    func run() throws -> PluginValue {
+    func run() async throws -> PluginValue {
         let source: String
-        var props: [String: PluginValue] = [:]
+        var props = baseProps
         let name: String
         if let page {
-            (source, props) = try Self.catalogPage(page, resources: resources)
+            let catalog = try Self.catalogPage(page, resources: resources)
+            source = catalog.source
+            props.merge(catalog.props) { _, new in new }
             name = "\(page).js"
         } else if let file {
             source = try String(contentsOf: URL(fileURLWithPath: file), encoding: .utf8)
@@ -94,8 +103,41 @@ struct PluginRenderCommand: Sendable {
                 "touchedNodes": .array(commit.touchedNodes.map { .number(Double($0)) })
             ]))
         }
+        var hostCalls: [PluginValue] = []
+        // Answers every pending host call, then runs the timers its answers
+        // scheduled, until the plugin stops calling (bounded, for a loop).
+        func settle() async {
+            runtime.runDueTimers()
+            for _ in 0..<50 {
+                guard let call = runtime.pendingHostCalls.first else { return }
+                var entry: [String: PluginValue] = ["kind": .string(call.kind), "name": .string(call.name), "arguments": call.arguments]
+                let result: Result<PluginValue, PluginHostError>
+                if let refusal = PluginHostRules.refusal(kind: call.kind, name: call.name, placement: placement) {
+                    result = .failure(refusal)
+                } else if call.kind == "bridge", let bridge {
+                    do {
+                        result = .success(try await bridge(call.name, call.arguments))
+                    } catch let error as PluginHostError {
+                        result = .failure(error)
+                    } catch {
+                        result = .failure(PluginHostError(code: "operation_failed", message: error.localizedDescription))
+                    }
+                } else if call.kind == "bridge" {
+                    result = .failure(PluginHostError(code: "unavailable", message: "Bridge calls are not available here."))
+                } else {
+                    result = .success(.null)
+                }
+                switch result {
+                case .success(let value): entry["ok"] = .bool(true); entry["result"] = value
+                case .failure(let error): entry["ok"] = .bool(false); entry["error"] = .object(["code": .string(error.code), "message": .string(error.message)])
+                }
+                hostCalls.append(.object(entry))
+                runtime.answerHostCall(call.id, result: result)
+                runtime.runDueTimers()
+            }
+        }
         // Effects run from a zero-delay scheduler timer; flush them so the tree is settled.
-        runtime.runDueTimers()
+        await settle()
         noteCommit("render", since: nil)
         for event in events where runtime.errors.isEmpty {
             guard let node = Self.find(testID: event.testID, in: runtime.tree.root) else {
@@ -106,12 +148,13 @@ struct PluginRenderCommand: Sendable {
             }
             let before = runtime.tree.lastCommit?.number
             runtime.dispatch(nodeID: node.id, event: event.name, value: event.value.map(PluginValue.string))
-            runtime.runDueTimers()
+            await settle()
             noteCommit("\(event.testID):\(event.name)", since: before)
         }
         if advance > 0, runtime.errors.isEmpty {
             let before = runtime.tree.lastCommit?.number
             runtime.runDueTimers(advancing: advance)
+            await settle()
             noteCommit("advance", since: before)
         }
         return .object([
@@ -120,6 +163,7 @@ struct PluginRenderCommand: Sendable {
             "commits": .array(commits),
             "tree": runtime.tree.snapshot(),
             "errors": .array(runtime.errors.map(PluginValue.string)),
+            "hostCalls": .array(hostCalls),
             "log": .array(runtime.log.map { .string("\($0.level): \($0.message)") })
         ])
     }
