@@ -312,6 +312,11 @@ struct RemoteConversationManager {
             .decoded(SkillRecord.self)
     }
 
+    /// What the composer's `@` menu can mention, read like the CLI's `mentions list`.
+    func mentions(taskID: UUID) async throws -> MentionCatalog {
+        try await daemon.call("mentions.list", ["taskID": id(taskID)]).decoded(MentionCatalog.self)
+    }
+
     func rules(taskID: UUID) async throws -> RuleCatalog {
         try await daemon.call("rules.list", ["taskID": id(taskID)]).decoded(RuleCatalog.self)
     }
