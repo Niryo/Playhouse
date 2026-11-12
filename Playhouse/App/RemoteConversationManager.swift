@@ -481,6 +481,7 @@ struct RemoteConversationManager {
         taskID: UUID,
         sideChatID: String?,
         selection: String?,
+        source: ConversationTextSource? = nil,
         message: String,
         modelID: String? = nil,
         effort: ConversationEffort? = nil,
@@ -491,9 +492,16 @@ struct RemoteConversationManager {
         if let effort { arguments["effort"] = .string(effort.rawValue) }
         if let sideChatID { arguments["sideChatID"] = .string(sideChatID) }
         if let selection { arguments["selection"] = .string(selection) }
+        if let source, let json = try? JSONEncoder().encode(source), let text = String(data: json, encoding: .utf8) {
+            arguments["source"] = .string(text)
+        }
         return try await daemon.call("conversation.side_chat", arguments) { event in
             if event.type == "text_delta", let text = event.payload.object?["text"]?.string { onDelta(text) }
         }.decoded(SideChatReply.self)
+    }
+
+    func savedSideChats(taskID: UUID) async throws -> [SavedSideChat] {
+        try await daemon.call("conversation.side_chats.list", ["taskID": id(taskID)]).decoded([SavedSideChat].self)
     }
 
     func closeSideChat(taskID: UUID, sideChatID: String) async {

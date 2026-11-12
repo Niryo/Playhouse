@@ -193,6 +193,8 @@ final class BoardTask {
     /// Review comments the user has written but not sent, encoded as JSON. Optional so tasks
     /// stored before this field existed load unchanged.
     var pendingAnnotationsData: Data?
+    /// Side chats on selected conversation text, encoded as JSON (`SavedSideChats`).
+    var sideChatsData: Data?
     var conversationActivityDurationsData: Data?
     var answeredAsyncQuestionIDsData: Data?
     var viewedWorkspaceChangesData: Data?
@@ -291,6 +293,7 @@ final class BoardTask {
         contextFolderPathsData = nil
         draftImageDataURLsData = nil
         pendingAnnotationsData = nil
+        sideChatsData = nil
         conversationActivityDurationsData = nil
         answeredAsyncQuestionIDsData = nil
         viewedWorkspaceChangesData = nil

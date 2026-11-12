@@ -10501,7 +10501,7 @@ final class PlayhouseUITests: XCTestCase {
         return answer
     }
 
-    // case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a Side chat hint centered above the selection, and no bubble opens until it is clicked; clicking it hides the hint and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls. The bubble shows the selected text and a compact chat with no subtitle, whose composer has a Comment button, the conversation's model picker and a send button but no Skills button or mode menu. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown or closed side chat rejects follow-ups, and closing the bubble with Escape ends its side chat without adding a comment.
+    // case-contract: test_side_chat_forks_claude_conversation_read_only | Selecting text in a Claude task's reply shows a Side chat hint centered above the selection, and no bubble opens until it is clicked; clicking it hides the hint and opens a side chat bubble above the selection that starts compact and grows to wrap its conversation, wider once it has messages and taller with each exchange, until the chat reaches its maximum height and scrolls. The bubble shows the selected text and a compact chat with no subtitle, whose composer has a Comment button, the conversation's model picker and a send button but no Skills button or mode menu. Choosing another model and effort in the bubble applies to the side chat's next messages only: the task keeps its own model. The first side chat message forks the task's Claude session with --resume and --fork-session under a new session ID, read-only (Edit, MultiEdit, Write and NotebookEdit disallowed), with side chat instructions that list the Playhouse CLI and forbid reporting the task's progress or outcome, and the selected text quoted in the prompt; its answer streams and shows the source session's context in the bubble. A follow-up resumes the forked session without forking again, with the model and effort chosen for it. Asking it to create a task lets only the Playhouse CLI's board commands run, checked by a PreToolUse hook Playhouse passes in the launch settings (ahead of the user's own allow rules) and by its permission handler: a Write, an ordinary shell command and the CLI chained with & to another command are denied, while the CLI's task create, whose quoted description contains shell punctuation, really creates the task, and no file is written. The task's own conversation, Claude session, status and history are unchanged by the side chat. A side chat needs a conversation to fork, a selection, a non-empty message and a valid model and effort; an unknown side chat rejects follow-ups, and closing the bubble with Escape ends its live session without adding a comment, while the saved side chat's next follow-up continues the same forked session.
     func test_side_chat_forks_claude_conversation_read_only() throws {
         _ = try installClaudeFixture(named: "claude-fixture-side-chat")
         _ = try runCLI(["settings", "set-default-provider", "claude"])
@@ -10621,21 +10621,24 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("send-message-button").isEnabled, "Closing the side chat adds no comment.")
         XCTAssertFalse(element("pending-comment-count").exists)
         attachScreenshot(named: "Side chat closed with Escape and no pending comment")
-        // The bubble ends its side chat as it goes away, in a request of its own.
+        // The bubble ends its live session as it goes away, in a request of its own; the side
+        // chat stays saved, so its next message continues the same forked session.
         Thread.sleep(forTimeInterval: 1.5)
-        let rejected = try runCLI(["conversation", "side-chat", opened.taskID, "--side-chat", sideChatID, "--message", "Still there?"],
-                                  expectedStatus: 3)
-        XCTAssertEqual((rejected["error"] as? [String: Any])?["code"] as? String, "not_found",
-                       "Closing the bubble should end its side chat.")
+        let continued = try XCTUnwrap(try runCLI(["conversation", "side-chat", opened.taskID, "--side-chat", sideChatID, "--message", "Still there?"])["result"] as? [String: Any])
+        let forkSession = try XCTUnwrap(((continued["sideChat"] as? [String: Any])?["threadID"]) as? String)
+        XCTAssertNotEqual(forkSession, sourceSession)
+        XCTAssertTrue((continued["reply"] as? String ?? "").hasSuffix("on \(forkSession): Still there?"),
+                      "A closed side chat should continue its forked session: \(continued)")
 
-        // Selecting again shows the hint again, and only the hint, until it is clicked.
-        opened.reply.click()
-        opened.reply.typeKey("a", modifierFlags: .command)
-        _ = try waitForSideChatBubble(at: opened.reply)
+        // Clicking its text, now side-chatted, reopens the bubble with the saved exchanges.
+        clickHighlightedText(opened.reply)
+        XCTAssertTrue(element("side-chat-bubble").waitToExist(timeout: 8), "Clicking side-chatted text should reopen its bubble.")
+        XCTAssertEqual(element("side-chat-user-message-0").label, "What does this mean?")
         app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(element("side-chat-bubble").waitForNonExistence(timeout: 5))
     }
 
-    // case-contract: test_side_chat_forks_codex_conversation_read_only | The first side chat message on a Codex task's selected text forks the task's Codex thread with thread/fork into Codex's read-only sandbox (excluding turns from the response, with approvals off and the side chat developer instructions), and every side chat turn names a read-only sandbox policy with network access, so the Playhouse CLI still reaches the bridge daemon. The answer streams, names the forked source thread and quotes the selected text; a follow-up continues the same forked thread with the model and effort chosen for it, reloading the fork in the read-only sandbox when the model changes, and asking it to create a task really creates one through the CLI, run inside the read-only sandbox, where the daemon accepts only board requests from a sandboxed caller, so the same side chat's task delete is refused as forbidden and the task stays. The task's own conversation, Codex thread, status and history are unchanged. In the app the bubble opens on the selection, shows the question and the answer below the selected text, and a follow-up adds a second exchange.
+    // case-contract: test_side_chat_forks_codex_conversation_read_only | The first side chat message on a Codex task's selected text forks the task's Codex thread with thread/fork into Codex's read-only sandbox (excluding turns from the response, with approvals off and the side chat developer instructions), and every side chat turn names a read-only sandbox policy with network access, so the Playhouse CLI still reaches the bridge daemon. The answer streams, names the forked source thread and quotes the selected text; a follow-up continues the same forked thread with the model and effort chosen for it, reloading the fork in the read-only sandbox when the model changes, and asking it to create a task really creates one through the CLI, run inside the read-only sandbox, where the daemon accepts only board requests from a sandboxed caller, so the same side chat's task delete is refused as forbidden and the task stays. The task's own conversation, Codex thread, status and history are unchanged. In the app the bubble opens on the selection, shows the question and the answer below the selected text, and a follow-up adds a second exchange. Closing a side chat keeps it saved, and its next follow-up continues the same forked thread.
     func test_side_chat_forks_codex_conversation_read_only() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success").path
         launchApp(defaultParent: fixture.parent.path)
@@ -10652,6 +10655,17 @@ final class PlayhouseUITests: XCTestCase {
         let createdID = String(created.label.split(separator: " ").last ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "."))
         XCTAssertEqual(try taskRecord(id: createdID)?["title"] as? String, "Side chat follow-up")
         attachScreenshot(named: "Codex side chat follow-ups")
+        let sideChatID = element("side-chat-send-button").value as? String ?? ""
+        XCTAssertFalse(sideChatID.isEmpty, "The bubble should name the side chat its first message opened.")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(opened.bubble.waitForNonExistence(timeout: 5), "Escape should close the side chat bubble.")
+        // Closing ends only the live session; the saved side chat continues the same forked thread.
+        Thread.sleep(forTimeInterval: 1.5)
+        let continued = try XCTUnwrap(try runCLI(["conversation", "side-chat", opened.taskID, "--side-chat", sideChatID, "--message", "Still there?"])["result"] as? [String: Any])
+        let forkThread = try XCTUnwrap(((continued["sideChat"] as? [String: Any])?["threadID"]) as? String)
+        XCTAssertTrue(forkThread.hasPrefix("fork-"), "The side chat should keep its forked thread: \(continued)")
+        XCTAssertTrue((continued["reply"] as? String ?? "").hasSuffix("on \(forkThread): Still there?"),
+                      "A closed side chat should continue its forked thread: \(continued)")
         let taskAfter = try XCTUnwrap(try taskRecord(id: opened.taskID))
         XCTAssertEqual(taskAfter["status"] as? String, taskBefore["status"] as? String)
         XCTAssertEqual(taskAfter["codexThreadID"] as? String, sourceThread, "The task keeps its own Codex thread.")
@@ -10660,7 +10674,7 @@ final class PlayhouseUITests: XCTestCase {
                        "The side chat's messages must not reach the task's conversation.")
     }
 
-    // case-contract: test_conversation_persists_unsent_comments | Unsent conversation comments are saved with the task draft. Through CLI/XPC, a saved comment list reports its count on a fresh read, malformed input is rejected with invalid_argument and leaves the saved comments unchanged, a later draft save keeps them, appending a list adds only comments not already saved (how a send that ends without delivering its comments returns them without overwriting newer ones), and an empty list clears them. Saving comments after a sent prompt leaves hasUnsentDraft false, so the sent prompt never returns to the composer as a draft. In the app, comments added to a conversation are saved as they are added and survive switching to another task and back and quitting and relaunching: the composer shows the pending comment count and the highlights are restored. Sending them delivers their source ranges, clears the saved comments, and reopening the task shows no pending comment and no duplicate.
+    // case-contract: test_conversation_persists_unsent_comments | Unsent conversation comments are saved with the task draft. Through CLI/XPC, a saved comment list reports its count on a fresh read, malformed input is rejected with invalid_argument and leaves the saved comments unchanged, a later draft save keeps them, appending a list adds only comments not already saved (how a send that ends without delivering its comments returns them without overwriting newer ones), and an empty list clears them. Saving comments after a sent prompt leaves hasUnsentDraft false, so the sent prompt never returns to the composer as a draft. In the app, comments added to a conversation are saved as they are added and survive switching to another task and back and quitting and relaunching: the composer shows the pending comment count and the highlights are restored. Sending them delivers their source ranges, clears the saved comments, and reopening the task shows no pending comment and no duplicate. Once sent, a comment can no longer be edited (task comments edit reports not_found), and clicking its text reopens it read-only in the side chat bubble, whose Comment button can still add a new comment there.
     func test_conversation_persists_unsent_comments() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-goal-success").path
         let fixtureStateDirectory = dataDirectory.appendingPathComponent("unsent-comments-fixture-state", isDirectory: true)
@@ -10755,6 +10769,22 @@ final class PlayhouseUITests: XCTestCase {
             (try? self.taskRecord(id: taskID)?["pendingCommentCount"] as? Int) == 0
         }, timeout: 10), "Sending should clear the saved comments.")
         XCTAssertFalse(element("pending-comment-count").exists, "No pending comment should remain after sending.")
+        // The sent comment stays orange; clicking it reopens it read-only, beside a Comment button.
+        XCTAssertTrue(sourceView.waitToExist(timeout: 10) || revealWholeTranscript())
+        XCTAssertTrue(waitForStableFrame(sourceView))
+        clickHighlightedText(sourceView)
+        let sentBubble = element("side-chat-bubble")
+        XCTAssertTrue(sentBubble.waitToExist(timeout: 8), "Clicking a sent comment's text should reopen its bubble.")
+        let sentComment = element("side-chat-comment-text")
+        XCTAssertTrue(sentComment.waitToExist(timeout: 5), "A sent comment should show in the reopened bubble.")
+        XCTAssertTrue(accessibleLabelOrValue(of: sentComment).contains("Keep this unsent comment"))
+        XCTAssertFalse(element("side-chat-comment-field").exists, "A sent comment can't be edited.")
+        XCTAssertFalse(element("side-chat-comment-save").exists)
+        XCTAssertTrue(element("add-comment-button").exists, "Another comment can still be added on a sent comment's text.")
+        attachElementScreenshot(sentBubble, named: "Sent comment reopened read-only")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(sentBubble.waitForNonExistence(timeout: 5))
+        XCTAssertFalse(element("pending-comment-count").exists, "Reopening a sent comment adds no pending comment.")
 
         element("back-to-board-button").click()
         openTask(named: "Unsent comments")
@@ -10763,6 +10793,113 @@ final class PlayhouseUITests: XCTestCase {
                        "Reopening after the send should show no stale pending comment.")
         XCTAssertEqual(try taskRecord(id: taskID)?["pendingCommentCount"] as? Int, 0)
         attachScreenshot(named: "Sent comment reopened without a pending duplicate")
+    }
+
+    // case-contract: test_side_chat_and_comment_reopen_from_highlighted_text | Clicking commented or side-chatted conversation text, without selecting any, reopens its bubble with that selection's comment and side chat. A side chat opened on a selection is saved on the task with its source range, selected text, provider conversation, model and every answered exchange; closing its bubble keeps it, its text renders purple while no comment covers it and orange once a comment does, and reopening it shows its history and continues the same forked conversation, so its next answer is saved after the earlier ones. An unsent comment opens in an editable field: saving changed text keeps the comment with the new text, and clearing it and saving deletes it, leaving the side chat and its purple text. Through CLI/XPC, conversation side-chats lists the saved side chats, a side chat's source must name a message and a non-empty range, task comments edit changes an unsent comment's text, empty text deletes it, and an unknown comment is not_found. Edits and side chats survive a fresh read and relaunching the app.
+    func test_side_chat_and_comment_reopen_from_highlighted_text() throws {
+        _ = try installClaudeFixture(named: "claude-fixture-side-chat")
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        launchApp(defaultParent: fixture.parent.path)
+        let title = "Reopen side chat"
+        let opened = try openSideChatOnReply(title: title)
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", opened.taskID])["result"] as? [String: Any])
+        let replyID = try XCTUnwrap(ordinaryMessages(try XCTUnwrap(history["messages"] as? [[String: Any]]))
+            .last { ($0["role"] as? String) == "assistant" }?["id"] as? String)
+        // Looked up on each use: the relaunch below replaces the app instance.
+        var reply: XCUIElement { element("assistant-message-\(replyID)").descendants(matching: .staticText).firstMatch }
+        var bubble: XCUIElement { element("side-chat-bubble") }
+        let orangeBefore = orangePixelCount(in: reply.screenshot())
+        let purpleBefore = purplePixelCount(in: reply.screenshot())
+        func savedSideChats() throws -> [[String: Any]] {
+            try XCTUnwrap(try runCLI(["conversation", "side-chats", opened.taskID])["result"] as? [[String: Any]])
+        }
+
+        _ = sendSideChatMessage("What does this mean?", answerIndex: 1, containing: "Side chat about")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5), "Escape should close the side chat bubble.")
+        XCTAssertTrue(waitUntil({ self.purplePixelCount(in: reply.screenshot()) > purpleBefore + 5 }, timeout: 5),
+                      "With its bubble closed, a side chat without a comment should color its text purple.")
+        let saved = try XCTUnwrap(try savedSideChats().first, "Closing the bubble should keep its side chat saved.")
+        XCTAssertEqual((saved["messages"] as? [[String: Any]])?.count, 2)
+        XCTAssertEqual((saved["source"] as? [String: Any])?["messageID"] as? String, replyID, "The side chat should save where its text is.")
+
+        // The side chat's text is purple, and clicking it reopens the bubble with its history.
+        clickHighlightedText(reply)
+        XCTAssertTrue(bubble.waitToExist(timeout: 8), "Clicking side-chatted text should reopen its bubble.")
+        XCTAssertGreaterThan(purplePixelCount(in: reply.screenshot()), purpleBefore + 5, "A side chat without a comment should color its text purple.")
+        XCTAssertLessThan(orangePixelCount(in: reply.screenshot()), orangeBefore + 5, "Side-chatted text without a comment is not orange.")
+        XCTAssertEqual(element("side-chat-user-message-0").label, "What does this mean?", "The reopened bubble should show the saved question.")
+        XCTAssertTrue(element("side-chat-assistant-message-1").label.contains("Side chat about"), "The reopened bubble should show the saved answer.")
+        XCTAssertFalse(element("side-chat-comment-field").exists, "A side chat without a comment has no comment to edit.")
+        XCTAssertTrue(element("add-comment-button").exists, "A side chat without a comment can still add one.")
+        attachScreenshot(named: "Side chat reopened from its purple text")
+        _ = sendSideChatMessage("And then?", answerIndex: 3, containing: "Side chat follow-up 2 on")
+
+        // Adding a comment on the same text turns it orange.
+        let input = element("side-chat-input")
+        input.click()
+        input.typeText("Explain the parser here")
+        element("add-comment-button").click()
+        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5), "Add comment should close the bubble.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: opened.taskID)?["pendingCommentCount"] as? Int) == 1 }, timeout: 10))
+        XCTAssertTrue(waitUntil({ self.orangePixelCount(in: reply.screenshot()) > orangeBefore + 5 }, timeout: 5),
+                      "Text with both a comment and a side chat should be orange.")
+        XCTAssertLessThan(purplePixelCount(in: reply.screenshot()), purpleBefore + 5, "The comment's orange should cover the side chat's purple.")
+        attachElementScreenshot(reply, named: "Commented side chat text renders orange")
+
+        // Clicking it reopens the comment, editable, beside the side chat's history.
+        clickHighlightedText(reply)
+        XCTAssertTrue(bubble.waitToExist(timeout: 8), "Clicking commented text should reopen its bubble.")
+        let commentField = element("side-chat-comment-field")
+        XCTAssertTrue(commentField.waitToExist(timeout: 5), "The reopened bubble should show the comment in an editable field.")
+        XCTAssertEqual(commentField.value as? String, "Explain the parser here")
+        XCTAssertTrue(element("side-chat-assistant-message-3").label.contains("Side chat follow-up 2 on"), "The side chat history should show beside the comment.")
+        XCTAssertFalse(element("add-comment-button").exists, "An existing comment is edited in its field, not added again.")
+        XCTAssertFalse(element("side-chat-comment-save").isEnabled, "An unchanged comment has nothing to save.")
+        attachScreenshot(named: "Comment and side chat reopened together")
+        commentField.click()
+        commentField.typeKey("a", modifierFlags: .command)
+        commentField.typeText("Explain it again")
+        attachElementScreenshot(bubble, named: "Comment edited in the reopened bubble")
+        element("side-chat-comment-save").click()
+        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5), "Saving the comment should close the bubble.")
+        XCTAssertTrue(accessibleLabelOrValue(of: element("pending-comment-count")).contains("1 comment"), "Editing keeps the one comment.")
+
+        // The edit and the side chat survive relaunching.
+        Thread.sleep(forTimeInterval: 1)
+        relaunchApp()
+        openTask(named: title)
+        XCTAssertTrue(reply.waitToExist(timeout: 10) || revealWholeTranscript())
+        XCTAssertTrue(waitForStableFrame(reply))
+        // The saved side chats load beside the transcript; the bubble opens with what is loaded.
+        Thread.sleep(forTimeInterval: 1)
+        clickHighlightedText(reply)
+        XCTAssertTrue(bubble.waitToExist(timeout: 8), "Commented text should reopen its bubble after relaunching.")
+        XCTAssertTrue(commentField.waitToExist(timeout: 5))
+        XCTAssertEqual(commentField.value as? String, "Explain it again", "The edited comment should be saved.")
+        XCTAssertTrue(element("side-chat-assistant-message-3").waitToExist(timeout: 5), "The side chat history should survive relaunching.")
+        attachScreenshot(named: "Edited comment and side chat after relaunching")
+
+        // Clearing the comment and saving deletes it; the side chat stays, purple again.
+        commentField.click()
+        commentField.typeKey("a", modifierFlags: .command)
+        commentField.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(element("side-chat-comment-save").isEnabled, "An emptied comment can be saved to delete it.")
+        element("side-chat-comment-save").click()
+        XCTAssertTrue(bubble.waitForNonExistence(timeout: 5), "Saving an empty comment should close the bubble.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: opened.taskID)?["pendingCommentCount"] as? Int) == 0 }, timeout: 10),
+                      "Saving an empty comment should delete it.")
+        XCTAssertFalse(element("pending-comment-count").exists, "No pending comment should remain.")
+        XCTAssertTrue(waitUntil({ self.purplePixelCount(in: reply.screenshot()) > purpleBefore + 5 }, timeout: 5),
+                      "Deleting the comment should leave the side chat's purple text.")
+        XCTAssertLessThan(orangePixelCount(in: reply.screenshot()), orangeBefore + 5)
+        attachElementScreenshot(reply, named: "Deleted comment leaves the side chat purple")
+        clickHighlightedText(reply)
+        XCTAssertTrue(bubble.waitToExist(timeout: 8))
+        XCTAssertFalse(element("side-chat-comment-field").exists, "The deleted comment should not reopen.")
+        XCTAssertEqual(element("side-chat-user-message-2").label, "And then?", "The side chat should still reopen with its history.")
+        XCTAssertEqual((try savedSideChats().first?["messages"] as? [[String: Any]])?.count, 4)
+        app.typeKey(.escape, modifierFlags: [])
     }
 
     // case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged.
@@ -25957,6 +26094,25 @@ final class PlayhouseUITests: XCTestCase {
 
     private func orangePixelCount(in screenshot: XCUIScreenshot) -> Int {
         pixelCount(in: screenshot.image, where: Self.isOrangePixel)
+    }
+
+    private func purplePixelCount(in screenshot: XCUIScreenshot) -> Int {
+        pixelCount(in: screenshot.image) { color in
+            color.blueComponent > 0.5 && color.redComponent > color.greenComponent + 0.15 && color.blueComponent > color.greenComponent + 0.25
+        }
+    }
+
+    /// Clicks a few points into the first characters of highlighted text, selecting nothing; the
+    /// bubble reopens once the double-click interval passes, so callers wait for it. The text is
+    /// scrolled into view first: after a send the transcript follows the newest turn, and a click
+    /// on text above the viewport would land on whatever covers that point.
+    private func clickHighlightedText(_ text: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        let scrollView = element("conversation-scroll-view")
+        if scrollView.exists {
+            XCTAssertTrue(scrollFullyIntoView(text, in: scrollView), "The highlighted text should scroll into view.", file: file, line: line)
+            waitForStableFrame(text)
+        }
+        text.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 12, dy: 12)).click()
     }
 
     private func orangePixelFillRatio(in screenshot: XCUIScreenshot) -> Double {
