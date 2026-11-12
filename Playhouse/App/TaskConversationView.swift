@@ -2349,8 +2349,8 @@ struct TaskConversationView: View {
                     changeSection(title: "Changes", entries: changeInventory.unviewed)
                 }
                 .padding(.vertical, 12)
+                .hoverRevealScrollers()
             }
-            .scrollIndicators(.visible)
             .accessibilityIdentifier("workspace-changes-list")
         }
     }
@@ -3603,6 +3603,7 @@ struct TaskConversationView: View {
                     .id(Self.conversationScrollEndID)
                     .accessibilityHidden(true)
                 }
+                .hoverRevealScrollers()
                 .background {
                     // The scroll observer reports this geometry from macOS 15
                     // on; before that the content's own frame in the scroll's
@@ -3623,7 +3624,6 @@ struct TaskConversationView: View {
                 }
             }
             .coordinateSpace(name: Self.conversationScrollCoordinateSpace)
-            .scrollIndicators(.visible)
             .accessibilityIdentifier("conversation-scroll-view")
             .accessibilityValue(hasLoadedConversation
                 ? "Showing latest \(renderedConversationMessages.count) of \(conversationMessages.count + earlierStoredMessageCount) messages"
@@ -4158,6 +4158,7 @@ struct TaskConversationView: View {
                     .padding(24)
                     .frame(maxWidth: 820)
                     .frame(maxWidth: .infinity)
+                    .hoverRevealScrollers()
                 }
                 .accessibilityIdentifier("subagent-conversation-scroll-view")
             }
@@ -5187,6 +5188,7 @@ struct TaskConversationView: View {
                             }
                         }
                     }
+                    .hoverRevealScrollers()
                 }.accessibilityIdentifier("pending-chat-images")
             }
             composerNotices

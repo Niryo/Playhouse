@@ -613,6 +613,7 @@ private struct SkillMarkdownPreview: View {
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .hoverRevealScrollers()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 6))
@@ -744,6 +745,7 @@ struct SkillTextEditor: NSViewRepresentable {
         textView.string = text
         textView.delegate = context.coordinator
         textView.setAccessibilityIdentifier(identifier)
+        HoverRevealScrollers.install(on: scrollView)
         return scrollView
     }
 
@@ -845,6 +847,7 @@ private struct RulesSectionView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) { content }
                     .padding(20)
+                    .hoverRevealScrollers()
             }
             .accessibilityIdentifier("rules-list")
         }

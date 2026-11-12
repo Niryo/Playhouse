@@ -59,6 +59,7 @@ def source_fingerprint():
             "Playhouse/BridgeTests/BridgeTestContracts.json",
             "scripts/check-button-feedback.py",
             "scripts/check-e2e-build-cache.py",
+            "scripts/check-hover-scrollers.py",
             "scripts/check-test-parity.py",
             "scripts/prepare-e2e-fixture.py",
             "scripts/seed-legacy-task-store.swift",
