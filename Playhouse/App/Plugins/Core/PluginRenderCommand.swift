@@ -28,7 +28,8 @@ struct PluginRenderCommand: Sendable {
     var baseProps: [String: PluginValue] = [:]
     var propsJSON: String?
     /// Answers the plugin's `Playhouse.bridge` calls; without one they are
-    /// rejected. `Playhouse.ui` calls are recorded and resolved with null.
+    /// rejected. `Playhouse.ui` calls are recorded and resolved with null;
+    /// `fetch` calls reach the network as they do in the window.
     var bridge: (@Sendable (String, PluginValue) async throws -> PluginValue)?
     /// An installed plugin's placement, which decides what its host refuses.
     var placement: PluginPlacement?
@@ -124,6 +125,8 @@ struct PluginRenderCommand: Sendable {
                     }
                 } else if call.kind == "bridge" {
                     result = .failure(PluginHostError(code: "unavailable", message: "Bridge calls are not available here."))
+                } else if call.kind == "net" {
+                    result = await PluginNetwork.fetch(call.arguments)
                 } else {
                     result = .success(.null)
                 }

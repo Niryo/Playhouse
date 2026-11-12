@@ -106,6 +106,8 @@ struct PluginSurfaceView: View {
             } catch {
                 return .failure(PluginHostError(code: "operation_failed", message: error.localizedDescription))
             }
+        case ("net", "fetch"):
+            return await PluginNetwork.fetch(call.arguments)
         case ("ui", "close"):
             actions.close()
         case ("ui", "openTask"):

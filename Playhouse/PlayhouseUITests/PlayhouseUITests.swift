@@ -3,6 +3,7 @@ import CoreGraphics
 import CryptoKit
 import Darwin
 import Foundation
+import Network
 import XCTest
 import SQLite3
 import Vision
@@ -331,6 +332,112 @@ final class DrainingPipe: @unchecked Sendable {
         _ = finished.wait(timeout: .now() + 10)
         lock.lock(); defer { lock.unlock() }
         return String(data: buffer, encoding: .utf8) ?? ""
+    }
+}
+
+/// The plugin fetch case's local HTTP server, inside the test process: the sandboxed
+/// runner can't start `python3` in the VM, but it may listen on loopback. It answers
+/// the routes of `scripts/fixtures/plugin-fetch-server.py` that the UI case reaches.
+private final class PluginFetchServer: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "plugin-fetch-server")
+    let port: UInt16
+
+    init() throws {
+        listener = try Self.loopbackListener()
+        listener.newConnectionHandler = { [queue] connection in
+            connection.start(queue: queue)
+            Self.receive(connection, buffer: Data())
+        }
+        port = try Self.start(listener, queue: queue)
+    }
+
+    deinit { listener.cancel() }
+
+    /// A loopback port nothing listens on: bound, read, then released.
+    static func closedPort() throws -> UInt16 {
+        let probe = try loopbackListener()
+        let port = try start(probe, queue: DispatchQueue(label: "plugin-fetch-probe"))
+        probe.cancel()
+        return port
+    }
+
+    private static func loopbackListener() throws -> NWListener {
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+        return try NWListener(using: parameters)
+    }
+
+    private static func start(_ listener: NWListener, queue: DispatchQueue) throws -> UInt16 {
+        let ready = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { state in
+            switch state {
+            case .ready, .failed, .cancelled: ready.signal()
+            default: break
+            }
+        }
+        if listener.newConnectionHandler == nil { listener.newConnectionHandler = { $0.cancel() } }
+        listener.start(queue: queue)
+        guard ready.wait(timeout: .now() + 10) == .success, let port = listener.port?.rawValue, port != 0 else {
+            throw NSError(domain: "PluginFetchServer", code: 1, userInfo: [NSLocalizedDescriptionKey: "The fetch fixture server couldn't listen on 127.0.0.1."])
+        }
+        return port
+    }
+
+    /// Reads one request (headers, then Content-Length bytes of body) and answers it.
+    private static func receive(_ connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, isComplete, error in
+            var buffer = buffer
+            if let data { buffer.append(data) }
+            if let end = buffer.range(of: Data("\r\n\r\n".utf8)) {
+                let head = String(decoding: buffer[..<end.lowerBound], as: UTF8.self)
+                let lines = head.components(separatedBy: "\r\n")
+                var headers: [String: String] = [:]
+                for line in lines.dropFirst() {
+                    guard let colon = line.firstIndex(of: ":") else { continue }
+                    headers[line[..<colon].lowercased()] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+                }
+                let length = Int(headers["content-length"] ?? "") ?? 0
+                let body = buffer[end.upperBound...]
+                if body.count >= length {
+                    let parts = (lines.first ?? "").split(separator: " ")
+                    let method = parts.first.map(String.init) ?? ""
+                    let path = parts.count > 1 ? String(parts[1]) : "/"
+                    respond(connection, method: method, path: path, headers: headers, body: String(decoding: body.prefix(length), as: UTF8.self))
+                    return
+                }
+            }
+            if isComplete || error != nil { connection.cancel(); return }
+            receive(connection, buffer: buffer)
+        }
+    }
+
+    private static func respond(_ connection: NWConnection, method: String, path: String, headers: [String: String], body: String) {
+        var status = 404
+        var reason = "Not Found"
+        var text = "unexpected"
+        var contentType = "text/plain"
+        var extra: [String] = []
+        switch (method, path) {
+        case ("GET", "/greeting"):
+            (status, reason, text, contentType) = (200, "OK", #"{"message": "hello from the fixture"}"#, "application/json")
+            extra.append("X-Fixture: playhouse")
+        case ("POST", "/echo"):
+            let echo: [String: Any] = ["method": method, "token": headers["x-token"] ?? NSNull(), "contentType": headers["content-type"] ?? NSNull(), "body": body]
+            let json = (try? JSONSerialization.data(withJSONObject: echo)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+            (status, reason, text, contentType) = (200, "OK", json, "application/json")
+        case ("GET", "/missing"):
+            text = "nothing here"
+        case ("GET", "/redirect"):
+            (status, reason, text) = (302, "Found", "")
+            extra.append("Location: /greeting")
+        default:
+            break
+        }
+        let payload = Data(text.utf8)
+        let head = (["HTTP/1.1 \(status) \(reason)", "Content-Type: \(contentType)", "Content-Length: \(payload.count)", "Connection: close"] + extra)
+            .joined(separator: "\r\n") + "\r\n\r\n"
+        connection.send(content: Data(head.utf8) + payload, completion: .contentProcessed { _ in connection.cancel() })
     }
 }
 
@@ -22897,6 +23004,95 @@ final class PlayhouseUITests: XCTestCase {
         sheet.descendants(matching: .any)["plugin-close"].click()
         XCTAssertTrue(waitForDisappearance(sheet, timeout: 5), "Playhouse.ui.close dismisses the sheet.")
         XCTAssertEqual(app.sheets.count, 0)
+    }
+
+    /// The same fetch plugin the CLI case renders headlessly (`PLUGIN_FETCH_SOURCE`).
+    private static let pluginFetchSource = """
+    function Fetcher() {
+      var greeting = React.useState("loading");
+      var status = React.useState("idle");
+      React.useEffect(function () {
+        fetch(BASE + "/greeting").then(function (response) { return response.json(); })
+          .then(function (body) { greeting[1](body.message); }, function (error) { greeting[1]("error: " + error.code); });
+      }, []);
+      function report(promise) {
+        promise.then(function (text) { status[1](text); }, function (error) { status[1]("error: " + error.code); });
+      }
+      return h(Stack, { spacing: 6 },
+        h(Text, { testID: "fetch-greeting" }, greeting[0]),
+        h(Text, { testID: "fetch-status" }, status[0]),
+        h(Button, { testID: "fetch-get", onPress: function () {
+          report(fetch(BASE + "/greeting").then(function (r) {
+            return r.json().then(function (body) { return r.status + " " + r.headers.get("X-Fixture") + " " + body.message; });
+          }));
+        } }, h(Text, null, "Get")),
+        h(Button, { testID: "fetch-post", onPress: function () {
+          report(fetch(BASE + "/echo", { method: "POST", headers: { "X-Token": "secret", "Content-Type": "application/json" }, body: JSON.stringify({ n: 1 }) })
+            .then(function (r) { return r.json(); })
+            .then(function (echo) { return echo.method + " " + echo.token + " " + echo.body; }));
+        } }, h(Text, null, "Post")),
+        h(Button, { testID: "fetch-missing", onPress: function () {
+          report(fetch(BASE + "/missing").then(function (r) {
+            return r.text().then(function (text) { return r.status + " " + r.ok + " " + text; });
+          }));
+        } }, h(Text, null, "Missing")),
+        h(Button, { testID: "fetch-redirect", onPress: function () {
+          report(fetch(BASE + "/redirect").then(function (r) { return r.redirected + " " + r.url.split("/").pop() + " " + r.status; }));
+        } }, h(Text, null, "Redirect")),
+        h(Button, { testID: "fetch-bare", onPress: function () {
+          report(fetch(BASE).then(function (r) { return r.redirected + " " + r.status; }));
+        } }, h(Text, null, "Bare")),
+        h(Button, { testID: "fetch-refused", onPress: function () {
+          report(fetch(CLOSED + "/greeting").then(function () { return "reached"; }));
+        } }, h(Text, null, "Refused")),
+        h(Button, { testID: "fetch-file", onPress: function () {
+          report(fetch("file:///etc/hosts").then(function () { return "read"; }));
+        } }, h(Text, null, "File")));
+    }
+    Playhouse.render(h(Fetcher));
+    """
+
+    /// Starts the fetch fixture server for this case and returns its base URL and a closed port's.
+    private func startPluginFetchServer() throws -> (base: String, closed: String) {
+        let server = try PluginFetchServer()
+        addTeardownBlock { withExtendedLifetime(server) {} }
+        return ("http://127.0.0.1:\(server.port)", "http://127.0.0.1:\(try PluginFetchServer.closedPort())")
+    }
+
+    // case-contract: test_plugin_fetch_reaches_the_network | Plugins have a fetch(url, options) global that makes HTTP and HTTPS requests from every placement, answered by the same core in the window and in `plugin render`; the cases reach a local fixture server instead of the internet. A fetch on mount shows the server's greeting; a GET resolves with its status, a response header read case-insensitively and a JSON body; a POST sends its method, headers and text body, which the server receives; a 404 resolves with ok false and its text body; a redirect is followed and reported as redirected with the final URL, while a URL with no path is not; a refused connection rejects with network_error; and a non-http URL such as file:// rejects with invalid_argument without any request. `plugin render` records each fetch in hostCalls as net.fetch with its arguments and result, and `plugin refresh` keeps a plugin that fetches on mount valid. In the window a page plugin from the board's sidebar shows the fetched greeting and each button's result.
+    func test_plugin_fetch_reaches_the_network() throws {
+        let server = try startPluginFetchServer()
+        let source = "var BASE = \"\(server.base)\";\nvar CLOSED = \"\(server.closed)\";\n" + Self.pluginFetchSource
+        try writeInstalledPlugin("fetcher", source: source, placement: "mainSidebar", presentation: "page", name: "Fetcher", icon: "network")
+        launchApp(defaultParent: fixture.parent.path)
+        let plugins = try XCTUnwrap((try runCLI(["plugin", "refresh"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
+        XCTAssertEqual(plugins.map { $0["valid"] as? Bool }, [true], "A plugin that fetches on mount stays valid: \(plugins)")
+
+        let entry = element("plugin-entry-fetcher")
+        XCTAssertTrue(entry.waitToExist(timeout: 15))
+        entry.click()
+        let page = element("plugin-surface-fetcher")
+        XCTAssertTrue(page.waitToExist(timeout: 10), "The fetch plugin opens.")
+        XCTAssertTrue(waitForStableFrame(page), "The page finishes sliding in before it is clicked.")
+        let greeting = page.descendants(matching: .any)["fetch-greeting"]
+        XCTAssertTrue(waitUntil({ self.pluginText(greeting) == "hello from the fixture" }, timeout: 15),
+                      "The plugin's fetch on mount reaches the server from the window.")
+        let status = page.descendants(matching: .any)["fetch-status"]
+        func press(_ testID: String, expecting expected: String, _ message: String) {
+            page.descendants(matching: .any)[testID].click()
+            XCTAssertTrue(waitUntil({ self.pluginText(status) == expected }, timeout: 15), "\(message) Status: \(pluginText(status))")
+        }
+        press("fetch-get", expecting: "200 playhouse hello from the fixture", "A GET resolves with its status, a header and a JSON body.")
+        attachScreenshot(named: "A plugin page showing what it fetched from the network")
+        press("fetch-post", expecting: #"POST secret {"n":1}"#, "A POST sends its method, header and body to the server.")
+        attachScreenshot(named: "The plugin's POST, echoed back by the server")
+        press("fetch-missing", expecting: "404 false nothing here", "A 404 resolves with ok false and its text.")
+        press("fetch-redirect", expecting: "true greeting 200", "A redirect is followed.")
+        press("fetch-bare", expecting: "false 404", "A URL with no path is not reported as redirected.")
+        press("fetch-refused", expecting: "error: network_error", "A refused connection rejects with network_error.")
+        attachScreenshot(named: "A plugin's fetch to a closed port rejected with network_error")
+        press("fetch-file", expecting: "error: invalid_argument", "A file URL is refused.")
+        attachScreenshot(named: "A plugin's fetch refused for a file URL")
     }
 
     // case-contract: test_debug_highlight_native_atoms_outlines_atoms | Debug ▸ Highlight Native Atoms outlines every atom view without moving it, so UI built from plugin atoms reads apart from plain SwiftUI. `plugin render` reports the container atoms (Stack, Panel, Card, Scroll, Disclosure, Overlay, Popover, Modal, Page, SidePanel), every one of them a known atom, and every other atom is a leaf. With the item off no atom carries an outline; turned on, the board's task card is outlined live, its Card as a container and its Text as a leaf, at the same frame as with it off, and the Plugin Catalog outlines each atom type it renders, including Spacer, Card and PillPicker, as a container or a leaf to match, the Card and the PillPicker keep the same frames as with it off, and hovering a Text atom shows a label naming its type that goes away when the pointer leaves. The setting persists: after a relaunch the reopened catalog is still outlined, and turning the item off removes every outline.

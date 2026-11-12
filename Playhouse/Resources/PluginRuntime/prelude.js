@@ -235,6 +235,56 @@
       });
     };
 
+    // fetch(url, {method, headers, body, timeout}): one HTTP or HTTPS request,
+    // answered by the host (PluginNetwork). Bodies are text; an HTTP error
+    // status still resolves (ok is false), and a request that can't be made
+    // rejects with an Error carrying code and message.
+    function fetchHeaders(fields) {
+      var names = Object.keys(fields);
+      return {
+        get: function (name) {
+          var value = fields[String(name).toLowerCase()];
+          return value === undefined ? null : value;
+        },
+        has: function (name) { return Object.prototype.hasOwnProperty.call(fields, String(name).toLowerCase()); },
+        keys: function () { return names.slice(); },
+        forEach: function (callback) { names.forEach(function (name) { callback(fields[name], name); }); },
+        toJSON: function () { return fields; }
+      };
+    }
+    function fetch(input, init) {
+      init = init || {};
+      var headers = {};
+      var given = init.headers;
+      if (given && typeof given.forEach === "function" && !Array.isArray(given)) {
+        given.forEach(function (value, name) { headers[String(name)] = String(value); });
+      } else if (Array.isArray(given)) {
+        given.forEach(function (pair) { headers[String(pair[0])] = String(pair[1]); });
+      } else if (given) {
+        Object.keys(given).forEach(function (name) { headers[name] = String(given[name]); });
+      }
+      var request = {
+        url: String(input && input.url !== undefined ? input.url : input),
+        method: String(init.method || "GET"),
+        headers: headers
+      };
+      if (init.body !== undefined && init.body !== null) request.body = String(init.body);
+      if (init.timeout !== undefined) request.timeout = Number(init.timeout);
+      return hostCall("net", "fetch", request).then(function (answer) {
+        var body = answer.body;
+        return {
+          ok: answer.status >= 200 && answer.status < 300,
+          status: answer.status,
+          statusText: answer.statusText,
+          url: answer.url,
+          redirected: answer.redirected,
+          headers: fetchHeaders(answer.headers || {}),
+          text: function () { return Promise.resolve(body); },
+          json: function () { return new Promise(function (resolve) { resolve(JSON.parse(body)); }); }
+        };
+      });
+    }
+
     // Swift replaces the props when the placement's context changes.
     var propsListeners = [];
     global.__playhouseSetProps = function (props) {
@@ -281,6 +331,7 @@
     global.React = React;
     global.h = React.createElement;
     global.Playhouse = Playhouse;
+    global.fetch = fetch;
     // Each atom is also a global string constant, so plugins write h(Text, …).
     atomNames.forEach(function (name) { global[name] = name; });
   };

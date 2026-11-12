@@ -337,6 +337,9 @@ enum PluginHostRules {
                 return PluginHostError(code: "unavailable", message: "There is no composer at the \(placement.title) placement.")
             }
             return nil
+        case "net":
+            // fetch reaches the network from every placement; `PluginNetwork` checks its URL.
+            return name == "fetch" ? nil : PluginHostError(code: "invalid_argument", message: "Unknown host call net.\(name).")
         default:
             return PluginHostError(code: "invalid_argument", message: "Unknown host call \(kind).\(name).")
         }
