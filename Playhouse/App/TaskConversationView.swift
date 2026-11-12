@@ -2495,6 +2495,11 @@ struct TaskConversationView: View {
                 .fill(Color.primary.opacity(0.07))
                 .frame(height: 1)
 
+            // Plugins lead the sidebar's sections, above Changes.
+            PluginSlot(placement: .conversationSidebar, props: pluginProps, actions: pluginActions, open: { openConversationPlugin = $0 }, add: startPluginTask)
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+
             changesSectionHeader
 
             if isChangesSectionCollapsed {
@@ -2504,10 +2509,6 @@ struct TaskConversationView: View {
             }
 
             Spacer(minLength: 0)
-
-            PluginSlot(placement: .conversationSidebar, props: pluginProps, actions: pluginActions, open: { openConversationPlugin = $0 }, add: startPluginTask)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 8)
 
             Rectangle()
                 .fill(Color.primary.opacity(0.07))
