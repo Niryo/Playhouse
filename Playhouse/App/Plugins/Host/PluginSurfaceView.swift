@@ -51,6 +51,7 @@ struct PluginSurfaceView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(14)
+                .hoverRevealScrollers()
             }
         }
         .accessibilityElement(children: .contain)

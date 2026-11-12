@@ -759,6 +759,7 @@ struct AtomScroll<Content: View>: View {
             }
             .padding(CGFloat(props.inset ?? 0))
             .frame(maxWidth: .infinity, alignment: .leading)
+            .hoverRevealScrollers()
         }
         .coordinateSpace(name: space)
         .background(GeometryReader { proxy in

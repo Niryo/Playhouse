@@ -152,10 +152,6 @@ struct KanbanBoardView: View {
     @State private var boardSearchText = ""
     @FocusState private var isBoardSearchFocused: Bool
     @State private var isShowingChatSidebar = false
-    /// The thickness a legacy (always visible) scroller takes from the board's visible area.
-    @State private var boardScrollerInset = KanbanBoardView.legacyScrollerInset()
-    /// The vertical scroller's thickness in the current style, which the Done drawer stays clear of.
-    @State private var boardScrollerWidth = KanbanBoardView.currentScrollerWidth()
     @State private var chatTask: StandaloneChat?
     @State private var isOpeningChatSidebar = false
     /// A modal, sidebar or page plugin opened from the board's sidebar.
@@ -380,18 +376,6 @@ struct KanbanBoardView: View {
         }
     }
 
-    /// Before macOS 15 the board can't anchor smaller content top leading, so it fills the full
-    /// frame instead: a legacy scroller then gets a few points of needless travel, but the clip
-    /// origin never goes negative, which is what desynchronized hit testing.
-    private static func legacyScrollerInset() -> CGFloat {
-        guard #available(macOS 15.0, *), NSScroller.preferredScrollerStyle == .legacy else { return 0 }
-        return NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
-    }
-
-    private static func currentScrollerWidth() -> CGFloat {
-        NSScroller.scrollerWidth(for: .regular, scrollerStyle: NSScroller.preferredScrollerStyle)
-    }
-
     private var boardContent: some View {
         ZStack(alignment: .topLeading) {
             VStack(spacing: 0) {
@@ -426,9 +410,8 @@ struct KanbanBoardView: View {
                             // horizontal scroll nudge followed by a content-height change, SwiftUI's hit
                             // testing lost that offset: the board drew centered while clicks resolved as if
                             // it were flush left, so buttons stopped responding until the window was resized.
-                            // The minimum size tracks the visible area, not the reader's frame: legacy
-                            // scrollers take their thickness out of the visible area, and content sized to the
-                            // full frame would show a needless scroll bar.
+                            // The board's scrollers always float over the content (see HoverRevealScrollers),
+                            // so the visible area is the reader's full frame.
                             GeometryReader { viewport in
                                 ScrollView([.horizontal, .vertical]) {
                                     HStack(alignment: .top, spacing: 16) {
@@ -467,10 +450,8 @@ struct KanbanBoardView: View {
                                     .padding(.bottom, 28)
                                     // Room for the Done drawer, so the last column scrolls clear of it.
                                     .padding(.trailing, DoneDropDrawer.gutterWidth)
-                                    .frame(
-                                        minWidth: max(0, viewport.size.width - boardScrollerInset),
-                                        minHeight: max(0, viewport.size.height - boardScrollerInset)
-                                    )
+                                    .frame(minWidth: viewport.size.width, minHeight: viewport.size.height)
+                                    .hoverRevealScrollers()
                                 }
                                 .modifier(TopLeadingScrollAlignment())
                                 .background(WorkspaceTheme.windowBackground)
@@ -485,12 +466,8 @@ struct KanbanBoardView: View {
                                         isActive: $isDoneTargetActive,
                                         onDrop: { moveTask(id: $0, to: .done) }
                                     )
-                                    .padding(.trailing, boardScrollerWidth)
+                                    .padding(.trailing, HoverRevealScrollers.scrollerWidth)
                                 }
-                            }
-                            .onReceive(NotificationCenter.default.publisher(for: NSScroller.preferredScrollerStyleDidChangeNotification)) { _ in
-                                boardScrollerInset = Self.legacyScrollerInset()
-                                boardScrollerWidth = Self.currentScrollerWidth()
                             }
                         }
                     }
@@ -2057,6 +2034,7 @@ private struct RawInputSheet: View {
                     }
                 }
                 .padding(.trailing, 8)
+                .hoverRevealScrollers()
             }
             .accessibilityIdentifier("raw-input-list")
             .onChange(of: scrollTarget) { _, target in
@@ -2415,6 +2393,7 @@ private struct RawInputTextPane: View {
                     }
                 }
                 .padding(.trailing, 8)
+                .hoverRevealScrollers()
             }
             .accessibilityIdentifier("raw-input-text")
         }

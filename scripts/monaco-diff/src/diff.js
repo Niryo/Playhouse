@@ -37,7 +37,12 @@ function defineDiffTheme(theme) {
       "diffEditor.removedLineBackground": isDark ? "#4b2529" : "#ffebe9",
       "diffEditor.removedTextBackground": isDark ? "#f8514966" : "#fdb8c0",
       "diffEditorGutter.insertedLineBackground": isDark ? "#2ea04366" : "#acf2bd",
-      "diffEditorGutter.removedLineBackground": isDark ? "#f8514966" : "#fdb8c0"
+      "diffEditorGutter.removedLineBackground": isDark ? "#f8514966" : "#fdb8c0",
+      // Monaco already shows its sliders only while the editor is hovered; match the app's
+      // native scrollers with a subdued resting slider that turns opaque while dragged.
+      "scrollbarSlider.background": isDark ? "#79797938" : "#64646438",
+      "scrollbarSlider.hoverBackground": isDark ? "#79797966" : "#64646466",
+      "scrollbarSlider.activeBackground": isDark ? "#bfbfbfb3" : "#000000a6"
     }
   });
   return themeName;

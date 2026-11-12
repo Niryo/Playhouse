@@ -89,6 +89,8 @@ struct PluginCatalogView: View {
                         Text(atom.rawValue)
                             .tag(Page.atom(atom))
                             .accessibilityIdentifier("plugin-catalog-atom-\(atom.rawValue)")
+                            // The always-populated first section carries the List's scroller reveal.
+                            .hoverRevealScrollers()
                     }
                 }
                 Section("Examples") {
@@ -121,28 +123,31 @@ struct PluginCatalogView: View {
             .navigationSplitViewColumnWidth(min: 170, ideal: 190)
         } detail: {
             ScrollView {
-                switch selection {
-                case .atom(let atom)?:
-                    AtomCatalogPage(atom: atom).id(atom)
-                case .taskItem?:
-                    TaskItemComparison()
-                case .agentsInfo?:
-                    AgentsInfoComparison()
-                case .kanbanColumn?:
-                    KanbanColumnComparison()
-                case .tokenStats?:
-                    TokenStatsComparison()
-                case .skillsPage?:
-                    SkillsPageComparison()
-                case .repositoryChips?:
-                    RepositoryChipsComparison()
-                case .composer?:
-                    ComposerComparison()
-                case .doneArchive?:
-                    DoneArchiveComparison()
-                case nil:
-                    EmptyView()
+                Group {
+                    switch selection {
+                    case .atom(let atom)?:
+                        AtomCatalogPage(atom: atom).id(atom)
+                    case .taskItem?:
+                        TaskItemComparison()
+                    case .agentsInfo?:
+                        AgentsInfoComparison()
+                    case .kanbanColumn?:
+                        KanbanColumnComparison()
+                    case .tokenStats?:
+                        TokenStatsComparison()
+                    case .skillsPage?:
+                        SkillsPageComparison()
+                    case .repositoryChips?:
+                        RepositoryChipsComparison()
+                    case .composer?:
+                        ComposerComparison()
+                    case .doneArchive?:
+                        DoneArchiveComparison()
+                    case nil:
+                        EmptyView()
+                    }
                 }
+                .hoverRevealScrollers()
             }
         }
     }
@@ -523,6 +528,7 @@ private struct SkillsPageComparison: View {
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("plugin-catalog-native-skills-page")
                     }
+                    .hoverRevealScrollers()
                 }
                 .accessibilityIdentifier("plugin-catalog-skills-page-scroll")
             }
