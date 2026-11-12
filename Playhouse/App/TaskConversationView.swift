@@ -838,8 +838,8 @@ private struct SideChatBubble: View {
 
     /// The bubble opens compact and grows as the chat does: wider once it has messages, taller
     /// with each one, until `maxTranscriptHeight`, after which the chat scrolls.
-    static let compactWidth: CGFloat = 340
-    static let width: CGFloat = 440
+    static let compactWidth: CGFloat = 442
+    static let width: CGFloat = 572
     static let maxTranscriptHeight: CGFloat = 340
 
     private struct TranscriptHeightKey: PreferenceKey {
