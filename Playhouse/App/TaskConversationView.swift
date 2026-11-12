@@ -5183,11 +5183,11 @@ struct TaskConversationView: View {
                     SelectableAnnotationText(
                         text: visibleText,
                         highlightedRanges: annotations.filter { $0.messageID == message.id }.compactMap { userMessageRange($0.source) },
+                        mentionRanges: mentions.map(\.range),
                         chatRanges: sideChatRanges(messageID: message.id, rangeOf: userMessageRange),
                         onHighlightClick: { range, bounds in
                             reopenHighlight(range, bounds: bounds, messageID: message.id, anchorID: 0, rangeOf: userMessageRange)
                         },
-                        mentionRanges: mentions.map(\.range),
                         textColor: isPlayhouseSent ? .secondaryLabelColor : .labelColor,
                         onSelection: { range, selectedText, bounds in
                             currentTextSelection = selectedText.isEmpty ? nil : AnnotationSelection(
