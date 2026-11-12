@@ -20143,6 +20143,221 @@ final class PlayhouseUITests: XCTestCase {
         return (history["turns"] as? [[String: Any]] ?? []).filter { ($0["userText"] as? String)?.isEmpty == false }
     }
 
+    // case-contract: test_mentions_menu_lists_expands_and_remembers_recent | Typing @ in the composer opens a mention menu that lists, in order, the task's enabled rules, then its skills, MCP servers, agents (Claude Code's .claude/agents and Codex's .codex/agents, an agent both define being one item that names both files, the running provider's first), repositories (the task's own and those under the repository root), then other board tasks; before anything was mentioned, an empty query shows that whole list. Typing after the @ filters it, items whose handle starts with the query first, and a query nothing matches shows an empty state. The arrow keys move the highlight, Return or Tab inserts the highlighted item, and a click inserts the clicked one, as @handle drawn in the accent color; Escape closes the menu while keeping the typed text. Sending appends a <playhouse-mentions> block naming each mentioned item with its full path or details (for the task's repository, also its worktree), only for known handles that start a word, and the provider receives it while the transcript shows only the typed message, once, with its mentions drawn in the accent color, and the task's saved prompt keeps the typed text. Steering an active Codex turn expands its mentions the same way, exactly once, and shows the steer once, while a steer that misses its turn is queued as typed. The sent mentions become the recent mentions, most recent first and ten at most, which an empty query then shows instead, and they persist across fresh CLI processes. Listing mentions without a task is a usage error, and for an unknown task is not_found.
+    func test_mentions_menu_lists_expands_and_remembers_recent() throws {
+        let repository = try makeSkillRepository("mention-repo", skills: [
+            "AGENTS.md": "# Mention repo rules\nKeep it tidy.\n",
+            ".agents/skills/mention-skill/SKILL.md": skillManifest("mention-skill", "A skill to mention"),
+            ".agents/skills/mention-extra-1/SKILL.md": skillManifest("mention-extra-1", "Another skill to mention"),
+            ".agents/skills/mention-extra-2/SKILL.md": skillManifest("mention-extra-2", "Another skill to mention"),
+            ".agents/skills/mention-extra-3/SKILL.md": skillManifest("mention-extra-3", "Another skill to mention"),
+            ".agents/skills/mention-extra-4/SKILL.md": skillManifest("mention-extra-4", "Another skill to mention"),
+            ".mcp.json": #"{"mcpServers": {"docs-server": {"type": "stdio", "command": "node", "args": ["docs.js"]}}}"#,
+            ".claude/agents/reviewer.md": "---\nname: reviewer\ndescription: Reviews changes\n---\n\nReview the diff.\n",
+            ".codex/agents/reviewer.toml": "name = \"reviewer\"\ndescription = \"Reviews changes\"\n",
+            ".codex/agents/helper.toml": "name = \"helper\"\ndescription = \"Codex-only helper\"\n",
+        ])
+        let executable = try installSkillsClaudeFixture("claude-fixture-mentions")
+        let historyURL = URL(fileURLWithPath: executable.path + ".history")
+        // A held Codex turn for the steer at the end; the fixture's name selects its hold mode.
+        let codex = dataDirectory.appendingPathComponent("codex-fixture-mention-steer-serial-success-wait")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: codex)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8).write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        codexFixtureExecutable = codex.path
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Other mention task", roots: [])
+        let task = try createSkillsTask("Mention task", repositories: [repository], provider: "claude")
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let worktree = try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String)
+        _ = try createSkillsTask("Mention steer task", repositories: [repository], provider: "codex")
+        func mentions() throws -> [String: Any] {
+            try XCTUnwrap(try runCLI(["mentions", "list", "--task", taskID])["result"] as? [String: Any])
+        }
+        func menuRowElements() -> [XCUIElement] {
+            app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "mention-item-")).allElementsBoundByIndex
+                .filter(\.exists).sorted { $0.frame.minY < $1.frame.minY }
+        }
+        /// The menu's rows, top to bottom.
+        func menuRows() -> [String] { menuRowElements().map { String($0.identifier.dropFirst("mention-item-".count)) } }
+        func highlightedRow() -> String? {
+            menuRowElements().first(where: \.isSelected).map { String($0.identifier.dropFirst("mention-item-".count)) }
+        }
+        let items = try XCTUnwrap(try mentions()["items"] as? [[String: Any]])
+        let handles = items.compactMap { $0["handle"] as? String }
+        XCTAssertEqual(items.first?["kind"] as? String, "rule", "Rules come first.")
+
+        openTask(named: "Mention task")
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        composer.click()
+        composer.typeText("@")
+        let menu = element("mention-menu")
+        XCTAssertTrue(menu.waitToExist(timeout: 10), "Typing @ opens the mention menu.")
+        XCTAssertLessThanOrEqual(menu.frame.maxY, composer.frame.minY, "The menu opens above the composer, leaving the typed text visible.")
+        XCTAssertTrue(element("mention-item-mention-repo/AGENTS.md").waitToExist(timeout: 10))
+        let rows = menuRows()
+        XCTAssertEqual(rows.first, "mention-repo/AGENTS.md", "Before anything was mentioned, the whole list shows, a rule first.")
+        XCTAssertEqual(rows, Array(handles.prefix(rows.count)), "The menu keeps the catalog's order: rules, skills, MCP servers, agents, repositories, tasks.")
+        for row in ["mention-skill", "docs-server", "reviewer", "mention-repo", "Other-mention-task"] {
+            XCTAssertTrue(rows.contains(row), "The menu lists \(row).")
+        }
+        XCTAssertEqual(highlightedRow(), rows.first)
+        composer.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ highlightedRow() == rows[1] }, timeout: 5), "Down moves the highlight to the next row.")
+        composer.typeKey(.downArrow, modifierFlags: [])
+        composer.typeKey(.upArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ highlightedRow() == rows[1] }, timeout: 5), "Up moves it back.")
+        attachScreenshot(named: "Mention menu listing rules, skills, MCP servers and agents")
+        attachElementScreenshot(menu, named: "Mention menu, full list")
+
+        composer.typeText("rev")
+        XCTAssertTrue(waitUntil({ menuRows().first == "reviewer" && highlightedRow() == "reviewer" }, timeout: 5),
+                      "Typing after @ filters, handle prefixes first, and highlights the first match.")
+        XCTAssertFalse(element("mention-item-mention-repo/AGENTS.md").exists)
+        XCTAssertEqual(element("mention-menu-title").value as? String, "Mention matching “rev”")
+        attachElementScreenshot(menu, named: "Mention menu filtered by the typed query")
+        composer.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "@reviewer " }, timeout: 5), "Return inserts the highlighted mention.")
+        XCTAssertTrue(waitUntil({ !self.element("mention-menu").exists }, timeout: 5))
+        XCTAssertTrue(waitUntil({ composer.title == "Mentions @reviewer" }, timeout: 5), "The inserted mention is drawn in the accent color.")
+
+        composer.typeText("check @zzz-nothing")
+        let empty = element("mention-menu-empty")
+        XCTAssertTrue(empty.waitToExist(timeout: 5))
+        XCTAssertTrue((empty.value as? String ?? "").contains("Nothing to mention matches"), "A query nothing matches shows an empty state: \(String(describing: empty.value))")
+        for _ in 0..<"@zzz-nothing".count { composer.typeText(XCUIKeyboardKey.delete.rawValue) }
+        composer.typeText("@mention-re")
+        let repositoryRow = element("mention-item-mention-repo")
+        XCTAssertTrue(repositoryRow.waitToExist(timeout: 5))
+        // XCUITest reports rows of the menu, which floats over the transcript, as not hittable;
+        // a real click at the row's center must still choose it.
+        repositoryRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "@reviewer check @mention-repo " }, timeout: 5), "A click inserts the clicked mention.")
+        composer.typeText("and @docs")
+        XCTAssertTrue(waitUntil({ highlightedRow() == "docs-server" }, timeout: 5))
+        composer.typeKey(.tab, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "@reviewer check @mention-repo and @docs-server " }, timeout: 5), "Tab inserts the highlighted mention.")
+
+        composer.typeText("then @")
+        XCTAssertTrue(menu.waitToExist(timeout: 5))
+        composer.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ !self.element("mention-menu").exists }, timeout: 5), "Escape closes the menu.")
+        XCTAssertEqual(composer.value as? String, "@reviewer check @mention-repo and @docs-server then @", "Escape keeps the typed text.")
+        composer.typeText(XCUIKeyboardKey.delete.rawValue)
+        composer.typeText("report back.")
+        XCTAssertTrue(waitUntil({ composer.title == "Mentions @reviewer, @mention-repo, @docs-server" }, timeout: 5))
+        attachScreenshot(named: "Composer with mentions in the accent color")
+        attachElementScreenshot(element("message-composer-scroll-view"), named: "Composer mentions close up")
+
+        let typed = "@reviewer check @mention-repo and @docs-server then report back."
+        element("send-message-button").click()
+        func sentText() -> String? {
+            guard let data = try? Data(contentsOf: historyURL),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            return (history["turns"] as? [[String: Any]] ?? []).compactMap { $0["userText"] as? String }.first { $0.hasPrefix(typed) }
+        }
+        XCTAssertTrue(waitUntil({ sentText() != nil }, timeout: 20), "The message reaches Claude Code.")
+        let sent = try XCTUnwrap(sentText())
+        XCTAssertTrue(sent.hasPrefix(typed + "\n\n<playhouse-mentions>\n"), sent)
+        XCTAssertEqual(sent.components(separatedBy: "\n").filter { $0.hasPrefix("- @") }.count, 3, sent)
+        XCTAssertTrue(sent.contains("- @reviewer (agent): the Claude Code subagent `reviewer` defined in `"), sent)
+        XCTAssertTrue(sent.contains(".codex/agents/reviewer.toml`"), sent)
+        XCTAssertTrue(sent.contains("- @mention-repo (repository): the Git repository at `\(repository.path)`; this task works on it in its worktree `\(worktree)`"), sent)
+        XCTAssertTrue(sent.contains("- @docs-server (mcp): the MCP server `docs-server`"), sent)
+        let bubble = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "user-message-", typed)).firstMatch
+        XCTAssertTrue(bubble.waitToExist(timeout: 10))
+        XCTAssertFalse(bubble.label.contains("playhouse-mentions"), "The transcript hides the mention block.")
+        XCTAssertTrue(waitUntil({ bubble.textViews.firstMatch.title == "Mentions @reviewer, @mention-repo, @docs-server" }, timeout: 10),
+                      "The sent message draws its mentions in the accent color.")
+        // The fixture turn reports no outcome, so Playhouse nudges it once it completes.
+        let nudge = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "playhouse-message-")).firstMatch
+        XCTAssertTrue(nudge.waitToExist(timeout: 30), "The sent turn completes before the composer is used again.")
+        // The persisted message's bubble ends in -user; once it shows, the live copy must be gone.
+        let sentBubbles = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "user-message-", typed))
+        XCTAssertTrue(waitUntil({ sentBubbles.matching(NSPredicate(format: "identifier ENDSWITH %@", "-user")).count == 1 }, timeout: 10))
+        XCTAssertEqual(sentBubbles.count, 1, "The live message and the one persisted with its mention block are one bubble.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, typed, "The task's saved prompt keeps the typed text.")
+        attachScreenshot(named: "Sent message with its mentions colored")
+        attachElementScreenshot(bubble, named: "Sent message mentions close up")
+
+        let recentIDs = try XCTUnwrap(try mentions()["recentIDs"] as? [String])
+        XCTAssertEqual(Array(recentIDs.prefix(2)), ["agent:reviewer", "repository:\(repository.path)"], "Sent mentions become recent, in order.")
+        XCTAssertEqual(recentIDs.count, 3)
+        composer.click()
+        composer.typeText("@")
+        XCTAssertTrue(menu.waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ menuRows() == ["reviewer", "mention-repo", "docs-server"] }, timeout: 10),
+                      "An empty query now shows the recent mentions, most recent first.")
+        XCTAssertEqual(element("mention-menu-title").value as? String, "Recent mentions")
+        attachElementScreenshot(menu, named: "Mention menu showing recent mentions")
+        // Moving the keyboard out of the composer closes the menu; typing there again reopens it.
+        bubble.textViews.firstMatch.click()
+        XCTAssertTrue(waitUntil({ !self.element("mention-menu").exists }, timeout: 5), "The menu closes when the composer loses focus.")
+        composer.click()
+        composer.typeText(XCUIKeyboardKey.delete.rawValue + "@")
+        XCTAssertTrue(menu.waitToExist(timeout: 5), "Typing in the composer again reopens the menu.")
+        composer.typeKey(.escape, modifierFlags: [])
+        composer.typeText(XCUIKeyboardKey.delete.rawValue)
+
+        // Steering a held Codex turn from the composer expands its mentions, Codex's agent file first.
+        openTask(named: "Mention steer task")
+        let steerComposer = element("message-composer")
+        XCTAssertTrue(waitUntil({ steerComposer.exists && steerComposer.isHittable }, timeout: 15))
+        steerComposer.click()
+        steerComposer.typeText("Hold this turn for a steer.")
+        element("send-message-button").click()
+        let ready = URL(fileURLWithPath: codex.path + ".resolve-ready")
+        let release = URL(fileURLWithPath: codex.path + ".resolve-continue")
+        defer { try? Data("Release the active turn.\n".utf8).write(to: release) }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 20), "The fixture holds the Codex turn.")
+        // A steer that misses its turn is queued as typed; it is expanded only when it is sent.
+        try "The expected turn ID is stale.\n".write(to: URL(fileURLWithPath: codex.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
+        let steerTaskID = try self.taskID(named: "Mention steer task")
+        steerComposer.typeText("@helper later")
+        XCTAssertTrue(waitUntil({ !self.element("mention-menu").exists }, timeout: 5), "The space after a mention closes the menu.")
+        steerComposer.typeKey(.return, modifierFlags: .command)
+        func queuedTexts() -> [String] {
+            ((try? runCLI(["conversation", "queue-list", steerTaskID]))?["result"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+        }
+        XCTAssertTrue(waitUntil({ queuedTexts() == ["@helper later"] }, timeout: 10), "A missed steer is queued as typed, not expanded: \(queuedTexts())")
+        let queuedID = try XCTUnwrap(((try runCLI(["conversation", "queue-list", steerTaskID]))["result"] as? [[String: Any]])?.first?["id"] as? String)
+        let queuedText = element("queued-message-text-\(queuedID)")
+        XCTAssertTrue(queuedText.waitToExist(timeout: 10))
+        XCTAssertEqual(queuedText.value as? String, "@helper later", "The queued follow-up shows only the typed text.")
+        _ = try runCLI(["conversation", "queue-remove", steerTaskID, queuedID])
+        XCTAssertTrue(waitUntil({ (steerComposer.value as? String)?.isEmpty == true }, timeout: 10))
+        steerComposer.click()
+        steerComposer.typeText("Hurry, @rev")
+        XCTAssertTrue(waitUntil({ self.element("mention-item-reviewer").exists }, timeout: 10))
+        steerComposer.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (steerComposer.value as? String) == "Hurry, @reviewer " }, timeout: 5))
+        steerComposer.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ (steerComposer.value as? String)?.isEmpty == true }, timeout: 10), "The steer is accepted and clears the draft.")
+        let steerBubbles = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "user-message-", "Hurry, @reviewer"))
+        XCTAssertTrue(steerBubbles.firstMatch.waitToExist(timeout: 10))
+        // The provider echoes the steer with its mention block; it must still match the local copy.
+        XCTAssertFalse(waitUntil({ steerBubbles.count > 1 }, timeout: 3), "The steer shows once: \(steerBubbles.count)")
+        XCTAssertFalse(steerBubbles.firstMatch.label.contains("playhouse-mentions"), "The steered message hides its mention block.")
+        try Data("Release the active turn.\n".utf8).write(to: release)
+        func steerText() -> String? {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: codex.path + ".history")),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let requests = history["steerRequests"] as? [[String: Any]], !requests.isEmpty else { return nil }
+            return requests.flatMap { ($0["input"] as? [[String: Any]]) ?? [] }.compactMap { $0["text"] as? String }.joined()
+        }
+        XCTAssertTrue(waitUntil({ steerText() != nil }, timeout: 20), "Codex receives the steer.")
+        let steered = try XCTUnwrap(steerText())
+        XCTAssertTrue(steered.hasPrefix("Hurry, @reviewer\n\n<playhouse-mentions>\n"), steered)
+        XCTAssertEqual(steered.components(separatedBy: "<playhouse-mentions>").count, 2, "The steer is expanded exactly once.")
+        let agentLine = try XCTUnwrap(steered.components(separatedBy: "\n").first { $0.hasPrefix("- @reviewer (agent): ") })
+        XCTAssertLessThan(try XCTUnwrap(agentLine.range(of: "Codex agent `reviewer`")).lowerBound,
+                          try XCTUnwrap(agentLine.range(of: "Claude Code subagent")).lowerBound, "A Codex task names Codex's agent file first.")
+
+        XCTAssertEqual(try runCLI(["mentions", "list", "--task", UUID().uuidString], expectedStatus: 3)["error"].flatMap { ($0 as? [String: Any])?["code"] as? String }, "not_found")
+        XCTAssertEqual(try runCLI(["mentions", "list"], expectedStatus: 2)["error"].flatMap { ($0 as? [String: Any])?["code"] as? String }, "invalid_argument")
+    }
+
     // case-contract: test_rules_catalog_lists_repo_global_and_managed_rules | The Skills page, titled Skills, Rules & MCP, switches to its Rules list with a Skills | Rules | MCP picker. Rules lists each task repository's instruction files from its worktree (AGENTS.override.md, AGENTS.md, CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, and every .md file under .claude/rules, keyed by the source repository and the file's path), the user's global rules (~/.agents/AGENTS.md, Codex's AGENTS.md, and Claude's CLAUDE.md and rules folder), and the organization's managed CLAUDE.md. Each rule names the agents that follow it in Playhouse sessions and the ones that read it natively: a repository AGENTS.md beside a CLAUDE.md is followed by both but read natively only by Codex, ~/.agents/AGENTS.md is read natively by neither yet shared with both, a CLAUDE.md symlinked to AGENTS.md is one Linked rule read natively by both, AGENTS.override.md is Codex's own and leaves the AGENTS.md beside it to Claude, a .claude/rules file shows its paths globs, the managed CLAUDE.md is Claude's only and read-only, and an @import of a missing file is flagged as a problem. A repository without rules shows an empty state. Reading a rule returns its file exactly, and an unknown rule is not_found.
     func test_rules_catalog_lists_repo_global_and_managed_rules() throws {
         let working = try makeSkillRepository("rules-catalog-repo", skills: [

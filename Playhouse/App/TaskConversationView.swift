@@ -1283,6 +1283,17 @@ struct TaskConversationView: View {
     /// the previous page is still sliding out builds a fresh page that reloads the catalog
     /// instead of reviving the closing one with what it read before.
     @State private var skillsPresentation = 0
+    /// What the composer's `@` menu can mention, read from the daemon when a mention starts.
+    @State private var mentionCatalog: MentionCatalog?
+    @State private var isLoadingMentions = false
+    /// The highlighted row of the open mention menu.
+    @State private var mentionSelection = 0
+    /// The last chosen mention, which the editor inserts once.
+    @State private var mentionEdit: ChatEditorEdit?
+    /// The `@` whose menu Escape closed; it stays closed until another mention starts.
+    @State private var dismissedMentionLocation: Int?
+    /// Whether the composer's editor has the keyboard, as the editor itself reports it.
+    @State private var isComposerEditing = false
     @State private var selectedChatImage: NSImage?
     @State private var isGeneratingTitle = false
     @State private var didCopyTaskTitle = false
@@ -4738,12 +4749,14 @@ struct TaskConversationView: View {
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("playhouse-message-label-\(message.id)")
                 }
+                let mentions = isPlayhouseSent ? [] : messageMentions(message, visibleText: visibleText)
                 if !visibleText.isEmpty {
                     SelectableAnnotationText(
                         text: visibleText,
                         highlightedRanges: annotations.filter { $0.messageID == message.id && $0.blockID == 0 }.map {
                             NSRange(location: $0.startOffset, length: $0.endOffset - $0.startOffset)
                         },
+                        mentionRanges: mentions.map(\.range),
                         textColor: isPlayhouseSent ? .secondaryLabelColor : .labelColor,
                         onSelection: { range, selectedText, bounds in
                             currentTextSelection = selectedText.isEmpty ? nil : AnnotationSelection(
@@ -4865,6 +4878,7 @@ struct TaskConversationView: View {
     }
 
     private static func displayableUserText(_ text: String) -> String {
+        let text = MentionText.displayText(text)
         let commentEnvelopeStart = text.range(of: "<playhouse-comment-context>")
             ?? text.range(of: "<playhouse-annotation-context>")
         let commentEnvelopeEnd = commentEnvelopeStart.flatMap { envelope in
@@ -5530,7 +5544,25 @@ struct TaskConversationView: View {
         }
             }, scheduleContent: { scheduleHint }, pluginActions: isReadOnly ? nil : AnyView(
                 PluginSlot(placement: .composerActions, props: pluginProps, actions: pluginActions, open: { openConversationPlugin = $0 }, add: startPluginTask)
+            ), mentions: ChatEditorMentions(
+                handles: mentionHandles, edit: mentionEdit, onKey: handleMentionKey,
+                onEditingChange: { isComposerEditing = $0 }
             ))
+                // A zero-height strip along the composer's top edge, so the menu grows upward over the
+                // transcript rather than covering the text being typed.
+                .overlay(alignment: .top) {
+                    Color.clear.frame(height: 0).overlay(alignment: .bottomLeading) { mentionMenu }
+                }
+                .onChange(of: typedMention?.location) { _, location in
+                    if location != dismissedMentionLocation { dismissedMentionLocation = nil }
+                }
+                .onChange(of: activeMention?.location) { _, location in
+                    mentionSelection = 0
+                    // Each new mention reads the catalog again, so it shows the latest recent mentions.
+                    if location != nil { Task { await loadMentions() } }
+                }
+                .onChange(of: activeMention?.query) { _, _ in mentionSelection = 0 }
+                .task(id: task.id) { await loadMentions() }
                 .onChange(of: draft) { _, newValue in
                     if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {
                         activatePlanMode()
@@ -5685,6 +5717,91 @@ struct TaskConversationView: View {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    // MARK: @ mentions
+
+    private var mentionHandles: Set<String> { Set(mentionCatalog?.items.map(\.handle) ?? []) }
+
+    /// The mention being typed before the caret, whether or not its menu was dismissed.
+    private var typedMention: (location: Int, query: String)? {
+        guard !isReadOnly, isComposerEditing, composerDraft.selection.length == 0 else { return nil }
+        return MentionText.activeQuery(in: draft, caret: composerDraft.selection.location)
+    }
+
+    /// The mention whose menu is open.
+    private var activeMention: (location: Int, query: String)? {
+        guard let typed = typedMention, typed.location != dismissedMentionLocation else { return nil }
+        return typed
+    }
+
+    private var mentionSuggestions: [MentionItem] {
+        guard let active = activeMention, let mentionCatalog else { return [] }
+        return Array(mentionCatalog.suggestions(query: active.query).prefix(80))
+    }
+
+    @ViewBuilder
+    private var mentionMenu: some View {
+        if let active = activeMention {
+            let items = mentionSuggestions
+            ComposerMentionMenu(
+                query: active.query,
+                items: items,
+                showsRecent: active.query.isEmpty && !(mentionCatalog?.recent.isEmpty ?? true),
+                isLoading: mentionCatalog == nil,
+                selectedIndex: min(mentionSelection, max(items.count - 1, 0)),
+                select: { insertMention($0, at: active) }
+            )
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, 14)
+            .padding(.bottom, 8)
+        }
+    }
+
+    /// The `@` mentions a sent message's visible text names: those its context block lists,
+    /// or, for a message shown before its turn recorded one, those the catalog knows.
+    private func messageMentions(_ message: ConversationMessage, visibleText: String) -> [(handle: String, range: NSRange)] {
+        guard visibleText.contains("@") else { return [] }
+        let listed = MentionText.contextHandles(in: message.text)
+        return MentionText.handles(in: visibleText, known: listed.isEmpty ? mentionHandles : listed)
+    }
+
+    private func loadMentions() async {
+        guard !isLoadingMentions else { return }
+        isLoadingMentions = true
+        defer { isLoadingMentions = false }
+        if let catalog = try? await conversationManager.mentions(taskID: task.id) {
+            mentionCatalog = catalog
+        }
+    }
+
+    /// The open menu's keys: the arrows move the highlight, Return or Tab inserts it, Escape closes the menu.
+    private func handleMentionKey(_ key: ChatEditorKey) -> Bool {
+        guard let active = activeMention else { return false }
+        let items = mentionSuggestions
+        switch key {
+        case .up:
+            mentionSelection = max(0, min(mentionSelection, items.count - 1) - 1)
+        case .down:
+            mentionSelection = min(max(items.count - 1, 0), mentionSelection + 1)
+        case .accept:
+            guard !items.isEmpty else { return false }
+            insertMention(items[min(mentionSelection, items.count - 1)], at: active)
+        case .dismiss:
+            dismissedMentionLocation = active.location
+        }
+        return true
+    }
+
+    /// Replaces the typed `@query` with the item's `@handle` and a space.
+    private func insertMention(_ item: MentionItem, at active: (location: Int, query: String)) {
+        let length = (("@" + active.query) as NSString).length
+        mentionEdit = ChatEditorEdit(
+            id: (mentionEdit?.id ?? 0) + 1,
+            range: NSRange(location: active.location, length: length),
+            text: "@" + item.handle + " "
+        )
+        mentionSelection = 0
     }
 
     private var composerActions: ComposerActions {
@@ -6025,7 +6142,7 @@ struct TaskConversationView: View {
             let hasPendingSubmittedPrompt = task.pendingSubmittedPrompt != nil
             if let submittedPrompt = task.pendingSubmittedPrompt,
                !submittedPrompt.isEmpty,
-               !history.messages.contains(where: { $0.role == .user && $0.text == submittedPrompt }) {
+               !history.messages.contains(where: { $0.role == .user && MentionText.sameUserText($0.text, submittedPrompt) }) {
                 messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: submittedPrompt))
             }
             // A marked draft is unsent by definition: steering, queueing, and sending clear it.
@@ -6707,8 +6824,9 @@ struct TaskConversationView: View {
                         }
                         continue
                     }
+                    // A sent message is persisted with its mention block, which the live copy lacks.
                     let alreadyPersisted = mergedMessages.contains {
-                        $0.role == liveMessage.role && $0.text == liveMessage.text
+                        $0.role == liveMessage.role && MentionText.sameUserText($0.text, liveMessage.text)
                     }
                     if !alreadyPersisted {
                         mergedMessages.append(liveMessage)
@@ -6742,13 +6860,14 @@ struct TaskConversationView: View {
             refreshQueuedMessages()
         case "steered_message":
             let steered = update.message ?? ""
-            if let index = unechoedLocalSteers.firstIndex(of: steered) {
+            // The provider echoes a steer with its mention block, which the local copy lacks.
+            if let index = unechoedLocalSteers.firstIndex(where: { MentionText.sameUserText($0, steered) }) {
                 unechoedLocalSteers.remove(at: index)
             } else {
                 unconfirmedStreamedSteers.append(steered)
                 messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: steered, imageDataURLs: update.imageDataURLs ?? []))
             }
-            if let message = update.message, draft == message { draft = "" }
+            if let message = update.message, MentionText.sameUserText(draft, message) { draft = "" }
         case "action_notice":
             actionNotice = update.message
         default:
@@ -6769,8 +6888,7 @@ struct TaskConversationView: View {
         } else {
             later = history.messages[...]
         }
-        let sent = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return later.contains { $0.role == .user && $0.text.trimmingCharacters(in: .whitespacesAndNewlines) == sent } ? history : nil
+        return later.contains { $0.role == .user && MentionText.sameUserText($0.text, text) } ? history : nil
     }
 
     private func mutateGoal(_ action: String, objective: String? = nil, observeRuntime: Bool = false) async -> Bool {
@@ -7362,7 +7480,7 @@ struct TaskConversationView: View {
     private func showLocalSteer(_ text: String, imageDataURLs: [String] = []) {
         // The steer follows the text that streamed before it.
         flushStreamedTextDeltas()
-        if let index = unconfirmedStreamedSteers.firstIndex(of: text) {
+        if let index = unconfirmedStreamedSteers.firstIndex(where: { MentionText.sameUserText($0, text) }) {
             unconfirmedStreamedSteers.remove(at: index)
             return
         }
@@ -8116,6 +8234,8 @@ private struct SelectableAnnotationText: NSViewRepresentable {
     let text: String
     /// Commented ranges of `text`, rendered orange.
     let highlightedRanges: [NSRange]
+    /// `@` mentions in `text`, rendered in the accent color.
+    var mentionRanges: [NSRange] = []
     var responseAnnotations: [ResponseAnnotationReference] = []
     var responseCommentSourcePrefix = ""
     var isAssistantText = false
@@ -8187,6 +8307,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
 
     private var renderKey: String {
         responseCommentSourcePrefix + "|" + text + highlightedRanges.map { "\($0.location):\($0.length)" }.joined(separator: ",")
+            + "|" + mentionRanges.map { "\($0.location):\($0.length)" }.joined(separator: ",")
             + responseAnnotations.map { "\($0.text):\($0.comment)" }.joined(separator: "|")
     }
 
@@ -8214,6 +8335,10 @@ private struct SelectableAnnotationText: NSViewRepresentable {
                 .paragraphStyle: style
             ])
         }
+        for range in mentionRanges {
+            guard range.location >= 0, range.length >= 0, NSMaxRange(range) <= value.length else { continue }
+            value.addAttributes([.foregroundColor: NSColor.controlAccentColor, .playhouseMention: true], range: range)
+        }
         for range in highlightedRanges {
             guard range.location >= 0, range.length >= 0, NSMaxRange(range) <= value.length else { continue }
             value.addAttribute(.foregroundColor, value: NSColor.systemOrange, range: range)
@@ -8229,6 +8354,8 @@ private struct SelectableAnnotationText: NSViewRepresentable {
         // The measurer holds the text the view shows, until it takes the new one below.
         view.textStorage?.replaceChangedTail(with: value, previous: coordinator.measurer.text)
         coordinator.measurer.setText(value)
+        // Read back from what is drawn, so the title names exactly the mentions shown in color.
+        view.setAccessibilityTitle(view.textStorage?.drawnMentionsTitle)
         view.setSelectedRange(NSRange(location: 0, length: 0))
         coordinator.responseCommentContentDidChange()
     }
