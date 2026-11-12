@@ -5,7 +5,7 @@ import Foundation
 enum PluginPlacement: String, CaseIterable, Codable, Sendable {
     /// The board's sidebar, below Scheduled Tasks. Standalone: no task.
     case mainSidebar
-    /// A section of the conversation's task sidebar, below Changes.
+    /// The conversation task sidebar's first section, above Changes.
     case conversationSidebar
     /// The task sidebar's bottom row, beside the Terminal button.
     case conversationToolbar

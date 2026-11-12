@@ -279,7 +279,7 @@ deleted with its Delete item in the Plugins menu, or with `plugin delete --id`.
 | Placement | Where | Entry | Extra context in `Playhouse.props` |
 | --- | --- | --- | --- |
 | `mainSidebar` | The board's sidebar, below Scheduled Tasks | Labeled | None: it is standalone |
-| `conversationSidebar` | The task sidebar, below Changes | Labeled | `task`, `repositories`, `contextFolders` |
+| `conversationSidebar` | The task sidebar, the first section, above Changes | Labeled | `task`, `repositories`, `contextFolders` |
 | `conversationToolbar` | The task sidebar's bottom row, beside Terminal | Icon | `task`, `repositories`, `contextFolders` |
 | `composerActions` | The composer's actions row, beside Skills (also in the standalone chat) | Icon | The above and `composer` (`{draft, selection: {location, length, text}}`) |
 
