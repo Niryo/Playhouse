@@ -106,7 +106,7 @@ struct ScheduledTasksPageView: View {
                 common: AtomCommon(testID: "scheduled-tasks-back-button", label: "Back to the board", help: "Back to the board"),
                 action: onClose
             ) {
-                AtomPanel(props: PanelProps(fillOpacity: 0.07, capsule: true, align: "center"), common: AtomCommon(width: 26, height: 26)) {
+                AtomPanel(props: PanelProps(fillOpacity: 0.07, capsule: true, align: "center"), common: AtomCommon(width: 26, height: 26, padding: 0)) {
                     AtomIcon(props: IconProps(name: "chevron.left", size: 13, weight: "semibold"))
                 }
             }
@@ -139,7 +139,7 @@ struct ScheduledTasksPageView: View {
         let repositories = task.repositoryWorktrees.map { URL(fileURLWithPath: $0.repositoryPath).lastPathComponent }
         return AtomPanel(
             props: PanelProps(fill: "panel", fillOpacity: 1, cornerRadius: 10),
-            common: AtomCommon(testID: "scheduled-task-row-\(id)", paddingX: 14, paddingY: 10)
+            common: AtomCommon(testID: "scheduled-task-row-\(id)", padding: 0, paddingX: 14, paddingY: 10)
         ) {
             AtomStack(props: StackProps(axis: "h", spacing: 12)) {
                 // A press area rather than a Button: a Button folds its label into one element,

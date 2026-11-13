@@ -32,7 +32,7 @@ function StartImplementing(props) {
     h(Button, {
       key: "start", disabled: start.disabled, testID: prefix + "start-implementing-button", value: start.value,
       hint: "Switches to Code mode and starts implementing this plan", help: start.help, onPress: props.on.startImplementing
-    }, h(Panel, { fill: "accent", fillOpacity: 1, cornerRadius: 15.5, height: 31, paddingX: 11 },
+    }, h(Panel, { fill: "accent", fillOpacity: 1, cornerRadius: 15.5, height: 31, padding: 0, paddingX: 11 },
       h(Text, { size: 12, weight: "semibold", color: "white" }, "Start Implementing"))),
     start.unavailableReason != null ? h(Button, {
       key: "reason", disabled: start.reasonDisabled, testID: prefix + "start-implementing-unavailable-reason", label: "No repository",
@@ -54,7 +54,7 @@ function ProviderMenu(props) {
 function ModelPicker(props) {
   var model = props.model, picker = model.model, prefix = model.prefix, on = props.on;
   var effortTitle = picker.effortChoices.filter(function (choice) { return choice.value === picker.selectedEffort; })[0];
-  return h(Popover, { isPresented: picker.open, arrowEdge: "top", width: 320, testID: prefix + "model-picker-popover", onDismiss: on.dismissModelPicker },
+  return h(Popover, { isPresented: picker.open, arrowEdge: "top", width: 320, inset: 0, spacing: 0, testID: prefix + "model-picker-popover", onDismiss: on.dismissModelPicker },
     h(Button, {
       testID: prefix + "model-picker-menu", label: picker.label, value: picker.name,
       help: "Choose a model and reasoning effort", opacity: 0.82, onPress: on.toggleModelPicker
@@ -79,16 +79,16 @@ function ModelPicker(props) {
 
 function ScheduleButton(props) {
   var model = props.model, schedule = model.schedule, prefix = model.prefix, on = props.on;
-  return h(Popover, { isPresented: schedule.open, arrowEdge: "top", testID: prefix + "schedule-popover", onDismiss: on.dismissSchedule },
+  return h(Popover, { isPresented: schedule.open, arrowEdge: "top", inset: 0, spacing: 0, testID: prefix + "schedule-popover", onDismiss: on.dismissSchedule },
     h(Button, {
       testID: prefix + "schedule-task-button", label: "Schedule", value: schedule.on ? "On" : "Off", help: schedule.help, onPress: on.toggleSchedule
-    }, h(Panel, { fill: "accent", fillOpacity: schedule.on ? 0.14 : 0, cornerRadius: 13, width: 26, height: 26 },
+    }, h(Panel, { fill: "accent", fillOpacity: schedule.on ? 0.14 : 0, cornerRadius: 13, width: 26, height: 26, padding: 0 },
       h(Icon, { name: schedule.on ? "clock.fill" : "clock", size: 12, weight: "medium", color: schedule.on ? "accent" : "secondary" }))),
     h(Text, { size: 12, padding: 12, testID: prefix + "schedule-hint" }, "The schedule hint stays native."));
 }
 
 function primaryIcon(name, fill, opacity, size, radius, dimmed) {
-  return h(Panel, { fill: fill, fillOpacity: opacity, cornerRadius: radius, width: 31, height: 31, opacity: dimmed ? 0.45 : 1 },
+  return h(Panel, { fill: fill, fillOpacity: opacity, cornerRadius: radius, width: 31, height: 31, padding: 0, opacity: dimmed ? 0.45 : 1 },
     h(Icon, { name: name, size: size, weight: "bold", color: "white" }));
 }
 
@@ -98,7 +98,7 @@ function Primary(props) {
   if (primary.kind === "stop") label = primaryIcon("stop.fill", "primary", 0.72, 11, 9, false);
   else if (primary.kind === "continue") label = primaryIcon("play.fill", "accent", 1, 11, 9, false);
   else if (primary.kind === "schedule") {
-    label = h(Panel, { fill: "accent", fillOpacity: 1, cornerRadius: 15.5, height: 31, paddingX: 12, opacity: primary.disabled ? 0.45 : 1 },
+    label = h(Panel, { fill: "accent", fillOpacity: 1, cornerRadius: 15.5, height: 31, padding: 0, paddingX: 12, opacity: primary.disabled ? 0.45 : 1 },
       h(Label, { text: "Schedule", icon: "clock", size: 12, weight: "semibold", color: "white" }));
   } else label = primaryIcon("arrow.up", "accent", 1, 13, 15.5, primary.disabled);
   return h(Button, {

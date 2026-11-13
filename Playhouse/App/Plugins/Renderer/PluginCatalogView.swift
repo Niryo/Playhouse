@@ -489,7 +489,7 @@ private struct NativeTokenStatsDemo: View {
                 AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
             }
             if open {
-                AtomPanel(props: PanelProps(fillOpacity: 0.03, cornerRadius: 10), common: AtomCommon(testID: "native-token-stats-modal")) {
+                AtomPanel(props: PanelProps(fillOpacity: 0.03, cornerRadius: 10), common: AtomCommon(testID: "native-token-stats-modal", padding: 0)) {
                     TokenStatsView(model: model, section: section, actions: TokenStatsActions(
                         selectSection: { section = $0; lastAction = "section \($0)" },
                         showRawInput: { target in
@@ -633,7 +633,7 @@ private struct NativeSkillsPageDemo: View {
                 AtomText(props: TextProps(text: "Last: \(lastAction)", size: 11, color: "secondary"), common: AtomCommon(testID: "native-last-action"))
             }
             if open {
-                AtomPanel(props: PanelProps(spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 10), common: AtomCommon(testID: "native-skills-page", width: 1040, height: 520)) {
+                AtomPanel(props: PanelProps(spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 10), common: AtomCommon(testID: "native-skills-page", width: 1040, height: 520, padding: 0)) {
                     SkillsPageHeader(model: model, actions: actions)
                     AtomDivider()
                     if model.kind == "skills" {
@@ -737,7 +737,7 @@ private struct NativeRepositoryChipsDemo: View {
             if open {
                 AtomPanel(
                     props: PanelProps(fill: "window", fillOpacity: 1, cornerRadius: 10, stroke: "primary", strokeOpacity: 0.12),
-                    common: AtomCommon(testID: "native-repository-picker-panel")
+                    common: AtomCommon(testID: "native-repository-picker-panel", padding: 0)
                 ) {
                     RepositoryPickerView(model: pickerModel, actions: RepositoryPickerActions(
                         chooseParent: { lastAction = "choose folder" },

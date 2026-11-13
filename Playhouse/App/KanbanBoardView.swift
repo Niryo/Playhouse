@@ -248,7 +248,7 @@ struct KanbanBoardView: View {
                 }
             }
         }
-        .atomModal(ModalProps(isPresented: taskShowingTokenStats != nil), onDismiss: { taskShowingTokenStats = nil }) {
+        .atomModal(ModalProps(isPresented: taskShowingTokenStats != nil, inset: 0), onDismiss: { taskShowingTokenStats = nil }) {
             if let taskShowingTokenStats {
                 TokenStatsSheet(taskID: taskShowingTokenStats.id, taskTitle: taskShowingTokenStats.title, modelContext: modelContext)
             }
@@ -734,7 +734,7 @@ struct KanbanBoardView: View {
             ) {
                 AtomPanel(
                     props: PanelProps(fill: "accent", fillOpacity: isShowingScheduledTasks ? 0.14 : 0, cornerRadius: 8),
-                    common: AtomCommon(fillWidth: true, paddingX: 12, paddingY: 9)
+                    common: AtomCommon(fillWidth: true, padding: 0, paddingX: 12, paddingY: 9)
                 ) {
                     AtomLabel(props: LabelProps(text: "Scheduled Tasks", icon: "clock", size: 12, weight: "medium"))
                 }

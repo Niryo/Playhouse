@@ -25,7 +25,7 @@ function Chip(props) {
     model.readOnly ? null : h(Button, {
       testID: prefix + "remove-conversation-repository-" + name, label: "Remove " + name,
       help: "Remove " + name + " from this task", onPress: function () { on.remove(chip.path); }
-    }, h(Panel, { fill: "panel", fillOpacity: 1, capsule: true, stroke: "primary", strokeOpacity: 0.16, width: 20, height: 20 },
+    }, h(Panel, { fill: "panel", fillOpacity: 1, capsule: true, stroke: "primary", strokeOpacity: 0.16, width: 20, height: 20, padding: 0 },
       h(Icon, { name: "xmark", size: 9, weight: "bold", color: "secondary" }))));
 }
 
@@ -35,7 +35,7 @@ function Chips(props) {
   children.push(h(Button, {
     key: "add", disabled: model.readOnly, testID: prefix + "add-conversation-repository-button",
     label: "Add repository", help: "Add a repository", onPress: on.add
-  }, h(Panel, { fillOpacity: 0.07, capsule: true, width: 28, height: 28 },
+  }, h(Panel, { fillOpacity: 0.07, capsule: true, width: 28, height: 28, padding: 0 },
     h(Icon, { name: "plus", size: 12, weight: "semibold" }))));
   return h(Stack, { axis: "h", spacing: 10 }, children);
 }
@@ -146,7 +146,7 @@ function Demo() {
   return h(Stack, { axis: "v", spacing: 12, align: "leading" },
     h(Text, { size: 11, color: "secondary", testID: "js-last-action" }, "Last: ", last[0]),
     h(Chips, { model: chipsModel, on: on }),
-    open[0] ? h(Panel, { fill: "window", fillOpacity: 1, cornerRadius: 10, stroke: "primary", strokeOpacity: 0.12, testID: "js-repository-picker-panel" },
+    open[0] ? h(Panel, { fill: "window", fillOpacity: 1, cornerRadius: 10, stroke: "primary", strokeOpacity: 0.12, padding: 0, testID: "js-repository-picker-panel" },
       h(Picker, { model: pickerModel, on: on })) : null);
 }
 

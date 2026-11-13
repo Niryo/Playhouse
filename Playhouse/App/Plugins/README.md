@@ -197,7 +197,7 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | `PillPicker` | `options` (`[{value, label, help?, testID?}]`), `selected`; the `help` tooltip may contain `{help}`, which is replaced by the shown option's help | `onChange(value)` | |
 | `Card` | `menu` (`[{id, title, icon?, destructive?, testID?}]`), `meter` (0…1 usage bar), `meterLabel`, `meterTestID`; `testID`, `label` and `hint` describe its open button | `onPress()`, `onMenu(id)` | atoms |
 | `Disclosure` | `title`, `collapsed` (required; the atom shows what it is given), `spacing`, `toggleTestID` (the title button); a collapsed section keeps its children in the tree and hides them | `onToggle()`, called inside an animation; the owner flips `collapsed` | atoms |
-| `Panel` | `spacing`, `fill`, `fillOpacity`, `cornerRadius`, `capsule`, `stroke`, `strokeOpacity`, `strokeWidth`, `dash`, `align` (`leading` default or `center`), `combine`. A composite atom, shorthand for a column `Stack` with `group` and a surface whose defaults differ: `fill` `primary` at `fillOpacity` 0.05, `cornerRadius` 8, `align` `leading`, and a border only when it has a `stroke`. Its view is that Stack's (`PanelProps.stack`) | | atoms |
+| `Panel` | `spacing`, `fill`, `fillOpacity`, `cornerRadius`, `capsule`, `stroke`, `strokeOpacity`, `strokeWidth`, `dash`, `align` (`leading` default or `center`), `combine`. A composite atom, shorthand for a column `Stack` with `group` and a surface whose defaults differ: `fill` `primary` at `fillOpacity` 0.05, `cornerRadius` 8, `align` `leading`, the common `padding` 12, and a border only when it has a `stroke`. Its view is that Stack's (`PanelProps.stack`) | | atoms |
 | `Meter` | `fraction` (0…1, required), `color` (`accent` default), `thickness` (3 default), `trackOpacity` (0.12 default), `minFill` (shortest fill in points, 0 default); decorative unless it has a `label` | | |
 | `Scroll` | `spacing`, `maxHeight` (shrinks to its content up to it; the common `height` fixes it), `inset` (padding inside the scroll view), `lazy` (builds only the children in view); a vertical scroll view around a leading column that fills its width | `onEndReached()`: raised each time the end of its content comes into view, and once when the content fits (the Done archive appends its next page). It isn't raised again while the end stays in view, so an owner whose page doesn't fill the view loads the next one itself | atoms |
 | `Divider` | none; a thin separator across its stack | | |
@@ -209,17 +209,35 @@ and `window` (the workspace's panel and window backgrounds), `red`,
 | `PressArea` | `spacing`, `pointer` (the pointing hand); a leading column that takes every click on its children, one accessibility container | `onPress()` for a click, `onLongPress()` for a press and hold | atoms |
 | `Overlay` | `align` (`center` default, `top`, `bottom`, `leading`, `trailing`, `topLeading`, `topTrailing`, `bottomLeading`, `bottomTrailing`), `offsetX`, `offsetY`, `revealOnHover` (the overlay shows only while the pointer is over the atom); its first child laid out as usual and the rest drawn over it at `align`, moved by the offsets without changing its size; one accessibility container | | atoms |
 | `Editor` | `text` (required), `placeholder`, `placeholderTestID`, `enabled`, `autofocus`, `focused`, `focusRequest` (each new value moves the keyboard in once), `inputTestID` and `inputLabel` (the text view's own accessibility identifier and label); a multiline message editor that grows with its text; the common `hint` is its accessibility help; a pasted image, and Escape when the owner handles it, reach native owners only | `onChange(text)`, `onSubmit()` (Return), `onSteerSubmit()` (Command-Return), `onFocusChange(isFocused)` | |
-| `Popover` | `isPresented` (required), `arrowEdge` (`top` default, `bottom`, `leading`, `trailing`), `width`; shows the children after its first in a popover (a leading column) anchored to its first; its `testID` only names it to events | `onDismiss()` (a click outside or Escape; the owner sets `isPresented` false) | atoms: the anchor, then the content |
+| `Popover` | `isPresented` (required), `arrowEdge` (`top` default, `bottom`, `leading`, `trailing`), `width`, `inset` (padding around the content, 14 default), `spacing` (between its children, 10 default); shows the children after its first in a popover (a leading column) anchored to its first; its `testID` only names it to events | `onDismiss()` (a click outside or Escape; the owner sets `isPresented` false) | atoms: the anchor, then the content |
 | `StepSlider` | `options` (`[{value, label}]`), `selected`; a discrete slider as wide as its container, driven by click, drag or arrow keys; its common `label` and `testID` name it | `onChange(value)` | |
-| `Modal` | `isPresented` (required), `width`, `height` (fix the sheet's size; it fits its content otherwise); a sheet over the window presented from its first child, which stays laid out as usual, showing the rest in a leading column; its `testID` and accessibility props name the sheet's content | `onDismiss()` (Escape; the owner sets `isPresented` false) | atoms: the presenter, then the content |
+| `Modal` | `isPresented` (required), `width`, `height` (fix the sheet's size, content at the top; it fits its content otherwise), `title`, `subtitle`, `icon` (SF Symbol), `inset` (padding around the header and content, 24 default), `spacing` (between the header and each child, 16 default); a sheet over the window presented from its first child, which stays laid out as usual, showing the rest in a leading column. With a `title` the sheet starts with the app's standard modal header: the accent `icon`, the 19-point semibold rounded title (`<testID>-title`), the secondary subtitle, and a close button (`<testID>-close`, or `modal-title` and `modal-close` without a `testID`); its `testID` and accessibility props name the sheet's content | `onDismiss()` (Escape or the header's close button; the owner sets `isPresented` false) | atoms: the presenter, then the content |
 | `Page` | `isPresented` (required); slides in from the trailing edge over all of its first child, which stays laid out as usual (its accessibility tree untouched, with no container added around it) and sizes the atom, showing the rest in a leading column on the window background, like the Scheduled Tasks page; its `testID` and accessibility props name the page; the owner closes it with its own control | | atoms: the covered view, then the page |
 | `SidePanel` | `isPresented` (required), `edge` (`trailing` default, `leading`), `width` (340 default); a full-height panel sliding in over that edge of its first child, which stays laid out as usual (its accessibility tree untouched, with no container added around it) and sizes the atom, showing the rest in a column with no spacing on the window background, with a hairline along its inner edge and a shadow, like the Done archive; its `testID` and accessibility props name the panel; the owner closes it with its own control | | atoms: the covered view, then the panel |
+
+### Defaults
+
+Atoms look right with no styling props: a `Modal` pads its content 24
+points and, given a `title`, draws the app's standard header (the same view,
+`AtomModalHeader`, an installed plugin's surface starts with); a `Popover`
+pads its content 14 points; a `Panel` is padded 12 points; a `Card` is padded
+14 points; and presented children are spaced apart. Every default is a prop a plugin can override
+(`inset`, `spacing`, `padding`). Native composites that size and pad their
+own content opt out explicitly (`padding: 0` on a Panel, `inset: 0` on a
+Modal or Popover), and their catalog copies pass the same values, so the
+defaults never change the app's own views. `Stack` stays the bare primitive
+with no defaults. `Page` and `SidePanel` deliberately have no inset: they
+cover a whole view or edge and their owners lay out their own headers and
+edges (an installed plugin's surface pads them itself). Paddings add up, as
+on a Stack: a Panel given only `paddingX: 4` is padded 12 + 4 across and 12
+along its height; give it `padding: 0` to use `paddingX` alone.
 
 ### Composite atoms
 
 Most atoms do one thing. `Panel` is a composite atom: shorthand for a column
-`Stack` with `group` and a surface (`primary` at 0.05, radius 8, a border only
-when it has a `stroke`), drawn by that Stack's own view (`PanelProps.stack`).
+`Stack` with `group`, `padding` 12 and a surface (`primary` at 0.05, radius 8,
+a border only when it has a `stroke`), drawn by that Stack's own view
+(`PanelProps.stack`).
 
 These are composites too, and still to settle:
 
@@ -231,7 +249,7 @@ These are composites too, and still to settle:
 | `Disclosure` | A `Button` (chevron `Icon` and `Text`) over a column `Stack` | Its animated collapse is reachable through no smaller atom |
 | `Scroll` | A scroll view around a column `Stack` | `lazy`: a `Stack` is never lazy |
 | `Menu` | A pull-down whose label is `Icon`s and a `Text` | Its label is symbol and text props, not atom children |
-| `PressArea`, `Popover`, `Modal` | A press or presentation around a column `Stack` | The column is reachable through a nested `Stack`, but they draw their own |
+| `PressArea`, `Popover`, `Modal` | A press or presentation around a column `Stack`; a Popover's or Modal's `inset` and `spacing` are a padded nested `Stack`'s `padding` and `spacing`, and a titled Modal's header is a row `Stack` of the accent `Icon`, a column `Stack` of the title and subtitle `Text`s, a `Spacer` and a `Button` around an `xmark` `Icon` whose `onPress` closes it (`AtomModalHeader`, built from those atoms' views) | The column, padding and header are reachable through those atoms (give the Modal `inset: 0` and no `title`), but they draw their own |
 | `Page`, `SidePanel` | A presentation around a column `Stack` on a `window`-filled surface | The column and the fill are reachable through a `Stack`; the shadow over what they cover and the SidePanel's one-edge hairline are reachable through no smaller atom |
 
 To add an atom, add its case and props struct to `Core/AtomProps.swift`, its
@@ -290,6 +308,13 @@ Every plugin also gets `plugin` (`{id, name, placement, presentation}`) and
 - `modal`: a sheet.
 - `sidebar`: slides in from the trailing edge.
 - `page`: covers the board or the conversation.
+
+Each presentation starts with the app's standard modal header (the plugin's
+icon and name, `plugin-surface-title`, and its close button,
+`plugin-surface-close`) and pads the header and the script's atoms (24 points
+in a modal or page, 20 in a sidebar, 16 in a popover), spacing its root atoms
+12 points apart, so a plugin shows no title and adds no outer padding or
+fixed width of its own.
 
 The core builds the props (`PluginContext` in `Core/PluginLibrary.swift`).
 They stay live: `Playhouse.useProps()` re-renders when they change, as when the

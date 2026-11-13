@@ -581,7 +581,7 @@ struct AtomCard<Content: View>: View {
 
     var body: some View {
         content()
-            .padding(CGFloat(common.padding ?? 0))
+            .padding(CGFloat(common.padding ?? CardProps.defaultPadding))
             .frame(maxWidth: common.fillWidth == true ? .infinity : nil, alignment: .leading)
             .background {
                 Button(action: { DispatchQueue.main.async(execute: onPress) }) {
@@ -682,14 +682,21 @@ struct AtomDisclosure<Content: View>: View {
 }
 
 /// A composite atom: the column Stack with a surface that `PanelProps.stack`
-/// describes, drawn by the Stack's own view.
+/// describes, drawn by the Stack's own view, padded by
+/// `PanelProps.defaultPadding` unless its `padding` is set.
 struct AtomPanel<Content: View>: View {
     var props = PanelProps()
     var common = AtomCommon()
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        AtomStack(props: props.stack, common: common, atom: .panel, content: content)
+        AtomStack(props: props.stack, common: padded, atom: .panel, content: content)
+    }
+
+    private var padded: AtomCommon {
+        var copy = common
+        copy.padding = copy.padding ?? PanelProps.defaultPadding
+        return copy
     }
 }
 
@@ -1143,7 +1150,9 @@ struct AtomPopover<Anchor: View, Content: View>: View {
     var body: some View {
         anchor()
             .popover(isPresented: Binding(get: { props.isPresented }, set: { if !$0 && props.isPresented { onDismiss() } }), arrowEdge: edge) {
-                content().modifier(Applied(when: props.width != nil) { $0.frame(width: props.width.map { CGFloat($0) }) })
+                content()
+                    .padding(CGFloat(props.inset ?? PopoverProps.defaultInset))
+                    .modifier(Applied(when: props.width != nil) { $0.frame(width: props.width.map { CGFloat($0) }) })
             }
             .atomCommon(layoutOnly, atom: .popover)
     }
@@ -1370,13 +1379,55 @@ struct AtomModal<Base: View, Content: View>: View {
     var body: some View {
         base()
             .sheet(isPresented: Binding(get: { props.isPresented }, set: { if !$0 && props.isPresented { onDismiss() } })) {
-                content()
-                    .modifier(Applied(when: props.width != nil || props.height != nil) {
-                        $0.frame(width: props.width.map { CGFloat($0) }, height: props.height.map { CGFloat($0) })
-                    })
-                    .modifier(AtomAccessibility(common: common.presentationAccessibility, group: true, combine: false))
+                VStack(alignment: .leading, spacing: CGFloat(props.spacing ?? ModalProps.defaultSpacing)) {
+                    if let title = props.title {
+                        AtomModalHeader(
+                            title: title, subtitle: props.subtitle, icon: props.icon,
+                            idPrefix: common.testID ?? "modal", onClose: onDismiss
+                        )
+                    }
+                    content()
+                }
+                .padding(CGFloat(props.inset ?? ModalProps.defaultInset))
+                .modifier(Applied(when: props.width != nil || props.height != nil) {
+                    $0.frame(width: props.width.map { CGFloat($0) }, height: props.height.map { CGFloat($0) }, alignment: .topLeading)
+                })
+                .modifier(AtomAccessibility(common: common.presentationAccessibility, group: true, combine: false))
             }
             .atomCommon(common.presentationLayout(owningHeight: true), atom: .modal)
+    }
+}
+
+/// The app's standard modal header, composed of atoms: an optional accent
+/// symbol, the title (19-point semibold rounded, as the Token Stats and
+/// Rename Task sheets' are) over an optional secondary subtitle, and a close
+/// button at the trailing edge. A Modal with a `title` and an installed
+/// plugin's surface both start with it. The title is `<idPrefix>-title` and
+/// the close button `<idPrefix>-close`.
+struct AtomModalHeader: View {
+    let title: String
+    var subtitle: String?
+    var icon: String?
+    var titleSize: Double = 19
+    let idPrefix: String
+    let onClose: () -> Void
+
+    var body: some View {
+        AtomStack(props: StackProps(axis: "h", spacing: 10, align: "top"), common: AtomCommon(fillWidth: true)) {
+            if let icon {
+                AtomIcon(props: IconProps(name: icon, size: titleSize - 1, weight: "semibold", color: "accent"), common: AtomCommon(minWidth: titleSize + 5, minHeight: titleSize + 5))
+            }
+            AtomStack(props: StackProps(spacing: 3, align: "leading")) {
+                AtomText(props: TextProps(text: title, size: titleSize, weight: "semibold", design: "rounded", lineLimit: 2), common: AtomCommon(testID: "\(idPrefix)-title"))
+                if let subtitle {
+                    AtomText(props: TextProps(text: subtitle, size: 12, color: "secondary", lineLimit: 2))
+                }
+            }
+            AtomSpacer(props: SpacerProps(minLength: 8))
+            AtomButton(props: ButtonProps(emphasis: 5), common: AtomCommon(testID: "\(idPrefix)-close", label: "Close \(title)", help: "Close"), action: onClose) {
+                AtomIcon(props: IconProps(name: "xmark", size: 11, weight: "semibold", color: "secondary"), common: AtomCommon(width: 20, height: titleSize + 5))
+            }
+        }
     }
 }
 

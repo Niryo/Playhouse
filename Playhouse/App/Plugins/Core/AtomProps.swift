@@ -388,6 +388,9 @@ struct PillPickerProps: AtomPropsDecodable, Equatable {
 /// (`onPress`), with a right-click menu (`onMenu` receives the item's id) and
 /// an optional usage meter along its leading edge (`meter`, 0...1).
 struct CardProps: AtomPropsDecodable, Equatable {
+    /// The common `padding` of a Card that sets none.
+    static let defaultPadding: Double = 14
+
     struct MenuItem: Codable, Equatable {
         var id: String
         var title: String
@@ -427,8 +430,13 @@ struct DisclosureProps: AtomPropsDecodable, Equatable {
 /// does) or `center` (centered both ways, as an empty state's are), and one
 /// accessibility container (or with `combine` one element whose label joins
 /// its children's). Its border is drawn only when it has a `stroke`, at
-/// `strokeOpacity` (1), `strokeWidth` (1) and `dash` (solid).
+/// `strokeOpacity` (1), `strokeWidth` (1) and `dash` (solid). Unlike a Stack
+/// it is padded by default: the common `padding` is `defaultPadding` unless
+/// set (a native Panel sized by its own frame passes 0).
 struct PanelProps: AtomPropsDecodable, Equatable {
+    /// The common `padding` of a Panel that sets none.
+    static let defaultPadding: Double = 12
+
     var spacing: Double?
     var fill: String?
     var fillOpacity: Double?
@@ -654,15 +662,23 @@ struct EditorProps: AtomPropsDecodable, Equatable {
 /// controlled: it is open while `isPresented` is true, and a click outside or
 /// Escape calls `onDismiss`, after which the owner sets `isPresented` false.
 /// `arrowEdge` (`top` default, `bottom`, `leading`, `trailing`) is the
-/// anchor's edge it points at; `width` fixes the popover's. The anchor and
-/// the content keep their own accessibility, so a `testID` here only names
-/// the popover to a plugin's events.
+/// anchor's edge it points at; `width` fixes the popover's. The content is
+/// padded by `inset` (`defaultInset` unless set) and a plugin's children are
+/// `spacing` apart (`defaultSpacing` unless set), so content looks right with
+/// no padding of its own; a native owner that pads its content passes 0. The
+/// anchor and the content keep their own accessibility, so a `testID` here
+/// only names the popover to a plugin's events.
 struct PopoverProps: AtomPropsDecodable, Equatable {
+    static let defaultInset: Double = 14
+    static let defaultSpacing: Double = 10
+
     var isPresented: Bool
     var arrowEdge: String?
     var width: Double?
+    var inset: Double?
+    var spacing: Double?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, arrowEdge, width }
+    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, arrowEdge, width, inset, spacing }
 }
 
 /// A discrete slider over `options`, as wide as its container. It is
@@ -687,14 +703,29 @@ struct StepSliderProps: AtomPropsDecodable, Equatable {
 /// open while `isPresented` is true, and Escape (or a native owner's content
 /// dismissing itself) calls `onDismiss`, after which the owner sets
 /// `isPresented` false. `width` and `height` fix the sheet's
-/// size; without them it fits its content. Its `testID` names the sheet's
-/// content column.
+/// size, its content at the top leading corner; without them it fits its
+/// content. With a `title` the sheet starts with the app's standard modal
+/// header: an optional `icon` (SF Symbol), the title, an optional `subtitle`
+/// and a close button (`<testID>-close`, `modal-close` without one) that
+/// calls `onDismiss`. The header and content are padded by `inset`
+/// (`defaultInset` unless set, as the app's own sheets are) and `spacing`
+/// apart, as are a plugin's children (`defaultSpacing` unless set); a native
+/// owner whose content pads itself passes an `inset` of 0. Its `testID` names
+/// the sheet's content column.
 struct ModalProps: AtomPropsDecodable, Equatable {
+    static let defaultInset: Double = 24
+    static let defaultSpacing: Double = 16
+
     var isPresented: Bool
     var width: Double?
     var height: Double?
+    var title: String?
+    var subtitle: String?
+    var icon: String?
+    var inset: Double?
+    var spacing: Double?
 
-    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, width, height }
+    enum CodingKeys: String, CodingKey, CaseIterable { case isPresented, width, height, title, subtitle, icon, inset, spacing }
 }
 
 /// A page that slides in from the trailing edge over its first child and

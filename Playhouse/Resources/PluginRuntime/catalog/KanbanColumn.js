@@ -7,7 +7,7 @@
 function Header(props) {
   var model = props.model, prefix = model.idPrefix;
   return h(Stack, { axis: "h", spacing: 9, paddingX: 3 },
-    h(Panel, { fill: model.accent, fillOpacity: 1, cornerRadius: 4, width: 8, height: 8 }),
+    h(Panel, { fill: model.accent, fillOpacity: 1, cornerRadius: 4, width: 8, height: 8, padding: 0 }),
     h(Text, { size: 11, weight: "bold", design: "rounded", color: "primary", tracking: 0.65, testID: prefix + "column-heading-" + model.key }, model.title),
     h(Spacer, { minLength: 4 }),
     h(Panel, { fill: model.tint, fillOpacity: model.tint ? 0.16 : 0.055, cornerRadius: 100, padding: 3, paddingX: 4 },
@@ -22,7 +22,7 @@ function EmptyState(props) {
   var model = props.model, empty = model.empty;
   return h(Panel, {
     spacing: 9, fillOpacity: 0, cornerRadius: 12, stroke: "primary", strokeOpacity: 0.10, dash: [5, 4], align: "center", combine: true,
-    minHeight: 124, fillWidth: true, testID: model.idPrefix + "empty-state-" + model.key
+    minHeight: 124, fillWidth: true, padding: 0, testID: model.idPrefix + "empty-state-" + model.key
   },
     h(Icon, { name: empty.icon, size: 18, weight: "regular", color: model.accent }),
     h(Text, { size: 12, weight: "medium", color: "secondary" }, empty.title),
@@ -43,7 +43,7 @@ function KanbanColumn(props) {
   if (tint) {
     return h(Panel, {
       fill: "panel", fillOpacity: 0.78, cornerRadius: 16,
-      minHeight: props.minHeight, fillWidth: true, testID: model.idPrefix + "column-" + model.key
+      minHeight: props.minHeight, fillWidth: true, padding: 0, testID: model.idPrefix + "column-" + model.key
     },
       h(Panel, {
         spacing: 13, fill: tint, fillOpacity: 0.12, cornerRadius: 16, stroke: tint, strokeOpacity: 0.34,

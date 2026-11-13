@@ -139,7 +139,7 @@ struct PluginPresentationModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .atomModal(
-                ModalProps(isPresented: isPresenting(.modal), width: plugin.map { Double($0.surfaceSize.width) }, height: plugin.map { Double($0.surfaceSize.height) }),
+                ModalProps(isPresented: isPresenting(.modal), width: plugin.map { Double($0.surfaceSize.width) }, height: plugin.map { Double($0.surfaceSize.height) }, inset: 0),
                 common: surfaceCommon,
                 onDismiss: { plugin = nil }
             ) { surface }

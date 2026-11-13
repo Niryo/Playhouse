@@ -68,7 +68,7 @@ struct KanbanColumnSection<Cards: View>: View {
         if let tint = model.tint {
             AtomPanel(
                 props: PanelProps(fill: "panel", fillOpacity: 0.78, cornerRadius: 16),
-                common: AtomCommon(testID: testID, minHeight: minHeight, fillWidth: true)
+                common: AtomCommon(testID: testID, minHeight: minHeight, fillWidth: true, padding: 0)
             ) {
                 AtomPanel(
                     props: PanelProps(spacing: 13, fill: tint, fillOpacity: 0.12, cornerRadius: 16, stroke: tint, strokeOpacity: 0.34),
@@ -105,7 +105,7 @@ struct KanbanColumnSection<Cards: View>: View {
 
     private var header: some View {
         AtomStack(props: StackProps(axis: "h", spacing: 9), common: AtomCommon(paddingX: 3)) {
-            AtomPanel(props: PanelProps(fill: model.accent, fillOpacity: 1, cornerRadius: 4), common: AtomCommon(width: 8, height: 8)) {}
+            AtomPanel(props: PanelProps(fill: model.accent, fillOpacity: 1, cornerRadius: 4), common: AtomCommon(width: 8, height: 8, padding: 0)) {}
             AtomText(
                 props: TextProps(text: model.title, size: 11, weight: "bold", design: "rounded", color: "primary", tracking: 0.65),
                 common: AtomCommon(testID: "\(prefix)column-heading-\(model.key)")
@@ -132,7 +132,7 @@ struct KanbanColumnSection<Cards: View>: View {
     private func emptyState(_ empty: KanbanColumnModel.Empty) -> some View {
         AtomPanel(
             props: PanelProps(spacing: 9, fillOpacity: 0, cornerRadius: 12, stroke: "primary", strokeOpacity: 0.10, dash: [5, 4], align: "center", combine: true),
-            common: AtomCommon(testID: "\(prefix)empty-state-\(model.key)", minHeight: 124, fillWidth: true)
+            common: AtomCommon(testID: "\(prefix)empty-state-\(model.key)", minHeight: 124, fillWidth: true, padding: 0)
         ) {
             AtomIcon(props: IconProps(name: empty.icon, size: 18, weight: "regular", color: model.accent))
             AtomText(props: TextProps(text: empty.title, size: 12, weight: "medium", color: "secondary"))
