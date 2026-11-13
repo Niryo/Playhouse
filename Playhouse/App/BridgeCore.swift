@@ -6088,6 +6088,7 @@ final class ConversationManager {
                 onActivity: { activity in self.recordClaudeActivity(taskID: taskID, turnID: turnID, activity) },
                 onDiff: { _ in }, onHistory: { _ in }, onActionRequest: {},
                 onUserInput: { _ in }, onSteerMessage: { _, _ in }, onProgressMessage: { _ in },
+                onMessageTimestamp: { _, _ in },
                 onTurnStarted: { _ in }, onTokenUsage: { usageReports.append($0) }
             )
             try await clients.claude.compactSession(
