@@ -17647,7 +17647,7 @@ Playhouse.render(h(Context));
         self.assertEqual((installed / "index.js").read_text(), changed)
         self.assertEqual((draft / "index.js").read_text(), changed)
 
-    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview without a board card or task header. The Plugins menu reopens the same conversation and preview, including unsaved drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home.
+    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview without a board card or task header. The editor header shows “Plugin editor” beside its back button. The Plugins menu reopens the same conversation and preview, including unsaved drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home.
     def test_plugin_authoring_task_starts_with_placement_and_skill(self):
         self.assert_failure(self.call_cli("plugin", "author", "--placement", "titleBar", expected_status=2)[0], "invalid_argument")
         self.assertFalse(self.plugins_folder().exists(), "A refused placement creates nothing.")
