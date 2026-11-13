@@ -766,6 +766,21 @@ enum PlayhouseCLI {
                     throw CLIError.usage("Use: playhouse settings set-cpu-usage-color-max <percent>")
                 }
                 return BridgeRequest(command: "settings.set-cpu-usage-color-max", arguments: ["max": .integer(max)])
+            case "set-auto-compaction":
+                let usage = "Use: playhouse settings set-auto-compaction [--enabled <true|false>] [--threshold <tokens>] [--idle-minutes <minutes>] [--minimum <tokens>]"
+                let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--enabled", "--threshold", "--idle-minutes", "--minimum"])
+                var arguments: [String: BridgeValue] = [:]
+                if let enabled = flags["--enabled"]?.last {
+                    guard enabled == "true" || enabled == "false" else { throw CLIError.usage(usage) }
+                    arguments["enabled"] = .boolean(enabled == "true")
+                }
+                for (flag, key) in [("--threshold", "thresholdTokens"), ("--idle-minutes", "idleMinutes"), ("--minimum", "minimumTokens")] {
+                    guard let text = flags[flag]?.last else { continue }
+                    guard let value = Int(text) else { throw CLIError.usage(usage) }
+                    arguments[key] = .integer(value)
+                }
+                guard !arguments.isEmpty else { throw CLIError.usage(usage) }
+                return BridgeRequest(command: "settings.set-auto-compaction", arguments: arguments)
             case "set-parent":
                 guard rest.count == 2 else { throw CLIError.usage("Use: playhouse settings set-parent <path>") }
                 return BridgeRequest(command: "settings.set-parent", arguments: ["path": .string(rest[1])])
@@ -1148,6 +1163,7 @@ enum PlayhouseCLI {
       playhouse mcp authenticate --provider <claude|codex> --name <server-name> [--task <task-id>]
       playhouse mcp authenticate-wait --provider <claude|codex> --name <server-name> [--task <task-id>]
       playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>
+      playhouse settings set-auto-compaction [--enabled <true|false>] [--threshold <tokens>] [--idle-minutes <minutes>] [--minimum <tokens>]
       playhouse task token-usage <task-id>
       playhouse task token-waste <task-id>
       playhouse task raw-input <task-id> [--agent <id>] [--scope final|all|request] [--request <n>] [--order transcript|size|rent] [--query <text>] [--offset <n>] [--limit <n>] [--focus <item>]

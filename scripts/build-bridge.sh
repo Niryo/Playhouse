@@ -105,6 +105,7 @@ shared_sources=(
   "${repository_root}/Playhouse/App/ProviderRequestLog.swift"
   "${repository_root}/Playhouse/App/ProcessCPUSampler.swift"
   "${repository_root}/Playhouse/App/AgentRunHost.swift"
+  "${repository_root}/Playhouse/App/ContextCompaction.swift"
   "${repository_root}/Playhouse/App/AgentUsage.swift"
   "${repository_root}/Playhouse/App/AgentUsageStore.swift"
   "${repository_root}/Playhouse/App/ConversationTranscriptStore.swift"

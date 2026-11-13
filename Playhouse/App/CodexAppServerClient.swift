@@ -367,6 +367,22 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
 
+    /// Requests Codex app-server to compact a thread's native history. The
+    /// provider returns no size metadata for this control request; the refreshed
+    /// history carries its native contextCompaction item when available.
+    func compactThread(
+        id threadID: String, workspace: ConversationWorkspaceContext, modelID: String,
+        developerInstructions: String?
+    ) async throws -> ConversationHistory {
+        try await resumeThreadIfNeeded(
+            id: threadID, workspace: workspace, modelID: modelID,
+            developerInstructions: developerInstructions,
+            reusingLoadedThread: true, confirmingModel: false
+        )
+        _ = try await request(method: "thread/compact/start", params: ["threadId": threadID])
+        return try await readMessages(threadID: threadID)
+    }
+
     /// Reads a child thread without resuming it or changing its turn state.
     func inspectThreadReadOnly(id threadID: String, workspace: ConversationWorkspaceContext) async throws -> ConversationHistory {
         try await ensureInitialized(workspace: workspace)

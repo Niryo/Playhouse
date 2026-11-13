@@ -19011,6 +19011,500 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((page["request"] as? [String: Any])?["repeatedItems"] as? Int, 0)
     }
 
+    // case-contract: test_claude_auto_compaction_threshold_and_warm_idle | Claude task launches pass the configured token threshold to Claude Code, disabling automatic compaction removes the threshold environment value, and settings changes persist with invalid values rejected. For an In Progress Claude task whose fixture session has 180,000 context tokens and has been idle 51 minutes, a scheduler tick runs one warm-idle /compact before the cache expires, records its trigger and before/after sizes in token usage, and a second tick does not compact again. The conversation labels the maintenance activity as automatic without adding an empty assistant turn. Crossing 200,000 tokens emits a threshold compaction boundary visible in the conversation and Token Stats. The settings window shows and saves the enabled toggle, threshold, idle wait and minimum context, and its invalid-threshold alert leaves the saved value unchanged. Idle checks skip Done and Backlog tasks, contexts below the minimum, pending user-input requests, an active Claude turn, and an outstanding background task; eligible In Progress, Waiting Response, and Review tasks compact.
+    func test_claude_auto_compaction_threshold_and_warm_idle() throws {
+        var environment = try installClaudeFixture(named: "claude-fixture-ui-auto-compaction")
+        environment["CLAUDE_CONFIG_DIR"] = dataDirectory.appendingPathComponent("claude-config").path
+        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_REPORT_OUTCOME"] = "1"
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        let creation = try runCLI([
+            "task", "create", "--title", "Warm compaction", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])
+        let taskID = try XCTUnwrap((creation["result"] as? [String: Any])?["id"] as? String)
+        XCTAssertTrue(app.buttons["Warm compaction"].waitToExist(timeout: 10))
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Hello."], extraEnvironment: environment)
+        let fixtureHistory = dataDirectory.appendingPathComponent("claude-fixture-ui-auto-compaction.history")
+        let firstTurn = try XCTUnwrap(((try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureHistory)) as? [String: Any])?["turns"] as? [[String: Any]])?.first)
+        XCTAssertEqual(firstTurn["autoCompactWindow"] as? String, "200000")
+        _ = try runCLI([
+            "conversation", "send", taskID, "--message", "fill context to 180000 tokens 51 minutes ago",
+        ], extraEnvironment: environment)
+        _ = try runCLI(["task", "prompt", taskID, "--text", "Fixture task description.", "--status", "In Progress"])
+        XCTAssertEqual((try runCLI(["task", "get", taskID])["result"] as? [String: Any])?["status"] as? String, "In Progress")
+        _ = try runCLI(["schedule", "tick"], extraEnvironment: environment)
+        let usageResponse = try runCLI(["task", "token-usage", taskID])
+        let usage = try XCTUnwrap(usageResponse["result"] as? [String: Any])
+        let compactions = try XCTUnwrap(usage["contextCompactions"] as? [[String: Any]])
+        XCTAssertEqual(compactions.count, 1)
+        XCTAssertEqual(compactions.first?["trigger"] as? String, "warm-idle")
+        XCTAssertEqual(compactions.first?["preTokens"] as? Int, 180000)
+        XCTAssertEqual(compactions.first?["postTokens"] as? Int, 6000)
+        let conversation = try runCLI(["conversation", "history", taskID])
+        let history = try XCTUnwrap((conversation["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        XCTAssertFalse(history.contains { ($0["role"] as? String) == "assistant" && (($0["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) },
+                        "A maintenance compaction must not leave an empty assistant turn.")
+        _ = try runCLI(["schedule", "tick"], extraEnvironment: environment)
+        let repeatedResponse = try runCLI(["task", "token-usage", taskID])
+        let repeatedUsage = try XCTUnwrap(repeatedResponse["result"] as? [String: Any])
+        XCTAssertEqual((repeatedUsage["contextCompactions"] as? [[String: Any]])?.count, 1)
+
+        openTask(named: "Warm compaction")
+        let automaticActivity = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Context compacted automatically"
+        )).firstMatch
+        XCTAssertTrue(automaticActivity.waitToExist(timeout: 10), "The maintenance turn should have a labelled timeline activity.")
+        attachScreenshot(named: "Warm idle compaction is labelled in the conversation")
+        attachElementScreenshot(automaticActivity, named: "Automatic compaction timeline row")
+
+        returnToBoard()
+        element("task-token-usage-counter-\(taskID)").click()
+        let compactionStat = app.staticTexts["token-stats-compaction-0"]
+        XCTAssertTrue(compactionStat.waitToExist(timeout: 10), "Token Stats should expose the warm-idle trigger and context sizes.")
+        XCTAssertTrue(accessibleLabelOrValue(of: compactionStat).contains("Idle, before the cache expired"))
+        attachScreenshot(named: "Token Stats lists the warm-idle compaction")
+        attachElementScreenshot(compactionStat, named: "Token Stats shows the warm-idle compaction trigger")
+        element("close-token-stats-button").click()
+
+        app.typeKey(",", modifierFlags: .command)
+        let preferences = settingsWindow
+        XCTAssertTrue(preferences.waitToExist(timeout: 10))
+        for identifier in ["auto-compaction-enabled-toggle", "auto-compaction-threshold-field", "auto-compaction-idle-minutes-field", "auto-compaction-minimum-field"] {
+            XCTAssertTrue(preferences.descendants(matching: .any).matching(identifier: identifier).firstMatch.waitToExist(timeout: 5), "Settings should show \(identifier).")
+        }
+        let threshold = preferences.descendants(matching: .any).matching(identifier: "auto-compaction-threshold-field").firstMatch
+        XCTAssertEqual(threshold.value as? String, "200,000")
+        XCTAssertEqual((preferences.descendants(matching: .any).matching(identifier: "auto-compaction-enabled-toggle").firstMatch.value as? NSNumber)?.intValue, 1)
+        XCTAssertEqual(preferences.descendants(matching: .any).matching(identifier: "auto-compaction-idle-minutes-field").firstMatch.value as? String, "50")
+        XCTAssertEqual(preferences.descendants(matching: .any).matching(identifier: "auto-compaction-minimum-field").firstMatch.value as? String, "150,000")
+        let settingsScroll = preferences.scrollViews.firstMatch
+        XCTAssertTrue(scrollFullyIntoView(threshold, in: settingsScroll), "The default compaction threshold should be visible before its screenshot.")
+        attachScreenshot(named: "Context compaction settings and defaults")
+        attachElementScreenshot(threshold, named: "200k default compaction threshold setting")
+        threshold.click()
+        threshold.typeKey("a", modifierFlags: .command)
+        threshold.typeText("210000\r")
+        preferences.descendants(matching: .any).matching(identifier: "auto-compaction-idle-minutes-field").firstMatch.click()
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["settings", "get"])["result"] as? [String: Any])?["autoCompaction"] as? [String: Any])?["thresholdTokens"] as? Int == 210000
+        }, timeout: 10), "The edited threshold should persist through the shared settings manager.")
+        try runCLI(["settings", "set-auto-compaction", "--threshold", "200000"])
+        app.typeKey("w", modifierFlags: .command)
+        try runCLI(["settings", "set-auto-compaction", "--enabled", "false"])
+        let disabledTask = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Compaction disabled", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        _ = try runCLI(["conversation", "send", disabledTask, "--message", "Hello."], extraEnvironment: environment)
+        let disabledHistory = try XCTUnwrap((try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureHistory)) as? [String: Any])?["turns"] as? [[String: Any]])
+        let disabledAutoCompactWindow = disabledHistory.last?["autoCompactWindow"]
+        XCTAssertTrue(
+            disabledAutoCompactWindow == nil || disabledAutoCompactWindow is NSNull,
+            "Disabling the setting must remove Claude's threshold override."
+        )
+
+        try runCLI(["settings", "set-auto-compaction", "--enabled", "true"])
+        let thresholdTask = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Threshold compaction", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        _ = try runCLI(["conversation", "send", thresholdTask, "--message", "Hello."], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", thresholdTask, "--message", "fill context to 210000 tokens"], extraEnvironment: environment)
+        let thresholdUsage = try XCTUnwrap((try runCLI(["task", "token-usage", thresholdTask])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])
+        XCTAssertEqual(thresholdUsage.last?["trigger"] as? String, "threshold")
+        XCTAssertEqual(thresholdUsage.last?["preTokens"] as? Int, 210000)
+        openTask(named: "Threshold compaction")
+        let thresholdRow = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Context compacted automatically"
+        )).firstMatch
+        XCTAssertTrue(thresholdRow.waitToExist(timeout: 10), "Claude's auto-threshold boundary should be visible as automatic compaction.")
+        attachScreenshot(named: "Claude threshold compaction in the conversation")
+        attachElementScreenshot(thresholdRow, named: "Claude threshold compaction row")
+        returnToBoard()
+        element("task-token-usage-counter-\(thresholdTask)").click()
+        let thresholdStat = app.staticTexts["token-stats-compaction-0"]
+        XCTAssertTrue(thresholdStat.waitToExist(timeout: 10))
+        let thresholdStatText = pluginText(thresholdStat).localizedLowercase
+        XCTAssertTrue(thresholdStatText.contains("threshold"))
+        attachScreenshot(named: "Token Stats records threshold compaction")
+        attachElementScreenshot(thresholdStat, named: "Token Stats shows threshold compaction")
+        element("close-token-stats-button").click()
+
+        app.typeKey(",", modifierFlags: .command)
+        let settings = settingsWindow
+        let enabled = settings.descendants(matching: .any).matching(identifier: "auto-compaction-enabled-toggle").firstMatch
+        enabled.click()
+        XCTAssertTrue(waitUntil({
+            (((try? self.runCLI(["settings", "get"])["result"] as? [String: Any])?["autoCompaction"] as? [String: Any])?["enabled"] as? Bool) == false
+        }, timeout: 10), "The visible toggle should disable automatic compaction in persisted settings.")
+        enabled.click()
+        let idleField = settings.descendants(matching: .any).matching(identifier: "auto-compaction-idle-minutes-field").firstMatch
+        idleField.click(); idleField.typeKey("a", modifierFlags: .command); idleField.typeText("49\r")
+        let minimumField = settings.descendants(matching: .any).matching(identifier: "auto-compaction-minimum-field").firstMatch
+        minimumField.click(); minimumField.typeKey("a", modifierFlags: .command); minimumField.typeText("160000\r")
+        XCTAssertTrue(waitUntil({
+            guard let saved = try? self.runCLI(["settings", "get"])["result"] as? [String: Any],
+                  let compaction = saved["autoCompaction"] as? [String: Any] else { return false }
+            return compaction["idleMinutes"] as? Int == 49 && compaction["minimumTokens"] as? Int == 160000 && compaction["enabled"] as? Bool == true
+        }, timeout: 10), "The visible idle and minimum fields should persist through the shared settings manager.")
+        try runCLI(["settings", "set-auto-compaction", "--idle-minutes", "50", "--minimum", "150000"])
+        let invalidThreshold = settings.descendants(matching: .any).matching(identifier: "auto-compaction-threshold-field").firstMatch
+        invalidThreshold.click(); invalidThreshold.typeKey("a", modifierFlags: .command); invalidThreshold.typeText("99999\r")
+        let settingsError = app.sheets.firstMatch
+        XCTAssertTrue(settingsError.waitToExist(timeout: 5), "The settings form should report a rejected threshold.")
+        XCTAssertTrue(
+            settingsError.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "Couldn't save")).firstMatch.exists,
+            "The validation sheet should identify the failed context compaction setting."
+        )
+        let savedAfterRejection = try XCTUnwrap(try runCLI(["settings", "get"])["result"] as? [String: Any])
+        XCTAssertEqual((savedAfterRejection["autoCompaction"] as? [String: Any])?["thresholdTokens"] as? Int, 200000,
+                       "A rejected visible value must leave persisted settings unchanged.")
+        attachScreenshot(named: "Context compaction setting validation alert")
+        attachElementScreenshot(settingsError, named: "Invalid context compaction setting shows a save error")
+        settingsError.buttons["OK"].click()
+        app.typeKey("w", modifierFlags: .command)
+
+        func makeIdleTask(_ title: String, root: String = "") throws -> String {
+            var args = ["task", "create", "--title", title, "--prompt", "Fixture task description.", "--provider", "claude"]
+            if !root.isEmpty { args += ["--root", root] }
+            return try XCTUnwrap((try runCLI(args)["result"] as? [String: Any])?["id"] as? String)
+        }
+        let backlogTask = try makeIdleTask("Backlog compaction", root: fixture.primary.path)
+        _ = try runCLI(["conversation", "send", backlogTask, "--message", "Hello."], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", backlogTask, "--message", "fill context to 180000 tokens 51 minutes ago"], extraEnvironment: environment)
+        _ = try runCLI(["task", "prompt", backlogTask, "--text", "Saved in Backlog", "--status", "Backlog"])
+        _ = try runCLI(["schedule", "tick"], extraEnvironment: environment)
+        XCTAssertEqual((try runCLI(["task", "get", backlogTask])["result"] as? [String: Any])?["status"] as? String, "Backlog")
+        XCTAssertTrue(((try runCLI(["task", "token-usage", backlogTask])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])?.isEmpty == true)
+
+        let pendingTask = try makeIdleTask("Pending question compaction", root: fixture.primary.path)
+        _ = try runCLI(["conversation", "send", pendingTask, "--message", "finish while a structured question remains pending; fill context to 180000 tokens 51 minutes ago"], extraEnvironment: environment)
+        let pendingHistory = try runCLI(["conversation", "history", pendingTask], extraEnvironment: environment)
+        XCTAssertNotNil((pendingHistory["result"] as? [String: Any])?["pendingUserInputRequest"], "The fixture must leave a real user-input request pending before the idle tick.")
+        _ = try runCLI(["schedule", "tick"], extraEnvironment: environment)
+        let pendingAfterTick = try runCLI(["conversation", "history", pendingTask], extraEnvironment: environment)
+        XCTAssertNotNil((pendingAfterTick["result"] as? [String: Any])?["pendingUserInputRequest"], "The idle tick must preserve the pending user-input request.")
+        XCTAssertTrue(((try runCLI(["task", "token-usage", pendingTask])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])?.isEmpty == true)
+
+        let waitingTask = try makeIdleTask("Waiting response compaction", root: fixture.primary.path)
+        _ = try runCLI(["conversation", "send", waitingTask, "--message", "Hello."], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", waitingTask, "--message", "fill context to 180000 tokens 51 minutes ago"], extraEnvironment: environment)
+        XCTAssertEqual((try runCLI(["task", "get", waitingTask])["result"] as? [String: Any])?["status"] as? String, "Waiting Response")
+        _ = try runCLI(["schedule", "tick"], extraEnvironment: environment)
+        XCTAssertEqual((((try runCLI(["task", "token-usage", waitingTask])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])?.first)?["trigger"] as? String, "warm-idle")
+
+        let reviewTask = try makeIdleTask("Review compaction", root: fixture.custom.path)
+        _ = try runCLI(["conversation", "send", reviewTask, "--message", "Hello."], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", reviewTask, "--message", "fill context to 180000 tokens 51 minutes ago"], extraEnvironment: environment)
+        _ = try runCLI(["task", "move", reviewTask, "Review"])
+        XCTAssertEqual((try runCLI(["task", "get", reviewTask])["result"] as? [String: Any])?["status"] as? String, "Review")
+        _ = try runCLI(["schedule", "tick"], extraEnvironment: environment)
+        XCTAssertEqual((((try runCLI(["task", "token-usage", reviewTask])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])?.first)?["trigger"] as? String, "warm-idle")
+
+        let smallTask = try makeIdleTask("Small context compaction", root: fixture.primary.path)
+        _ = try runCLI(["conversation", "send", smallTask, "--message", "Hello."], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", smallTask, "--message", "fill context to 100000 tokens 51 minutes ago"], extraEnvironment: environment)
+        _ = try runCLI(["schedule", "tick"], extraEnvironment: environment)
+        XCTAssertTrue(((try runCLI(["task", "token-usage", smallTask])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])?.isEmpty == true)
+
+        let doneTask = try makeIdleTask("Done compaction", root: fixture.custom.path)
+        _ = try runCLI(["conversation", "send", doneTask, "--message", "Hello."], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", doneTask, "--message", "fill context to 180000 tokens 51 minutes ago"], extraEnvironment: environment)
+        _ = try runCLI(["task", "move", doneTask, "Review"])
+        _ = try runCLI(["task", "move", doneTask, "Done"])
+        _ = try runCLI(["schedule", "tick"], extraEnvironment: environment)
+        XCTAssertEqual((try runCLI(["task", "get", doneTask])["result"] as? [String: Any])?["status"] as? String, "Done")
+        XCTAssertTrue(((try runCLI(["task", "token-usage", doneTask])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])?.isEmpty == true)
+
+        let backgroundTask = try makeIdleTask("Background task compaction", root: fixture.primary.path)
+        _ = try runCLI(["conversation", "send", backgroundTask, "--message", "Hello."], extraEnvironment: environment)
+        let executable = URL(fileURLWithPath: environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]!)
+        let backgroundReady = URL(fileURLWithPath: executable.path + ".compaction-background-ready")
+        let backgroundRelease = URL(fileURLWithPath: executable.path + ".compaction-background-release")
+        try? FileManager.default.removeItem(at: backgroundReady)
+        try? FileManager.default.removeItem(at: backgroundRelease)
+        let backgroundFinished = DispatchSemaphore(value: 0)
+        let errorLock = NSLock()
+        var backgroundError: Error?
+        DispatchQueue.global().async {
+            do {
+                _ = try self.runCLI(["conversation", "send", backgroundTask, "--message", "hold background task for compaction; fill context to 180000 tokens 51 minutes ago"], extraEnvironment: environment)
+            } catch { errorLock.lock(); backgroundError = error; errorLock.unlock() }
+            backgroundFinished.signal()
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: backgroundReady.path) }, timeout: 15), "Claude should report the outstanding background task before the scheduler tick.")
+        _ = try runCLI(["schedule", "tick"], extraEnvironment: environment)
+        XCTAssertTrue(((try runCLI(["task", "token-usage", backgroundTask])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])?.isEmpty == true)
+        try Data().write(to: backgroundRelease)
+        XCTAssertEqual(backgroundFinished.wait(timeout: .now() + 45), .success)
+        errorLock.lock(); let finishedBackgroundError = backgroundError; errorLock.unlock()
+        XCTAssertNil(finishedBackgroundError)
+
+        let busyTask = try makeIdleTask("Busy compaction", root: fixture.primary.path)
+        _ = try runCLI(["conversation", "send", busyTask, "--message", "Hello."], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", busyTask, "--message", "fill context to 180000 tokens 51 minutes ago"], extraEnvironment: environment)
+        let readyURL = URL(fileURLWithPath: executable.path + ".concurrent-turn-ready")
+        let releaseURL = URL(fileURLWithPath: executable.path + ".concurrent-turn-release")
+        try? FileManager.default.removeItem(at: readyURL)
+        try? FileManager.default.removeItem(at: releaseURL)
+        let turnFinished = DispatchSemaphore(value: 0)
+        var turnError: Error?
+        DispatchQueue.global().async {
+            do {
+                _ = try self.runCLI(["conversation", "send", busyTask, "--message", "hold-claude-turn-for-concurrency"], extraEnvironment: environment)
+            } catch {
+                errorLock.lock(); turnError = error; errorLock.unlock()
+            }
+            turnFinished.signal()
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: readyURL.path) }, timeout: 15), "The Claude provider turn should be active before scheduler evaluation.")
+        _ = try runCLI(["schedule", "tick"], extraEnvironment: environment)
+        XCTAssertTrue(((try runCLI(["task", "token-usage", busyTask])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])?.isEmpty == true)
+        try Data().write(to: releaseURL)
+        XCTAssertEqual(turnFinished.wait(timeout: .now() + 45), .success, "The held provider turn should settle after release.")
+        errorLock.lock(); let heldTurnError = turnError; errorLock.unlock()
+        XCTAssertNil(heldTurnError, "The held provider turn should finish successfully.")
+    }
+
+    // case-contract: test_claude_cold_resume_and_model_switch_compaction | A Claude session with more than the minimum context is compacted before the next real prompt after its cache has been idle for over 60 minutes, and again before a model switch. The cold-resume and model-switch triggers are persisted with context sizes, each `/compact` fixture turn precedes the real prompt, the visible maintenance rows precede their corresponding prompts, and a model switch runs `/compact` with the old model before the requested model starts. When the cache is expired and automatic compaction is disabled, the first resumed response with near-zero cache reads and a large cache write records one cache miss, visible in Token Stats. If Claude reports a compaction failure, the failed maintenance row is recorded, the event is marked unsuccessful, and the user's prompt still runs and appears in history.
+    func test_claude_cold_resume_and_model_switch_compaction() throws {
+        var environment = try installClaudeFixture(named: "claude-fixture-ui-resume-compaction")
+        environment["CLAUDE_CONFIG_DIR"] = dataDirectory.appendingPathComponent("claude-config").path
+        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_REPORT_OUTCOME"] = "1"
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        let historyURL = URL(fileURLWithPath: environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]!).appendingPathExtension("history")
+
+        let coldTask = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Cold resume", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        XCTAssertTrue(app.buttons["Cold resume"].waitToExist(timeout: 10))
+        _ = try runCLI(["conversation", "send", coldTask, "--message", "Hello."], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", coldTask, "--message", "fill context to 180000 tokens 61 minutes ago"], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", coldTask, "--message", "Resume after cache expiry."], extraEnvironment: environment)
+        let coldUsage = try XCTUnwrap((try runCLI(["task", "token-usage", coldTask])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])
+        XCTAssertEqual(coldUsage.last?["trigger"] as? String, "cold-resume")
+        let coldHistory = try XCTUnwrap((try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any])?["turns"] as? [[String: Any]])
+        let coldPromptIndex = try XCTUnwrap(coldHistory.firstIndex { ($0["userText"] as? String) == "Resume after cache expiry." })
+        XCTAssertEqual(coldHistory[coldPromptIndex - 1]["userText"] as? String, "/compact")
+        openTask(named: "Cold resume")
+        let coldRow = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Context compacted automatically"
+        )).firstMatch
+        XCTAssertTrue(scrollTranscriptUntilExists(coldRow), "The cold-resume compaction row should be present in the conversation.")
+        XCTAssertTrue(coldRow.isHittable, "The compaction row must be visible before its screenshot.")
+        let coldVisibleHistory = try XCTUnwrap(try runCLI(["conversation", "history", coldTask])["result"] as? [String: Any])
+        let resumedPrompt = try XCTUnwrap((coldVisibleHistory["messages"] as? [[String: Any]])?.first {
+            $0["role"] as? String == "user" && $0["text"] as? String == "Resume after cache expiry."
+        })
+        let resumedPromptRow = app.descendants(matching: .any).matching(identifier: "user-message-\(try XCTUnwrap(resumedPrompt["id"] as? String))").firstMatch
+        XCTAssertTrue(scrollTranscriptUntilExists(resumedPromptRow), "The resumed prompt should be visible beside its compaction row.")
+        XCTAssertTrue(coldRow.isHittable, "The cold-resume row must remain visible beside the prompt.")
+        XCTAssertTrue(resumedPromptRow.isHittable, "The resumed prompt must be visible beside its compaction row.")
+        XCTAssertLessThan(coldRow.frame.minY, resumedPromptRow.frame.minY, "The visible cold-resume compaction row must precede the resumed prompt.")
+        attachScreenshot(named: "Cold-resume compaction appears in the conversation")
+        attachElementScreenshot(coldRow, named: "Cold-resume compaction timeline row")
+
+        let switchTask = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Model switch", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        _ = try runCLI(["conversation", "send", switchTask, "--message", "Hello.", "--model", "claude-haiku-4-5"], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", switchTask, "--message", "fill context to 180000 tokens", "--model", "claude-haiku-4-5"], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", switchTask, "--message", "Switch models now.", "--model", "claude-sonnet-4-6"], extraEnvironment: environment)
+        let switchUsage = try XCTUnwrap((try runCLI(["task", "token-usage", switchTask])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])
+        XCTAssertEqual(switchUsage.last?["trigger"] as? String, "model-switch")
+        let switchHistory = try XCTUnwrap((try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any])?["turns"] as? [[String: Any]])
+        let promptIndex = try XCTUnwrap(switchHistory.firstIndex { ($0["userText"] as? String) == "Switch models now." })
+        let compact = switchHistory[promptIndex - 1]
+        XCTAssertEqual(compact["userText"] as? String, "/compact")
+        let compactArgs = try XCTUnwrap(compact["arguments"] as? [String])
+        XCTAssertEqual(compactArgs[compactArgs.firstIndex(of: "--model")! + 1], "claude-haiku-4-5")
+        let promptArgs = try XCTUnwrap(switchHistory[promptIndex]["arguments"] as? [String])
+        XCTAssertEqual(promptArgs[promptArgs.firstIndex(of: "--model")! + 1], "claude-sonnet-4-6")
+        openTask(named: "Model switch")
+        let switchRow = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Context compacted automatically"
+        )).firstMatch
+        XCTAssertTrue(scrollTranscriptUntilExists(switchRow), "The model-switch compaction row should be present in the conversation.")
+        XCTAssertTrue(switchRow.isHittable, "The compaction row must be visible before its screenshot.")
+        let switchVisibleHistory = try XCTUnwrap(try runCLI(["conversation", "history", switchTask])["result"] as? [String: Any])
+        let switchedPrompt = try XCTUnwrap((switchVisibleHistory["messages"] as? [[String: Any]])?.first {
+            $0["role"] as? String == "user" && $0["text"] as? String == "Switch models now."
+        })
+        let switchedPromptRow = app.descendants(matching: .any).matching(identifier: "user-message-\(try XCTUnwrap(switchedPrompt["id"] as? String))").firstMatch
+        XCTAssertTrue(scrollTranscriptUntilExists(switchedPromptRow), "The model-switch prompt should be visible beside its compaction row.")
+        XCTAssertTrue(switchRow.isHittable, "The model-switch row must remain visible beside the prompt.")
+        XCTAssertTrue(switchedPromptRow.isHittable, "The model-switch prompt must be visible beside its compaction row.")
+        XCTAssertLessThan(switchRow.frame.minY, switchedPromptRow.frame.minY, "The visible model-switch compaction row must precede its prompt.")
+        attachScreenshot(named: "Model-switch compaction row in conversation")
+        attachElementScreenshot(switchRow, named: "Model-switch compaction timeline row")
+
+        try runCLI(["settings", "set-auto-compaction", "--enabled", "false"])
+        let cacheEnvironment = environment.merging(["PLAYHOUSE_E2E_CLAUDE_FIXTURE_CACHE_MISS": "1"]) { _, new in new }
+        let cacheTask = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Resume cache miss", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        _ = try runCLI(["conversation", "send", cacheTask, "--message", "Hello."], extraEnvironment: cacheEnvironment)
+        _ = try runCLI(["conversation", "send", cacheTask, "--message", "fill context to 180000 tokens 61 minutes ago"], extraEnvironment: cacheEnvironment)
+        _ = try runCLI(["conversation", "send", cacheTask, "--message", "Resume with a cold cache."], extraEnvironment: cacheEnvironment)
+        let cacheUsage = try XCTUnwrap((try runCLI(["task", "token-usage", cacheTask])["result"] as? [String: Any]))
+        let cacheMisses = try XCTUnwrap(cacheUsage["promptCacheMisses"] as? [[String: Any]])
+        XCTAssertEqual(cacheMisses.count, 1)
+        XCTAssertEqual(cacheMisses.first?["cacheReadTokens"] as? Int, 0)
+        XCTAssertEqual(cacheMisses.first?["cacheWriteTokens"] as? Int, 250000)
+        openTask(named: "Resume cache miss")
+        returnToBoard()
+        element("task-token-usage-counter-\(cacheTask)").click()
+        let cacheMissStat = app.staticTexts["token-stats-resume-cache-miss-0"]
+        XCTAssertTrue(cacheMissStat.waitToExist(timeout: 10), "Token Stats should expose the cold-resume cache miss.")
+        let cacheMissStatText = pluginText(cacheMissStat).localizedLowercase
+        XCTAssertTrue(cacheMissStatText.contains("resume cache miss"))
+        XCTAssertTrue(cacheMissStatText.contains("cache read 0 tokens"))
+        XCTAssertTrue(cacheMissStatText.contains("250,000"), "The full rewritten-token count should remain accessible.")
+        attachScreenshot(named: "Token Stats records a resume cache miss")
+        attachElementScreenshot(cacheMissStat, named: "Token Stats shows a resumed cache miss")
+        element("close-token-stats-button").click()
+
+        try runCLI(["settings", "set-auto-compaction", "--enabled", "true"])
+        let executable = URL(fileURLWithPath: environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]!)
+        let failureMarker = URL(fileURLWithPath: executable.path + ".compact-fail")
+        try Data().write(to: failureMarker)
+        let failureTask = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Failed Claude compaction", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        _ = try runCLI(["conversation", "send", failureTask, "--message", "Hello."], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", failureTask, "--message", "fill context to 180000 tokens 61 minutes ago"], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", failureTask, "--message", "Continue after failed compaction."], extraEnvironment: environment)
+        try? FileManager.default.removeItem(at: failureMarker)
+        let failedEvents = try XCTUnwrap((try runCLI(["task", "token-usage", failureTask])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])
+        XCTAssertEqual(failedEvents.last?["trigger"] as? String, "cold-resume")
+        XCTAssertEqual(failedEvents.last?["succeeded"] as? Bool, false)
+        let failedHistory = try XCTUnwrap((try runCLI(["conversation", "history", failureTask])["result"] as? [String: Any]))
+        let failedRow = try XCTUnwrap((failedHistory["activities"] as? [[String: Any]])?.first { $0["isContextCompaction"] as? Bool == true })
+        XCTAssertEqual(failedRow["status"] as? String, "failed")
+        XCTAssertTrue((failedHistory["messages"] as? [[String: Any]] ?? []).contains { $0["text"] as? String == "Continue after failed compaction." })
+        openTask(named: "Failed Claude compaction")
+        let failedCompactionRow = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Context compacted automatically"
+        )).firstMatch
+        XCTAssertTrue(scrollTranscriptUntilExists(failedCompactionRow), "The failed compaction row should be present in the conversation.")
+        XCTAssertTrue(failedCompactionRow.isHittable, "The compaction row must be visible before its screenshot.")
+        attachScreenshot(named: "Failed Claude compaction row in conversation")
+        attachElementScreenshot(failedCompactionRow, named: "Failed automatic compaction timeline row")
+    }
+
+    // case-contract: test_codex_context_compaction_threshold_and_model_switch | With a configured 100,000-token threshold and 150,000-token minimum, a Codex task reporting 120,000 context tokens calls thread/compact/start before its next prompt, records one successful automatic threshold event with a labelled activity, and adds no empty assistant turn. After a same-model turn records 220,000 context tokens, switching models compacts through the RPC first, records the old model and model-switch trigger, and orders compaction before turn/start. If the app-server rejects compaction, Playhouse records a failed activity and event but continues the prompt. Codex uses reported context and model changes; its path does not depend on Claude's prompt-cache TTL or warm-idle scheduler.
+    func test_codex_context_compaction_threshold_and_model_switch() throws {
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-ui-auto-threshold")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        codexFixtureExecutable = executable.path
+        let environment = ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path, "PLAYHOUSE_E2E_CODEX_CONTEXT_TOKENS": "120000"]
+        let contextTokensFile = URL(fileURLWithPath: executable.path + ".context-tokens")
+        try Data("120000".utf8).write(to: contextTokensFile)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        _ = try runCLI(["settings", "set-auto-compaction", "--threshold", "100000", "--minimum", "150000"])
+        let taskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Codex threshold compaction", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        XCTAssertTrue(app.buttons["Codex threshold compaction"].waitToExist(timeout: 10))
+        _ = try runCLI(["conversation", "send", taskID, "--message", "First Codex turn.", "--model", "gpt-6-sol"], extraEnvironment: environment)
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Continue after the context threshold.", "--model", "gpt-6-sol"], extraEnvironment: environment)
+        let compactions = try XCTUnwrap((try runCLI(["task", "token-usage", taskID])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])
+        XCTAssertEqual(compactions.count, 1)
+        XCTAssertEqual(compactions.first?["provider"] as? String, "codex")
+        XCTAssertEqual(compactions.first?["trigger"] as? String, "threshold")
+        XCTAssertEqual(compactions.first?["preTokens"] as? Int, 120000)
+        let thresholdHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let thresholdMessages = try XCTUnwrap(thresholdHistory["messages"] as? [[String: Any]])
+        XCTAssertFalse(thresholdMessages.contains {
+            ($0["role"] as? String) == "assistant" && (($0["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        }, "Codex compaction must not add an empty assistant message.")
+        let thresholdOrder = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
+        XCTAssertEqual((thresholdOrder?["rpcOrder"] as? [[String: String]] ?? []).map { $0["method"] ?? "" },
+                       ["turn/start", "thread/compact/start", "turn/start"],
+                       "Codex compaction must finish before the next turn starts.")
+        openTask(named: "Codex threshold compaction")
+        let row = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Context compacted automatically"
+        )).firstMatch
+        XCTAssertTrue(scrollTranscriptUntilExists(row), "The Codex threshold compaction row should be present in the conversation.")
+        XCTAssertTrue(row.isHittable, "The compaction row must be visible before its screenshot.")
+        XCTAssertTrue(row.label.contains("threshold"))
+        let thresholdPrompt = try XCTUnwrap(thresholdMessages.first {
+            $0["role"] as? String == "user" && $0["text"] as? String == "Continue after the context threshold."
+        })
+        let thresholdPromptRow = app.descendants(matching: .any).matching(identifier: "user-message-\(try XCTUnwrap(thresholdPrompt["id"] as? String))").firstMatch
+        XCTAssertTrue(scrollTranscriptUntilExists(thresholdPromptRow), "The Codex prompt should be visible beside its compaction row.")
+        XCTAssertTrue(row.isHittable, "The Codex compaction row must remain visible beside the prompt.")
+        XCTAssertTrue(thresholdPromptRow.isHittable, "The Codex prompt must be visible beside its compaction row.")
+        XCTAssertLessThan(row.frame.minY, thresholdPromptRow.frame.minY, "The visible Codex compaction row must precede the prompt.")
+        attachScreenshot(named: "Codex threshold compaction appears in the conversation")
+        attachElementScreenshot(row, named: "Codex automatic threshold compaction row")
+        returnToBoard()
+        element("task-token-usage-counter-\(taskID)").click()
+        let stat = app.staticTexts["token-stats-compaction-0"]
+        XCTAssertTrue(stat.waitToExist(timeout: 10))
+        XCTAssertTrue(accessibleLabelOrValue(of: stat).contains("threshold"))
+        attachScreenshot(named: "Token Stats lists Codex threshold compaction")
+        attachElementScreenshot(stat, named: "Codex threshold trigger in Token Stats")
+        element("close-token-stats-button").click()
+
+        try Data("220000".utf8).write(to: contextTokensFile)
+        _ = try runCLI(["settings", "set-auto-compaction", "--threshold", "300000", "--minimum", "150000"])
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Grow context before switching models.", "--model", "gpt-6-sol"], extraEnvironment: environment)
+        let firstHistory = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
+        let switchOrderCount = (firstHistory?["rpcOrder"] as? [[String: Any]])?.count ?? 0
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Switch to Luna.", "--model", "gpt-6-luna"], extraEnvironment: environment)
+        let switchEvents = try XCTUnwrap((try runCLI(["task", "token-usage", taskID])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])
+        XCTAssertEqual(switchEvents.last?["trigger"] as? String, "model-switch")
+        XCTAssertEqual(switchEvents.last?["model"] as? String, "gpt-6-sol")
+        XCTAssertEqual(switchEvents.last?["preTokens"] as? Int, 220000)
+        let history = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
+        let methods = (history?["rpcOrder"] as? [[String: String]] ?? []).map { $0["method"] ?? "" }
+        XCTAssertEqual(Array(methods.dropFirst(switchOrderCount)), ["thread/compact/start", "turn/start"])
+        openTask(named: "Codex threshold compaction")
+        let switchRow = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Model switch"
+        )).firstMatch
+        XCTAssertTrue(scrollTranscriptUntilExists(switchRow), "The model-switch compaction row should be present in the conversation.")
+        XCTAssertTrue(switchRow.isHittable, "The compaction row must be visible before its screenshot.")
+        let switchConversationHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let switchPrompt = try XCTUnwrap((switchConversationHistory["messages"] as? [[String: Any]])?.first {
+            $0["role"] as? String == "user" && $0["text"] as? String == "Switch to Luna."
+        })
+        let switchPromptRow = app.descendants(matching: .any).matching(identifier: "user-message-\(try XCTUnwrap(switchPrompt["id"] as? String))").firstMatch
+        XCTAssertTrue(scrollTranscriptUntilExists(switchPromptRow), "The Codex model-switch prompt should be visible beside its compaction row.")
+        XCTAssertTrue(switchRow.isHittable, "The Codex model-switch row must remain visible beside the prompt.")
+        XCTAssertTrue(switchPromptRow.isHittable, "The Codex model-switch prompt must be visible beside its compaction row.")
+        XCTAssertLessThan(switchRow.frame.minY, switchPromptRow.frame.minY, "The visible Codex model-switch row must precede its prompt.")
+        attachScreenshot(named: "Codex model-switch compaction row in conversation")
+        attachElementScreenshot(switchRow, named: "Codex model-switch compaction row")
+
+        let failureMarker = URL(fileURLWithPath: executable.path + ".compact-fail")
+        try Data().write(to: failureMarker)
+        let failureOrderCount = methods.count
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Continue after failed compaction.", "--model", "gpt-6-sol"], extraEnvironment: environment)
+        try? FileManager.default.removeItem(at: failureMarker)
+        let failureEvents = try XCTUnwrap((try runCLI(["task", "token-usage", taskID])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])
+        XCTAssertEqual(failureEvents.last?["succeeded"] as? Bool, false)
+        let failureHistory = try XCTUnwrap((try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]))
+        let failureActivity = try XCTUnwrap((failureHistory["activities"] as? [[String: Any]])?.first {
+            $0["title"] as? String == "Automatic context compaction failed" && $0["status"] as? String == "failed"
+        })
+        XCTAssertEqual(failureActivity["status"] as? String, "failed")
+        XCTAssertTrue((failureHistory["messages"] as? [[String: Any]] ?? []).contains { $0["text"] as? String == "Continue after failed compaction." })
+        let failureOrder = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
+        XCTAssertEqual(Array(((failureOrder?["rpcOrder"] as? [[String: String]]) ?? []).map { $0["method"] ?? "" }.dropFirst(failureOrderCount)),
+                       ["thread/compact/start", "turn/start"])
+        openTask(named: "Codex threshold compaction")
+        let failureRow = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Automatic context compaction failed"
+        )).firstMatch
+        XCTAssertTrue(scrollTranscriptUntilExists(failureRow), "The failed Codex compaction row should be present in the conversation.")
+        XCTAssertTrue(failureRow.isHittable, "The compaction row must be visible before its screenshot.")
+        attachScreenshot(named: "Codex failed compaction row in conversation")
+        attachElementScreenshot(failureRow, named: "Codex compaction failure timeline row")
+    }
+
     // case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
     func test_settings_token_usage_color_max_round_trip() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-max")

@@ -105,8 +105,15 @@ def call_usage_notifications(thread_id, turn_id):
     input count includes its cached tokens, so "sent" is the input count itself.
     """
     subagent = f"{thread_id}-subagent"
-    first, second = breakdown(700, 500, 30), breakdown(900, 600, 40)
-    cumulative = breakdown(1600, 1100, 70)
+    context_path = Path(str(sys.argv[0]) + ".context-tokens")
+    context_tokens = int(
+        context_path.read_text(encoding="utf-8").strip()
+        if context_path.is_file()
+        else (os.environ.get("PLAYHOUSE_E2E_CODEX_CONTEXT_TOKENS", "0") or 0)
+    )
+    first = breakdown(700, 500, 30)
+    second = breakdown(context_tokens or 900, 0 if context_tokens else 600, 40)
+    cumulative = breakdown(700 + (context_tokens or 900), 500 if context_tokens else 1100, 70)
     sub = breakdown(300, 100, 10)
     return [
         token_usage_notification(thread_id, turn_id, first, first),
@@ -1411,6 +1418,10 @@ def main():
                 kept_model.unlink(missing_ok=True)
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": resumed_model}})
         elif message.get("method") == "turn/start":
+            if mode.endswith(("-context-compaction", "-auto-threshold")):
+                order_history = serial_history()
+                order_history.setdefault("rpcOrder", []).append({"method": "turn/start"})
+                history_path.write_text(json.dumps(order_history), encoding="utf-8")
             if "-single-server" in mode:
                 THREAD_ID = message["params"]["threadId"]
                 TURN_ID = f"turn-{uuid.uuid4()}"
@@ -2008,6 +2019,33 @@ def main():
                         "threadId": THREAD_ID, "turnId": TURN_ID, "item": item,
                     }})
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"}}})
+            elif mode.endswith("-auto-threshold"):
+                item = {
+                    "id": "item_playhouse_auto_threshold_answer",
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": "Codex fixture completed the automatic-compaction turn.",
+                }
+                write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID, "item": {**item, "text": ""},
+                }})
+                write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item["id"], "delta": item["text"],
+                }})
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID, "item": item,
+                }})
+                instructions = turn_history.get("developerInstructions") or serial_history().get("threadStartDeveloperInstructions") or ""
+                outcome_line = next((line.strip() for line in instructions.splitlines()
+                                     if line.strip().startswith("'") and " task outcome " in line), None)
+                if outcome_line:
+                    outcome_command = outcome_line.replace("<completed|in-progress|waiting-response>", "waiting-response")
+                    completed = subprocess.run(shlex.split(outcome_command), capture_output=True, text=True, timeout=60)
+                    if completed.returncode != 0:
+                        raise RuntimeError(f"Fixture task outcome command failed: {completed.stderr.strip()}")
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"},
+                }})
             elif mode.endswith("-context-compaction"):
                 compaction_item = {"id": "item_playhouse_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}}
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
@@ -2499,6 +2537,27 @@ def main():
                 write({"jsonrpc": "2.0", "id": message["id"], "result": {"turnId": TURN_ID}})
         elif message.get("method") == "turn/interrupt":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+        elif message.get("method") == "thread/compact/start":
+            params = message.get("params", {})
+            if params.get("threadId") != THREAD_ID:
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32005, "message": "Unknown fixture thread."}})
+                return
+            saved_history = serial_history()
+            saved_history.setdefault("rpcOrder", []).append({"method": "thread/compact/start"})
+            if Path(str(sys.argv[0]) + ".compact-fail").exists():
+                history_path.write_text(json.dumps(saved_history), encoding="utf-8")
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32020, "message": "Fixture compaction failed."}})
+                return
+            turn_list = saved_history.get("messages") or saved_history.get("turns") or []
+            compaction_index = len(saved_history.get("compactions", [])) + 1
+            record = {
+                "afterTurnCount": len(turn_list),
+                "turnID": turn_list[-1].get("turnID") if turn_list else None,
+                "item": {"id": f"item_playhouse_compaction_{compaction_index}", "type": "contextCompaction"},
+            }
+            saved_history.setdefault("compactions", []).append(record)
+            history_path.write_text(json.dumps(saved_history), encoding="utf-8")
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
         elif message.get("method") == "thread/read":
             if message.get("params", {}).get("threadId") != CHILD_THREAD_ID:
                 write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32005, "message": "Unknown fixture child thread."}})
@@ -2596,6 +2655,8 @@ def main():
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
                             {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "phase": "final_answer", "text": answer_text(user_message)},
                         ])
+                    contents.extend({**record["item"], "_fixture_turn_index": index - 1}
+                                    for record in saved_history.get("compactions", []) if record.get("afterTurnCount") == index)
             elif saved_history.get("turns"):
                 contents = []
                 for index, saved_turn in enumerate(saved_history["turns"], start=1):
@@ -2658,6 +2719,8 @@ def main():
                                 "changes": [{"path": "follow-up.txt", "kind": "update", "diff": "+follow-up-visible-diff"}],
                                 "status": "completed",
                             })
+                    contents.extend({**record["item"], "_fixture_turn_index": index - 1}
+                                    for record in saved_history.get("compactions", []) if record.get("afterTurnCount") == index)
             else:
                 user_message = saved_history.get("userMessage") or (turn_message if answers else None)
                 user_images = saved_history.get("images", [])

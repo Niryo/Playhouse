@@ -111,6 +111,11 @@ enum WorkspaceSettings {
     static let defaultTokenUsageColorMax = TokenUsageHeatmap.defaultColorMax
     static let cpuUsageColorMaxKey = "cpuUsageColorMax"
     static let defaultCPUUsageColorMax = CPUUsageHeatmap.defaultColorMax
+    /// Automatic context compaction settings shared by Claude and Codex task sessions.
+    static let autoCompactionEnabledKey = "autoCompactionEnabled"
+    static let autoCompactionThresholdKey = "autoCompactionThresholdTokens"
+    static let autoCompactionIdleMinutesKey = "autoCompactionIdleMinutes"
+    static let autoCompactionMinimumKey = "autoCompactionMinimumTokens"
     /// Add Plugin mode: the window shows "Add here" placeholders at every plugin placement.
     static let pluginAddModeKey = "pluginAddMode"
     /// Bumped whenever the plugins folder changes (`plugin refresh`, `plugin delete`), so
@@ -174,6 +179,9 @@ struct ConversationWorkspaceContext {
     /// sandbox, checks every tool call in a hook that runs before the user's own allow rules.
     /// MCP tools stay available on both providers, as Codex's sandbox does not cover them.
     var isReadOnly = false
+    /// The auto-compact window Claude Code is launched with, in tokens; nil
+    /// leaves Claude Code's own default. Only a task turn's own launch sets it.
+    var claudeAutoCompactWindowTokens: Int?
 
     /// One Codex thread config joining what skills and MCP servers each need.
     var codexThreadConfig: [String: Any]? {
@@ -245,11 +253,14 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
     /// The message this call followed, which places the call in the
     /// conversation timeline; nil for calls recorded before Playhouse kept it.
     var afterMessageID: String? = nil
+    /// What fired a context compaction and how far it shrank the context;
+    /// nil for other activities and for compactions recorded without it.
+    var compaction: ContextCompactionDetails? = nil
 
     private enum CodingKeys: String, CodingKey {
         case id, title, detail, status, childThreadID, agentPath, model, reasoningEffort
         case toolKind, server, tool, durationMs, startedAt, isContextCompaction, turnID, timelineOrder
-        case backgroundTaskID, backgroundTaskSummary, summary, input, output, afterMessageID
+        case backgroundTaskID, backgroundTaskSummary, summary, input, output, afterMessageID, compaction
     }
 
     init(
@@ -274,7 +285,8 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         summary: String? = nil,
         input: String? = nil,
         output: String? = nil,
-        afterMessageID: String? = nil
+        afterMessageID: String? = nil,
+        compaction: ContextCompactionDetails? = nil
     ) {
         self.id = id
         self.title = title
@@ -298,6 +310,7 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         self.input = input
         self.output = output
         self.afterMessageID = afterMessageID
+        self.compaction = compaction
     }
 
     init(from decoder: Decoder) throws {
@@ -324,6 +337,7 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         input = try values.decodeIfPresent(String.self, forKey: .input)
         output = try values.decodeIfPresent(String.self, forKey: .output)
         afterMessageID = try values.decodeIfPresent(String.self, forKey: .afterMessageID)
+        compaction = try values.decodeIfPresent(ContextCompactionDetails.self, forKey: .compaction)
     }
 
     /// Whether the conversation timeline shows this call as a tool row of its
@@ -374,6 +388,7 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         merged.output = output ?? existing.output
         merged.afterMessageID = afterMessageID ?? existing.afterMessageID
         merged.startedAt = startedAt ?? existing.startedAt
+        merged.compaction = compaction ?? existing.compaction
         return merged
     }
 
@@ -1852,6 +1867,9 @@ struct WorkspaceSettingsView: View {
     @State private var appearance = WorkspaceSettings.preferencesStore.string(forKey: WorkspaceSettings.appearanceKey) ?? "dark"
     @State private var tokenUsageColorMax = WorkspaceSettingsManager().tokenUsageColorMax
     @State private var cpuUsageColorMax = WorkspaceSettingsManager().cpuUsageColorMax
+    @State private var autoCompaction = WorkspaceSettingsManager().contextCompaction
+    @FocusState private var focusedCompactionField: String?
+    @State private var compactionFieldDrafts: [String: String] = [:]
     @State private var pickerError: String?
     @State private var tokenUsageError: String?
     @State private var cpuUsageError: String?
@@ -1930,6 +1948,25 @@ struct WorkspaceSettingsView: View {
                     Spacer()
                 }
             }
+            Section("Context compaction") {
+                Toggle("Automatically compact task sessions", isOn: Binding(
+                    get: { autoCompaction.enabled },
+                    set: { value in saveCompaction(enabled: value) }
+                ))
+                .accessibilityIdentifier("auto-compaction-enabled-toggle")
+                Text("Claude sessions compact near prompt-cache expiry, on a cold resume, before model switches and at the threshold. Codex sessions compact before a prompt when the context reaches the threshold or the model changes; Codex does not expose the same cache-expiry signal.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                compactionField("Threshold", value: Binding(
+                    get: { autoCompaction.thresholdTokens }, set: { saveCompaction(thresholdTokens: $0) }
+                ), suffix: "tokens", id: "auto-compaction-threshold-field")
+                compactionField("Idle wait", value: Binding(
+                    get: { autoCompaction.idleMinutes }, set: { saveCompaction(idleMinutes: $0) }
+                ), suffix: "minutes", id: "auto-compaction-idle-minutes-field")
+                compactionField("Minimum context", value: Binding(
+                    get: { autoCompaction.minimumTokens }, set: { saveCompaction(minimumTokens: $0) }
+                ), suffix: "tokens", id: "auto-compaction-minimum-field")
+            }
             Section("Repository root") {
                 Text("Choose the root folder that contains your repositories. Playhouse searches below it for repository suggestions, and a valid root is required before sending a conversation.")
                     .fixedSize(horizontal: false, vertical: true)
@@ -1983,8 +2020,16 @@ struct WorkspaceSettingsView: View {
                 if updatedMax != tokenUsageColorMax { tokenUsageColorMax = updatedMax }
                 let updatedCPUMax = WorkspaceSettingsManager().cpuUsageColorMax
                 if updatedCPUMax != cpuUsageColorMax { cpuUsageColorMax = updatedCPUMax }
+                if focusedCompactionField == nil {
+                    let updatedCompaction = WorkspaceSettingsManager().contextCompaction
+                    if updatedCompaction != autoCompaction { autoCompaction = updatedCompaction }
+                }
                 try? await Task.sleep(for: .milliseconds(250))
             }
+        }
+        .onChange(of: focusedCompactionField) { previous, current in
+            guard let previous, previous != current else { return }
+            commitCompactionField(previous)
         }
         .formStyle(.grouped)
         .frame(width: 560, height: 420)
@@ -2018,6 +2063,53 @@ struct WorkspaceSettingsView: View {
             .nativeHelp("Dismiss CPU usage setting error")
         } message: {
             Text(cpuUsageError ?? "Please try again.")
+        }
+        .alert("Couldn't save context compaction setting", isPresented: Binding(
+            get: { compactionError != nil }, set: { if !$0 { compactionError = nil } }
+        )) {
+            Button("OK", role: .cancel) { compactionError = nil }
+            .buttonHoverPointer()
+            .nativeHelp("Dismiss context compaction setting error")
+        } message: { Text(compactionError ?? "Please try again.") }
+    }
+
+    @State private var compactionError: String?
+
+    private func saveCompaction(enabled: Bool? = nil, thresholdTokens: Int? = nil, idleMinutes: Int? = nil, minimumTokens: Int? = nil) {
+        do {
+            try WorkspaceSettingsManager().setContextCompaction(enabled: enabled, thresholdTokens: thresholdTokens, idleMinutes: idleMinutes, minimumTokens: minimumTokens)
+            autoCompaction = WorkspaceSettingsManager().contextCompaction
+            compactionError = nil
+        } catch { compactionError = error.localizedDescription }
+    }
+
+    private func commitCompactionField(_ id: String) {
+        guard let draft = compactionFieldDrafts.removeValue(forKey: id) else { return }
+        guard let value = Int(draft.filter(\.isNumber)) else {
+            compactionError = "Enter a whole number."
+            return
+        }
+        switch id {
+        case "auto-compaction-threshold-field": saveCompaction(thresholdTokens: value)
+        case "auto-compaction-idle-minutes-field": saveCompaction(idleMinutes: value)
+        case "auto-compaction-minimum-field": saveCompaction(minimumTokens: value)
+        default: break
+        }
+    }
+
+    private func compactionField(_ label: String, value: Binding<Int>, suffix: String, id: String) -> some View {
+        HStack(spacing: 10) {
+            Text(label)
+            TextField(label, text: Binding(
+                get: { compactionFieldDrafts[id] ?? value.wrappedValue.formatted(.number) },
+                set: { compactionFieldDrafts[id] = $0 }
+            ))
+                .textFieldStyle(.roundedBorder).frame(width: 120)
+                .focused($focusedCompactionField, equals: id)
+                .onSubmit { commitCompactionField(id) }
+                .accessibilityIdentifier(id)
+            Text(suffix).foregroundStyle(.secondary)
+            Spacer()
         }
     }
 
