@@ -5,7 +5,7 @@ import SwiftUI
 /// providers and receives their pushes, so this reads its state over the bridge:
 /// once with a refresh at launch and after a login (Codex's snapshot and both
 /// accounts' sign-in state), then follows the store's changes as the providers
-/// push them. Nothing here asks a provider, or the daemon, on a timer.
+/// push them or the daemon refreshes them periodically.
 @MainActor
 final class AgentUsageModel: ObservableObject {
     @Published private(set) var report: AgentUsageReport?
@@ -18,7 +18,7 @@ final class AgentUsageModel: ObservableObject {
     }
 
     /// Reads once with a refresh, then follows the daemon's changes; reconnects
-    /// if the daemon goes away. Nothing is asked of the providers after that.
+    /// if the daemon goes away. The daemon refreshes while the subscription is open.
     func start() {
         guard loop == nil else { return }
         loop = Task { [weak self] in

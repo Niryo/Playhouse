@@ -574,7 +574,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
 
     /// Reads the account and its rate limits from the app-server, launching it
     /// if it is not running. Later changes arrive as `account/rateLimits/updated`
-    /// pushes, so this runs on launch and after a login, not on a timer.
+    /// pushes; periodic reads also catch usage from other clients.
     func refreshAgentUsage() async {
         let store = AgentUsageStore.shared(scope: runtimeScope)
         store.setInstalled(.codex, isInstalled)
@@ -590,7 +590,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         // Read through this client's own app-server, never a second one: Codex serializes
         // its sign-in refresh only within one process, so two app-servers on one Codex home
         // could both use the refresh token and sign the user out. Pushes from the same server
-        // keep the numbers current between refreshes. A read that is never answered
+        // update the numbers between refreshes. A read that is never answered
         // fails after a timeout, without stopping the server, so it never blocks later refreshes
         // and the last known account and usage stay.
         await readAccountAndUsage(into: store)
