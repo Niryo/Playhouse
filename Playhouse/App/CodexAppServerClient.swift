@@ -955,7 +955,10 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             modelID: modelID,
             developerInstructions: developerInstructions,
             sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
-            sensitiveConversation: hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty
+            sensitiveConversation: hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty,
+            // The resumed thread may have used another model previously. This turn
+            // supplies its selected model explicitly in `turn/start` below.
+            confirmingModel: false
         )
         // This send's own stream follows the thread now. A Goal a window follows on another
         // thread keeps being followed: the CLI sends through the same client.

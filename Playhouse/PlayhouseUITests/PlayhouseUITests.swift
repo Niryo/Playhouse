@@ -9594,7 +9594,7 @@ final class PlayhouseUITests: XCTestCase {
         try exerciseRejectedStop(provider: "claude", title: "Claude rejected stop")
     }
 
-    // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly and saves a --prompt description without starting the task, rejecting a blank or missing prompt; the UI shows that task in Backlog with the description unsent in its composer. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
+    // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly and saves a --prompt description without starting the task, rejecting a blank or missing prompt; the UI shows that task in Backlog with the description unsent in its composer. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model becomes the default for conversations without an override; conversation-specific selections persist across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
     func test_conversation_provider_selection_persists_and_validates() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-provider-selection")
@@ -14750,7 +14750,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "legacy-codex-server-retired-window-send-on-new-server")
     }
 
-    // case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Claude Code names its newest release only through an alias entry's resolved model, so that resolved version supersedes the older concrete Opus 5 and keeps Claude Code's own display name. Alias entries with no resolved model are omitted. A remembered selection the filtered list no longer offers moves to its family's newest offered model and is written back, surviving a later refresh whose list no longer offers that family, while a still-offered selection is left alone. A remembered bare alias migrates to its family's offered release, but a dated snapshot pinned through the CLI is left in place because its family's undated release is not a higher version. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
+    // case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Claude Code names its newest release only through an alias entry's resolved model, so that resolved version supersedes the older concrete Opus 5 and keeps Claude Code's own display name. Alias entries with no resolved model are omitted. A remembered selection the filtered list no longer offers moves to its family's newest offered model and is written back, surviving a later refresh whose list no longer offers that family, while a still-offered selection is left alone. A cached intermediate version advances again when live discovery returns a newer version, and the picker and persisted selection converge. A remembered bare alias migrates to its family's offered release, but a dated snapshot pinned through the CLI is left in place because its family's undated release is not a higher version. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
     func test_conversation_models_keep_newest_version_per_family() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -14785,13 +14785,30 @@ final class PlayhouseUITests: XCTestCase {
         // that had not yet loaded a selection would display it and hide a regression.
         XCTAssertNotNil(try runCLI(["conversation", "model", taskID, "set", "gpt-5.6-sol"])["result"],
             "Seeding the superseded selection should succeed.")
+        let codexFixturePath = try XCTUnwrap(codexFixtureExecutable)
+        let liveModelsOverride = URL(fileURLWithPath: codexFixturePath + ".models-override")
+        let liveModelsDelay = URL(fileURLWithPath: codexFixturePath + ".models-delay")
+        try JSONSerialization.data(withJSONObject: [
+            ["id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": true,
+             "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]],
+            ["id": "gpt-7-sol", "displayName": "GPT-7 Sol", "isDefault": false,
+             "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]],
+            ["id": "gpt-6-mini", "displayName": "GPT-6 Mini", "isDefault": false,
+             "supportedReasoningEfforts": ["low", "medium"]],
+        ]).write(to: liveModelsOverride, options: .atomic)
+        try Data().write(to: liveModelsDelay, options: .atomic)
         openTask(named: "Model versions")
-        XCTAssertTrue(waitUntil({ modelPicker.label.contains("GPT-6 Sol") }, timeout: 10),
-            "A superseded selection should move the composer to its family's newest offered model.")
-        attachScreenshot(named: "Composer follows a superseded model forward to GPT-6 Sol")
+        XCTAssertTrue(waitUntil({ modelPicker.label.contains("GPT-6 Sol") }, timeout: 5),
+            "The cached catalog should first advance the superseded selection to GPT-6 Sol.")
+        try FileManager.default.removeItem(at: liveModelsDelay)
+        XCTAssertTrue(waitUntil({ modelPicker.label.contains("GPT-7 Sol") }, timeout: 10),
+            "The composer should follow the live catalog from cached GPT-6 Sol to newer GPT-7 Sol.")
+        attachElementScreenshot(modelPicker, named: "Composer advances from cached GPT-6 Sol to live GPT-7 Sol")
+        attachScreenshot(named: "Composer follows the live catalog to GPT-7 Sol")
         XCTAssertEqual(
-            (try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "gpt-6-sol",
+            (try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "gpt-7-sol",
             "The bridge should report the same forwarded model the composer shows.")
+        try FileManager.default.removeItem(at: liveModelsOverride)
 
         let claudeExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         let aliasesExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui-aliases-only")
@@ -14822,13 +14839,13 @@ final class PlayhouseUITests: XCTestCase {
         claudePicker.click()
     }
 
-    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected model is global across conversations for the active provider, persists through fresh CLI/XPC reads and reopening, and remains isolated between providers; a saved per-conversation model migrates into the global preference on first read; effort persists per conversation. Malformed model IDs and unsupported efforts are rejected without replacing prior choices. The UI opens a second conversation and shows the global model selection; unsupported modes and malformed model IDs are rejected before creating history.
+    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. A saved selection belongs to its conversation, persists through fresh CLI/XPC reads and reopening, and stays isolated between providers; legacy per-conversation selections remain available, while a provider-wide preference supplies the default for conversations without a selection. Effort persists per conversation. Malformed model IDs and unsupported efforts are rejected without replacing prior choices. The UI opens a second conversation, changes its model independently, and restores the first conversation's selection; unsupported modes and malformed model IDs are rejected before creating history.
     func test_conversation_mode_rejects_unknown_mode_without_starting_a_turn() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Conversation modes", roots: [fixture.primary.path])
-        let taskID = try taskID(named: "Conversation modes")
-        let modelResult = try runCLI(["conversation", "models", taskID])["result"] as? [String: Any]
+        let conversationModesTaskID = try taskID(named: "Conversation modes")
+        let modelResult = try runCLI(["conversation", "models", conversationModesTaskID])["result"] as? [String: Any]
         let availableModels = try XCTUnwrap(modelResult?["models"] as? [[String: Any]])
         XCTAssertFalse(availableModels.isEmpty)
         let migratedModelID = try XCTUnwrap(availableModels.first?["id"] as? String)
@@ -14847,9 +14864,9 @@ final class PlayhouseUITests: XCTestCase {
         seedLegacyModel.waitUntilExit()
         let seedDetails = String(data: seedOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         XCTAssertEqual(seedLegacyModel.terminationStatus, 0, "Seed the real SwiftData task row with its pre-global model: \(seedDetails)")
-        let migratedModel = try XCTUnwrap(try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])
+        let migratedModel = try XCTUnwrap(try runCLI(["conversation", "model", conversationModesTaskID])["result"] as? [String: Any])
         XCTAssertEqual(migratedModel["modelID"] as? String, migratedModelID,
-            "The first bridge read should migrate the persisted per-conversation model globally.")
+            "The first bridge read should preserve the legacy model for this conversation.")
 
         openTask(named: "Conversation modes")
         let modelPicker = element("model-picker-menu")
@@ -14882,7 +14899,7 @@ final class PlayhouseUITests: XCTestCase {
         }
         let selectedModelName = try XCTUnwrap(selectedModel["name"] as? String)
         let selectedModelID = try XCTUnwrap(selectedModel["id"] as? String)
-        XCTAssertEqual(selectedModelID, migratedModelID, "The visible picker should restore the model migrated from this conversation.")
+        XCTAssertEqual(selectedModelID, migratedModelID, "The visible picker should restore the legacy model saved on this conversation.")
         let modelMenu = modelPicker
         XCTAssertTrue(displayedModelValue().caseInsensitiveCompare(selectedModelName) == .orderedSame
             || displayedModelValue().caseInsensitiveCompare(selectedModelID) == .orderedSame)
@@ -14903,6 +14920,7 @@ final class PlayhouseUITests: XCTestCase {
             return displayedModel.caseInsensitiveCompare(alternateName) == .orderedSame
                 || displayedModel.caseInsensitiveCompare(alternateID) == .orderedSame
         }, timeout: 5), "Choosing a model should update the composer selection.")
+        attachElementScreenshot(modelPicker, named: "The conversation model picker shows its committed selection")
         let limitedModel = try XCTUnwrap(availableModels.first { $0["id"] as? String == "gpt-6-mini" })
         XCTAssertEqual(limitedModel["supportedEfforts"] as? [String], ["low", "medium"])
 
@@ -14945,13 +14963,13 @@ final class PlayhouseUITests: XCTestCase {
             accessibleLabelOrValue(of: element("selected-model-effort")) == "Extra High" && effortTitle(of: effortSlider) == "Extra High"
         }, timeout: 5), "The right arrow key should step the visible effort slider to Extra High.")
         XCTAssertTrue(modelPicker.label.contains("effort: Medium"), "The composer effort should stay committed while the picker is open.")
-        let savedEffortBeforeDismissal = try XCTUnwrap(try runCLI(["conversation", "effort", taskID])["result"] as? [String: Any])
+        let savedEffortBeforeDismissal = try XCTUnwrap(try runCLI(["conversation", "effort", conversationModesTaskID])["result"] as? [String: Any])
         XCTAssertEqual(savedEffortBeforeDismissal["effort"] as? String, "medium", "Effort changes should not persist before the picker is dismissed.")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(waitUntil({ !effortSlider.isHittable }, timeout: 5), "Escape should dismiss the model popover.")
         XCTAssertTrue(waitUntil({ modelPicker.label.contains("effort: Extra High") }, timeout: 5), "Dismissing the picker should apply the staged effort.")
         XCTAssertTrue(waitUntil({
-            guard let result = try? runCLI(["conversation", "effort", taskID])["result"] as? [String: Any] else { return false }
+            guard let result = try? runCLI(["conversation", "effort", conversationModesTaskID])["result"] as? [String: Any] else { return false }
             return result["effort"] as? String == "xhigh"
         }, timeout: 5), "Effort changes should persist after the picker is dismissed.")
         let limitedOption = app.buttons["model-option-gpt-6-mini"]
@@ -14966,7 +14984,7 @@ final class PlayhouseUITests: XCTestCase {
             modelPicker.label.contains("GPT-6 Mini") && modelPicker.label.contains("effort: Medium")
         }, timeout: 5), "Dismissing after changing to a restricted model should apply its clamped effort.")
         XCTAssertTrue(waitUntil({
-            guard let result = try? runCLI(["conversation", "effort", taskID])["result"] as? [String: Any] else { return false }
+            guard let result = try? runCLI(["conversation", "effort", conversationModesTaskID])["result"] as? [String: Any] else { return false }
             return result["effort"] as? String == "medium"
         }, timeout: 5), "The clamped effort should persist after the picker is dismissed.")
         modelPicker.click()
@@ -14992,7 +15010,7 @@ final class PlayhouseUITests: XCTestCase {
         modelPicker.click()
         XCTAssertTrue(waitUntil({ modelPicker.label.contains("effort: High") }, timeout: 5))
         XCTAssertTrue(waitUntil({
-            guard let response = try? runCLI(["conversation", "effort", taskID]),
+            guard let response = try? runCLI(["conversation", "effort", conversationModesTaskID]),
                   let result = response["result"] as? [String: Any] else { return false }
             return result["effort"] as? String == "high"
         }, timeout: 5), "The selected effort should persist through a fresh CLI/XPC request.")
@@ -15011,7 +15029,7 @@ final class PlayhouseUITests: XCTestCase {
         reopenedPicker.click()
         XCTAssertTrue(waitUntil({ modelPicker.label.contains(alternateName) }, timeout: 5))
         XCTAssertTrue(waitUntil({
-            guard let result = try? runCLI(["conversation", "model", taskID])["result"] as? [String: Any] else { return false }
+            guard let result = try? runCLI(["conversation", "model", conversationModesTaskID])["result"] as? [String: Any] else { return false }
             return result["modelID"] as? String == alternateID
         }, timeout: 5), "The committed model should persist through a fresh CLI/XPC request.")
         element("back-to-board-button").click()
@@ -15021,14 +15039,30 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ restoredModelPicker.label.contains(alternateName) }, timeout: 5), "Reopening the task should restore the last selected model.")
 
         try createTaskFixture(title: "Global model selection", roots: [fixture.primary.path])
+        let globalModelTaskID = try taskID(named: "Global model selection")
         element("back-to-board-button").click()
         openTask(named: "Global model selection")
         let globalModelPicker = element("model-picker-menu")
         XCTAssertTrue(globalModelPicker.waitToExist(timeout: 5))
         XCTAssertTrue(waitUntil({ globalModelPicker.label.contains(alternateName) }, timeout: 5),
-            "A newly opened conversation should use the global model selected in the previous conversation.")
+            "A conversation without its own choice should start with the provider's remembered default.")
+        globalModelPicker.click()
+        let secondConversationModel = app.buttons["model-option-\(selectedModelID)"]
+        XCTAssertTrue(secondConversationModel.waitToExist(timeout: 5))
+        secondConversationModel.click()
+        globalModelPicker.click()
+        XCTAssertTrue(waitUntil({ globalModelPicker.label.contains(selectedModelName) }, timeout: 5))
+        attachElementScreenshot(globalModelPicker, named: "The second conversation shows its own model selection")
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["conversation", "model", globalModelTaskID]))?["result"] as? [String: Any])?["modelID"] as? String == selectedModelID
+        }, timeout: 10), "The second conversation should persist its own model choice.")
         element("back-to-board-button").click()
         openTask(named: "Conversation modes")
+        let originalConversationPicker = element("model-picker-menu")
+        XCTAssertTrue(originalConversationPicker.waitToExist(timeout: 5))
+        XCTAssertTrue(waitUntil({ originalConversationPicker.label.contains(alternateName) }, timeout: 5),
+            "Reopening the first conversation should restore its independent model choice.")
+        attachElementScreenshot(originalConversationPicker, named: "Reopening restores the first conversation's model")
 
         let modeMenu = element("conversation-mode-menu")
         XCTAssertTrue(modeMenu.waitToExist(timeout: 10))
@@ -15046,12 +15080,12 @@ final class PlayhouseUITests: XCTestCase {
 
         assertCLIError(
             try runCLI(
-                ["conversation", "send", taskID, "--message", "Hello", "--mode", "unsupported"],
+                ["conversation", "send", conversationModesTaskID, "--message", "Hello", "--mode", "unsupported"],
                 expectedStatus: 2
             ),
             code: "invalid_argument"
         )
-        let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let history = try runCLI(["conversation", "history", conversationModesTaskID])["result"] as? [String: Any]
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
         XCTAssertEqual((history?["activities"] as? [Any])?.count, 0)
         attachScreenshot(named: "Plan mode is visible in the conversation composer")
@@ -15197,7 +15231,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(effort["effort"] as? String, "xhigh")
     }
 
-    // case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread, and after the selection moves to another non-default model (Mini) it resumes with that selected model rather than the hardcoded default and succeeds even though Codex, still holding the thread open, reports Sol; the reply stays visible with no conversation error. A later send on Luna still confirms the model Codex reports and fails with a model mismatch instead of switching silently, without starting a turn, and the next Luna send whose model Codex confirms succeeds.
+    // case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread. When the selection moves to another non-default model (Mini), history resumes with Mini even though Codex still reports Sol and remains readable. A subsequent send on Luna also resumes despite Codex reporting Sol, starts the turn with Luna, shows its reply without an error, and records Luna for that turn. The selected model remains associated with the conversation.
     func test_codex_history_keeps_loaded_thread_model() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-unique-turns-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -15231,6 +15265,9 @@ final class PlayhouseUITests: XCTestCase {
         returnToBoard()
         openTask(named: "Codex kept model UI")
         XCTAssertTrue(transcriptMessage(reply).waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ picker.label.contains("GPT-6 Sol") }, timeout: 10),
+            "Opening the conversation should restore its saved model selection.")
+        attachElementScreenshot(picker, named: "Reopening the Codex conversation restores Sol")
         XCTAssertFalse(waitUntil({ !FileManager.default.fileExists(atPath: keptModel.path) }, timeout: 3),
                        "History must not resume a thread already loaded with the task's model.")
         XCTAssertFalse(element("codex-chat-error").exists)
@@ -15257,7 +15294,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("codex-chat-error").waitToExist(timeout: 2),
                        "Loading history must not fail when Codex keeps the loaded thread's model.")
         attachScreenshot(named: "History loads after Codex keeps the Sol thread model")
-        // A send on a model the thread wasn't loaded with still has its model confirmed.
+        // The thread still reports Sol, but a new turn should switch to the
+        // model selected in this conversation.
         picker.click()
         app.buttons["model-option-gpt-6-luna"].click()
         picker.click()
@@ -15270,22 +15308,19 @@ final class PlayhouseUITests: XCTestCase {
         composer.typeText("Run on Luna.")
         element("send-message-button").click()
         let error = element("codex-chat-error")
-        XCTAssertTrue(error.waitToExist(timeout: 15), "A send whose model Codex didn't confirm must fail visibly.")
-        XCTAssertTrue(error.label.contains("Codex selected gpt-6-sol instead of gpt-6-luna"), error.label)
+        XCTAssertTrue(app.staticTexts["Codex · Luna"].waitToExist(timeout: 15), "The resumed thread should switch to Luna for this turn.")
+        XCTAssertFalse(error.exists, "A model change inside an existing thread should not show a mismatch error.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: keptModel.path))
-        attachScreenshot(named: "A send still reports a Codex model mismatch")
-        composer.click()
-        composer.typeText("Run on Luna again.")
-        element("send-message-button").click()
-        XCTAssertTrue(app.staticTexts["Codex · Luna"].waitToExist(timeout: 15), "The confirmed Luna send replies on Luna.")
-        XCTAssertFalse(error.exists, "A successful send clears the mismatch error.")
         let turns = try XCTUnwrap(
             (try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any])?["turns"] as? [[String: Any]]
         )
-        XCTAssertFalse(turns.contains { ($0["userMessage"] as? String)?.hasSuffix("Run on Luna.") == true },
-                       "A send whose model Codex didn't confirm must not start a turn.")
-        XCTAssertEqual(turns.last { ($0["userMessage"] as? String)?.hasSuffix("Run on Luna again.") == true }?["modelID"] as? String, "gpt-6-luna")
-        attachScreenshot(named: "The confirmed Luna send succeeds")
+        XCTAssertEqual(turns.last { ($0["userMessage"] as? String)?.hasSuffix("Run on Luna.") == true }?["modelID"] as? String, "gpt-6-luna",
+                       "The resumed Codex thread should run the newly selected model.")
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["conversation", "model", taskID]))?["result"] as? [String: Any])?["modelID"] as? String == "gpt-6-luna"
+        }, timeout: 10), "The selected model should remain persisted for this conversation.")
+        attachElementScreenshot(picker, named: "The Codex conversation model picker shows Luna")
+        attachScreenshot(named: "The existing Codex thread switches to Luna")
     }
 
     // case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 resolved from Claude Code's bare alias entry as the concrete latest choice in place of the older Opus 5. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.

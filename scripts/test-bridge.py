@@ -1210,7 +1210,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
         agent = self.start_chat_turn_and_kill_daemon(executable, environment, chat_id, question, close_turn_title="Parallel iOS tests")
         Path(str(executable) + ".reattach-exit").touch()
         self.wait_for(lambda: not self.agent_process_alive(agent), "The chat turn's agent exits without a result.")
-        lost_page = next(page for page in self.chat_pages(environment) if page["title"] == "Parallel iOS tests")
+        lost_page = self.wait_for(
+            lambda: next((page for page in self.chat_pages(environment) if page["title"] == "Parallel iOS tests"), None),
+            "The close-turn page should be visible after the agent exits.",
+        )
         self.wait_for(lambda: self.chat_page_texts(lost_page["id"], environment) == [question],
                       "The next daemon files the lost turn's question on the page its close-turn opened.")
         self.assertEqual(self.wait_for(lambda: recoveries("reattach-lost"), "The lost turn's filing is recorded."),
@@ -1282,7 +1285,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
         server = self.start_chat_turn_and_kill_daemon(executable, environment, chat_id, lost_question, close_turn_title="Parallel iOS tests")
         Path(str(executable) + ".reattach-die").touch()
         self.wait_for(lambda: not self.agent_process_alive(server), "The Codex app-server exits with the turn unfinished.")
-        lost_page = next(page for page in self.chat_pages(environment) if page["title"] == "Parallel iOS tests")
+        lost_page = self.wait_for(
+            lambda: next((page for page in self.chat_pages(environment) if page["title"] == "Parallel iOS tests"), None),
+            "The close-turn page should be visible after the app-server exits.",
+        )
         # The next send reads the Codex thread, files the lost turn, then seeds its page's session.
         seeded = self.send_filed_chat_turn(executable, environment, chat_id, "Which suite is slowest?")
         self.assertEqual(self.chat_page_texts(lost_page["id"], environment)[:2], [lost_question, "Before restart."],
@@ -7387,7 +7393,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(recovered_record["savedPrompt"], stale_prompt)
         self.assertIsNone(recovered_record.get("pendingSubmittedPrompt"))
 
-    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly and saves a --prompt description without starting the task, rejecting a blank or missing prompt; the UI shows that task in Backlog with the description unsent in its composer. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
+    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly and saves a --prompt description without starting the task, rejecting a blank or missing prompt; the UI shows that task in Backlog with the description unsent in its composer. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model becomes the default for conversations without an override; conversation-specific selections persist across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
     def test_conversation_provider_selection_persists_and_validates(self):
         settings = self.assert_success(self.call_cli("settings", "get")[0])
         self.assertEqual(settings["defaultProvider"], "codex", "Existing installs keep Codex as the default provider.")
@@ -10168,7 +10174,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual([os.path.realpath(root) for root in handed_off["workspaceRoots"]], [os.path.realpath(worktree["worktreePath"])],
                          "The implementation turn runs in the task's created worktree as its only root.")
 
-    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected model is global across conversations for the active provider, persists through fresh CLI/XPC reads and reopening, and remains isolated between providers; a saved per-conversation model migrates into the global preference on first read; effort persists per conversation. Malformed model IDs and unsupported efforts are rejected without replacing prior choices. The UI opens a second conversation and shows the global model selection; unsupported modes and malformed model IDs are rejected before creating history.
+    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. A saved selection belongs to its conversation, persists through fresh CLI/XPC reads and reopening, and stays isolated between providers; legacy per-conversation selections remain available, while a provider-wide preference supplies the default for conversations without a selection. Effort persists per conversation. Malformed model IDs and unsupported efforts are rejected without replacing prior choices. The UI opens a second conversation, changes its model independently, and restores the first conversation's selection; unsupported modes and malformed model IDs are rejected before creating history.
     def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):
         title = "Conversation mode validation"
         task_id = self.create_task(title=title)["id"]
@@ -10188,7 +10194,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(
             self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"],
             selected_model_id,
-            "The first read should migrate the existing per-conversation model to the global preference.",
+            "The first read should keep the legacy model associated with its conversation.",
         )
         global_model_id = next(model["id"] for model in models if model["id"] != selected_model_id)
         self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id, "set", global_model_id)[0])["modelID"], global_model_id)
@@ -10197,7 +10203,14 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(
             self.assert_success(self.call_cli("conversation", "model", second_task_id)[0])["modelID"],
             global_model_id,
-            "A model selected in one conversation should be the global choice in another conversation.",
+            "A conversation without a saved choice should inherit the provider's default selection.",
+        )
+        self.assert_success(self.call_cli("conversation", "model", second_task_id, "set", selected_model_id)[0])
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", second_task_id)[0])["modelID"], selected_model_id)
+        self.assertEqual(
+            self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"],
+            global_model_id,
+            "Changing a second conversation's model must not alter the first conversation.",
         )
         invalid_model, _ = self.call_cli("conversation", "model", task_id, "set", "bad model!", expected_status=2)
         self.assert_failure(invalid_model, "invalid_argument")
@@ -10280,7 +10293,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         retained_after_failure, _ = self.call_cli("conversation", "models", unavailable_task_id, "--cached")
         self.assertEqual(self.assert_success(retained_after_failure)["models"], initial_unavailable_models)
 
-    # case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Claude Code names its newest release only through an alias entry's resolved model, so that resolved version supersedes the older concrete Opus 5 and keeps Claude Code's own display name. Alias entries with no resolved model are omitted. A remembered selection the filtered list no longer offers moves to its family's newest offered model and is written back, surviving a later refresh whose list no longer offers that family, while a still-offered selection is left alone. A remembered bare alias migrates to its family's offered release, but a dated snapshot pinned through the CLI is left in place because its family's undated release is not a higher version. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
+    # case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Claude Code names its newest release only through an alias entry's resolved model, so that resolved version supersedes the older concrete Opus 5 and keeps Claude Code's own display name. Alias entries with no resolved model are omitted. A remembered selection the filtered list no longer offers moves to its family's newest offered model and is written back, surviving a later refresh whose list no longer offers that family, while a still-offered selection is left alone. A cached intermediate version advances again when live discovery returns a newer version, and the picker and persisted selection converge. A remembered bare alias migrates to its family's offered release, but a dated snapshot pinned through the CLI is left in place because its family's undated release is not a higher version. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
     def test_conversation_models_keep_newest_version_per_family(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-model-versions"
@@ -10303,6 +10316,26 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], "gpt-6-sol",
             "A superseded selection should move to its family's newest offered model.",
         )
+        models_override = Path(str(executable) + ".models-override")
+        models_override.write_text(json.dumps([
+            {"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True,
+             "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
+            {"id": "gpt-7-sol", "displayName": "GPT-7 Sol", "isDefault": False,
+             "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
+            {"id": "gpt-6-mini", "displayName": "GPT-6 Mini", "isDefault": False,
+             "supportedReasoningEfforts": ["low", "medium"]},
+        ]), encoding="utf-8")
+        try:
+            refreshed_models = self.assert_success(
+                self.call_cli("conversation", "models", task_id, extra_environment=environment)[0]
+            )["models"]
+            self.assertIn("gpt-7-sol", [model["id"] for model in refreshed_models])
+            self.assertEqual(
+                self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], "gpt-7-sol",
+                "A live catalog newer than the cached replacement should advance the persisted selection again.",
+            )
+        finally:
+            models_override.unlink()
         self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-mini")[0])
         self.assertEqual(
             self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], "gpt-6-mini",
@@ -10437,7 +10470,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(assistants[-1]["modelID"], "gpt-6-luna")
         self.assertEqual(assistants[-1]["createdAt"], "2026-10-26T12:34:00Z")
 
-    # case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread, and after the selection moves to another non-default model (Mini) it resumes with that selected model rather than the hardcoded default and succeeds even though Codex, still holding the thread open, reports Sol; the reply stays visible with no conversation error. A later send on Luna still confirms the model Codex reports and fails with a model mismatch instead of switching silently, without starting a turn, and the next Luna send whose model Codex confirms succeeds.
+    # case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread. When the selection moves to another non-default model (Mini), history resumes with Mini even though Codex still reports Sol and remains readable. A subsequent send on Luna also resumes despite Codex reporting Sol, starts the turn with Luna, shows its reply without an error, and records Luna for that turn. The selected model remains associated with the conversation.
     def test_codex_history_keeps_loaded_thread_model(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-kept-model-unique-turns-success"
@@ -10469,25 +10502,25 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(recorded["threadResumeKeptModels"][-1], {"requested": "gpt-6-mini", "reported": "gpt-6-sol"},
                          "History resumes with the task's selected model, not the hardcoded default.")
         self.assertTrue(any(message["role"] == "assistant" for message in history["messages"]))
-        # A send still confirms its model: Codex keeping Sol fails a send on Luna.
+        # The thread still reports Sol, but the next turn must switch to the
+        # model the conversation selected instead of rejecting the send.
         self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-luna")[0])
         kept_model.write_text("gpt-6-sol\n", encoding="utf-8")
-        mismatch, _ = self.call_cli(
+        switched, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Run on Luna.", "--model", "gpt-6-luna",
-            expected_status=1, extra_environment=environment
+            extra_environment=environment
         )
-        self.assertIn("Codex selected gpt-6-sol instead of gpt-6-luna", mismatch["error"]["message"])
+        self.assert_success(switched)
         self.assertFalse(kept_model.exists())
         recorded = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
         self.assertEqual(recorded["threadResumeKeptModels"][-1], {"requested": "gpt-6-luna", "reported": "gpt-6-sol"})
-        self.assertFalse(any(turn.get("userMessage", "").endswith("Run on Luna.") for turn in recorded["turns"]),
-                         "A send whose model Codex didn't confirm must not start a turn.")
-        self.assert_success(self.call_cli(
-            "conversation", "send", task_id, "--message", "Run on Luna again.", "--model", "gpt-6-luna", extra_environment=environment
-        )[0])
+        luna_turn = next(turn for turn in reversed(recorded["turns"]) if turn.get("userMessage", "").endswith("Run on Luna."))
+        self.assertEqual(luna_turn["modelID"], "gpt-6-luna", "The resumed thread should start the requested Luna turn.")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], "gpt-6-luna")
         recorded = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
-        luna_turn = next(turn for turn in reversed(recorded["turns"]) if turn.get("userMessage", "").endswith("Run on Luna again."))
-        self.assertEqual(luna_turn["modelID"], "gpt-6-luna")
+        self.assertTrue(any(message.get("modelID") == "gpt-6-luna" for message in self.assert_success(
+            self.call_cli("conversation", "history", task_id, extra_environment=environment)[0]
+        )["messages"]), "Fresh history should preserve the switched turn's model attribution.")
 
     # case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 resolved from Claude Code's bare alias entry as the concrete latest choice in place of the older Opus 5. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
     def test_conversation_effort_dispatches_to_claude(self):
