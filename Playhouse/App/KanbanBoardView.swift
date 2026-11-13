@@ -96,6 +96,7 @@ struct KanbanBoardView: View {
     }
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(PluginRegistry.self) private var pluginRegistry
     @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
     @Query(filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" }, sort: \BoardTask.createdAt, order: .reverse) private var allTasks: [BoardTask]
     /// Board cards. Recurring schedule templates aren't board tasks; the Scheduled Tasks page
@@ -153,6 +154,8 @@ struct KanbanBoardView: View {
     @FocusState private var isBoardSearchFocused: Bool
     @State private var isShowingChatSidebar = false
     @State private var chatTask: StandaloneChat?
+    @State private var pluginChat: StandaloneChat?
+    @State private var pluginInitialPrompt: String?
     @State private var isOpeningChatSidebar = false
     /// A modal, sidebar or page plugin opened from the board's sidebar.
     @State private var openBoardPlugin: PluginRecord?
@@ -203,6 +206,19 @@ struct KanbanBoardView: View {
                 }, onStart: { name, presentation in
                     finishPluginSetup(placement, name: name, presentation: presentation)
                 })
+            } else if let pluginChat, let pluginID = pluginChat.authoredPluginID {
+                HStack(spacing: 0) {
+                    TaskConversationView(task: pluginChat, isNewTask: false,
+                        conflictResolutionRequested: false, onConflictResolutionChecked: { _ in },
+                        skillFixPrompt: pluginInitialPrompt, onOpenTask: openTask(_:sending:),
+                        onBack: { self.pluginChat = nil; pluginInitialPrompt = nil })
+                        .id(pluginChat.id)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Divider()
+                    PluginAuthoringPreview(task: pluginChat, pluginID: pluginID)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
             } else if let selectedTask {
                 if let pluginID = selectedTask.authoredPluginID {
                     HStack(spacing: 0) {
@@ -243,6 +259,15 @@ struct KanbanBoardView: View {
             guard let placement = notification.object as? PluginPlacement else { return }
             PluginRegistry.setAddMode(false)
             withAnimation(.easeInOut(duration: 0.25)) { pluginSetupPlacement = placement }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .playhouseEditPlugin)) { notification in
+            guard let id = notification.object as? UUID else { return }
+            openPluginConversation(id, prompt: nil)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .playhousePreparePluginEdit)) { notification in
+            guard let id = notification.object as? UUID else { return }
+            if selectedTask?.id == id { selectedTask = nil }
+            if pluginChat?.id == id { pluginChat = nil; pluginInitialPrompt = nil }
         }
         .onReceive(NotificationCenter.default.publisher(for: .playhouseShowBoardSearch)) { _ in
             withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = true }
@@ -978,12 +1003,30 @@ struct KanbanBoardView: View {
         Task { @MainActor in
             defer { isStartingPluginTask = false }
             do {
-                let started = try await PluginRegistry(client: conversationRuntime.client)
-                    .author(placement, name: name, presentation: presentation)
-                openTask(started.taskID, sending: started.prompt)
+                let started = try await pluginRegistry.author(placement, name: name, presentation: presentation)
+                openPluginConversation(started.taskID, prompt: started.prompt)
             } catch {
                 saveError = error.localizedDescription
             }
+        }
+    }
+
+    private func openPluginConversation(_ id: UUID, prompt: String?) {
+        Task { @MainActor in
+            let manager = BoardTaskManager(modelContext: modelContext)
+            for _ in 0..<100 {
+                if let chat = try? manager.standaloneChatModel(id) {
+                    setChatSidebarVisible(false)
+                    pluginInitialPrompt = prompt
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        pluginChat = chat
+                        pluginSetupPlacement = nil
+                    }
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            saveError = "Couldn't open the plugin conversation."
         }
     }
 
@@ -2538,6 +2581,8 @@ private struct RenameTaskSheet: View {
 
 extension Notification.Name {
     static let playhouseStartPluginCreation = Notification.Name("playhouseStartPluginCreation")
+    static let playhouseEditPlugin = Notification.Name("playhouseEditPlugin")
+    static let playhousePreparePluginEdit = Notification.Name("playhousePreparePluginEdit")
 }
 
 private struct PluginCreationSetup: View {
@@ -2600,7 +2645,7 @@ private struct PluginCreationSetup: View {
 }
 
 private struct PluginAuthoringPreview: View {
-    let task: BoardTask
+    let task: any ConversationSubject
     let pluginID: String
     @State private var plugin: PluginRecord?
     @State private var revision = ""

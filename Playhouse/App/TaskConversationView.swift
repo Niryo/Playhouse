@@ -1778,6 +1778,7 @@ struct TaskConversationView: View {
     @State private var asyncQuestionAnswers: [String: String] = [:]
     @State private var answeredAsyncQuestionIDs: Set<String> = []
     @State private var errorMessage: String?
+    @State private var pluginBridgeRecoveryError: String?
     @State private var actionNotice: String?
     @State private var isShowingWorkspaceEditor = false
     @State private var isShowingRepositoryPicker = false
@@ -1817,7 +1818,7 @@ struct TaskConversationView: View {
     private var isRepositoryRootConfigured: Bool {
         // Standalone chat has no repository/worktree of its own, so it must never require the
         // app's global repository-root setting to be configured before sending.
-        task.isStandaloneChat || WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) != nil
+        task.isStandaloneChat || task.authoringPluginID != nil || WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) != nil
     }
 
     private var conversationRuntime: ConversationRuntimeModel {
@@ -2407,7 +2408,7 @@ struct TaskConversationView: View {
 
     var body: some View {
         Group {
-            if task.isStandaloneChat || (task as? BoardTask)?.authoredPluginID != nil {
+            if task.isStandaloneChat || task.authoringPluginID != nil {
                 // The standalone chat sidebar reuses only the conversation transcript/composer,
                 // not the repo-specific "Changes" sidebar a real task's worktree needs.
                 conversationPanel
@@ -3219,7 +3220,24 @@ struct TaskConversationView: View {
     private var conversationPanel: some View {
         ZStack(alignment: .leading) {
             VStack(spacing: 0) {
-                conversationHeader
+                if task.authoringPluginID != nil {
+                    HStack {
+                        Button(action: saveAndBack) {
+                            Image(systemName: "chevron.backward")
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .buttonHoverPointer()
+                        .nativeHelp("Back to Kanban")
+                        .accessibilityLabel("Back to Kanban board")
+                        .accessibilityIdentifier("back-to-board-button")
+                        Spacer()
+                    }
+                    .padding(.horizontal, 26)
+                    .padding(.vertical, 15)
+                } else {
+                    conversationHeader
+                }
 
                 Rectangle()
                     .fill(Color.primary.opacity(0.07))
@@ -3635,6 +3653,7 @@ struct TaskConversationView: View {
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
+                    .accessibilityIdentifier("task-header-status")
                     if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
                         Text(statusMessage)
                             .font(.system(size: 10))
@@ -7228,6 +7247,9 @@ struct TaskConversationView: View {
             } catch {
                 // Text that streamed before the failure is part of what the window showed.
                 flushStreamedTextDeltas()
+                if task.authoringPluginID != nil, error is DaemonClientError {
+                    pluginBridgeRecoveryError = error.localizedDescription
+                }
                 if resolutionAttempt > 0 {
                     conflictResolutionAttempt = 0
                     onConflictResolutionChecked(false)
@@ -7263,6 +7285,11 @@ struct TaskConversationView: View {
             }
 
             isResponding = false
+            // A daemon restart can end this window's send stream while the provider turn
+            // continues. Refreshing history reconnects the editor to that turn.
+            if let recoveryError = pluginBridgeRecoveryError, errorMessage == recoveryError {
+                followHistory()
+            }
         }
     }
 
@@ -7497,6 +7524,10 @@ struct TaskConversationView: View {
             applyHistoryMessages(history)
             activities = history.activities
             providerBoundaries = history.providerBoundaries
+            if let recoveryError = pluginBridgeRecoveryError {
+                if errorMessage == recoveryError { errorMessage = nil }
+                pluginBridgeRecoveryError = nil
+            }
         } catch {
             errorMessage = error.localizedDescription
         }

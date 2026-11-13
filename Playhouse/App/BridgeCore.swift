@@ -1096,8 +1096,8 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         let boardTask = task as? BoardTask
         schedule = boardTask.flatMap(TaskScheduleRecord.init(task:))
         scheduleSourceTaskID = boardTask?.scheduleSourceTaskID
-        pluginPlacement = boardTask?.pluginPlacement
-        authoredPluginID = boardTask?.authoredPluginID
+        pluginPlacement = boardTask?.pluginPlacement ?? (task as? StandaloneChat)?.pluginPlacement
+        authoredPluginID = boardTask?.authoredPluginID ?? (task as? StandaloneChat)?.authoredPluginID
         id = task.id
         title = task.title
         status = task.status.rawValue
@@ -2264,7 +2264,7 @@ final class BoardTaskManager {
             FetchDescriptor<BoardTask>(predicate: #Predicate { $0.legacyStandaloneChatMarker })
         )
         guard !legacy.isEmpty else { return }
-        var alreadyMigrated = try !modelContext.fetch(FetchDescriptor<StandaloneChat>()).isEmpty
+        var alreadyMigrated = try modelContext.fetch(FetchDescriptor<StandaloneChat>()).contains { $0.authoredPluginID == nil }
         for task in legacy {
             if !alreadyMigrated {
                 let chat = StandaloneChat(provider: task.conversationProvider)
@@ -2310,7 +2310,7 @@ final class BoardTaskManager {
     func getOrCreateStandaloneChat(provider: ConversationProvider) async throws -> BoardTaskRecord {
         try migrateLegacyStandaloneChatTasks()
         let descriptor = FetchDescriptor<StandaloneChat>(sortBy: [SortDescriptor(\.createdAt)])
-        if let existing = try modelContext.fetch(descriptor).first {
+        if let existing = try modelContext.fetch(descriptor).first(where: { $0.authoredPluginID == nil }) {
             return BoardTaskRecord(task: existing)
         }
         let chat = StandaloneChat(provider: provider)
@@ -2318,6 +2318,115 @@ final class BoardTaskManager {
         try await saveTaskContext(taskID: chat.id)
         PlayhouseDiagnostics.record("chat.created", fields: ["chatID": chat.id.uuidString, "provider": provider.rawValue])
         return BoardTaskRecord(task: chat)
+    }
+
+    /// Creates an editor conversation without adding a card to the task board.
+    func createPluginConversation(name: String, pluginID: String, placement: String, contextFolder: String, provider: ConversationProvider, prompt: String? = nil) async throws -> BoardTaskRecord {
+        let chat = StandaloneChat(provider: provider)
+        chat.title = name
+        chat.authoredPluginID = pluginID
+        chat.pluginPlacement = placement
+        chat.pluginContextFolder = contextFolder
+        chat.savedPrompt = prompt
+        chat.hasUnsentDraft = prompt?.isEmpty == false
+        modelContext.insert(chat)
+        try await saveTaskContext(taskID: chat.id)
+        return BoardTaskRecord(task: chat)
+    }
+
+    func pluginConversations() throws -> [BoardTaskRecord] {
+        let sessions = try modelContext.fetch(FetchDescriptor<StandaloneChat>(sortBy: [SortDescriptor(\.createdAt)]))
+            .filter { $0.authoredPluginID != nil }.map { BoardTaskRecord(task: $0) }
+        let legacy = try modelContext.fetch(FetchDescriptor<BoardTask>())
+            .filter { $0.authoredPluginID != nil && $0.repositoryWorktrees.isEmpty }
+            .map { BoardTaskRecord(task: $0) }
+        return sessions + legacy
+    }
+
+    func withPluginOperationLock<T>(_ id: String, operation: @MainActor () async throws -> T) async throws -> T {
+        guard PluginLibrary.isValidID(id) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Invalid plugin ID.")
+        }
+        guard let directory = taskOperationLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the plugin operation lock directory.")
+        }
+        return try await withExclusiveFileLocks(at: [directory.appendingPathComponent("plugin-\(id).lock")], purpose: "plugin-operation") {
+            try await operation()
+        }
+    }
+
+    /// Preserve the transcript and provider sessions of editors created as board cards.
+    func migrateLegacyPluginConversation(_ id: UUID) async throws -> BoardTaskRecord {
+        try await withConversationTurnReservation(id) {
+            try await self.withTaskOperationLock(id) {
+                if let existing = try self.standaloneChatModel(id) { return BoardTaskRecord(task: existing) }
+                let task = try self.requireTask(id)
+                guard task.authoredPluginID != nil, task.repositoryWorktrees.isEmpty else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "This task cannot be converted to a plugin editor.")
+                }
+                let chat = StandaloneChat(provider: task.conversationProvider)
+                chat.id = task.id
+                chat.title = task.title.hasPrefix("New plugin: ") ? String(task.title.dropFirst("New plugin: ".count)) : task.title
+                chat.createdAt = task.createdAt
+                chat.authoredPluginID = task.authoredPluginID
+                chat.pluginPlacement = task.pluginPlacement
+                chat.pluginContextFolder = task.contextFolderPaths.first
+                chat.statusRawValue = task.status == .done ? TaskStatus.waitingResponse.rawValue : task.statusRawValue
+                chat.lifecycleRevision = task.lifecycleRevision
+                chat.statusMessage = task.statusMessage
+                chat.progressTypeRawValue = task.progressTypeRawValue
+                chat.progressLabel = task.progressLabel
+                chat.progressDetail = task.progressDetail
+                chat.inProgressStartedAt = task.inProgressStartedAt
+                chat.totalInProgressSeconds = task.totalInProgressSeconds
+                chat.codexThreadID = task.codexThreadID
+                chat.claudeSessionID = task.claudeSessionID
+                chat.conversationEffortRawValue = task.conversationEffortRawValue
+                chat.conversationModelIDsData = task.conversationModelIDsData
+                chat.savedPrompt = task.savedPrompt
+                chat.pendingSubmittedPrompt = task.pendingSubmittedPrompt
+                chat.hasUnsentDraft = task.hasUnsentDraft
+                chat.draftImageDataURLsData = task.draftImageDataURLsData
+                chat.pendingAnnotationsData = task.pendingAnnotationsData
+                chat.sideChatsData = task.sideChatsData
+                chat.conversationActivityDurationsData = task.conversationActivityDurationsData
+                chat.answeredAsyncQuestionIDsData = task.answeredAsyncQuestionIDsData
+                chat.totalInputTokens = task.totalInputTokens
+                chat.totalOutputTokens = task.totalOutputTokens
+                chat.totalCacheReadTokens = task.totalCacheReadTokens
+                chat.totalCacheCreationTokens = task.totalCacheCreationTokens
+                chat.callUsageSnapshotsData = task.callUsageSnapshotsData
+                self.modelContext.insert(chat)
+                self.modelContext.delete(task)
+                try self.modelContext.save()
+                return BoardTaskRecord(task: chat)
+            }
+        }
+    }
+
+    /// Lock every editor turn while deleting its plugin, then remove its conversation records.
+    /// If deleting the folder fails, the saved conversations remain available for retry.
+    func deletePlugin(id: String, library: PluginLibrary) async throws {
+        _ = try library.plugin(id: id, validate: false)
+        let ids = try pluginConversations().filter { $0.authoredPluginID == id }.map(\.id)
+            .sorted { $0.uuidString < $1.uuidString }
+        func reserve(_ index: Int) async throws {
+            if index < ids.count {
+                try await withConversationTurnReservation(ids[index]) {
+                    try await self.withTaskOperationLock(ids[index]) {
+                        try await reserve(index + 1)
+                    }
+                }
+                return
+            }
+            try library.delete(id: id)
+            for id in ids {
+                if let chat = try standaloneChatModel(id) { modelContext.delete(chat) }
+                else if let task = try? taskModel(id) { modelContext.delete(task) }
+            }
+            if !ids.isEmpty { try modelContext.save() }
+        }
+        try await reserve(0)
     }
 
     @discardableResult
@@ -6393,8 +6502,10 @@ final class ConversationManager {
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: repositoryRoot?.path,
                     isStandaloneChat: task.isStandaloneChat,
+                    isPluginEditor: task.authoringPluginID != nil,
                     isArchived: task.status == .done,
-                    pluginPlacement: (task as? BoardTask)?.pluginPlacement,
+                    pluginPlacement: task.authoringPluginPlacement,
+                    pluginID: task.authoringPluginID,
                     pluginsDirectory: clients.skills?.pluginsDirectory
                 ),
                 sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
@@ -7055,7 +7166,9 @@ final class ConversationManager {
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: task.isStandaloneChat ? nil : settingsManager.defaultParentFolderURL?.path,
                     isStandaloneChat: task.isStandaloneChat,
-                    pluginPlacement: (task as? BoardTask)?.pluginPlacement,
+                    isPluginEditor: task.authoringPluginID != nil,
+                    pluginPlacement: task.authoringPluginPlacement,
+                    pluginID: task.authoringPluginID,
                     pluginsDirectory: clients.skills?.pluginsDirectory
                 )
             )
@@ -7424,10 +7537,14 @@ final class ConversationManager {
                         // must hold the whole turn rather than the newest page.
                         historyMessageLimit: task.isStandaloneChat ? nil : historyMessageLimit
                     )
-                    try await self.driveUnsettledTurns(
-                        taskID: taskID, isStandaloneChat: isStandaloneChat, mode: mode, modelID: modelID,
-                        client: operationClient, onUpdate: onUpdate, onUserInput: onUserInput
-                    )
+                    if task.authoringPluginID == nil {
+                        try await self.driveUnsettledTurns(
+                            taskID: taskID, isStandaloneChat: isStandaloneChat, mode: mode, modelID: modelID,
+                            client: operationClient, onUpdate: onUpdate, onUserInput: onUserInput
+                        )
+                    } else if (try? self.transcripts.readState(taskID).pendingUserInputRequest) == nil {
+                        _ = try await self.tasks.setLifecycleStatus(taskID, to: .waitingResponse)
+                    }
                     try onUserInputApplied?()
                     self.lastReportedTurnOutcomeByTaskID.removeValue(forKey: taskID)
                     try? await self.tasks.clearPendingSubmittedPrompt(taskID)
@@ -7712,8 +7829,13 @@ final class ConversationManager {
         // A chat gets no nudge here: the daemon that sent the turn is gone, and with it the
         // signal count it took at the start, so a reattached chat turn leaves a missed page
         // decision to the background classifier, which the filing below schedules.
-        let chat = (try? tasks.conversationSubject(taskID)).flatMap { $0.isStandaloneChat ? $0 : nil }
-        if chat == nil {
+        let subject = try? tasks.conversationSubject(taskID)
+        let chat = subject.flatMap { $0.isStandaloneChat ? $0 : nil }
+        if subject?.authoringPluginID != nil {
+            if (try? transcripts.readState(taskID).pendingUserInputRequest) == nil {
+                _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse)
+            }
+        } else if chat == nil {
             try await driveUnsettledTurns(
                 taskID: taskID, isStandaloneChat: false, mode: .code, modelID: nil,
                 client: client, onUpdate: onUpdate, onUserInput: { _ in }
@@ -9101,7 +9223,7 @@ final class ConversationManager {
                 resolvedWorktreeTitle = task.title
             }
             // A standalone chat owns no repositories, so there is no worktree to prepare.
-            if !task.isStandaloneChat {
+            if !task.isStandaloneChat && task.authoringPluginID == nil {
                 task = try await tasks.prepareRepositoryWorktrees(
                     taskID,
                     fallbackPrompt: isPlayhouseNudge && !task.hasUnsentDraft ? (task.savedPrompt ?? typedText) : typedText,
@@ -9180,8 +9302,10 @@ final class ConversationManager {
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: repositoryRoot?.path,
                     isStandaloneChat: task.isStandaloneChat,
+                    isPluginEditor: task.authoringPluginID != nil,
                     isArchived: task.status == .done,
-                    pluginPlacement: (task as? BoardTask)?.pluginPlacement,
+                    pluginPlacement: task.authoringPluginPlacement,
+                    pluginID: task.authoringPluginID,
                     pluginsDirectory: clients.skills?.pluginsDirectory
                 )
             }
@@ -9302,8 +9426,10 @@ final class ConversationManager {
                     contextFolders: task.contextFolderPaths,
                     repositoryRootPath: repositoryRoot?.path,
                     isStandaloneChat: task.isStandaloneChat,
+                    isPluginEditor: task.authoringPluginID != nil,
                     isArchived: task.status == .done,
-                    pluginPlacement: (task as? BoardTask)?.pluginPlacement,
+                    pluginPlacement: task.authoringPluginPlacement,
+                    pluginID: task.authoringPluginID,
                     pluginsDirectory: clients.skills?.pluginsDirectory
                 ),
                 onDelta: callbacks.onDelta,
@@ -10602,11 +10728,34 @@ final class PlayhouseBridgeRuntime {
                     "revision": .integer(revision),
                     "plugins": try Self.value(plugins)
                 ])
+            case "plugin.sessions":
+                result = .object(["sessions": try Self.value(taskManager.pluginConversations())])
+            case "plugin.edit":
+                let id = try request.requiredString("pluginID")
+                let editor = try await taskManager.withPluginOperationLock(id) {
+                    if let existing = try taskManager.pluginConversations().first(where: { $0.authoredPluginID == id }) {
+                        return try taskManager.standaloneChatModel(existing.id) != nil
+                            ? existing : await taskManager.migrateLegacyPluginConversation(existing.id)
+                    }
+                    let library = try pluginLibrary()
+                    let plugin: PluginRecord
+                    do { plugin = try library.plugin(id: id, validate: false) }
+                    catch let error as PluginTreeError { throw BridgeCommandError(code: "invalid_argument", message: error.message) }
+                    catch { throw BridgeCommandError(code: "not_found", message: error.localizedDescription) }
+                    let created = try await taskManager.createPluginConversation(
+                        name: plugin.name, pluginID: plugin.id, placement: plugin.placement,
+                        contextFolder: library.directory.path, provider: settings.defaultConversationProvider)
+                    _ = settings.bumpPluginsRevision()
+                    return created
+                }
+                result = .object(["task": try Self.value(editor)])
             case "plugin.delete":
                 let library = try pluginLibrary()
                 let id = try request.requiredString("pluginID")
                 do {
-                    try library.delete(id: id)
+                    try await taskManager.withPluginOperationLock(id) {
+                        try await taskManager.deletePlugin(id: id, library: library)
+                    }
                 } catch let error as PluginLibraryError {
                     throw BridgeCommandError(code: "not_found", message: error.localizedDescription)
                 } catch let error as PluginTreeError {
@@ -10631,17 +10780,19 @@ final class PlayhouseBridgeRuntime {
                         throw BridgeCommandError(code: "invalid_argument", message: "A plugin name and valid presentation are required.")
                     }
                 }
-                let pluginID = name.map { _ in "plugin-" + UUID().uuidString.lowercased() }
+                let pluginID = "plugin-" + UUID().uuidString.lowercased()
                 let prompt: String
-                if let name, let presentation, let pluginID {
+                if let name, let presentation {
                     prompt = "/\(TaskThreadDeveloperInstructions.pluginSkillName) Create a plugin named \(name) in the \(placement.title) placement (\(placement.rawValue)), with presentation \(presentation). Use plugin ID and folder \(pluginID). Ask me what the plugin should do before implementing it."
                 } else {
-                    prompt = "/\(TaskThreadDeveloperInstructions.pluginSkillName) Create a new plugin in the \(placement.title) placement (\(placement.rawValue))."
+                    prompt = "/\(TaskThreadDeveloperInstructions.pluginSkillName) Create a new plugin in the \(placement.title) placement (\(placement.rawValue)). Use plugin ID and folder \(pluginID)."
                 }
-                let created = try await taskManager.create(
-                    title: name.map { "New plugin: \($0)" } ?? "New plugin: \(placement.title)", repositories: [], contextFolders: [library.directory.path],
-                    provider: provider, pullRequestMode: .manual, prompt: prompt, pluginPlacement: placement.rawValue, authoredPluginID: pluginID
-                )
+                let created = try await taskManager.withPluginOperationLock(pluginID) {
+                    try await taskManager.createPluginConversation(
+                        name: name ?? placement.title, pluginID: pluginID, placement: placement.rawValue,
+                        contextFolder: library.directory.path, provider: provider, prompt: prompt)
+                }
+                _ = settings.bumpPluginsRevision()
                 result = .object(["task": try Self.value(created), "prompt": .string(prompt)])
             // A plugin runs headlessly off the main actor; its runtime lives only for this request.
             case "plugin.render":

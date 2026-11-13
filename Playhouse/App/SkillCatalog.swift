@@ -1012,7 +1012,8 @@ final class SkillCatalogManager {
     /// The Playhouse skills a task's sessions get: a plugin authoring task
     /// gets the plugin skill.
     static func playhouseSkills(for task: any ConversationSubject) -> [String] {
-        (task as? BoardTask)?.pluginPlacement == nil ? [] : [TaskThreadDeveloperInstructions.pluginSkillName]
+        let placement = (task as? BoardTask)?.pluginPlacement ?? (task as? StandaloneChat)?.pluginPlacement
+        return placement == nil ? [] : [TaskThreadDeveloperInstructions.pluginSkillName]
     }
 
     /// Everything a launch for `task` passes: the gallery's bridge, its

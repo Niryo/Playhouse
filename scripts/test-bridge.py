@@ -1722,6 +1722,17 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn(f"Seeded linked PR #{number}", result.stdout)
         return seeded_url
 
+    def seed_legacy_plugin_task(self, task_id, plugin_id):
+        root = Path(__file__).resolve().parent.parent
+        executable = self.data_directory / "seed-legacy-plugin"
+        subprocess.run(["xcrun", "swiftc", "-module-name", "Playhouse",
+                        str(root / "Playhouse/App/BoardTask.swift"),
+                        str(root / "Playhouse/App/ConversationSubject.swift"),
+                        str(root / "scripts/seed-task-pr-link.swift"), "-o", str(executable)],
+                       check=True, capture_output=True, text=True)
+        subprocess.run([str(executable), str(self.data_directory), task_id, "--legacy-plugin",
+                        plugin_id, str(self.plugins_folder())], check=True, capture_output=True, text=True)
+
     def clear_task_provider_session(self, task_id):
         executable = self.data_directory / "seed-task-pr-link"
         if not executable.exists():
@@ -16873,7 +16884,7 @@ Playhouse.render(h(Context));
         self.assert_failure(self.call_cli("plugin", "mode", "--on", "--off", expected_status=2)[0], "invalid_argument")
         self.assertEqual(self.assert_success(self.call_cli("plugin", "mode")[0]), {"enabled": False}, "A refused option changes nothing.")
 
-    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with a centered name and presentation setup before opening a conversation and live preview. The selected name, presentation, placement and unique plugin folder reach the authoring prompt; the task and folder identity persist on reopening. Invalid setup is rejected. Changes to the plugin files update the preview. Legacy placement-only authoring remains supported, and plugin authoring instructions and the bundled skill reach Claude and Codex without installing files in the user’s home.
+    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview without a board card or task header. The Plugins menu reopens the same conversation and preview, including unsaved drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home.
     def test_plugin_authoring_task_starts_with_placement_and_skill(self):
         self.assert_failure(self.call_cli("plugin", "author", "--placement", "titleBar", expected_status=2)[0], "invalid_argument")
         self.assertFalse(self.plugins_folder().exists(), "A refused placement creates nothing.")
@@ -16886,14 +16897,15 @@ Playhouse.render(h(Context));
             provider = "codex" if placement == "conversationToolbar" else "claude"
             result = self.assert_success(self.call_cli("plugin", "author", "--placement", placement, "--provider", provider)[0])
             task, prompt = result["task"], result["prompt"]
-            self.assertEqual(prompt, f"/playhouse-plugin Create a new plugin in the {title} placement ({placement}).")
-            self.assertEqual(task["title"], f"New plugin: {title}")
+            self.assertEqual(prompt, f"/playhouse-plugin Create a new plugin in the {title} placement ({placement}). Use plugin ID and folder {task['authoredPluginID']}.")
+            self.assertEqual(task["title"], title)
             self.assertEqual(task["status"], "Backlog")
             self.assertEqual(task["pluginPlacement"], placement)
             self.assertEqual(task["repositoryWorktrees"], [], "A plugin task needs no repository.")
             self.assertEqual([os.path.realpath(path) for path in task["contextFolders"]], [os.path.realpath(self.plugins_folder())])
             self.assertEqual(task["conversationProvider"], provider)
-            stored = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+            stored = self.assert_success(self.call_cli("plugin", "edit", "--id", task["authoredPluginID"])[0])["task"]
+            self.assertEqual(stored["id"], task["id"])
             self.assertEqual(stored["savedPrompt"], prompt, "A fresh CLI process reads the task's prompt.")
             self.assertEqual(stored["pluginPlacement"], placement)
             started[placement] = (task, prompt)
@@ -16901,10 +16913,13 @@ Playhouse.render(h(Context));
         self.assert_failure(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Timer", "--presentation", "unknown", expected_status=2)[0], "invalid_argument")
         configured = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Timer", "--presentation", "modal", "--provider", "claude")[0])
         authored = configured["task"]
-        self.assertEqual(authored["title"], "New plugin: Timer")
+        self.assertEqual(authored["title"], "Timer")
         self.assertIn("presentation modal", configured["prompt"])
         self.assertIn(authored["authoredPluginID"], configured["prompt"])
-        stored_authored = self.assert_success(self.call_cli("task", "get", authored["id"])[0])
+        stored_authored = self.assert_success(self.call_cli("plugin", "edit", "--id", authored["authoredPluginID"])[0])["task"]
+        self.assertEqual(stored_authored["id"], authored["id"])
+        self.assertNotIn(authored["id"], [entry["id"] for entry in self.assert_success(self.call_cli("board", "list")[0])["tasks"]])
+        self.assert_failure(self.call_cli("plugin", "edit", "--id", "missing", expected_status=3)[0], "not_found")
         self.assertEqual(stored_authored["authoredPluginID"], authored["authoredPluginID"])
         self.assertEqual(stored_authored["pluginPlacement"], "mainSidebar")
         self.assertEqual(stored_authored["savedPrompt"], configured["prompt"])
@@ -16912,14 +16927,43 @@ Playhouse.render(h(Context));
         self.assertIn("mainSidebar", configured["prompt"])
         other = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Timer", "--presentation", "modal")[0])
         self.assertNotEqual(other["task"]["authoredPluginID"], authored["authoredPluginID"])
+        self.write_installed_plugin("existing-editor", self.PLUGIN_CONTEXT_SOURCE, placement="composerActions")
+        edits = []
+        def open_existing():
+            edits.append(self.assert_success(self.call_cli("plugin", "edit", "--id", "existing-editor")[0])["task"])
+        workers = [threading.Thread(target=open_existing) for _ in range(2)]
+        for worker in workers: worker.start()
+        for worker in workers: worker.join(timeout=30)
+        self.assertEqual(len(edits), 2)
+        self.assertEqual(edits[0]["id"], edits[1]["id"], "Concurrent edits share one session.")
+        existing = edits[0]
+        self.assertEqual(existing["authoredPluginID"], "existing-editor")
+        self.assertEqual(existing["id"], self.assert_success(self.call_cli("plugin", "edit", "--id", "existing-editor")[0])["task"]["id"])
+        self.plugins_folder().chmod(0o500)
+        try:
+            self.assert_failure(self.call_cli("plugin", "delete", "--id", "existing-editor", expected_status=1)[0], "operation_failed")
+        finally:
+            self.plugins_folder().chmod(0o700)
+        self.assertEqual(existing["id"], self.assert_success(self.call_cli("plugin", "edit", "--id", "existing-editor")[0])["task"]["id"], "A failed delete preserves the session.")
+        self.assert_success(self.call_cli("plugin", "delete", "--id", "existing-editor")[0])
+        self.assertNotIn("existing-editor", [entry["authoredPluginID"] for entry in self.assert_success(self.call_cli("plugin", "sessions")[0])["sessions"]])
         self.assert_failure(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Timer", expected_status=2)[0], "invalid_argument")
         self.assert_failure(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--presentation", "modal", expected_status=2)[0], "invalid_argument")
         configured_environment = self.install_claude_fixture("claude-fixture-plugin-preview")
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
         for value in ("First preview", "Updated preview"):
             message = "plugin-preview-fixture " + json.dumps({"folder": str(self.plugins_folder() / authored["authoredPluginID"]), "text": value})
             self.assert_success(self.call_cli("conversation", "send", authored["id"], "--message", message, extra_environment=configured_environment)[0])
             rendered = self.assert_success(self.call_cli("plugin", "render", "--plugin", authored["authoredPluginID"])[0])
             self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "preview-content")), value)
+        self.assert_success(self.call_cli("task", "draft", authored["id"], "--text", "Resume this draft")[0])
+        reopened = self.assert_success(self.call_cli("plugin", "edit", "--id", authored["authoredPluginID"])[0])["task"]
+        self.assertEqual(reopened["id"], authored["id"])
+        self.assertEqual(reopened["savedPrompt"], "Resume this draft")
+        texts, _ = self.history_texts(reopened["id"], configured_environment)
+        self.assertTrue(any("Updated preview" in text for text in texts))
+        self.assert_failure(self.call_cli("plugin", "edit", "--id", "../plugins", expected_status=2)[0], "invalid_argument")
+        self.assert_success(self.call_cli("settings", "set-parent", self.fixture / "suggested-parent")[0])
         composer_author = self.assert_success(self.call_cli("plugin", "author", "--placement", "composerActions", "--name", "Composer", "--presentation", "popover")[0])["task"]
         self.write_installed_plugin(composer_author["authoredPluginID"], self.PLUGIN_CONTEXT_SOURCE, placement="composerActions")
         composer_props = json.dumps({"composer": {"draft": "draft", "selection": {"location": 0, "length": 5, "text": "draft"}}})
@@ -16941,6 +16985,7 @@ Playhouse.render(h(Context));
         arguments = turn["arguments"]
         instructions = arguments[arguments.index("--append-system-prompt") + 1]
         self.assertIn("Plugin authoring", instructions)
+        self.assertIn(task["authoredPluginID"], instructions)
         self.assertIn("Chat input actions placement (`composerActions`)", instructions)
         self.assertIn("`composer` ({draft, selection", instructions, "The instructions describe the placement's context.")
         self.assertTrue(str(self.plugins_folder()) in instructions or os.path.realpath(self.plugins_folder()) in instructions)
@@ -16976,9 +17021,30 @@ Playhouse.render(h(Context));
         self.assertNotIn("Plugin authoring", plain["arguments"][plain["arguments"].index("--append-system-prompt") + 1])
         self.assertNotIn("playhouse-plugin", plain["skills"])
 
+        legacy = self.create_task("New plugin: Legacy", roots=[], provider="claude")
+        self.assert_success(self.call_cli("conversation", "send", legacy["id"], "--message", "Remember the legacy conversation.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("task", "draft", legacy["id"], "--text", "Legacy draft")[0])
+        legacy_before = self.assert_success(self.call_cli("task", "get", legacy["id"])[0])
+        self.write_installed_plugin("legacy-editor", self.PLUGIN_CONTEXT_SOURCE, placement="mainSidebar")
+        self.seed_legacy_plugin_task(legacy["id"], "legacy-editor")
+        migrated = self.assert_success(self.call_cli("plugin", "edit", "--id", "legacy-editor")[0])["task"]
+        self.assertEqual(migrated["id"], legacy["id"])
+        self.assertEqual(migrated["savedPrompt"], "Legacy draft")
+        self.assertEqual(migrated["claudeSessionID"], legacy_before["claudeSessionID"])
+        self.assertNotIn(legacy["id"], [entry["id"] for entry in self.assert_success(self.call_cli("board", "list")[0])["tasks"]])
+        texts, _ = self.history_texts(legacy["id"], environment)
+        self.assertTrue(any("Remember the legacy conversation" in text for text in texts))
+        legacy_delete = self.create_task("New plugin: Delete legacy", roots=[], provider="claude")
+        self.write_installed_plugin("legacy-delete", self.PLUGIN_CONTEXT_SOURCE, placement="mainSidebar")
+        self.seed_legacy_plugin_task(legacy_delete["id"], "legacy-delete")
+        self.assert_success(self.call_cli("plugin", "delete", "--id", "legacy-delete")[0])
+        self.assertNotIn(legacy_delete["id"], [entry["id"] for entry in self.assert_success(self.call_cli("board", "list")[0])["tasks"]])
+        self.assertNotIn("legacy-delete", [entry["authoredPluginID"] for entry in self.assert_success(self.call_cli("plugin", "sessions")[0])["sessions"]])
+
         # Codex: the instructions ride the thread and the skill an extra root plus a structured input.
         task, prompt = started["conversationToolbar"]
-        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-plugin-author", message=prompt)
+        executable = self.install_provider_fixture("codex", "codex-fixture-plugin-author")
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", prompt, "--answer", "color=Blue", "--answer", "token=fixture-secret", extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)})[0])
         history = json.loads((self.data_directory / "codex-fixture-plugin-author.history").read_text(encoding="utf-8"))
         self.assertIn("Conversation sidebar toolbar placement (`conversationToolbar`)", history["threadStartDeveloperInstructions"])
         self.assertIn("plugin refresh", history["threadStartDeveloperInstructions"])
@@ -16991,6 +17057,30 @@ Playhouse.render(h(Context));
         disabled = {os.path.realpath(entry["path"]) for entry in (history.get("threadStartConfig") or {}).get("skills", {}).get("config", []) if entry["enabled"] is False}
         self.assertNotIn(os.path.realpath(roots[0] / "playhouse-plugin" / "SKILL.md"), disabled, "The plugin task's own skill stays on.")
         self.assertFalse((self.skills_codex_home / "config.toml").exists(), "Codex's config.toml is not written.")
+        self.restart_provider(executable)
+        reopened_codex = self.assert_success(self.call_cli("plugin", "edit", "--id", task["authoredPluginID"])[0])["task"]
+        self.assertEqual(reopened_codex["id"], task["id"])
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", "Continue editing.", "--answer", "color=Blue", "--answer", "token=fixture-secret", extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)})[0])
+        resumed_history = json.loads((self.data_directory / "codex-fixture-plugin-author.history").read_text(encoding="utf-8"))
+        self.assertTrue(any(turn["userMessage"] == "Continue editing." for turn in resumed_history["turns"]))
+        self.assertGreaterEqual(resumed_history.get("threadResumeCount", 0), 1)
+        self.assertIn(task["authoredPluginID"], resumed_history["threadResumeDeveloperInstructions"][-1])
+        self.assertEqual(reopened_codex["codexThreadID"], self.assert_success(self.call_cli("plugin", "edit", "--id", task["authoredPluginID"])[0])["task"]["codexThreadID"])
+
+
+    # case-contract: test_plugin_editor_reattaches_after_daemon_restart | A plugin editor follows a running Claude turn after a daemon restart, restores its answer once alongside the preview, and settles without a task outcome nudge. Claude represents the shared reattachment settlement used by both providers.
+    def test_plugin_editor_reattaches_after_daemon_restart(self):
+        executable = self.install_provider_fixture("claude", "claude-fixture-reattach-plugin")
+        environment = self.restart_service_environment("claude", executable)
+        created = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Restart plugin", "--presentation", "modal", "--provider", "claude", extra_environment=environment)[0])["task"]
+        marker = Path(str(executable) + ".reattach-hold-nudge")
+        marker.touch()
+        self.start_chat_turn_and_kill_daemon(executable, environment, created["id"], "Continue this plugin after restart.")
+        Path(str(executable) + ".reattach-release-quiet").touch()
+        self.wait_for(lambda: self.assert_success(self.call_cli("plugin", "edit", "--id", created["authoredPluginID"], extra_environment=environment)[0])["task"]["status"] == "Waiting Response", "The plugin turn settles without task outcome reporting.", timeout=40)
+        texts, _ = self.history_texts(created["id"], environment)
+        self.assertEqual(texts.count("After restart."), 1)
+        self.assertTrue(marker.exists(), "No task outcome nudge was sent.")
 
     # case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports none at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. After a refresh the window shows the valid plugin's button at its placement and the Plugins menu lists every plugin with its placement, an invalid one with its first error. Deleting a plugin from the Plugins menu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
     def test_plugin_install_refresh_and_delete(self):
