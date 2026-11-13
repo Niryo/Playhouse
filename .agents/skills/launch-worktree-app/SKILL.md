@@ -24,7 +24,7 @@ Agent sessions inherit three variables from the Playhouse app that started them,
 - A `PLAYHOUSE_DATA_DIRECTORY` that names another Playhouse app's profile directory (the primary app's or another worktree's) is replaced with this worktree's own. Any other value must match this worktree's profile; if `run.sh` rejects it with "uses this worktree's isolated data directory," do not retry unchanged or construct an app launch by hand. Clear it and rerun: `env -u PLAYHOUSE_DATA_DIRECTORY ./scripts/run.sh`.
 - Bridge variables that don't name this worktree's own bridge (`playhouse_clear_inherited_bridge_overrides` in `scripts/app-profile.sh`) are dropped before `open`, so the window derives this worktree's bridge itself.
 
-If a window already shows the task-store error, it was launched by an older `run.sh` with the parent's bridge variables. Relaunch it with `./scripts/run.sh`; it closes the old instance first.
+If a window already shows the task-store error, it was launched by an older `run.sh` with the parent's bridge variables. Relaunch it with `./scripts/run.sh`; it closes the old instance once the new build is ready.
 
 `scripts/playhouse.sh` does not clear inherited bridge variables: it refuses with "The bridge service override does not match the selected app" rather than guess. Clear them for calls aimed at the launched worktree app, for example to create a task for the user to try:
 

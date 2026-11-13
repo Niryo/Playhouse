@@ -1057,6 +1057,8 @@ struct AtomEditor: View {
     var onCancel: (() -> Void)? = nil
     /// The selection reaches only native owners, such as the composer's plugins.
     var onSelectionChange: (NSRange) -> Void = { _ in }
+    /// The composer's `@` mentions reach only native owners.
+    var mentions = ChatEditorMentions()
     @State private var text: String
     @State private var height: CGFloat = 28
 
@@ -1065,9 +1067,11 @@ struct AtomEditor: View {
         onSubmit: @escaping () -> Void = {}, onSteerSubmit: @escaping () -> Void = {},
         onFocusChange: @escaping (Bool) -> Void = { _ in }, onPasteImage: @escaping (Data) -> Void = { _ in },
         onCancel: (() -> Void)? = nil,
-        onSelectionChange: @escaping (NSRange) -> Void = { _ in }
+        onSelectionChange: @escaping (NSRange) -> Void = { _ in },
+        mentions: ChatEditorMentions = ChatEditorMentions()
     ) {
         self.props = props
+        self.mentions = mentions
         self.onCancel = onCancel
         self.common = common
         self.onChange = onChange
@@ -1094,7 +1098,8 @@ struct AtomEditor: View {
             onSteerSubmit: onSteerSubmit,
             onPasteImage: onPasteImage,
             onCancel: onCancel,
-            onSelectionChange: onSelectionChange
+            onSelectionChange: onSelectionChange,
+            mentions: mentions
         )
         .frame(height: height)
         .overlay(alignment: .topLeading) {

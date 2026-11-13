@@ -7169,8 +7169,15 @@ final class ConversationManager {
         }
         let task = try tasks.conversationSubject(taskID)
         guard let threadID = task.activeConversationID else { return false }
+        let steeredText = await expandMentions(normalizedText, for: task)
         // The running turn records and streams the steered input itself.
-        return try await client(for: task).steerActiveTurn(threadID: threadID, text: normalizedText, imageDataURLs: imageDataURLs)
+        return try await client(for: task).steerActiveTurn(threadID: threadID, text: steeredText, imageDataURLs: imageDataURLs)
+    }
+
+    /// `text` with the context block that tells the provider what its `@` mentions refer to.
+    private func expandMentions(_ text: String, for task: any ConversationSubject) async -> String {
+        guard let mentions = clients.mentions else { return text }
+        return await mentions.expand(text, for: task, tasks: tasks, settings: settingsManager)
     }
 
     func answerUserInput(taskID: UUID, requestID: String, threadID: String, answers: [String: [String]]) throws -> Bool {
@@ -7346,6 +7353,8 @@ final class ConversationManager {
                 message: "Chat pages belong to the standalone chat, so a task conversation cannot take --context-page."
             )
         }
+        // After validation, so a rejected send leaves the recent mentions as they were.
+        let text = isPlayhouseNudge ? text : await expandMentions(text, for: task)
         let operationClient = client(for: task)
         operationClient.beginConversationOperation()
         defer { operationClient.finishConversationOperation() }
@@ -9019,6 +9028,9 @@ final class ConversationManager {
         let persistedText = hideSensitiveRecoveryPrompt
             ? Self.privatePromptPlaceholder(for: normalizedText)
             : Self.redactingSensitiveText(normalizedText, values: sensitiveUserInputAnswerValues)
+        // The provider and the transcript get the mention block; the task's own prompt, title and
+        // worktree names keep what was typed.
+        let typedText = MentionText.displayText(persistedText)
         guard !normalizedText.isEmpty || !imageDataURLs.isEmpty else { throw PlayhouseManagerError.invalidMessage }
         guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
@@ -9116,7 +9128,7 @@ final class ConversationManager {
                     let titleWorkspace = try ConversationWorkspaceContext(roots: titleRoots)
                     resolvedWorktreeTitle = try await generateAndApplyTitle(
                         taskID: taskID,
-                        prompt: persistedText,
+                        prompt: typedText,
                         workspace: titleWorkspace,
                         clients: clients.helperClients(preferring: provider)
                     )
@@ -9134,12 +9146,12 @@ final class ConversationManager {
             if !task.isStandaloneChat {
                 task = try await tasks.prepareRepositoryWorktrees(
                     taskID,
-                    fallbackPrompt: isPlayhouseNudge && !task.hasUnsentDraft ? (task.savedPrompt ?? persistedText) : persistedText,
-                    resolvedTitle: resolvedWorktreeTitle ?? persistedText
+                    fallbackPrompt: isPlayhouseNudge && !task.hasUnsentDraft ? (task.savedPrompt ?? typedText) : typedText,
+                    resolvedTitle: resolvedWorktreeTitle ?? typedText
                 )
             }
             if !isPlayhouseNudge, !normalizedText.isEmpty {
-                _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
+                _ = try await tasks.savePrompt(taskID, prompt: typedText, status: .inProgress, submitted: true)
             }
             let roots = Self.launchRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) }
             workspace = try launchWorkspace(for: task, roots: roots, message: normalizedText)
@@ -9159,7 +9171,7 @@ final class ConversationManager {
                         do {
                             _ = try await self.generateAndApplyTitle(
                                 taskID: taskID,
-                                prompt: persistedText,
+                                prompt: typedText,
                                 workspace: workspace,
                                 clients: titleClients
                             )
@@ -10005,6 +10017,7 @@ final class PlayhouseBridgeRuntime {
             let skills = SkillCatalogManager(environment: agentEnvironment, preferences: preferences)
             let rules = RuleCatalogManager(environment: agentEnvironment, preferences: preferences)
             let mcp = McpCatalogManager(environment: agentEnvironment, preferences: preferences)
+            let mentions = MentionCatalogManager(environment: agentEnvironment, preferences: preferences, skills: skills, rules: rules, mcp: mcp)
             func conversationClients() -> ConversationClients {
                 ConversationClients(
                     codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: callerCodexHome, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
@@ -10012,6 +10025,7 @@ final class PlayhouseBridgeRuntime {
                     skills: skills,
                     rules: rules,
                     mcp: mcp,
+                    mentions: mentions,
                     observesGoalTurns: guiRuntime
                 )
             }
@@ -10795,6 +10809,14 @@ final class PlayhouseBridgeRuntime {
                     bridge.invocations = skills.invocations(in: request.arguments["message"]?.string ?? "", roots: [])
                     result = try Self.value(bridge)
                 }
+            case "mentions.list":
+                let task = try taskManager.conversationSubject(request.requiredUUID("taskID"))
+                let catalog = await mentions.catalog(for: task, tasks: taskManager, settings: settings)
+                result = .object([
+                    "items": try Self.value(catalog.items),
+                    "recentIDs": try Self.value(catalog.recentIDs),
+                    "suggestions": try Self.value(catalog.suggestions(query: request.arguments["query"]?.string ?? "")),
+                ])
             case "rules.list":
                 result = try Self.value(rules.catalog(roots: skillRoots()))
             case "rules.get":
