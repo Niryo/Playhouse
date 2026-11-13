@@ -220,6 +220,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     var runtimeScope: String? { dataDirectoryOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } }
     private var turnWaiters: [String: CheckedContinuation<Void, Error>] = [:]
     private var completedTurns: [String: Result<Void, Error>] = [:]
+    private final class PendingCompaction {
+        var turnID: String?
+        var result: Result<Void, Error>?
+    }
+    private var pendingCompactions: [String: PendingCompaction] = [:]
     private var rejectedTurnKeys = Set<String>()
 
     init(codexExecutableOverride: String? = nil, codexHomeOverride: String? = nil, dataDirectory: String? = nil, persistentServer: CodexSharedServer? = nil) {
@@ -366,6 +371,33 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         return try await readMessages(threadID: threadID)
     }
 
+
+    /// Requests Codex app-server to compact a thread's native history. The
+    /// provider returns no size metadata for this control request; the refreshed
+    /// history carries its native contextCompaction item when available.
+    func compactThread(
+        id threadID: String, workspace: ConversationWorkspaceContext, modelID: String,
+        developerInstructions: String?
+    ) async throws -> ConversationHistory {
+        try await resumeThreadIfNeeded(
+            id: threadID, workspace: workspace, modelID: modelID,
+            developerInstructions: developerInstructions,
+            reusingLoadedThread: true, confirmingModel: false
+        )
+        // The empty RPC response only acknowledges the request. Register before
+        // sending it because turn notifications can arrive before that response.
+        interruptedThreadIDs.remove(threadID)
+        let pending = PendingCompaction()
+        pendingCompactions[threadID] = pending
+        defer { pendingCompactions.removeValue(forKey: threadID) }
+        _ = try await request(method: "thread/compact/start", params: ["threadId": threadID])
+        while pending.result == nil {
+            try Task.checkCancellation()
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try pending.result?.get()
+        return try await readMessages(threadID: threadID)
+    }
 
     /// Reads a child thread without resuming it or changing its turn state.
     func inspectThreadReadOnly(id threadID: String, workspace: ConversationWorkspaceContext) async throws -> ConversationHistory {
@@ -2059,6 +2091,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                   context != nil || threadParents[threadID] == nil,
                   let turn = params["turn"] as? [String: Any],
                   let turnID = turn["id"] as? String else { return }
+            if let pending = pendingCompactions[threadID], pending.turnID == nil {
+                pending.turnID = turnID
+            }
             context?.turnID = turnID
             if context == nil {
                 contextlessTurnIDs[threadID] = turnID
@@ -2228,14 +2263,6 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 ConversationSteerMailbox.clearActiveTurn(threadID: threadID)
             }
 
-            if goalObservationThreadID == threadID, isContextlessTurn {
-                goalTurnCompletedTurnID = turnID
-                goalTurnRevision += 1
-                goalTurnCompletedRevision += 1
-                noteGoalEvent()
-                return
-            }
-
             let key = Self.turnKey(threadID: threadID, turnID: turnID)
             if rejectedTurnKeys.remove(key) != nil { return }
             let result: Result<Void, Error>
@@ -2243,6 +2270,19 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 result = .success(())
             } else {
                 result = .failure(ClientError.turnFailed(Self.turnFailureDescription(turn)))
+            }
+
+            if let pending = pendingCompactions[threadID], pending.turnID == turnID {
+                pending.result = result
+                return
+            }
+
+            if goalObservationThreadID == threadID, isContextlessTurn {
+                goalTurnCompletedTurnID = turnID
+                goalTurnRevision += 1
+                goalTurnCompletedRevision += 1
+                noteGoalEvent()
+                return
             }
 
             if let waiter = turnWaiters.removeValue(forKey: key) {
@@ -2612,6 +2652,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             "activeTurnID": activeTurnID ?? "",
         ]) { _, new in new }))
         let error = ClientError.processExited(exitDetail)
+        for pending in pendingCompactions.values { pending.result = .failure(error) }
         process = nil
         inputPipe = nil
         outputPipe?.fileHandleForReading.readabilityHandler = nil

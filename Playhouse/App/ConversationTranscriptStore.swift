@@ -112,6 +112,11 @@ struct ConversationTranscript: Codable, Equatable {
     var sensitiveCodexTurnMessages: [String: [ConversationMessage]]?
     /// Fail-closed marker written before a private recovery prompt is sent.
     var pendingSensitiveUserInputRedaction: Bool?
+    /// Every compaction of the Claude session's context, oldest first: what
+    /// fired it and how far it shrank the context.
+    var contextCompactions: [ContextCompactionEvent]?
+    /// Resumed Claude turns whose first call missed the prompt cache, oldest first.
+    var promptCacheMisses: [PromptCacheMissEvent]?
 
     var isEmpty: Bool { segments.isEmpty && turns.isEmpty }
 

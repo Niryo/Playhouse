@@ -10859,7 +10859,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         probe = self.data_directory / "codex-question-ownership-probe"
         core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "HoverRevealScrollers", "WorkspaceChanges", "CodexAppServerClient",
-                "CodexSocketConnection", "AgentRunHost", "ConversationModel", "ClaudeCodeClient", "ProviderRequestLog", "ProcessCPUSampler", "AgentUsage", "AgentUsageStore", "ConversationTranscriptStore",
+                "CodexSocketConnection", "AgentRunHost", "ContextCompaction", "ConversationModel", "ClaudeCodeClient", "ProviderRequestLog", "ProcessCPUSampler", "AgentUsage", "AgentUsageStore", "ConversationTranscriptStore",
                 "StandaloneChatStore", "SkillCatalog", "RuleCatalog", "MentionCatalog", "McpCatalog", "CodexConfigTOML", "BridgeCore", "TaskSchedule"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine", "JavaScriptCore"):
@@ -12914,6 +12914,97 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         return {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
 
+    # case-contract: test_codex_context_compaction_threshold_and_model_switch | With a configured 100,000-token threshold and 150,000-token minimum, a Codex task reporting 120,000 context tokens calls thread/compact/start before its next prompt, records one successful automatic threshold event with a labelled activity, and adds no empty assistant turn. After a same-model turn records 220,000 context tokens, switching models compacts through the RPC first, records the old model and model-switch trigger, and waits for the matching successful terminal notification before turn/start. A failure after the initial acknowledgment is recorded as unsuccessful while the prompt still runs. If the app-server rejects compaction, Playhouse records a failed activity and event but continues the prompt. Codex uses reported context and model changes; its path does not depend on Claude's prompt-cache TTL or warm-idle scheduler.
+    def test_codex_context_compaction_threshold_and_model_switch(self):
+        environment = self.install_codex_fixture("codex-fixture-auto-threshold")
+        environment["PLAYHOUSE_E2E_CODEX_CONTEXT_TOKENS"] = "120000"
+        context_tokens_file = Path(environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] + ".context-tokens")
+        context_tokens_file.write_text("120000", encoding="utf-8")
+        self.assert_success(self.call_cli(
+            "settings", "set-auto-compaction", "--threshold", "100000", "--minimum", "150000"
+        )[0])
+        task_id = self.create_task("Codex threshold compaction", provider="codex")["id"]
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "First Codex turn.", "--model", "gpt-6-sol",
+            extra_environment=environment,
+        )[0])
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Continue after the context threshold.", "--model", "gpt-6-sol",
+            extra_environment=environment,
+        )[0])
+        usage = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        threshold_events = usage["contextCompactions"]
+        self.assertEqual(len(threshold_events), 1)
+        self.assertEqual(threshold_events[0]["provider"], "codex")
+        self.assertEqual(threshold_events[0]["trigger"], "threshold")
+        self.assertEqual(threshold_events[0]["preTokens"], 120000)
+        self.assertTrue(threshold_events[0]["succeeded"])
+        history_path = Path(environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] + ".history")
+        history = json.loads(history_path.read_text(encoding="utf-8"))
+        methods = [event["method"] for event in history["rpcOrder"]]
+        self.assertEqual(methods, ["turn/start", "thread/compact/start", "compaction/completed", "turn/start"])
+        conversation = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        rows = [item for item in conversation["activities"] if item.get("isContextCompaction")]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title"], "Context compacted automatically")
+        self.assertFalse(any(message.get("role") == "assistant" and not message.get("text", "").strip()
+                             for message in conversation["messages"]))
+
+        context_tokens_file.write_text("220000", encoding="utf-8")
+        self.assert_success(self.call_cli(
+            "settings", "set-auto-compaction", "--threshold", "300000", "--minimum", "150000"
+        )[0])
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Grow context before switching models.", "--model", "gpt-6-sol",
+            extra_environment=environment,
+        )[0])
+        methods = [event["method"] for event in json.loads(history_path.read_text(encoding="utf-8"))["rpcOrder"]]
+        self.assertEqual(methods[-1], "turn/start", "The same-model turn records the 220k usage for the upcoming switch.")
+        previous_order_count = len(methods)
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Switch to Luna.", "--model", "gpt-6-luna",
+            extra_environment=environment,
+        )[0])
+        events = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])["contextCompactions"]
+        self.assertEqual(events[-1]["trigger"], "model-switch")
+        self.assertEqual(events[-1]["model"], "gpt-6-sol")
+        self.assertEqual(events[-1]["preTokens"], 220000)
+        self.assertTrue(events[-1]["succeeded"])
+        switch_history = json.loads(history_path.read_text(encoding="utf-8"))
+        methods = [event["method"] for event in switch_history["rpcOrder"]]
+        self.assertEqual(methods[previous_order_count:], ["thread/compact/start", "compaction/completed", "turn/start"])
+
+        failure_marker = Path(environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] + ".compact-fail")
+        failure_marker.touch()
+        previous_order_count = len(methods)
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Continue after failed compaction.", "--model", "gpt-6-sol",
+            extra_environment=environment,
+        )[0])
+        failure_events = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])["contextCompactions"]
+        self.assertFalse(failure_events[-1]["succeeded"])
+        failure_history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        failure_rows = [item for item in failure_history["activities"] if item.get("isContextCompaction")]
+        self.assertTrue(any(item["title"] == "Automatic context compaction failed" and item["status"] == "failed" for item in failure_rows))
+        self.assertIn("Continue after failed compaction.", [message["text"] for message in failure_history["messages"]])
+        failure_order = json.loads(history_path.read_text(encoding="utf-8"))["rpcOrder"]
+        self.assertEqual([event["method"] for event in failure_order][previous_order_count:],
+                         ["thread/compact/start", "turn/start"])
+        failure_marker.unlink()
+        terminal_failure = Path(environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] + ".compact-terminal-fail")
+        terminal_failure.touch()
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Continue after asynchronous failure.", "--model", "gpt-6-luna",
+            extra_environment=environment,
+        )[0])
+        terminal_failure.unlink()
+        terminal_events = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])["contextCompactions"]
+        self.assertEqual(len(terminal_events), len(failure_events) + 1)
+        self.assertFalse(terminal_events[-1]["succeeded"])
+        final_history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        self.assertIn("Continue after asynchronous failure.", [message["text"] for message in final_history["messages"]])
+
+
     def install_claude_fixture(self, name):
         """Installs the Claude Code protocol fixture and returns its turn environment."""
         source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
@@ -13566,6 +13657,277 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_failure(single("--request", "0", expected_status=2), "invalid_argument")
         self.assert_failure(export("--request", "9", expected_status=3), "not_found")
         self.assert_failure(export("--format", "yaml", expected_status=2), "invalid_argument")
+
+    # case-contract: test_claude_auto_compaction_threshold_and_warm_idle | Claude task launches pass the configured token threshold to Claude Code, disabling automatic compaction removes the threshold environment value, and settings changes persist with invalid values rejected. For an In Progress Claude task whose fixture session has 180,000 context tokens and has been idle 51 minutes, a scheduler tick runs one warm-idle /compact before the cache expires, records its trigger and before/after sizes in token usage, and a second tick does not compact again. Maintenance API token usage contributes to the task total. The conversation labels the maintenance activity as automatic without adding an empty assistant turn. Crossing 200,000 tokens emits a threshold compaction boundary visible in the conversation and Token Stats. The settings window shows and saves the enabled toggle, threshold, idle wait and minimum context, and its invalid-threshold alert leaves the saved value unchanged; negative and malformed integers are rejected without changing saved settings. Idle checks skip Done and Backlog tasks, contexts below the minimum, pending user-input requests, an active Claude turn, and an outstanding background task; eligible In Progress, Waiting Response, and Review tasks compact.
+    def test_claude_auto_compaction_threshold_and_warm_idle(self):
+        settings = self.assert_success(self.call_cli("settings", "get")[0])["autoCompaction"]
+        self.assertEqual(settings, {"enabled": True, "thresholdTokens": 200000, "idleMinutes": 50, "minimumTokens": 150000})
+        environment = self.install_claude_fixture("claude-fixture-auto-compaction")
+        environment["CLAUDE_CONFIG_DIR"] = str(self.data_directory / "claude-config")
+        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_REPORT_OUTCOME"] = "1"
+        updated = self.assert_success(self.call_cli(
+            "settings", "set-auto-compaction", "--threshold", "200000", "--idle-minutes", "50", "--minimum", "150000"
+        )[0])
+        self.assertEqual(updated["autoCompaction"]["thresholdTokens"], 200000)
+        self.assert_failure(self.call_cli("settings", "set-auto-compaction", "--threshold", "-100000", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(self.assert_success(self.call_cli("settings", "get")[0])["autoCompaction"]["thresholdTokens"], 200000)
+        task_id = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Warm compaction", "--prompt", "Fixture task description.",
+            "--root", str(self.primary), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Hello.", extra_environment=environment)[0])
+        fixture = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
+        history_path = Path(str(fixture) + ".history")
+        history = json.loads(history_path.read_text(encoding="utf-8"))["turns"]
+        self.assertEqual(history[-1]["autoCompactWindow"], "200000", "Claude receives the configured token threshold.")
+
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "fill context to 180000 tokens 51 minutes ago",
+            extra_environment=environment
+        )[0])
+        self.assert_success(self.call_cli(
+            "task", "prompt", task_id, "--text", "Fixture task description.", "--status", "In Progress"
+        )[0])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
+        before_usage = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])["totalTokens"]
+        self.assert_success(self.call_cli("schedule", "tick", extra_environment=environment)[0])
+        summary = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        self.assertEqual(summary["totalTokens"] - before_usage, 180060, "Compaction API usage is included in task totals.")
+        events = summary["contextCompactions"]
+        self.assertEqual(len(events), 1, "The idle tick compacts exactly once.")
+        self.assertEqual(events[0]["trigger"], "warm-idle")
+        self.assertEqual(events[0]["preTokens"], 180000)
+        self.assertEqual(events[0]["postTokens"], 6000)
+        self.assertTrue(events[0]["succeeded"])
+        self.assertEqual(len(self.assert_success(self.call_cli("task", "token-usage", task_id)[0])["contextCompactions"]), 1)
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        self.assertFalse(any(message.get("role") == "assistant" and not message.get("text", "").strip() for message in history["messages"]),
+                         "A maintenance compaction must not leave an empty assistant turn.")
+
+        small_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Small context", "--prompt", "Fixture task description.", "--root", str(self.primary), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", small_task, "--message", "Hello.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", small_task, "--message", "fill context to 100000 tokens 51 minutes ago", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("schedule", "tick", extra_environment=environment)[0])
+        self.assertEqual(self.assert_success(self.call_cli("task", "token-usage", small_task)[0])["contextCompactions"], [], "A context below the minimum must be skipped.")
+
+        backlog_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Backlog compaction", "--prompt", "Fixture task description.", "--root", str(self.primary), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", backlog_task, "--message", "Hello.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", backlog_task, "--message", "fill context to 180000 tokens 51 minutes ago", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("task", "prompt", backlog_task, "--text", "Saved in Backlog", "--status", "Backlog")[0])
+        self.assert_success(self.call_cli("schedule", "tick", extra_environment=environment)[0])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", backlog_task)[0])["status"], "Backlog")
+        self.assertEqual(self.assert_success(self.call_cli("task", "token-usage", backlog_task)[0])["contextCompactions"], [], "Backlog tasks must never pay for idle maintenance.")
+
+        done_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Done compaction", "--prompt", "Fixture task description.", "--root", str(self.custom), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", done_task, "--message", "Hello.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", done_task, "--message", "fill context to 180000 tokens 51 minutes ago", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("task", "move", done_task, "Review")[0])
+        self.assert_success(self.call_cli("task", "move", done_task, "Done")[0])
+        self.assert_success(self.call_cli("schedule", "tick", extra_environment=environment)[0])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", done_task)[0])["status"], "Done")
+        self.assertEqual(self.assert_success(self.call_cli("task", "token-usage", done_task)[0])["contextCompactions"], [], "Done tasks must never pay for idle maintenance.")
+
+        pending_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Pending question compaction", "--prompt", "Fixture task description.", "--root", str(self.primary), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", pending_task, "--message", "finish while a structured question remains pending; fill context to 180000 tokens 51 minutes ago", extra_environment=environment)[0])
+        pending_history = self.assert_success(self.call_cli("conversation", "history", pending_task, extra_environment=environment)[0])
+        self.assertIsNotNone(pending_history.get("pendingUserInputRequest"), "The fixture must leave a real user-input request pending before the idle tick.")
+        self.assert_success(self.call_cli("schedule", "tick", extra_environment=environment)[0])
+        pending_after_tick = self.assert_success(self.call_cli("conversation", "history", pending_task, extra_environment=environment)[0])
+        self.assertIsNotNone(pending_after_tick.get("pendingUserInputRequest"), "The idle tick must preserve the pending user-input request.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "token-usage", pending_task)[0])["contextCompactions"], [], "A pending user-input request must block idle compaction.")
+
+        waiting_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Waiting response compaction", "--prompt", "Fixture task description.", "--root", str(self.primary), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", waiting_task, "--message", "Hello.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", waiting_task, "--message", "fill context to 180000 tokens 51 minutes ago", extra_environment=environment)[0])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", waiting_task)[0])["status"], "Waiting Response")
+        self.assert_success(self.call_cli("schedule", "tick", extra_environment=environment)[0])
+        self.assertEqual(self.assert_success(self.call_cli("task", "token-usage", waiting_task)[0])["contextCompactions"][0]["trigger"], "warm-idle")
+
+        review_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Review compaction", "--prompt", "Fixture task description.", "--root", str(self.custom), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", review_task, "--message", "Hello.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", review_task, "--message", "fill context to 180000 tokens 51 minutes ago", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("task", "move", review_task, "Review")[0])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", review_task)[0])["status"], "Review")
+        self.assert_success(self.call_cli("schedule", "tick", extra_environment=environment)[0])
+        self.assertEqual(self.assert_success(self.call_cli("task", "token-usage", review_task)[0])["contextCompactions"][0]["trigger"], "warm-idle")
+
+        busy_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Busy compaction", "--prompt", "Fixture task description.", "--root", str(self.primary), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", busy_task, "--message", "Hello.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", busy_task, "--message", "fill context to 180000 tokens 51 minutes ago", extra_environment=environment)[0])
+        ready = Path(str(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]) + ".concurrent-turn-ready")
+        release = Path(str(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]) + ".concurrent-turn-release")
+        ready.unlink(missing_ok=True)
+        release.unlink(missing_ok=True)
+        send_result = {}
+        sender = threading.Thread(target=lambda: send_result.setdefault("response", self.call_cli(
+            "conversation", "send", busy_task, "--message", "hold-claude-turn-for-concurrency", timeout=45,
+            extra_environment=environment,
+        )), daemon=True)
+        sender.start()
+        self.wait_for(ready.exists, "The Claude turn should remain active while the scheduler runs.")
+        self.assert_success(self.call_cli("schedule", "tick", extra_environment=environment)[0])
+        self.assertEqual(self.assert_success(self.call_cli("task", "token-usage", busy_task)[0])["contextCompactions"], [],
+                         "An active Claude turn must block idle compaction.")
+        release.touch()
+        sender.join(timeout=45)
+        self.assertFalse(sender.is_alive(), "The held provider turn should settle after release.")
+        self.assert_success(send_result["response"][0])
+
+        background_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Background task compaction", "--prompt", "Fixture task description.", "--root", str(self.primary), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", background_task, "--message", "Hello.", extra_environment=environment)[0])
+        background_ready = Path(str(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]) + ".compaction-background-ready")
+        background_release = Path(str(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]) + ".compaction-background-release")
+        background_ready.unlink(missing_ok=True)
+        background_release.unlink(missing_ok=True)
+        background_result = {}
+        background_sender = threading.Thread(target=lambda: background_result.setdefault("response", self.call_cli(
+            "conversation", "send", background_task, "--message", "hold background task for compaction; fill context to 180000 tokens 51 minutes ago",
+            timeout=45, extra_environment=environment,
+        )), daemon=True)
+        background_sender.start()
+        self.wait_for(background_ready.exists, "The provider should report a running background task before the scheduler tick.")
+        self.assert_success(self.call_cli("schedule", "tick", extra_environment=environment)[0])
+        self.assertEqual(self.assert_success(self.call_cli("task", "token-usage", background_task)[0])["contextCompactions"], [],
+                         "An outstanding provider background task must block idle compaction.")
+        background_release.touch()
+        background_sender.join(timeout=45)
+        self.assertFalse(background_sender.is_alive(), "The background task turn should settle after release.")
+        self.assert_success(background_result["response"][0])
+
+        threshold_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Threshold compaction", "--prompt", "Fixture task description.",
+            "--root", str(self.primary), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", threshold_task, "--message", "Hello.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", threshold_task, "--message", "fill context to 210000 tokens", extra_environment=environment)[0])
+        threshold_events = self.assert_success(self.call_cli("task", "token-usage", threshold_task)[0])["contextCompactions"]
+        self.assertEqual(threshold_events[-1]["trigger"], "threshold", "Crossing the configured window emits an automatic compaction boundary.")
+        self.assertEqual((threshold_events[-1]["preTokens"], threshold_events[-1]["postTokens"]), (210000, 6000))
+
+        self.assert_success(self.call_cli("settings", "set-auto-compaction", "--enabled", "false")[0])
+        disabled = self.assert_success(self.call_cli("settings", "get")[0])["autoCompaction"]
+        self.assertFalse(disabled["enabled"])
+        self.assert_failure(self.call_cli("settings", "set-auto-compaction", "--idle-minutes", "60", expected_status=2)[0], "invalid_argument")
+        self.assertEqual(self.assert_success(self.call_cli("settings", "get")[0])["autoCompaction"], disabled)
+        disabled_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Compaction disabled", "--prompt", "Fixture task description.",
+            "--root", str(self.primary), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", disabled_task, "--message", "Hello.", extra_environment=environment)[0])
+        history = json.loads(history_path.read_text(encoding="utf-8"))["turns"]
+        self.assertIsNone(history[-1]["autoCompactWindow"], "Disabled settings leave Claude's built-in auto-compaction alone.")
+
+    # case-contract: test_claude_cold_resume_and_model_switch_compaction | A Claude session with more than the minimum context is compacted before the next real prompt after its cache has been idle for over 60 minutes, and again before a model switch. The cold-resume and model-switch triggers are persisted with context sizes, each `/compact` fixture turn precedes the real prompt, the visible maintenance rows precede their corresponding prompts, and a model switch runs `/compact` with the old model before the requested model starts. When the cache is expired and automatic compaction is disabled, the first resumed response with near-zero cache reads and a large cache write records one cache miss, visible in Token Stats. If Claude reports a compaction failure, the failed maintenance row is recorded, the event is marked unsuccessful, and the user's prompt still runs and appears in history. Failed attempts are labelled as failures in the conversation and Token Stats. Stopping during compaction prevents the submitted work from starting.
+    def test_claude_cold_resume_and_model_switch_compaction(self):
+        environment = self.install_claude_fixture("claude-fixture-resume-compaction")
+        environment["CLAUDE_CONFIG_DIR"] = str(self.data_directory / "claude-config")
+        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_REPORT_OUTCOME"] = "1"
+        fixture = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
+        history_path = Path(str(fixture) + ".history")
+
+        cold_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Cold resume", "--prompt", "Fixture task description.",
+            "--root", str(self.primary), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", cold_task, "--message", "Hello.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", cold_task, "--message", "fill context to 180000 tokens 61 minutes ago", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", cold_task, "--message", "Resume after cache expiry.", extra_environment=environment)[0])
+        cold_events = self.assert_success(self.call_cli("task", "token-usage", cold_task)[0])["contextCompactions"]
+        self.assertEqual(cold_events[-1]["trigger"], "cold-resume")
+        self.assertTrue(cold_events[-1]["succeeded"])
+        history = json.loads(history_path.read_text(encoding="utf-8"))["turns"]
+        cold_prompt_index = next(i for i, turn in enumerate(history) if turn.get("userText") == "Resume after cache expiry.")
+        self.assertEqual(history[cold_prompt_index - 1].get("userText"), "/compact", "Cold compaction must run before the resumed prompt.")
+
+        switch_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Model switch", "--prompt", "Fixture task description.",
+            "--root", str(self.primary), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", switch_task, "--message", "Hello.", "--model", "claude-haiku-4-5", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", switch_task, "--message", "fill context to 180000 tokens", "--model", "claude-haiku-4-5", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", switch_task, "--message", "Switch models now.", "--model", "claude-sonnet-4-6", extra_environment=environment)[0])
+        switch_events = self.assert_success(self.call_cli("task", "token-usage", switch_task)[0])["contextCompactions"]
+        self.assertEqual(switch_events[-1]["trigger"], "model-switch")
+        history = json.loads(history_path.read_text(encoding="utf-8"))["turns"]
+        prompt_index = next(i for i, turn in enumerate(history) if turn.get("userText") == "Switch models now.")
+        compact_turn = history[prompt_index - 1]
+        self.assertEqual(compact_turn.get("userText"), "/compact")
+        self.assertEqual(compact_turn["arguments"][compact_turn["arguments"].index("--model") + 1], "claude-haiku-4-5")
+        self.assertEqual(history[prompt_index]["arguments"][history[prompt_index]["arguments"].index("--model") + 1], "claude-sonnet-4-6")
+
+        cache_environment = dict(environment, PLAYHOUSE_E2E_CLAUDE_FIXTURE_CACHE_MISS="1")
+        self.assert_success(self.call_cli("settings", "set-auto-compaction", "--enabled", "false")[0])
+        cache_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Resume cache miss", "--prompt", "Fixture task description.",
+            "--root", str(self.primary), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", cache_task, "--message", "Hello.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", cache_task, "--message", "fill context to 180000 tokens 61 minutes ago", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", cache_task, "--message", "Resume with a cold cache.", extra_environment=cache_environment)[0])
+        misses = self.assert_success(self.call_cli("task", "token-usage", cache_task)[0])["promptCacheMisses"]
+        self.assertEqual(len(misses), 1)
+        self.assertEqual((misses[0]["cacheReadTokens"], misses[0]["cacheWriteTokens"]), (0, 250000))
+
+        self.assert_success(self.call_cli("settings", "set-auto-compaction", "--enabled", "true")[0])
+        failure_marker = Path(str(fixture) + ".compact-fail")
+        failure_marker.touch()
+        failure_task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Failed Claude compaction", "--prompt", "Fixture task description.",
+            "--root", str(self.primary), "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli("conversation", "send", failure_task, "--message", "Hello.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", failure_task, "--message", "fill context to 180000 tokens 61 minutes ago", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", failure_task, "--message", "Continue after failed compaction.", extra_environment=environment)[0])
+        failure_events = self.assert_success(self.call_cli("task", "token-usage", failure_task)[0])["contextCompactions"]
+        self.assertEqual(failure_events[-1]["trigger"], "cold-resume")
+        self.assertFalse(failure_events[-1]["succeeded"])
+        failure_history = self.assert_success(self.call_cli("conversation", "history", failure_task, extra_environment=environment)[0])
+        failure_rows = [activity for activity in failure_history["activities"] if activity.get("isContextCompaction")]
+        self.assertEqual(len(failure_rows), 1)
+        self.assertEqual(failure_rows[0]["status"], "failed")
+        self.assertEqual(failure_rows[0]["title"], "Automatic context compaction failed")
+        self.assertIn("Continue after failed compaction.", [message["text"] for message in failure_history["messages"]])
+        failure_marker.unlink()
+
+
+        # Stop while maintenance is running must also stop the submitted prompt.
+        self.assert_success(self.call_cli("conversation", "send", failure_task, "--message", "fill context to 180000 tokens 61 minutes ago", extra_environment=environment)[0])
+        hold = Path(str(fixture) + ".compact-hold")
+        ready = Path(str(fixture) + ".compact-ready")
+        hold.touch()
+        results = []
+        sender = threading.Thread(target=lambda: results.append(self.call_cli(
+            "conversation", "send", failure_task, "--message", "Must not run after Stop.",
+            expected_status=1, timeout=45, extra_environment=environment,
+        )), daemon=True)
+        sender.start()
+        try:
+            self.wait_for(ready.exists, "Compaction should be active before Stop.")
+            self.assert_success(self.call_cli("conversation", "stop", failure_task, extra_environment=environment)[0])
+            sender.join(timeout=30)
+            self.assertFalse(sender.is_alive())
+            provider_history = json.loads(history_path.read_text(encoding="utf-8"))["turns"]
+            self.assertFalse(any(turn.get("userText") == "Must not run after Stop." for turn in provider_history))
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", failure_task)[0])["status"], "Waiting Response")
+        finally:
+            hold.unlink(missing_ok=True)
+            ready.unlink(missing_ok=True)
 
     # case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
     def test_settings_token_usage_color_max_round_trip(self):

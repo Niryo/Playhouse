@@ -388,6 +388,12 @@ final class ClaudeSessionRunner {
     /// an agent report for the transcript.
     private var backgroundShellTaskIDs: Set<String> = []
     private var parentWakeBackstopGeneration = 0
+    /// Why Playhouse sent this turn's `/compact`, which Claude Code itself
+    /// reports as a manual compaction; nil for every other turn.
+    var compactionTrigger: ContextCompactionTrigger?
+    /// The timeline row of a compaction Claude Code has started and not yet
+    /// finished, so its boundary completes that row instead of adding one.
+    private var pendingCompactionActivityID: String?
 
     private(set) var activeTurnID: String?
     private(set) var isTurnActive = false
@@ -737,6 +743,11 @@ final class ClaudeSessionRunner {
         environment["LOGNAME"] = environment["LOGNAME"] ?? NSUserName()
         if let configDirectoryOverride { environment["CLAUDE_CONFIG_DIR"] = configDirectoryOverride }
         if let effort { environment["CLAUDE_CODE_EFFORT_LEVEL"] = effort.rawValue }
+        // Claude Code auto-compacts once the context nears this many tokens,
+        // instead of near the model's whole (up to 1M-token) window.
+        if let window = workspace.claudeAutoCompactWindowTokens {
+            environment[ContextCompactionSettings.autoCompactWindowVariable] = String(window)
+        }
         // The CLI is a child of Playhouse, not an IDE integration or nested session.
         environment.removeValue(forKey: "CLAUDECODE")
         environment.removeValue(forKey: "CLAUDE_CODE_ENTRYPOINT")
@@ -1525,6 +1536,30 @@ final class ClaudeSessionRunner {
                 turnCompletion.wokenTurnCount += 1
                 scheduleParentWakeBackstopIfNeeded()
             }
+        case "status":
+            // Claude Code compacts before the call that would cross its
+            // auto-compact window, and for `/compact`; either way it reports
+            // the start here and the result as a boundary.
+            let rowID = "claude-compaction-\((message["uuid"] as? String) ?? UUID().uuidString.lowercased())"
+            if message["status"] as? String == "compacting" {
+                pendingCompactionActivityID = rowID
+                activityHandler?(compactionActivity(id: rowID, status: "inProgress", details: nil))
+            } else if let result = message["compact_result"] as? String, result != "success",
+                      let pending = pendingCompactionActivityID {
+                pendingCompactionActivityID = nil
+                activityHandler?(compactionActivity(id: pending, status: "failed", details: nil))
+            }
+        case "compact_boundary":
+            let metadata = message["compact_metadata"] as? [String: Any] ?? [:]
+            let rowID = pendingCompactionActivityID
+                ?? "claude-compaction-\((message["uuid"] as? String) ?? UUID().uuidString.lowercased())"
+            pendingCompactionActivityID = nil
+            let details = ContextCompactionDetails(
+                trigger: .reported(metadata["trigger"] as? String, requested: compactionTrigger),
+                preTokens: (metadata["pre_tokens"] as? NSNumber)?.intValue,
+                postTokens: (metadata["post_tokens"] as? NSNumber)?.intValue
+            )
+            activityHandler?(compactionActivity(id: rowID, status: "completed", details: details))
         case "background_tasks_changed":
             let tasks = message["tasks"] as? [[String: Any]] ?? []
             outstandingBackgroundTaskIDs = Set(tasks.compactMap { $0["task_id"] as? String })
@@ -1609,6 +1644,25 @@ final class ClaudeSessionRunner {
         default:
             break
         }
+    }
+
+    /// The timeline row of one compaction. Claude Code names Playhouse's own
+    /// `/compact` a manual one, so the trigger Playhouse asked for labels it.
+    private func compactionActivity(id: String, status: String, details: ContextCompactionDetails?) -> ConversationActivity {
+        let trigger = details?.trigger ?? compactionTrigger
+        let automatic = trigger?.isAutomatic ?? false
+        let detail: String
+        switch status {
+        case "inProgress": detail = automatic ? "Automatic · \(trigger?.label ?? "")" : ""
+        case "failed": detail = "Claude Code couldn't compact the context."
+        default: detail = details?.summary ?? ""
+        }
+        return ConversationActivity(
+            id: id, title: status == "failed"
+                ? (automatic ? "Automatic context compaction failed" : "Context compaction failed")
+                : (automatic ? "Context compacted automatically" : "Context compacted"), detail: detail,
+            status: status, isContextCompaction: true, turnID: activeTurnID, compaction: details
+        )
     }
 
     private static func resolvedBackgroundTaskStatus(_ status: String) -> String {
@@ -1838,6 +1892,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     private var runsDirectory: URL?
     private var newSessionIDs = Set<String>()
     private var forkSourceSessionIDs: [String: String] = [:]
+    /// The trigger of the `/compact` turn `compactSession` is about to run, by session.
+    private var requestedCompactionTriggers: [String: ContextCompactionTrigger] = [:]
     private var startingSessionIDs = Set<String>()
     private var interruptedThreadIDs = Set<String>()
     /// The process and turn identity each conversation last ran under, so a
@@ -2174,6 +2230,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         runner.actionRequestHandler = onActionRequest
         runner.userInputHandler = onUserInput
         runner.tokenUsageHandler = onTokenUsage
+        runner.compactionTrigger = requestedCompactionTriggers.removeValue(forKey: sessionID)
         runners[sessionID] = runner
         Self.activeRunnersBySessionID[sessionID] = runner
         // A new turn supersedes a stop another client recorded for this session.
@@ -2219,6 +2276,44 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             developerInstructions: developerInstructions,
             sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
             hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt
+        )
+    }
+
+    /// Compacts an existing session's context with Claude Code's own
+    /// `/compact`, as a turn of its own: its compaction row is labelled with
+    /// `trigger`, and it writes no answer. `modelID` should be the model whose
+    /// prompt cache holds the context, so the summary reads it from the cache.
+    func compactSession(
+        trigger: ContextCompactionTrigger,
+        threadID: String,
+        modelID: String,
+        effort: ConversationEffort,
+        workspace: ConversationWorkspaceContext,
+        developerInstructions: String?,
+        callbacks: ConversationTurnCallbacks
+    ) async throws {
+        requestedCompactionTriggers[threadID] = trigger
+        defer { requestedCompactionTriggers.removeValue(forKey: threadID) }
+        try await sendMessage(
+            "/compact",
+            mode: .code,
+            modelID: modelID,
+            effort: effort,
+            threadID: threadID,
+            workspace: workspace,
+            developerInstructions: developerInstructions,
+            onDelta: { _ in },
+            onFinalMessage: { _ in },
+            onActivity: callbacks.onActivity,
+            onDiff: { _ in },
+            onHistory: { _ in },
+            onActionRequest: callbacks.onActionRequest,
+            onUserInput: { request in
+                self.rejectUserInput(requestID: request.id, threadID: request.threadID, message: "This is Playhouse's automatic context compaction; there is nobody to answer.")
+            },
+            onProgressMessage: { _ in },
+            onTurnStarted: { _ in },
+            onTokenUsage: callbacks.onTokenUsage
         )
     }
 

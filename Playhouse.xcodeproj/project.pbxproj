@@ -60,6 +60,7 @@
 		A10000000000000000000018 /* BridgeSocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* BridgeSocket.swift */; };
 		A1000000000000000000001B /* ProcessCPUSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001B /* ProcessCPUSampler.swift */; };
 		A1000000000000000000F403 /* AgentRunHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F403 /* AgentRunHost.swift */; };
+		A1000000000000000000F601 /* ContextCompaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F601 /* ContextCompaction.swift */; };
 		A1000000000000000000001C /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002 /* GRDB */; };
 		A1000000000000000000F501 /* TaskItemView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000F501 /* TaskItemView.swift */; };
 		A100000000000000000000DB /* DebugConversationImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000000000000000000DB /* DebugConversationImport.swift */; };
@@ -130,6 +131,7 @@
 		A20000000000000000000018 /* BridgeSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/BridgeSocket.swift; sourceTree = "<group>"; };
 		A2000000000000000000001B /* ProcessCPUSampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessCPUSampler.swift; sourceTree = "<group>"; };
 		A2000000000000000000F403 /* AgentRunHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentRunHost.swift; sourceTree = "<group>"; };
+		A2000000000000000000F601 /* ContextCompaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextCompaction.swift; sourceTree = "<group>"; };
 		A2000000000000000000F501 /* TaskItemView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskItemView.swift; sourceTree = "<group>"; };
 		A200000000000000000000DB /* DebugConversationImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugConversationImport/DebugConversationImport.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -249,6 +251,7 @@
 				A20000000000000000000016 /* DaemonClient.swift */,
 				A2000000000000000000001B /* ProcessCPUSampler.swift */,
 				A2000000000000000000F403 /* AgentRunHost.swift */,
+				A2000000000000000000F601 /* ContextCompaction.swift */,
 				A200000000000000000000DB /* DebugConversationImport.swift */,
 				A2000000000000000000F501 /* TaskItemView.swift */,
 				A200000000000000000000F1 /* Plugins */,
@@ -464,6 +467,7 @@
 				"$(SRCROOT)/Playhouse/App/ClaudeCodeClient.swift",
 				"$(SRCROOT)/Playhouse/App/ProcessCPUSampler.swift",
 				"$(SRCROOT)/Playhouse/App/AgentRunHost.swift",
+				"$(SRCROOT)/Playhouse/App/ContextCompaction.swift",
 				"$(SRCROOT)/Playhouse/App/AgentUsage.swift",
 				"$(SRCROOT)/Playhouse/App/AgentUsageStore.swift",
 				"$(SRCROOT)/Playhouse/App/ConversationTranscriptStore.swift",
@@ -552,6 +556,7 @@
 				A10000000000000000000016 /* DaemonClient.swift in Sources */,
 				A1000000000000000000001B /* ProcessCPUSampler.swift in Sources */,
 				A1000000000000000000F403 /* AgentRunHost.swift in Sources */,
+				A1000000000000000000F601 /* ContextCompaction.swift in Sources */,
 				A100000000000000000000DB /* DebugConversationImport.swift in Sources */,
 				A1000000000000000000F501 /* TaskItemView.swift in Sources */,
 			);

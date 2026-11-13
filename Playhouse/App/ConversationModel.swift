@@ -509,6 +509,8 @@ struct TaskTokenUsageSummary: Codable, Equatable {
     let turns: [Turn]
     let tools: [Tool]
     let callUsage: CallUsage
+    let contextCompactions: [ContextCompactionEvent]
+    let promptCacheMisses: [PromptCacheMissEvent]
     /// Stored rather than computed so the CLI payload carries it too.
     let totalTokens: Int
     /// Uncached input + cache writes + output. Includes subagents when call
@@ -517,12 +519,14 @@ struct TaskTokenUsageSummary: Codable, Equatable {
 
     var turnCount: Int { turns.count }
 
-    init(taskID: UUID, usage: ConversationTokenUsage, turns: [Turn], tools: [Tool], callUsage: CallUsage) {
+    init(taskID: UUID, usage: ConversationTokenUsage, turns: [Turn], tools: [Tool], callUsage: CallUsage, contextCompactions: [ContextCompactionEvent] = [], promptCacheMisses: [PromptCacheMissEvent] = []) {
         self.taskID = taskID
         self.usage = usage
         self.turns = turns
         self.tools = tools
         self.callUsage = callUsage
+        self.contextCompactions = contextCompactions
+        self.promptCacheMisses = promptCacheMisses
         totalTokens = usage.totalTokens
         tokensExcludingCacheReads = callUsage.totalTokensExcludingCacheReads ?? usage.totalTokens - usage.cacheReadTokens
     }

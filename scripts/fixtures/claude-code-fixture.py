@@ -155,6 +155,11 @@ def maybe_burn_cpu():
 def write(value):
     if isinstance(value, dict) and value.get("type") == "result" and "usage" not in value:
         value = {**value, "usage": dict(TURN_USAGE)}
+    if isinstance(value, dict) and value.get("type") == "result" and os.environ.get("PLAYHOUSE_E2E_CLAUDE_FIXTURE_CACHE_MISS") == "1":
+        value = {**value, "usage": {
+            "input_tokens": 250000, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 250000, "output_tokens": 5,
+        }}
     sys.stdout.write(json.dumps(value) + "\n")
     sys.stdout.flush()
 
@@ -253,6 +258,11 @@ def side_chat_respond(user_text, instructions, turn, prior_turns):
 
 
 def assistant(message_id, blocks, usage=None, parent=None):
+    if usage is None and os.environ.get("PLAYHOUSE_E2E_CLAUDE_FIXTURE_CACHE_MISS") == "1":
+        usage = {
+            "input_tokens": 250000, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 250000, "output_tokens": 5,
+        }
     message = {"id": message_id, "role": "assistant", "content": blocks}
     if usage:
         message["usage"] = dict(usage)
@@ -304,6 +314,40 @@ def write_session_calls(session_id, turn_number, main_calls):
     with open(project / session_id / "subagents" / f"agent-fx{turn_number}.jsonl", "a", encoding="utf-8") as handle:
         for index, usage in enumerate(STORY_SUBAGENT_CALLS):
             handle.write(line(f"msg_fx_sub{turn_number}_{index}", usage, sidechain=True))
+
+
+def write_session_context(session_id, tokens, minutes_ago=0):
+    """Write a real-looking main-agent usage line to position the cache clock."""
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not config or not session_id:
+        return
+    project = Path(config) / "projects" / "-fixture-project"
+    project.mkdir(parents=True, exist_ok=True)
+    model = argument("--model") or "claude-opus-5-5"
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - minutes_ago * 60))
+    entry = {"type": "assistant", "timestamp": timestamp,
+             "message": {"id": f"fixture-context-{time.time_ns()}", "model": model,
+                         "usage": {"input_tokens": tokens, "cache_read_input_tokens": 0,
+                                   "cache_creation_input_tokens": 0, "output_tokens": 1}}}
+    with open(project / f"{session_id}.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+
+def write_compaction_boundary(session_id, trigger, pre_tokens, post_tokens=6000):
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    if config and session_id:
+        project = Path(config) / "projects" / "-fixture-project"
+        project.mkdir(parents=True, exist_ok=True)
+        entry = {"type": "system", "subtype": "compact_boundary", "timestamp": timestamp,
+                 "compactMetadata": {"trigger": trigger, "preTokens": pre_tokens, "postTokens": post_tokens}}
+        with open(project / f"{session_id}.jsonl", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    write({"type": "system", "status": "compacting"})
+    write({"type": "system", "status": None, "compact_result": "success"})
+    write({"type": "system", "subtype": "compact_boundary", "compact_metadata": {
+        "trigger": trigger, "pre_tokens": pre_tokens, "post_tokens": post_tokens
+    }})
 
 
 # The token-waste session: a Claude Code request log (`api-request-shape`,
@@ -647,6 +691,40 @@ def respond(user_text, instructions, preserve_no_outcome=False, previous_prompt=
         write({"type": "control_request", "request_id": "question-request-1", "request": {
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
         }})
+    elif "hold background task for compaction" in user_text.lower():
+        tool_id, task_id = "toolu_compaction_background", "bgtask-compaction-background"
+        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Agent", "input": {
+            "subagent_type": "general-purpose", "description": "Held background task", "prompt": "wait for fixture release",
+            "run_in_background": True,
+        }}])
+        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "content": "Async agent launched successfully.", "is_error": False},
+        ]}})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": task_id, "run_id": "fixture-background-run", "task_type": "local_agent",
+             "subagent_type": "general-purpose", "description": "Held background task"},
+        ]})
+        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-background-run",
+               "tool_use_id": tool_id, "description": "Held background task", "subagent_type": "general-purpose",
+               "is_backgrounded": True, "spawn_depth": 1, "task_type": "local_agent"})
+        text("msg_compaction_background", "The background task is still running.")
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        background_result_sent = True
+        executable_path = Path(str(sys.argv[0]))
+        ready = Path(str(executable_path) + ".compaction-background-ready")
+        release = Path(str(executable_path) + ".compaction-background-release")
+        ready.write_text("Background task is running.\n", encoding="utf-8")
+        deadline = time.monotonic() + 60
+        while not release.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not release.exists():
+            raise TimeoutError("Timed out waiting for the compaction background task release.")
+        write({"type": "system", "subtype": "task_notification", "task_id": task_id,
+               "run_id": "fixture-background-run", "tool_use_id": tool_id, "status": "completed",
+               "output_file": "", "summary": "Held background task completed."})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        parent_request_started("msg_compaction_background_woken", woken=True)
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
     elif "pending ui review" in user_text.lower():
         # Mirrors the observed incident: Claude answers while a background
         # review still runs, the review's notification lands right after that
@@ -1543,6 +1621,7 @@ def main():
         "cwd": os.getcwd(),
         "bridgeServiceName": os.environ.get("PLAYHOUSE_BRIDGE_SERVICE_NAME"),
         "effort": os.environ.get("CLAUDE_CODE_EFFORT_LEVEL"),
+        "autoCompactWindow": os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
         # The non-built-in skills this launch would load, after bridging and overrides.
         "skills": [command["name"] for command in fixture_commands() if not command.get("builtin")],
     }
@@ -1675,6 +1754,51 @@ def main():
             content = message.get("message", {}).get("content", [])
             user_text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
             turn["userText"] = user_text
+            session_id = argument("--session-id") or argument("--resume")
+            if user_text.strip() == "/compact":
+                history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
+                turn["compaction"] = {"trigger": "manual"}
+                history.setdefault("turns", []).append(turn)
+                history_path.write_text(json.dumps(history), encoding="utf-8")
+                write({"type": "command_lifecycle", "command_uuid": current_command_uuid, "state": "started"})
+                if Path(str(sys.argv[0]) + ".compact-hold").exists():
+                    write({"type": "system", "subtype": "status", "status": "compacting"})
+                    Path(str(sys.argv[0]) + ".compact-ready").touch()
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        line = STDIN.readline(0.02)
+                        if line is None:
+                            continue
+                        control = json.loads(line)
+                        if control.get("type") == "control_request" and control.get("request", {}).get("subtype") == "interrupt":
+                            write({"type": "control_response", "response": {
+                                "subtype": "success", "request_id": control.get("request_id"), "response": {},
+                            }})
+                            write({"type": "system", "subtype": "status", "status": None, "compact_result": "failed"})
+                            write({"type": "command_lifecycle", "command_uuid": current_command_uuid, "state": "completed"})
+                            write({"type": "result", "subtype": "error", "is_error": True, "result": "Interrupted"})
+                            return 0
+                    raise TimeoutError("Compaction was not interrupted.")
+                if Path(str(sys.argv[0]) + ".compact-fail").exists():
+                    write({"type": "system", "subtype": "status", "status": "compacting"})
+                    write({"type": "system", "subtype": "status", "status": None, "compact_result": "failed"})
+                else:
+                    write_compaction_boundary(session_id, "manual", 180000)
+                write({"type": "command_lifecycle", "command_uuid": current_command_uuid, "state": "completed"})
+                write({"type": "result", "subtype": "success", "is_error": False, "result": "", "usage": {
+                    "input_tokens": 20, "output_tokens": 40, "cache_read_input_tokens": 180000,
+                    "cache_creation_input_tokens": 0
+                }})
+                continue
+            if match := re.search(r"fill context to (\d+) tokens(?: (\d+) minutes ago)?", user_text.lower()):
+                filled = int(match.group(1))
+                minutes_ago = int(match.group(2) or 0)
+                write_session_context(session_id, filled, minutes_ago)
+                turn["filledContextTokens"] = filled
+                configured_window = int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "0") or 0)
+                if configured_window and filled >= configured_window:
+                    write_compaction_boundary(session_id, "auto", filled)
+                    turn["autoCompacted"] = True
             # What arrived of each image, without keeping its payload in the history.
             turn["images"] = [
                 {"mediaType": block.get("source", {}).get("media_type"),
@@ -1704,6 +1828,15 @@ def main():
             else:
                 turn["reportCommands"] = respond(user_text, instructions, preserve_no_outcome=preserve_no_outcome,
                                                 previous_prompt=previous_prompt)
+            if (os.environ.get("PLAYHOUSE_E2E_CLAUDE_FIXTURE_REPORT_OUTCOME") == "1"
+                    and "playhouse internal outcome nudge:" not in user_text.lower()
+                    and "hold" not in user_text.lower()):
+                outcome = report_command(instructions, " task outcome ", "waiting-response")
+                if outcome:
+                    turn["reportCommands"].append({
+                        "command": outcome,
+                        "output": run_tool("toolu_fixture_compaction_outcome", "Bash", {"command": outcome}, outcome),
+                    })
             history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
             history["turns"].append(turn)
             history_path.write_text(json.dumps(history), encoding="utf-8")

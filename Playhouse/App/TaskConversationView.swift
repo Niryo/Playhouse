@@ -4802,13 +4802,13 @@ struct TaskConversationView: View {
         AtomStack(
             props: StackProps(axis: "h", spacing: 9, align: "top", group: true),
             common: AtomCommon(
-                testID: "context-compaction-row-\(activity.id)", label: "Context compaction, \(activity.statusLabel)",
+                testID: "context-compaction-row-\(activity.id)", label: "\(activity.title), \(activity.statusLabel), \(activity.detail)",
                 value: activity.statusLabel, paddingY: 5
             )
         ) {
             AtomIcon(props: IconProps(name: "arrow.triangle.2.circlepath", color: "secondary"))
             AtomStack(props: StackProps(spacing: 3, align: "leading")) {
-                AtomText(props: TextProps(text: activity.status == "inProgress" ? "Compacting context…" : "Context compacted", size: 12, weight: "medium"))
+                AtomText(props: TextProps(text: activity.status == "inProgress" ? "Compacting context…" : activity.title, size: 12, weight: "medium"))
                 if !activity.detail.isEmpty {
                     AtomText(
                         props: TextProps(text: activity.detail, size: 11, color: "secondary", lineLimit: 4),

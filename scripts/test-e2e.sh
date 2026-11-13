@@ -88,6 +88,13 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/unit/agent-run-host-tests.swift" \
   -o "${agent_run_host_tests}"
 "${agent_run_host_tests}"
+# Pure-logic unit checks of the context compaction decisions and session state reader.
+context_compaction_tests="${test_output_dir}/context-compaction-policy-tests"
+xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/Playhouse/App/ContextCompaction.swift" \
+  "${repository_root}/scripts/unit/context-compaction-policy-tests.swift" \
+  -o "${context_compaction_tests}"
+"${context_compaction_tests}"
 if [[ ! -x "${cli_path}" ]]; then
   printf 'The app build did not produce its bundled CLI at %s.\n' "${cli_path}" >&2
   exit 1
