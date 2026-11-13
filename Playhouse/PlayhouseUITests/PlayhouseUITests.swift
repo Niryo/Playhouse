@@ -5524,7 +5524,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertLessThan(abs(badgeAfterSend.frame.midY - title.frame.midY), 8, "Repository badges should stay on the fixed title row after the timeline scrolls.")
     }
 
-    // case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, duplicates are rejected, and the saved repository selection follows.
+    // case-contract: test_conversation_repository_picker_add_and_replace_buttons | Each repository row in the header's Add repository picker adds the repository alongside the selected ones when the row or its plus button is clicked, and its Replace button removes every selected repository and attaches only that one; the task repository API reaches the same add and replace results, duplicates are rejected, and the saved repository selection follows. The catalog's shared Overlay atom contains both actions and reveals them on hover; the UI keeps them visible over the row and buttons and hides them on exit.
     func test_conversation_repository_picker_add_and_replace_buttons() throws {
         launchApp(defaultParent: fixture.parent.path)
         let created = try runCLI(["task", "create", "--title", "Picker add and replace", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any]
@@ -5561,8 +5561,23 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(secondaryRow.waitToExist(timeout: 10))
         secondaryRow.hover()
         XCTAssertTrue(element("conversation-repository-suggestion-secondary-replace").waitToExist(timeout: 5))
-        XCTAssertTrue(element("conversation-repository-suggestion-secondary-add").exists)
+        let secondaryAdd = element("conversation-repository-suggestion-secondary-add")
+        let secondaryReplace = element("conversation-repository-suggestion-secondary-replace")
+        XCTAssertTrue(secondaryAdd.exists)
+        // Moving onto the revealed controls must not cause the row to lose hover.
+        for target in [secondaryRow, secondaryAdd, secondaryReplace] {
+            target.hover()
+            for _ in 0..<5 {
+                Thread.sleep(forTimeInterval: 0.2)
+                XCTAssertTrue(secondaryReplace.isHittable && secondaryAdd.isHittable, "Row actions must remain visible while the pointer is stationary.")
+            }
+        }
         attachScreenshot(named: "Hovered repository row shows Replace and Add once the task has a repository")
+        attachElementScreenshot(element("conversation-repository-picker"), named: "Repository picker hover actions")
+        element("conversation-repository-search").hover()
+        XCTAssertTrue(waitUntil({ !secondaryAdd.exists && !secondaryReplace.exists }, timeout: 5), "Actions should disappear after leaving the row.")
+        secondaryRow.hover()
+        XCTAssertTrue(secondaryAdd.waitToExist(timeout: 5))
         secondaryRow.click()
         XCTAssertTrue(element("conversation-repository-badge-secondary").waitToExist(timeout: 10))
         XCTAssertTrue(element("conversation-repository-badge-primary").exists, "Adding keeps the other selected repositories.")
