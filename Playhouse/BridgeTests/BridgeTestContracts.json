@@ -801,7 +801,7 @@
   },
   {
     "id": "test_plugin_authoring_task_starts_with_placement_and_skill",
-    "expectation": "Pressing an Add here placeholder, or `plugin author --placement <placement>`, creates a Backlog task titled New plugin: <placement title> with no repository, the plugins folder in the data directory as its context folder, the placement saved on the task, and the prompt `/playhouse-plugin Create a new plugin in the <title> placement (<id>).`; the window turns Add Plugin mode off, opens that task, and sends the prompt. An unknown placement is refused as invalid_argument. The task's turns carry plugin authoring instructions naming the placement, its context, the plugins folder and the plugin refresh and render commands, and Playhouse's bundled playhouse-plugin skill reaches the agent without being installed anywhere: Claude Code gets it through a Playhouse-owned --add-dir wrapper and loads it, and Codex gets it among the app-server's extra skill roots with the /playhouse-plugin message sent as a structured skill input naming its SKILL.md. An ordinary task's turn gets neither the instructions nor the skill."
+    "expectation": "Plugin authoring starts with a centered name and presentation setup before opening a conversation and live preview. The selected name, presentation, placement and unique plugin folder reach the authoring prompt; the task and folder identity persist on reopening. Invalid setup is rejected. Changes to the plugin files update the preview. Legacy placement-only authoring remains supported, and plugin authoring instructions and the bundled skill reach Claude and Codex without installing files in the user’s home."
   },
   {
     "id": "test_plugin_install_refresh_and_delete",

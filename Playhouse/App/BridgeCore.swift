@@ -1088,6 +1088,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let scheduleSourceTaskID: UUID?
     /// The plugin placement an Add Plugin mode task builds for, if any.
     let pluginPlacement: String?
+    let authoredPluginID: String?
 
     /// Accepts any conversation owner: a board task, or the standalone chat, which reports
     /// empty workspace roots and worktrees because it has none.
@@ -1096,6 +1097,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         schedule = boardTask.flatMap(TaskScheduleRecord.init(task:))
         scheduleSourceTaskID = boardTask?.scheduleSourceTaskID
         pluginPlacement = boardTask?.pluginPlacement
+        authoredPluginID = boardTask?.authoredPluginID
         id = task.id
         title = task.title
         status = task.status.rawValue
@@ -2203,7 +2205,7 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, pullRequestMode: PullRequestMode = .pullRequest, prompt: String? = nil, pluginPlacement: String? = nil) async throws -> BoardTaskRecord {
+    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, pullRequestMode: PullRequestMode = .pullRequest, prompt: String? = nil, pluginPlacement: String? = nil, authoredPluginID: String? = nil) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw PlayhouseManagerError.invalidTitle }
         let folders = try Self.normalizeOptionalRoots(contextFolders)
@@ -2225,6 +2227,7 @@ final class BoardTaskManager {
         task.pullRequestAutopilot = pullRequestMode == .autopilot || pullRequestMode == .merge
         task.pullRequestAutoMerge = pullRequestMode == .merge
         task.pluginPlacement = pluginPlacement
+        task.authoredPluginID = authoredPluginID
         // A prompt given at creation has not been sent, so it is the composer's draft.
         if let prompt, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             task.savedPrompt = prompt
@@ -10621,10 +10624,23 @@ final class PlayhouseBridgeRuntime {
                 let library = try pluginLibrary()
                 try FileManager.default.createDirectory(at: library.directory, withIntermediateDirectories: true)
                 let provider = try request.arguments["provider"]?.string.map(ConversationProvider.parse) ?? settings.defaultConversationProvider
-                let prompt = "/\(TaskThreadDeveloperInstructions.pluginSkillName) Create a new plugin in the \(placement.title) placement (\(placement.rawValue))."
+                let name = request.arguments["name"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let presentation = request.arguments["presentation"]?.string
+                if name != nil || presentation != nil {
+                    guard let name, !name.isEmpty, let presentation, PluginPresentation(rawValue: presentation) != nil else {
+                        throw BridgeCommandError(code: "invalid_argument", message: "A plugin name and valid presentation are required.")
+                    }
+                }
+                let pluginID = name.map { _ in "plugin-" + UUID().uuidString.lowercased() }
+                let prompt: String
+                if let name, let presentation, let pluginID {
+                    prompt = "/\(TaskThreadDeveloperInstructions.pluginSkillName) Create a plugin named \(name) in the \(placement.title) placement (\(placement.rawValue)), with presentation \(presentation). Use plugin ID and folder \(pluginID). Ask me what the plugin should do before implementing it."
+                } else {
+                    prompt = "/\(TaskThreadDeveloperInstructions.pluginSkillName) Create a new plugin in the \(placement.title) placement (\(placement.rawValue))."
+                }
                 let created = try await taskManager.create(
-                    title: "New plugin: \(placement.title)", repositories: [], contextFolders: [library.directory.path],
-                    provider: provider, pullRequestMode: .manual, prompt: prompt, pluginPlacement: placement.rawValue
+                    title: name.map { "New plugin: \($0)" } ?? "New plugin: \(placement.title)", repositories: [], contextFolders: [library.directory.path],
+                    provider: provider, pullRequestMode: .manual, prompt: prompt, pluginPlacement: placement.rawValue, authoredPluginID: pluginID
                 )
                 result = .object(["task": try Self.value(created), "prompt": .string(prompt)])
             // A plugin runs headlessly off the main actor; its runtime lives only for this request.

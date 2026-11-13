@@ -244,6 +244,8 @@ final class BoardTask {
     /// Set on a task started from an Add Plugin mode placeholder: the `PluginPlacement`
     /// the new plugin's entry goes in. Its conversation gets plugin authoring instructions.
     var pluginPlacement: String?
+    /// Identifies the plugin being authored so its preview survives reopening.
+    var authoredPluginID: String?
 
     var workspaceRootPaths: [String] {
         get {

@@ -2407,7 +2407,7 @@ struct TaskConversationView: View {
 
     var body: some View {
         Group {
-            if task.isStandaloneChat {
+            if task.isStandaloneChat || (task as? BoardTask)?.authoredPluginID != nil {
                 // The standalone chat sidebar reuses only the conversation transcript/composer,
                 // not the repo-specific "Changes" sidebar a real task's worktree needs.
                 conversationPanel
@@ -6217,18 +6217,7 @@ struct TaskConversationView: View {
     /// An Add Plugin mode placeholder was pressed: the new task's agent builds a
     /// plugin for that placement, and the mode ends.
     private func startPluginTask(_ placement: PluginPlacement) {
-        guard !isStartingPluginTask else { return }
-        isStartingPluginTask = true
-        Task { @MainActor in
-            defer { isStartingPluginTask = false }
-            do {
-                let started = try await pluginRegistry.author(placement)
-                PluginRegistry.setAddMode(false)
-                onOpenTask(started.taskID, started.prompt)
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-        }
+        NotificationCenter.default.post(name: .playhouseStartPluginCreation, object: placement)
     }
 
     // MARK: @ mentions

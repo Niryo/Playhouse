@@ -432,7 +432,7 @@ enum PlayhouseCLI {
             ])
         case "plugin":
             let renderUsage = "Use: playhouse plugin render (--file <plugin.js> | --page <catalog-page> | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>]...] [--advance <seconds>]"
-            let usage = "Use: playhouse plugin mode [--on|--off] | list | refresh | delete --id <plugin-id> | author --placement <\(pluginPlacements)> [--provider <codex|claude>] | render …"
+            let usage = "Use: playhouse plugin mode [--on|--off] | list | refresh | delete --id <plugin-id> | author --placement <\(pluginPlacements)> [--provider <codex|claude>] [--name <name> --presentation <popover|modal|sidebar|page>] | render …"
             switch rest.first {
             case "mode":
                 let options = Array(rest.dropFirst())
@@ -449,9 +449,11 @@ enum PlayhouseCLI {
                 let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--id"])
                 return BridgeRequest(command: "plugin.delete", arguments: ["pluginID": .string(try requiredFlag("--id", flags: flags).first!)])
             case "author":
-                let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--placement", "--provider"])
+                let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--placement", "--provider", "--name", "--presentation"])
                 var arguments: [String: BridgeValue] = ["placement": .string(try requiredFlag("--placement", flags: flags).first!)]
                 arguments["provider"] = flags["--provider"]?.first.map(BridgeValue.string)
+                arguments["name"] = flags["--name"]?.first.map(BridgeValue.string)
+                arguments["presentation"] = flags["--presentation"]?.first.map(BridgeValue.string)
                 return BridgeRequest(command: "plugin.author", arguments: arguments)
             case "render":
                 break
@@ -1122,7 +1124,7 @@ enum PlayhouseCLI {
       playhouse plugin mode [--on|--off]
       playhouse plugin list|refresh
       playhouse plugin delete --id <plugin-id>
-      playhouse plugin author --placement <mainSidebar|conversationSidebar|conversationToolbar|composerActions> [--provider <codex|claude>]
+      playhouse plugin author --placement <mainSidebar|conversationSidebar|conversationToolbar|composerActions> [--provider <codex|claude>] [--name <name> --presentation <popover|modal|sidebar|page>]
       playhouse plugin render (--file <plugin.js> | --page <catalog-page> | --plugin <plugin-id> [--task <task-id>]) [--props <json>] [--event <testID>:<event>[:<value>]...] [--advance <seconds>]
       playhouse usage get [--refresh|--watch]|login <codex|claude>|switch-account <codex|claude>
       playhouse skills list [--task <task-id>] [--include-bundled true]

@@ -36,8 +36,11 @@ final class PluginRegistry {
 
     /// Creates the task whose agent builds a plugin for `placement`, and
     /// returns it with the prompt its conversation sends.
-    func author(_ placement: PluginPlacement) async throws -> (taskID: UUID, prompt: String) {
-        let result = try await client.call("plugin.author", ["placement": .string(placement.rawValue)])
+    func author(_ placement: PluginPlacement, name: String? = nil, presentation: PluginPresentation? = nil) async throws -> (taskID: UUID, prompt: String) {
+        var arguments: [String: BridgeValue] = ["placement": .string(placement.rawValue)]
+        if let name { arguments["name"] = .string(name) }
+        if let presentation { arguments["presentation"] = .string(presentation.rawValue) }
+        let result = try await client.call("plugin.author", arguments)
         guard let task = try result.object?["task"]?.decoded(BoardTaskRecord.self),
               let prompt = result.object?["prompt"]?.string else {
             throw BridgeCommandError(code: "invalid_response", message: "The bridge did not return the new plugin task.")

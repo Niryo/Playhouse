@@ -16873,7 +16873,7 @@ Playhouse.render(h(Context));
         self.assert_failure(self.call_cli("plugin", "mode", "--on", "--off", expected_status=2)[0], "invalid_argument")
         self.assertEqual(self.assert_success(self.call_cli("plugin", "mode")[0]), {"enabled": False}, "A refused option changes nothing.")
 
-    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Pressing an Add here placeholder, or `plugin author --placement <placement>`, creates a Backlog task titled New plugin: <placement title> with no repository, the plugins folder in the data directory as its context folder, the placement saved on the task, and the prompt `/playhouse-plugin Create a new plugin in the <title> placement (<id>).`; the window turns Add Plugin mode off, opens that task, and sends the prompt. An unknown placement is refused as invalid_argument. The task's turns carry plugin authoring instructions naming the placement, its context, the plugins folder and the plugin refresh and render commands, and Playhouse's bundled playhouse-plugin skill reaches the agent without being installed anywhere: Claude Code gets it through a Playhouse-owned --add-dir wrapper and loads it, and Codex gets it among the app-server's extra skill roots with the /playhouse-plugin message sent as a structured skill input naming its SKILL.md. An ordinary task's turn gets neither the instructions nor the skill.
+    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with a centered name and presentation setup before opening a conversation and live preview. The selected name, presentation, placement and unique plugin folder reach the authoring prompt; the task and folder identity persist on reopening. Invalid setup is rejected. Changes to the plugin files update the preview. Legacy placement-only authoring remains supported, and plugin authoring instructions and the bundled skill reach Claude and Codex without installing files in the user’s home.
     def test_plugin_authoring_task_starts_with_placement_and_skill(self):
         self.assert_failure(self.call_cli("plugin", "author", "--placement", "titleBar", expected_status=2)[0], "invalid_argument")
         self.assertFalse(self.plugins_folder().exists(), "A refused placement creates nothing.")
@@ -16897,6 +16897,39 @@ Playhouse.render(h(Context));
             self.assertEqual(stored["savedPrompt"], prompt, "A fresh CLI process reads the task's prompt.")
             self.assertEqual(stored["pluginPlacement"], placement)
             started[placement] = (task, prompt)
+        self.assert_failure(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", " ", "--presentation", "popover", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Timer", "--presentation", "unknown", expected_status=2)[0], "invalid_argument")
+        configured = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Timer", "--presentation", "modal", "--provider", "claude")[0])
+        authored = configured["task"]
+        self.assertEqual(authored["title"], "New plugin: Timer")
+        self.assertIn("presentation modal", configured["prompt"])
+        self.assertIn(authored["authoredPluginID"], configured["prompt"])
+        stored_authored = self.assert_success(self.call_cli("task", "get", authored["id"])[0])
+        self.assertEqual(stored_authored["authoredPluginID"], authored["authoredPluginID"])
+        self.assertEqual(stored_authored["pluginPlacement"], "mainSidebar")
+        self.assertEqual(stored_authored["savedPrompt"], configured["prompt"])
+        self.assertIn("Timer", configured["prompt"])
+        self.assertIn("mainSidebar", configured["prompt"])
+        other = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Timer", "--presentation", "modal")[0])
+        self.assertNotEqual(other["task"]["authoredPluginID"], authored["authoredPluginID"])
+        self.assert_failure(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Timer", expected_status=2)[0], "invalid_argument")
+        self.assert_failure(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--presentation", "modal", expected_status=2)[0], "invalid_argument")
+        configured_environment = self.install_claude_fixture("claude-fixture-plugin-preview")
+        for value in ("First preview", "Updated preview"):
+            message = "plugin-preview-fixture " + json.dumps({"folder": str(self.plugins_folder() / authored["authoredPluginID"]), "text": value})
+            self.assert_success(self.call_cli("conversation", "send", authored["id"], "--message", message, extra_environment=configured_environment)[0])
+            rendered = self.assert_success(self.call_cli("plugin", "render", "--plugin", authored["authoredPluginID"])[0])
+            self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "preview-content")), value)
+        composer_author = self.assert_success(self.call_cli("plugin", "author", "--placement", "composerActions", "--name", "Composer", "--presentation", "popover")[0])["task"]
+        self.write_installed_plugin(composer_author["authoredPluginID"], self.PLUGIN_CONTEXT_SOURCE, placement="composerActions")
+        composer_props = json.dumps({"composer": {"draft": "draft", "selection": {"location": 0, "length": 5, "text": "draft"}}})
+        preview = self.assert_success(self.call_cli("plugin", "render", "--plugin", composer_author["authoredPluginID"], "--task", composer_author["id"], "--props", composer_props, "--event", "plugin-set-draft:onPress")[0])
+        self.assertEqual(self.plugin_text(self.plugin_node(preview["tree"], "plugin-draft")), "draft")
+        self.assertTrue(any(call.get("name") == "composer.setDraft" for call in preview["hostCalls"]))
+        self.assertEqual(self.plugin_text(self.plugin_node(preview["tree"], "plugin-selection")), "draft")
+        for event, call_name in (("plugin-upper", "composer.replaceSelection"), ("plugin-insert", "composer.insertText"), ("plugin-focus", "composer.focus")):
+            action = self.assert_success(self.call_cli("plugin", "render", "--plugin", composer_author["authoredPluginID"], "--task", composer_author["id"], "--props", composer_props, "--event", event + ":onPress")[0])
+            self.assertTrue(any(call.get("name") == call_name for call in action["hostCalls"]))
         self.assertTrue(self.plugins_folder().is_dir(), "Authoring creates the plugins folder.")
 
         # Claude Code: the instructions ride --append-system-prompt and the skill a Playhouse wrapper.
