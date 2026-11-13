@@ -73,6 +73,9 @@ if [[ "$(cat "${fixture_root}/.playhouse-bridge-fixture" 2>/dev/null || true)" !
   printf 'Refusing to prepare UI Codex fixtures without the owned fixture root marker.\n' >&2
   exit 1
 fi
+for fixture_module in "${repository_root}"/scripts/fixtures/*_fixture_*.py; do
+  cp "${fixture_module}" "${fixture_root}/"
+done
 codex_fixtures=(
   ui empty nonblocking slow plan-slow question-isolation-plan-slow interrupted abort success unique-turns-success goal-success single-server-goal-success
   title-success title-failure title-success-wait title-archive-ui hold
