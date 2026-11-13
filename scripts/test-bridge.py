@@ -17560,6 +17560,7 @@ function Context() {
   var composer = props.composer;
   return h(Stack, { spacing: 6, align: "leading" },
     h(Text, { testID: "plugin-placement" }, props.plugin.placement),
+    h(Text, { testID: "plugin-version" }, String(props.plugin.version)),
     h(Text, { testID: "plugin-task" }, task ? task.title : "no task"),
     h(Text, { testID: "plugin-repositories" }, props.repositories ? props.repositories.map(function (r) { return r.repositoryPath.split("/").pop(); }).join(",") : "no repositories"),
     h(Text, { testID: "plugin-draft" }, composer ? composer.draft : "no composer"),
@@ -17604,6 +17605,48 @@ Playhouse.render(h(Context));
         self.assert_failure(self.call_cli("plugin", "mode", "--on", "--off", expected_status=2)[0], "invalid_argument")
         self.assertEqual(self.assert_success(self.call_cli("plugin", "mode")[0]), {"enabled": False}, "A refused option changes nothing.")
 
+    # case-contract: test_plugin_draft_versions_and_restore | Plugin edits persist as an isolated draft, saving publishes a new version and preserves history, discard restores the saved preview, and restoring an older version publishes it as a new revision.
+    def test_plugin_draft_versions_and_restore(self):
+        source = self.PLUGIN_CONTEXT_SOURCE
+        installed = self.write_installed_plugin("versioned", source, placement="mainSidebar")
+        editor = self.assert_success(self.call_cli("plugin", "edit", "--id", "versioned")[0])["task"]
+        draft = Path(editor["contextFolders"][0]) / "versioned"
+        changed = source.replace("props.plugin.placement", '"draft change"')
+        (draft / "index.js").write_text(changed, encoding="utf-8")
+        self.assertEqual((installed / "index.js").read_text(), source)
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "edit", "--id", "versioned")[0])["task"]["id"], editor["id"])
+        self.assertEqual((draft / "index.js").read_text(), changed)
+        saved = self.assert_success(self.call_cli("plugin", "save", "--id", "versioned")[0])["plugin"]
+        self.assertEqual(saved["version"], 1)
+        self.assertEqual(json.loads((installed / "plugin.json").read_text())["version"], 1)
+        self.assertEqual((installed / "index.js").read_text(), changed)
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "versions", "--id", "versioned")[0])["versions"], [0])
+        self.assertEqual(json.loads((self.plugins_folder() / ".versions" / "versioned" / "0" / "plugin.json").read_text())["version"], 0)
+        (draft / "index.js").write_text("invalid javascript !", encoding="utf-8")
+        self.assertNotEqual(self.call_cli("plugin", "save", "--id", "versioned", expected_status=1)[0]["ok"], True)
+        self.assertEqual((installed / "index.js").read_text(), changed)
+        self.assert_success(self.call_cli("plugin", "discard", "--id", "versioned")[0])
+        self.assertEqual((draft / "index.js").read_text(), changed)
+        (draft / "index.js").write_text("unsaved changes", encoding="utf-8")
+        self.assertNotEqual(self.call_cli("plugin", "restore", "--id", "versioned", "--version", "99", expected_status=1)[0]["ok"], True)
+        self.assertEqual((draft / "index.js").read_text(), "unsaved changes")
+        restored = self.assert_success(self.call_cli("plugin", "restore", "--id", "versioned", "--version", "0")[0])["plugin"]
+        self.assertEqual((draft / "index.js").read_text(), "unsaved changes")
+        self.assertEqual(restored["version"], 2)
+        self.assertEqual((installed / "index.js").read_text(), source)
+        self.assertEqual(self.assert_success(self.call_cli("plugin", "versions", "--id", "versioned")[0])["versions"], [1, 0])
+        self.assert_success(self.call_cli("plugin", "discard", "--id", "versioned")[0])
+        (draft / "index.js").write_text(changed, encoding="utf-8")
+        draft.parent.chmod(0o500)
+        try:
+            published = self.assert_success(self.call_cli("plugin", "save", "--id", "versioned")[0])
+        finally:
+            draft.parent.chmod(0o700)
+        self.assertTrue(published["draftSyncFailed"])
+        self.assertEqual(published["plugin"]["version"], 3)
+        self.assertEqual((installed / "index.js").read_text(), changed)
+        self.assertEqual((draft / "index.js").read_text(), changed)
+
     # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview without a board card or task header. The editor header shows “Plugin editor” beside its back button. The Plugins menu reopens the same conversation and preview, including unsaved drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home.
     def test_plugin_authoring_task_starts_with_placement_and_skill(self):
         self.assert_failure(self.call_cli("plugin", "author", "--placement", "titleBar", expected_status=2)[0], "invalid_argument")
@@ -17622,7 +17665,7 @@ Playhouse.render(h(Context));
             self.assertEqual(task["status"], "Backlog")
             self.assertEqual(task["pluginPlacement"], placement)
             self.assertEqual(task["repositoryWorktrees"], [], "A plugin task needs no repository.")
-            self.assertEqual([os.path.realpath(path) for path in task["contextFolders"]], [os.path.realpath(self.plugins_folder())])
+            self.assertEqual([os.path.realpath(path) for path in task["contextFolders"]], [os.path.realpath(self.plugins_folder() / ".drafts" / "plugins")])
             self.assertEqual(task["conversationProvider"], provider)
             stored = self.assert_success(self.call_cli("plugin", "edit", "--id", task["authoredPluginID"])[0])["task"]
             self.assertEqual(stored["id"], task["id"])
@@ -17672,9 +17715,9 @@ Playhouse.render(h(Context));
         configured_environment = self.install_claude_fixture("claude-fixture-plugin-preview")
         self.assert_success(self.call_cli("settings", "clear-parent")[0])
         for value in ("First preview", "Updated preview"):
-            message = "plugin-preview-fixture " + json.dumps({"folder": str(self.plugins_folder() / authored["authoredPluginID"]), "text": value})
+            message = "plugin-preview-fixture " + json.dumps({"folder": str(self.plugins_folder() / ".drafts" / "plugins" / authored["authoredPluginID"]), "text": value})
             self.assert_success(self.call_cli("conversation", "send", authored["id"], "--message", message, extra_environment=configured_environment)[0])
-            rendered = self.assert_success(self.call_cli("plugin", "render", "--plugin", authored["authoredPluginID"])[0])
+            rendered = self.assert_success(self.call_cli("plugin", "render", "--file", self.plugins_folder() / ".drafts" / "plugins" / authored["authoredPluginID"] / "index.js")[0])
             self.assertEqual(self.plugin_text(self.plugin_node(rendered["tree"], "preview-content")), value)
         self.assert_success(self.call_cli("task", "draft", authored["id"], "--text", "Resume this draft")[0])
         reopened = self.assert_success(self.call_cli("plugin", "edit", "--id", authored["authoredPluginID"])[0])["task"]
@@ -17709,8 +17752,8 @@ Playhouse.render(h(Context));
         self.assertIn("Chat input actions placement (`composerActions`)", instructions)
         self.assertIn("`composer` ({draft, selection", instructions, "The instructions describe the placement's context.")
         self.assertTrue(str(self.plugins_folder()) in instructions or os.path.realpath(self.plugins_folder()) in instructions)
-        self.assertIn("plugin refresh", instructions)
-        self.assertIn("plugin render --plugin", instructions)
+        self.assertIn("persistent draft", instructions)
+        self.assertIn("plugin render --file", instructions)
         directories = [arguments[index + 1] for index, value in enumerate(arguments) if value == "--add-dir"]
         wrappers = [Path(path) for path in directories if (Path(path) / ".claude" / "skills" / "playhouse-plugin").exists()]
         self.assertEqual(len(wrappers), 1, f"One wrapper carries the plugin skill: {directories}")
@@ -17727,7 +17770,9 @@ Playhouse.render(h(Context));
         self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", "Make it blue.", extra_environment=environment)[0])
         resumed = next(turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText") == "Make it blue.")
         self.assertTrue(resumed["resumed"], "The follow-up resumes the plugin task's session.")
-        self.assertIn("Plugin authoring", resumed["arguments"][resumed["arguments"].index("--append-system-prompt") + 1])
+        resumed_instructions = resumed["arguments"][resumed["arguments"].index("--append-system-prompt") + 1]
+        self.assertIn("Plugin authoring", resumed_instructions)
+        self.assertIn(str(self.plugins_folder() / ".drafts" / "plugins"), resumed_instructions)
         resumed_directories = [resumed["arguments"][index + 1] for index, value in enumerate(resumed["arguments"]) if value == "--add-dir"]
         self.assertIn(os.path.realpath(wrappers[0]), [os.path.realpath(path) for path in resumed_directories], "The resumed turn keeps the skill wrapper.")
         bridge = self.assert_success(self.call_cli("skills", "bridge", "--task", task["id"])[0])
@@ -17751,6 +17796,10 @@ Playhouse.render(h(Context));
         self.assertEqual(migrated["id"], legacy["id"])
         self.assertEqual(migrated["savedPrompt"], "Legacy draft")
         self.assertEqual(migrated["claudeSessionID"], legacy_before["claudeSessionID"])
+        self.assert_success(self.call_cli("conversation", "send", migrated["id"], "--message", "Continue migrated editor.", extra_environment=environment)[0])
+        migrated_turn = next(turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText") == "Continue migrated editor.")
+        migrated_instructions = migrated_turn["arguments"][migrated_turn["arguments"].index("--append-system-prompt") + 1]
+        self.assertIn(str(self.plugins_folder() / ".drafts" / "plugins"), migrated_instructions)
         self.assertNotIn(legacy["id"], [entry["id"] for entry in self.assert_success(self.call_cli("board", "list")[0])["tasks"]])
         texts, _ = self.history_texts(legacy["id"], environment)
         self.assertTrue(any("Remember the legacy conversation" in text for text in texts))
@@ -17767,7 +17816,7 @@ Playhouse.render(h(Context));
         self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", prompt, "--answer", "color=Blue", "--answer", "token=fixture-secret", extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)})[0])
         history = json.loads((self.data_directory / "codex-fixture-plugin-author.history").read_text(encoding="utf-8"))
         self.assertIn("Conversation sidebar toolbar placement (`conversationToolbar`)", history["threadStartDeveloperInstructions"])
-        self.assertIn("plugin refresh", history["threadStartDeveloperInstructions"])
+        self.assertIn("persistent draft", history["threadStartDeveloperInstructions"])
         roots = [Path(root) for root in history["skillExtraRoots"] if (Path(root) / "playhouse-plugin" / "SKILL.md").exists()]
         self.assertEqual(len(roots), 1, f"One extra root carries the plugin skill: {history['skillExtraRoots']}")
         self.assertSamePath(roots[0].parent, self.data_directory / "skill-bridge" / "codex")
@@ -17785,7 +17834,20 @@ Playhouse.render(h(Context));
         self.assertTrue(any(turn["userMessage"] == "Continue editing." for turn in resumed_history["turns"]))
         self.assertGreaterEqual(resumed_history.get("threadResumeCount", 0), 1)
         self.assertIn(task["authoredPluginID"], resumed_history["threadResumeDeveloperInstructions"][-1])
+        self.assertIn(str(self.plugins_folder() / ".drafts" / "plugins"), resumed_history["threadResumeDeveloperInstructions"][-1])
         self.assertEqual(reopened_codex["codexThreadID"], self.assert_success(self.call_cli("plugin", "edit", "--id", task["authoredPluginID"])[0])["task"]["codexThreadID"])
+
+        legacy_codex = self.create_task("New plugin: Codex legacy", roots=[], provider="codex")
+        codex_env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        self.assert_success(self.call_cli("conversation", "send", legacy_codex["id"], "--message", "Before migration.", "--answer", "color=Blue", "--answer", "token=fixture-secret", extra_environment=codex_env)[0])
+        self.write_installed_plugin("legacy-codex", self.PLUGIN_CONTEXT_SOURCE, placement="mainSidebar")
+        self.seed_legacy_plugin_task(legacy_codex["id"], "legacy-codex")
+        migrated_codex = self.assert_success(self.call_cli("plugin", "edit", "--id", "legacy-codex")[0])["task"]
+        self.restart_provider(executable)
+        self.assert_success(self.call_cli("conversation", "send", migrated_codex["id"], "--message", "After migration.", "--answer", "color=Blue", "--answer", "token=fixture-secret", extra_environment=codex_env)[0])
+        codex_history = json.loads((self.data_directory / "codex-fixture-plugin-author.history").read_text(encoding="utf-8"))
+        self.assertIn(str(self.plugins_folder() / ".drafts" / "plugins"), codex_history["threadResumeDeveloperInstructions"][-1])
+        self.assertIn("legacy-codex", codex_history["threadResumeDeveloperInstructions"][-1])
 
 
     # case-contract: test_plugin_editor_reattaches_after_daemon_restart | A plugin editor follows a running Claude turn after a daemon restart, restores its answer once alongside the preview, and settles without a task outcome nudge. Claude represents the shared reattachment settlement used by both providers.
@@ -17874,6 +17936,7 @@ Playhouse.render(h(Context));
         self.assertEqual(rendered["errors"], [])
         tree = rendered["tree"]
         self.assertEqual(self.plugin_text(self.plugin_node(tree, "plugin-placement")), "composerActions")
+        self.assertEqual(self.plugin_text(self.plugin_node(tree, "plugin-version")), "0")
         self.assertEqual(self.plugin_text(self.plugin_node(tree, "plugin-task")), "Plugin context task")
         self.assertEqual(self.plugin_text(self.plugin_node(tree, "plugin-repositories")), self.primary.name)
         self.assertEqual(self.plugin_text(self.plugin_node(tree, "plugin-draft")), "make this loud")
@@ -17882,7 +17945,7 @@ Playhouse.render(h(Context));
 
         dumped = self.assert_success(self.call_cli("plugin", "render", "--plugin", "props-dump", "--task", task["id"])[0])
         props = json.loads(self.plugin_text(self.plugin_node(dumped["tree"], "props")))
-        self.assertEqual(props["plugin"], {"id": "props-dump", "name": "Props Dump", "placement": "conversationSidebar", "presentation": "sidebar"})
+        self.assertEqual(props["plugin"], {"id": "props-dump", "name": "Props Dump", "version": 0, "placement": "conversationSidebar", "presentation": "sidebar"})
         self.assertEqual(props["app"], {"appearance": "dark"})
         self.assertEqual(props["task"], {"id": task["id"], "title": "Plugin context task", "status": "Backlog", "provider": task["conversationProvider"], "isStandaloneChat": False})
         self.assertEqual(props["contextFolders"], [])

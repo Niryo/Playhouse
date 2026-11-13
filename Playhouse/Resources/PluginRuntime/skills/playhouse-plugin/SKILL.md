@@ -131,16 +131,9 @@ function WordCount() {
 Playhouse.render(h(WordCount));
 ```
 
-## 3. Check and install
+## 3. Check the draft
 
-1. Run `playhouse-cli plugin render --plugin <plugin-id> [--task <task-id>]`.
-   - It renders the plugin headlessly with the real context of `--task`, and
-     reports the tree, its errors and any `hostCalls`.
-   - Press a button with `--event <testID>:onPress`.
-   - Fix every error it reports.
-2. Run `playhouse-cli plugin refresh`.
-   - It validates every plugin and makes the app reload, so the user sees the
-     new button at its placement right away.
-   - An invalid plugin is listed with its errors and is not shown.
-3. Tell the user where the button is and how to use it. They can delete the
-   plugin from the Plugins menu.
+Run `playhouse-cli plugin render --file <draft-folder>/<plugin-id>/index.js` and
+fix errors. The editor previews the draft automatically. Tell the user how the
+plugin works and let them choose Save in the editor to publish it. Do not edit
+the installed plugin or use `plugin refresh` to publish draft changes.
