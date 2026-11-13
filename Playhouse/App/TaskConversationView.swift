@@ -1580,9 +1580,9 @@ struct TaskConversationView: View {
     var isReadOnly = false
     var conflictResolutionRequested = false
     var onConflictResolutionChecked: (Bool) -> Void = { _ in }
-    /// The prompt a task opened from the Skills page's Fix with Agent sends on arrival.
-    var skillFixPrompt: String? = nil
-    /// Shows another task's conversation, sending it the prompt once it opens.
+    /// A prompt to send on arrival, or to place in the composer for a plugin task.
+    var initialTaskPrompt: String? = nil
+    /// Opens another task with an initial prompt in its composer or first turn.
     var onOpenTask: (UUID, String) -> Void = { _, _ in }
     /// Opens with the schedule hint showing, set to this kind (the Scheduled Tasks page's New Task).
     var presentScheduleOnAppear: TaskScheduleKind? = nil
@@ -2541,10 +2541,17 @@ struct TaskConversationView: View {
             if conflictResolutionRequested && !isReadOnly && !isResponding {
                 conflictResolutionAttempt = 1
                 sendMessage(overrideText: PlayhouseSentMessage.pullRequestConflicts)
-            } else if let skillFixPrompt, !isReadOnly, !isResponding, messages.isEmpty, task.pendingSubmittedPrompt == nil {
-                // Sent as the composer's own draft, so the composer clears as for any send.
-                draft = skillFixPrompt
-                sendMessage()
+            } else if let initialTaskPrompt, !isReadOnly, !isResponding, messages.isEmpty, task.pendingSubmittedPrompt == nil {
+                if (task as? BoardTask)?.pluginPlacement == nil {
+                    draft = initialTaskPrompt
+                    // Skills fixes start immediately; plugin authoring waits for the user's description.
+                    sendMessage()
+                } else if draft.isEmpty, !isDraftUnsaved {
+                    // The task's persisted draft normally restores during loadConversation().
+                    // Seed only if it is still empty; never replace text the user entered while
+                    // history or model options were loading.
+                    draft = initialTaskPrompt
+                }
             }
         }
         .onChange(of: providerPendingUserInputRequest) { previous, request in

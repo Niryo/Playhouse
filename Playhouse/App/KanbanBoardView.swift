@@ -53,7 +53,7 @@ private struct TaskConversationPanel: View, Equatable {
     let task: BoardTask
     let isNewTask: Bool
     let conflictResolutionRequested: Bool
-    let skillFixPrompt: String?
+    let initialTaskPrompt: String?
     let presentScheduleOnAppear: TaskScheduleKind?
     let onConflictResolutionChecked: (Bool) -> Void
     let onOpenTask: (UUID, String) -> Void
@@ -62,7 +62,7 @@ private struct TaskConversationPanel: View, Equatable {
     static func == (lhs: TaskConversationPanel, rhs: TaskConversationPanel) -> Bool {
         lhs.task === rhs.task && lhs.isNewTask == rhs.isNewTask
             && lhs.conflictResolutionRequested == rhs.conflictResolutionRequested
-            && lhs.skillFixPrompt == rhs.skillFixPrompt
+            && lhs.initialTaskPrompt == rhs.initialTaskPrompt
             && lhs.presentScheduleOnAppear == rhs.presentScheduleOnAppear
     }
 
@@ -71,7 +71,7 @@ private struct TaskConversationPanel: View, Equatable {
             task: task, isNewTask: isNewTask,
             conflictResolutionRequested: conflictResolutionRequested,
             onConflictResolutionChecked: onConflictResolutionChecked,
-            skillFixPrompt: skillFixPrompt,
+            initialTaskPrompt: initialTaskPrompt,
             onOpenTask: onOpenTask,
             presentScheduleOnAppear: presentScheduleOnAppear,
             onBack: onBack
@@ -127,8 +127,8 @@ struct KanbanBoardView: View {
     @State private var mergedReviewTaskIDs = Set<UUID>()
     @State private var conflictedReviewTaskIDs = Set<UUID>()
     @State private var conflictResolutionTaskID: UUID?
-    /// Prompts that tasks opened by the Skills page's Fix with Agent send when they appear.
-    @State private var skillFixPrompts: [UUID: String] = [:]
+    /// Initial composer prompts for tasks opened from another workflow.
+    @State private var initialTaskPrompts: [UUID: String] = [:]
     @State private var checkingMergedPullRequests = false
     @State private var mergedPullRequestCheckPending = false
     @State private var mergedPullRequestCheckTimerScheduled = false
@@ -176,7 +176,7 @@ struct KanbanBoardView: View {
         TaskConversationPanel(
             task: selectedTask, isNewTask: isSelectedTaskNew,
             conflictResolutionRequested: conflictResolutionTaskID == selectedTask.id,
-            skillFixPrompt: skillFixPrompts[selectedTask.id],
+            initialTaskPrompt: initialTaskPrompts[selectedTask.id],
             presentScheduleOnAppear: presentScheduleOnOpen,
             onConflictResolutionChecked: { resolved in
                 if resolved { conflictedReviewTaskIDs.remove(selectedTask.id) }
@@ -184,7 +184,7 @@ struct KanbanBoardView: View {
             },
             onOpenTask: openTask(_:sending:)
         ) {
-            self.skillFixPrompts[selectedTask.id] = nil
+            self.initialTaskPrompts[selectedTask.id] = nil
             self.selectedTask = nil
             self.isSelectedTaskNew = false
             self.conflictResolutionTaskID = nil
@@ -959,8 +959,7 @@ struct KanbanBoardView: View {
         }
     }
 
-    /// Shows a task the daemon just created, such as one fixing skills, and
-    /// has its conversation send `prompt` once it opens.
+    /// Shows a task the daemon just created and seeds its composer or first turn.
     private func openTask(_ id: UUID, sending prompt: String) {
         let origin = selectedTask?.id
         Task { @MainActor in
@@ -971,7 +970,7 @@ struct KanbanBoardView: View {
                 guard selectedTask?.id == origin else { return }
                 if let task = try? manager.taskModel(id) {
                     // A plugin's openTask shows the task without sending anything.
-                    skillFixPrompts[id] = prompt.isEmpty ? nil : prompt
+                    initialTaskPrompts[id] = prompt.isEmpty ? nil : prompt
                     setChatSidebarVisible(false)
                     isSelectedTaskNew = false
                     conflictResolutionTaskID = nil

@@ -1587,8 +1587,17 @@ def main():
                 if models_override.exists():
                     models = json.loads(models_override.read_text(encoding="utf-8"))
                 # Lets a test observe the cached list before discovery replaces it.
-                if Path(str(sys.argv[0]) + ".models-delay").exists():
-                    time.sleep(8)
+                models_delay = Path(str(sys.argv[0]) + ".models-delay")
+                if models_delay.exists():
+                    if models_delay.read_text(encoding="utf-8").strip() == "hold":
+                        models_release = Path(str(sys.argv[0]) + ".models-release")
+                        models_entered = Path(str(sys.argv[0]) + ".models-entered")
+                        models_entered.write_text("waiting", encoding="utf-8")
+                        deadline = time.monotonic() + 30
+                        while not models_release.exists() and time.monotonic() < deadline:
+                            time.sleep(0.02)
+                    else:
+                        time.sleep(8)
                 response = {"claude_code_version": "2.1.308 (Claude Code fixture)",
                             "models": models,
                             "commands": fixture_commands(), "agents": []}

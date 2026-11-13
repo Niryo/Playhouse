@@ -23423,7 +23423,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitForDisappearance(chat.descendants(matching: .any)["plugin-add-here-composerActions"]))
     }
 
-    // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Pressing an Add here placeholder, or `plugin author --placement <placement>`, creates a Backlog task titled New plugin: <placement title> with no repository, the plugins folder in the data directory as its context folder, the placement saved on the task, and the prompt `/playhouse-plugin Create a new plugin in the <title> placement (<id>).`; the window turns Add Plugin mode off, opens that task, and sends the prompt. An unknown placement is refused as invalid_argument. The task's turns carry plugin authoring instructions naming the placement, its context, the plugins folder and the plugin refresh and render commands, and Playhouse's bundled playhouse-plugin skill reaches the agent without being installed anywhere: Claude Code gets it through a Playhouse-owned --add-dir wrapper and loads it, and Codex gets it among the app-server's extra skill roots with the /playhouse-plugin message sent as a structured skill input naming its SKILL.md. An ordinary task's turn gets neither the instructions nor the skill.
+    // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Pressing an Add here placeholder, or `plugin author --placement <placement>`, creates a Backlog task titled New plugin: <placement title> with no repository, the plugins folder in the data directory as its context folder, the placement saved on the task, and the prompt `/playhouse-plugin Create a new plugin in the <title> placement (<id>).`; the window turns Add Plugin mode off and opens that task with the generated prompt in the composer as an unsent draft; the user can add a description and send it when ready. An unknown placement is refused as invalid_argument. The task's turns carry plugin authoring instructions naming the placement, its context, the plugins folder and the plugin refresh and render commands, and Playhouse's bundled playhouse-plugin skill reaches the agent without being installed anywhere: Claude Code gets it through a Playhouse-owned --add-dir wrapper and loads it, and Codex gets it among the app-server's extra skill roots with the /playhouse-plugin message sent as a structured skill input naming its SKILL.md. An ordinary task's turn gets neither the instructions nor the skill.
     func test_plugin_authoring_task_starts_with_placement_and_skill() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-plugin-author")
         let historyURL = URL(fileURLWithPath: try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]) + ".history")
@@ -23443,21 +23443,54 @@ final class PlayhouseUITests: XCTestCase {
         _ = try runCLI(["plugin", "mode", "--on"])
         let boardPlaceholder = element("plugin-add-here-mainSidebar")
         XCTAssertTrue(boardPlaceholder.waitToExist(timeout: 15))
+        let claudeExecutable = try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
+        let modelsDelay = URL(fileURLWithPath: claudeExecutable + ".models-delay")
+        let modelsRelease = URL(fileURLWithPath: claudeExecutable + ".models-release")
+        let modelsEntered = URL(fileURLWithPath: claudeExecutable + ".models-entered")
+        try Data("hold".utf8).write(to: modelsDelay)
+        try? FileManager.default.removeItem(at: modelsRelease)
+        try? FileManager.default.removeItem(at: modelsEntered)
+        defer {
+            try? FileManager.default.removeItem(at: modelsDelay)
+            try? FileManager.default.removeItem(at: modelsRelease)
+            try? FileManager.default.removeItem(at: modelsEntered)
+        }
         boardPlaceholder.click()
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "New plugin: Main sidebar" }, timeout: 15),
                       "Pressing Add here opens the new plugin task.")
         XCTAssertTrue(waitForDisappearance(element("plugin-mode-banner"), timeout: 5), "Choosing a placement ends Add Plugin mode.")
         XCTAssertFalse(try pluginMode())
         let boardPrompt = "/playhouse-plugin Create a new plugin in the Main sidebar placement (mainSidebar)."
-        XCTAssertTrue(waitUntil({ turns().contains { $0["userText"] as? String == boardPrompt } }, timeout: 20), "The task sends its prompt as it opens.")
+        XCTAssertTrue(waitUntil({ self.element("message-composer").value as? String == boardPrompt }, timeout: 10),
+                      "The generated instruction waits in the composer for the user's description.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: modelsEntered.path) }, timeout: 10),
+                      "The test waits until model loading is blocked before editing the draft.")
+        XCTAssertFalse(turns().contains { $0["userText"] as? String == boardPrompt }, "Opening a plugin task does not send a turn.")
         let boardTask = try XCTUnwrap(try boardTaskRecords().first { $0["title"] as? String == "New plugin: Main sidebar" })
         XCTAssertEqual(boardTask["pluginPlacement"] as? String, "mainSidebar")
         XCTAssertEqual((boardTask["repositoryWorktrees"] as? [Any])?.count, 0, "A plugin task needs no repository.")
         XCTAssertEqual(((boardTask["contextFolders"] as? [String]) ?? []).map(realPath), [realPath(pluginsFolder.path)], "The plugins folder is its context folder.")
-        XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String ?? "").isEmpty }, timeout: 10), "The sent prompt leaves the composer.")
-        attachScreenshot(named: "The plugin task opened from the board's Add here, its prompt sent")
+        attachScreenshot(named: "The plugin task waits with its generated instruction in the composer")
+        let boardComposer = element("message-composer")
+        attachElementScreenshot(boardComposer, named: "Generated plugin instruction waiting in the composer")
+        boardComposer.click()
+        boardComposer.typeKey(.rightArrow, modifierFlags: .command)
+        boardComposer.typeText(" Temporary description.")
+        XCTAssertTrue(waitUntil({ boardComposer.value as? String == boardPrompt + " Temporary description." }, timeout: 5))
+        boardComposer.typeKey("a", modifierFlags: .command)
+        boardComposer.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (boardComposer.value as? String ?? "").isEmpty }, timeout: 5), "Clearing the draft during model loading should stay cleared.")
+        let submittedDescription = boardPrompt + " Add a compact greeting button."
+        boardComposer.typeText(submittedDescription)
+        XCTAssertTrue(waitUntil({ boardComposer.value as? String == submittedDescription }, timeout: 5))
+        try Data().write(to: modelsRelease)
+        XCTAssertTrue(waitUntil({ boardComposer.value as? String == submittedDescription }, timeout: 15),
+                      "Finishing model loading must preserve the user's description instead of restoring the generated prompt.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ turns().contains { $0["userText"] as? String == submittedDescription } }, timeout: 20),
+                      "The task sends the user's description only when requested.")
 
-        let turn = try XCTUnwrap(turns().first { $0["userText"] as? String == boardPrompt })
+        let turn = try XCTUnwrap(turns().first { $0["userText"] as? String == submittedDescription })
         let arguments = try XCTUnwrap(turn["arguments"] as? [String])
         let instructions = arguments[try XCTUnwrap(arguments.firstIndex(of: "--append-system-prompt")) + 1]
         XCTAssertTrue(instructions.contains("Main sidebar placement (`mainSidebar`)"), "The turn carries the plugin authoring instructions.")
@@ -23477,14 +23510,12 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "New plugin: Chat input actions" }, timeout: 15),
                       "The composer's Add here opens its own plugin task.")
         let composerPrompt = "/playhouse-plugin Create a new plugin in the Chat input actions placement (composerActions)."
-        XCTAssertTrue(waitUntil({ turns().contains { $0["userText"] as? String == composerPrompt } }, timeout: 20))
-        XCTAssertEqual(turns().filter { $0["userText"] as? String == composerPrompt }.count, 1, "The prompt is sent exactly once.")
+        XCTAssertTrue(waitUntil({ self.element("message-composer").value as? String == composerPrompt }, timeout: 10))
+        XCTAssertFalse(turns().contains { $0["userText"] as? String == composerPrompt }, "The composer placement also waits for a description.")
         XCTAssertFalse(element("plugin-mode-banner").exists)
         let composerTask = try XCTUnwrap(try boardTaskRecords().first { $0["title"] as? String == "New plugin: Chat input actions" })
         XCTAssertEqual(composerTask["pluginPlacement"] as? String, "composerActions")
-        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'user-message-'")).firstMatch.waitToExist(timeout: 10),
-                      "The prompt shows in the new task's conversation.")
-        attachScreenshot(named: "The plugin task opened from the composer's Add here")
+        attachScreenshot(named: "The plugin task from the composer's Add here waits for a description")
     }
 
     // case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports none at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. After a refresh the window shows the valid plugin's button at its placement and the Plugins menu lists every plugin with its placement, an invalid one with its first error. Deleting a plugin from the Plugins menu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
