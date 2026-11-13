@@ -8818,9 +8818,17 @@ final class PlayhouseUITests: XCTestCase {
         let settled = try XCTUnwrap(try runCLI(["conversation", "runtime"])["result"] as? [String: Any])
         XCTAssertFalse((settled["activeThreadIDs"] as? [String] ?? []).contains(threadID), "A stopped turn is no longer active in the daemon.")
         XCTAssertTrue((settled["interruptedThreadIDs"] as? [String] ?? []).contains(threadID), "The daemon should remember that the window paused the turn.")
+        if provider == "codex" {
+            relaunchApp()
+            openTask(named: title)
+            XCTAssertTrue(app.staticTexts["message-time-item_user_fixture_1"].waitForExistence(timeout: 10),
+                          "The observed message time survives interruption and relaunch.")
+            attachScreenshot(named: "Interrupted Codex message timestamp")
+            attachElementScreenshot(app.staticTexts["message-time-item_user_fixture_1"], named: "Interrupted Codex timestamp detail")
+        }
     }
 
-    // case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer.
+    // case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer. The observed Codex message time survives interruption and reload.
     func test_codex_stop_interrupts_thinking_turn_and_waits_for_response() throws {
         try exerciseStopDuringThinking(provider: "codex", title: "Codex stop while thinking")
     }
@@ -15203,7 +15211,45 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(retainedOfflineCache.first?["name"] as? String, "Offline Cached Claude")
     }
 
-    // case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Sol turn, then simulates a legacy transcript with no Codex turn metadata and sends a Luna turn; the old reply remains provider-only and the new reply is attributed to Luna. The latest reply shows its provider timestamp, while a legacy history item without createdAt has no timestamp label.
+    // case-contract: test_codex_message_timestamps | Codex records a timestamp when a message event arrives and restores it after reload when provider history omits a time. A provider-supplied timestamp takes precedence over the locally observed time.
+    func test_codex_message_timestamps() throws {
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-unique-turns-success")
+        codexFixtureExecutable = executable.path
+        let marker = URL(fileURLWithPath: executable.path + ".provider-timestamp")
+        try? FileManager.default.removeItem(at: marker)
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: executable.path + ".history"))
+        defer { try? FileManager.default.removeItem(at: marker) }
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Codex timestamp UI", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Codex timestamp UI")
+        openTask(named: "Codex timestamp UI")
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Check message time.")
+        element("send-message-button").click()
+        XCTAssertTrue(app.staticTexts["message-time-item_assistant_fixture_1"].waitForExistence(timeout: 15))
+        relaunchApp()
+        openTask(named: "Codex timestamp UI")
+        let timestamp = app.staticTexts["message-time-item_assistant_fixture_1"]
+        XCTAssertTrue(timestamp.waitForExistence(timeout: 10))
+        attachScreenshot(named: "Restored Codex timestamp")
+        attachElementScreenshot(timestamp, named: "Restored Codex timestamp detail")
+        try Data().write(to: marker)
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
+        let reply = try XCTUnwrap(messages.first { $0["id"] as? String == "item_assistant_fixture_1" })
+        XCTAssertEqual(reply["createdAt"] as? String, "2026-10-26T12:34:00Z")
+        relaunchApp()
+        openTask(named: "Codex timestamp UI")
+        let providerTimestamp = app.staticTexts["message-time-item_assistant_fixture_1"]
+        XCTAssertTrue(providerTimestamp.waitForExistence(timeout: 10))
+        let providerDate = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-26T12:34:00Z"))
+        XCTAssertEqual(accessibleLabelOrValue(of: providerTimestamp), providerDate.formatted(.dateTime.hour().minute()))
+        attachScreenshot(named: "Provider-supplied Codex timestamp")
+        attachElementScreenshot(providerTimestamp, named: "Provider-supplied Codex timestamp detail")
+    }
+
+    // case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Sol turn, then simulates a legacy transcript with no Codex turn metadata and sends a Luna turn; the old reply remains provider-only and the new reply is attributed to Luna. The latest reply shows its locally recorded timestamp after history reload, while a legacy history item without a known time has no timestamp label.
     func test_conversation_effort_dispatches_to_codex() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-unique-turns-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -15236,7 +15282,7 @@ final class PlayhouseUITests: XCTestCase {
         composer.typeText("Check Codex effort dispatch.")
         element("send-message-button").click()
         XCTAssertTrue(transcriptMessage("Answers received: Blue / fixture-secret.").waitToExist(timeout: 15), "The Codex fixture's reply should arrive.")
-        XCTAssertTrue(app.staticTexts["Codex · Sol"].exists, "The sent reply's label reflects the model actually selected for the turn, not the hardcoded default.")
+        XCTAssertTrue(app.staticTexts["Codex · Sol"].waitForExistence(timeout: 10), "The sent reply's label reflects the model actually selected for the turn, not the hardcoded default.")
         var transcript = try XCTUnwrap(try conversationState(taskID))
         var segments = try XCTUnwrap(transcript["segments"] as? [[String: Any]])
         for index in segments.indices {
@@ -15244,6 +15290,7 @@ final class PlayhouseUITests: XCTestCase {
             segments[index].removeValue(forKey: "codexTurnModelIDs")
         }
         transcript["segments"] = segments
+        transcript.removeValue(forKey: "messageTimestamps")
         try writeConversationState(taskID, transcript)
         picker.click()
         app.buttons["model-option-gpt-6-luna"].click()
@@ -15260,14 +15307,27 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 15))
         XCTAssertTrue(app.staticTexts["Codex"].exists, "A legacy reply without a stored model stays provider-only.")
         XCTAssertTrue(app.staticTexts["Codex · Luna"].exists, "The new turn is attributed to the model selected for that send.")
+        relaunchApp()
+        openTask(named: "Codex effort UI")
+        let legacyReply = app.groups["assistant-message-item_assistant_fixture_1"]
+        let transcriptScrollView = element("conversation-scroll-view")
+        for _ in 0..<10 where !legacyReply.exists {
+            transcriptScrollView.scroll(byDeltaX: 0, deltaY: 400)
+            _ = waitUntil({ legacyReply.exists }, timeout: 1)
+        }
+        XCTAssertTrue(legacyReply.exists, "Scrolling up loads the older legacy reply.")
         XCTAssertEqual(app.staticTexts.matching(identifier: "message-time-item_assistant_fixture_1").count, 0,
                        "Legacy provider history without createdAt has no timestamp label.")
         // The latest ordinary reply is the one the user's turn got, not a reply to a status nudge.
         let effortHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         let latestReplyItem = try XCTUnwrap(ordinaryMessages(effortHistory["messages"] as? [[String: Any]] ?? []).last { ($0["role"] as? String) == "assistant" }?["id"] as? String)
         XCTAssertNotEqual(latestReplyItem, "item_assistant_fixture_1")
-        XCTAssertTrue(app.staticTexts.matching(identifier: "message-time-\(latestReplyItem)").firstMatch.waitToExist(timeout: 5),
-                      "The latest reply displays its provider-supplied timestamp.")
+        relaunchApp()
+        openTask(named: "Codex effort UI")
+        let timestamp = app.staticTexts.matching(identifier: "message-time-\(latestReplyItem)").firstMatch
+        XCTAssertTrue(timestamp.waitToExist(timeout: 10), "The locally recorded timestamp survives an app reload.")
+        attachScreenshot(named: "Codex message timestamp")
+        attachElementScreenshot(timestamp, named: "Codex message timestamp detail")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         let history = try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any]
         let turns = try XCTUnwrap(history?["turns"] as? [[String: Any]])

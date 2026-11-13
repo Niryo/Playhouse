@@ -521,6 +521,14 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(received.is_file(), f"The {provider} fixture should confirm it received the native interrupt.")
         persisted = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(persisted["status"], "Waiting Response")
+        if provider == "codex":
+            recorded = self.conversation_state(task["id"])["messageTimestamps"]["item_user_fixture_1"]
+            restored = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=environment)[0])
+            user = next(message for message in restored["messages"] if message["id"] == "item_user_fixture_1")
+            self.assertIsNotNone(recorded, "The event time was stored before interruption.")
+            self.assertIsNotNone(user.get("createdAt"), "Interrupted turns retain their observed message time.")
+            again = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=environment)[0])
+            self.assertEqual(user["createdAt"], next(message for message in again["messages"] if message["id"] == user["id"])["createdAt"])
         settled = self.assert_success(self.call_cli("conversation", "runtime")[0])
         self.assertNotIn(thread_id, settled["activeThreadIDs"], "A stopped turn is no longer active in the daemon.")
         self.assertIn(thread_id, settled["interruptedThreadIDs"], "The daemon should remember that the turn was paused.")
@@ -541,7 +549,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         # The fold itself is SwiftUI state with no CLI-observable surface, so the
         # paired UI case asserts it directly once the daemon state above holds.
 
-    # case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer.
+    # case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer. The observed Codex message time survives interruption and reload.
     def test_codex_stop_interrupts_thinking_turn_and_waits_for_response(self):
         self.assert_user_stop_pauses_provider_turn(
             "Codex stop while thinking", "codex", "PLAYHOUSE_E2E_CODEX_EXECUTABLE", "codex-app-server-fixture.py"
@@ -10465,7 +10473,27 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )[0])["models"]
         self.assertEqual(aliases_only, [], "Claude aliases should not be exposed without a concrete versioned choice.")
 
-    # case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Sol turn, then simulates a legacy transcript with no Codex turn metadata and sends a Luna turn; the old reply remains provider-only and the new reply is attributed to Luna. The latest reply shows its provider timestamp, while a legacy history item without createdAt has no timestamp label.
+    # case-contract: test_codex_message_timestamps | Codex records a timestamp when a message event arrives and restores it after reload when provider history omits a time. A provider-supplied timestamp takes precedence over the locally observed time.
+    def test_codex_message_timestamps(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-timestamps-unique-turns-success"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8")
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        task_id = self.create_task(title="Codex message timestamps")["id"]
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Check message time.", extra_environment=environment)[0])
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        message = next(m for m in history["messages"] if m["id"] == "item_assistant_fixture_1")
+        self.assertIsNotNone(message.get("createdAt"))
+        self.assertIn("item_assistant_fixture_1", self.conversation_state(task_id)["messageTimestamps"])
+        Path(str(executable) + ".provider-timestamp").touch()
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        message = next(m for m in history["messages"] if m["id"] == "item_assistant_fixture_1")
+        self.assertEqual(message["createdAt"], "2026-10-26T12:34:00Z")
+
+    # case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Sol turn, then simulates a legacy transcript with no Codex turn metadata and sends a Luna turn; the old reply remains provider-only and the new reply is attributed to Luna. The latest reply shows its locally recorded timestamp after history reload, while a legacy history item without a known time has no timestamp label.
     def test_conversation_effort_dispatches_to_codex(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-effort-unique-turns-success"
@@ -10504,6 +10532,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         for segment in transcript["segments"]:
             segment["codexTurnIDs"] = []
             segment.pop("codexTurnModelIDs", None)
+        transcript.pop("messageTimestamps", None)  # Simulate a transcript from before local timestamps.
         self.write_conversation_state(task_id, transcript)
         self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-luna")[0])
         self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Check the next model.", "--model", "gpt-6-luna", extra_environment=environment)[0])
@@ -10513,7 +10542,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(assistants[0].get("modelID"), "Legacy replies without stored model attribution must remain provider-only.")
         self.assertIsNone(assistants[0].get("createdAt"), "Legacy provider history without a timestamp must stay timestamp-free.")
         self.assertEqual(assistants[-1]["modelID"], "gpt-6-luna")
-        self.assertEqual(assistants[-1]["createdAt"], "2026-10-26T12:34:00Z")
+        self.assertIsNotNone(assistants[-1].get("createdAt"), "Locally observed time survives a history reload.")
 
     # case-contract: test_codex_history_keeps_loaded_thread_model | Right after a Codex turn on a non-default model (Sol) ends, loading history with Sol still selected reuses the loaded thread. When the selection moves to another non-default model (Mini), history resumes with Mini even though Codex still reports Sol and remains readable. A subsequent send on Luna also resumes despite Codex reporting Sol, starts the turn with Luna, shows its reply without an error, and records Luna for that turn. The selected model remains associated with the conversation.
     def test_codex_history_keeps_loaded_thread_model(self):

@@ -548,6 +548,7 @@ struct ConversationTurnCallbacks {
     let onUserInput: (ConversationUserInputRequest) async -> Void
     let onSteerMessage: (String, [String]) -> Void
     let onProgressMessage: (ConversationMessage) -> Void
+    let onMessageTimestamp: (String, Date) -> Void
     let onTurnStarted: (String) -> Void
     let onTokenUsage: (ConversationTurnUsageReport) -> Void
 }
@@ -603,6 +604,7 @@ protocol ConversationProviderClient: AnyObject {
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
         onSteerMessage: @escaping (String, [String]) -> Void,
         onProgressMessage: @escaping (ConversationMessage) -> Void,
+        onMessageTimestamp: @escaping (String, Date) -> Void,
         onTurnStarted: @escaping (String) -> Void,
         onTokenUsage: @escaping (ConversationTurnUsageReport) -> Void,
         sensitiveUserInputAnswerValues: [String],
@@ -671,7 +673,7 @@ extension ConversationProviderClient {
             workspace: workspace, sessionRecoveryContext: sessionRecoveryContext, developerInstructions: developerInstructions,
             onDelta: { _ in }, onFinalMessage: onFinalMessage, onActivity: { _ in }, onDiff: { _ in },
             onHistory: { _ in }, onActionRequest: {}, onUserInput: onUserInput,
-            onSteerMessage: { _, _ in }, onProgressMessage: { _ in }, onTurnStarted: { _ in },
+            onSteerMessage: { _, _ in }, onProgressMessage: { _ in }, onMessageTimestamp: { _, _ in }, onTurnStarted: { _ in },
             onTokenUsage: { _ in },
             sensitiveUserInputAnswerValues: [], hideSensitiveRecoveryPrompt: false
         )

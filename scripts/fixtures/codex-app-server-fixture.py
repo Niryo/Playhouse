@@ -1696,6 +1696,10 @@ def main():
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             elif mode.endswith("-hold-interrupt") or mode.endswith("-hold-reject-interrupt"):
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID,
+                    "item": {"id": "item_user_fixture_1", "type": "userMessage"},
+                }})
                 # Report one activity before holding, so a user-initiated Stop with
                 # no final answer still keeps the window's activity section mounted
                 # and the fold it performs on settle is distinguishable from the
@@ -1772,7 +1776,16 @@ def main():
                     "turn": {"id": TURN_ID, "status": "interrupted", "error": {"message": "Fixture interrupted the conflict-resolution turn."}},
                 }})
             elif mode.endswith("-success") or mode.endswith("-timeline-tool-calls"):
-                # A timeline turn's items come from its thread history, not its stream.
+                # Emit the same item identities that thread/items/list returns.
+                if "-unique-turns-success" in mode:
+                    index = len(serial_history().get("turns", []))
+                    for item in (
+                        {"id": f"item_user_fixture_{index}", "type": "userMessage"},
+                        {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "phase": "final_answer", "text": answer_text(turn_message)},
+                    ):
+                        write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                            "threadId": THREAD_ID, "turnId": TURN_ID, "item": item,
+                        }})
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
@@ -2971,8 +2984,10 @@ def main():
                         turn_index = -1
                     if 0 <= turn_index < len(saved_turns):
                         turn_id = saved_turns[turn_index].get("turnID", TURN_ID)
-                        if turn_index in ordinary_turn_indexes and ordinary_turn_indexes.index(turn_index) == 1:
+                        if "-unique-turns-success" not in mode and turn_index in ordinary_turn_indexes and ordinary_turn_indexes.index(turn_index) == 1:
                             item["createdAt"] = "2026-10-26T12:34:00Z"
+                if item_id == "item_assistant_fixture_1" and Path(str(sys.argv[0]) + ".provider-timestamp").exists():
+                    item["createdAt"] = "2026-10-26T12:34:00Z"
                 if "-long-history-lazy-" in mode and item_id.startswith("item_long_history_"):
                     # Each history turn is its own turn, as in a real multi-turn thread, so the app
                     # treats every turn but the last as settled and shows its calls inline.

@@ -110,6 +110,8 @@ struct ConversationTranscript: Codable, Equatable {
     /// Locally sanitized message copies for private Codex recovery turns. Raw
     /// provider messages can be replaced after restart without losing safe text.
     var sensitiveCodexTurnMessages: [String: [ConversationMessage]]?
+    /// Locally observed message times for provider histories that omit them.
+    var messageTimestamps: [String: Date]?
     /// Fail-closed marker written before a private recovery prompt is sent.
     var pendingSensitiveUserInputRedaction: Bool?
     /// Every compaction of the Claude session's context, oldest first: what
