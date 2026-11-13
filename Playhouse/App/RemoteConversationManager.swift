@@ -37,7 +37,7 @@ struct RemoteConversationManager {
 
     func modelID(taskID: UUID) throws -> String? { try store.modelID(taskID: taskID) }
     func effort(taskID: UUID) throws -> ConversationEffort { try store.effort(taskID: taskID) }
-    func setModelID(taskID: UUID, modelID: String) throws { try store.setModelID(taskID: taskID, modelID: modelID) }
+    func setModelID(taskID: UUID, modelID: String) async throws { try await store.setModelID(taskID: taskID, modelID: modelID) }
     func cachedModels(taskID: UUID) throws -> [ConversationModelOption] { try store.cachedModels(taskID: taskID) }
     func cachedModels(taskID: UUID, provider: ConversationProvider) throws -> [ConversationModelOption] {
         try store.cachedModels(taskID: taskID, provider: provider)

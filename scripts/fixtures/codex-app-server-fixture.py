@@ -1254,7 +1254,7 @@ def main():
         if message.get("method") == "initialize":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"serverInfo": {"name": "playhouse-fixture", "version": "1"}}})
         elif message.get("method") == "model/list":
-            write({"jsonrpc": "2.0", "id": message["id"], "result": {"data": [
+            models = [
                 {"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True,
                  "supportedReasoningEfforts": [{"reasoningEffort": level} for level in ["low", "medium", "high", "xhigh"]]},
                 {"id": "gpt-6-sol", "displayName": "GPT-6 Sol", "isDefault": False,
@@ -1267,7 +1267,13 @@ def main():
                 # test can tell "followed the family forward" from "no selection loaded yet".
                 {"id": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol", "isDefault": False,
                  "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
-            ]}})
+            ]
+            models_override = Path(str(sys.argv[0]) + ".models-override")
+            if models_override.exists():
+                models = json.loads(models_override.read_text(encoding="utf-8"))
+            if Path(str(sys.argv[0]) + ".models-delay").exists():
+                time.sleep(1)
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"data": models}})
         elif message.get("method") == "mcpServerStatus/list":
             # The servers a test seeds in `<executable>.mcp-status`, as Codex lists
             # the ones its own configuration defines.

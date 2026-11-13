@@ -4623,6 +4623,42 @@ final class BoardTaskManager {
         }
     }
 
+    func setConversationModelID(_ id: UUID, modelID: String) async throws {
+        try await withTaskOperationLock(id) {
+            let task = try requireSubject(id)
+            let previous = task.conversationModelIDsData
+            task.conversationModelID = modelID
+            do {
+                try await saveTaskContext(taskID: id)
+            } catch {
+                task.conversationModelIDsData = previous
+                throw error
+            }
+        }
+    }
+
+    func replaceConversationModelID(
+        _ id: UUID,
+        expectedProvider: ConversationProvider,
+        expectedModelID: String,
+        replacementModelID: String
+    ) async throws -> Bool {
+        try await withTaskOperationLock(id) {
+            let task = try requireSubject(id)
+            guard task.conversationProvider == expectedProvider,
+                  task.conversationModelID == expectedModelID else { return false }
+            let previous = task.conversationModelIDsData
+            task.conversationModelID = replacementModelID
+            do {
+                try await saveTaskContext(taskID: id)
+            } catch {
+                task.conversationModelIDsData = previous
+                throw error
+            }
+            return true
+        }
+    }
+
     func setWorkspaceRoots(_ id: UUID, roots: [String]) async throws -> BoardTaskRecord {
         let initialTask = try requireTask(id)
         let initialRepositories = initialTask.repositoryWorktrees
@@ -6777,12 +6813,33 @@ final class ConversationManager {
     func models(taskID: UUID) async throws -> [ConversationModelOption] {
         PlayhouseDiagnostics.record("conversation.models.read.started", fields: ["taskID": taskID.uuidString])
         let task = try tasks.conversationSubject(taskID)
+        var selectionToReconcile = task.conversationModelID
+        if let selectedModelID = task.conversationModelID,
+           let replacement = try cachedModels(provider: task.conversationProvider)
+                .supersedingModel(forSelectedID: selectedModelID) {
+            let replaced = try await tasks.replaceConversationModelID(
+                taskID,
+                expectedProvider: task.conversationProvider,
+                expectedModelID: selectedModelID,
+                replacementModelID: replacement.id
+            )
+            selectionToReconcile = replaced ? replacement.id : nil
+        }
         let workspace = try ConversationWorkspaceContext(roots: task.workspaceRootPaths.map {
             URL(fileURLWithPath: $0, isDirectory: true)
         })
         let models = try await client(for: task).availableModels(workspace: workspace).newestVersionPerFamily()
         if let data = try? JSONEncoder().encode(models) {
             preferences.set(data, forKey: modelCacheKey(for: task.conversationProvider))
+        }
+        if let selectedModelID = selectionToReconcile,
+           let replacement = models.supersedingModel(forSelectedID: selectedModelID) {
+            _ = try await tasks.replaceConversationModelID(
+                taskID,
+                expectedProvider: task.conversationProvider,
+                expectedModelID: selectedModelID,
+                replacementModelID: replacement.id
+            )
         }
         PlayhouseDiagnostics.record("conversation.models.read.succeeded", fields: [
             "taskID": taskID.uuidString,
@@ -6800,18 +6857,32 @@ final class ConversationManager {
     func modelID(taskID: UUID) throws -> String? {
         let task = try tasks.conversationSubject(taskID)
         let key = selectedModelKey(for: task.conversationProvider)
+        if let conversationModelID = task.conversationModelID {
+            return supersededSelection(conversationModelID, provider: task.conversationProvider, key: nil)
+        }
+        if let historicalModelID = latestTranscriptModelID(taskID: taskID, provider: task.conversationProvider) {
+            return supersededSelection(historicalModelID, provider: task.conversationProvider, key: nil)
+        }
         if let selectedModelID = preferences.string(forKey: key) {
             return supersededSelection(selectedModelID, provider: task.conversationProvider, key: key)
         }
-
-        // One-time migration from the previous per-task preference.
-        if let legacyModelID = task.conversationModelID {
-            // Resolve before persisting, so the migration writes the key once.
-            let modelID = supersededSelection(legacyModelID, provider: task.conversationProvider, key: nil)
-            preferences.set(modelID, forKey: key)
-            return modelID
-        }
         return nil
+    }
+
+    private func latestTranscriptModelID(taskID: UUID, provider: ConversationProvider) -> String? {
+        guard let transcript = try? transcripts.read(taskID, turns: .all, includeImages: false) else { return nil }
+        if provider == .codex {
+            for segment in transcript.segments.reversed() where segment.provider == .codex {
+                for turnID in segment.codexTurnIDs.reversed() {
+                    if let modelID = segment.codexTurnModelIDs[turnID] { return modelID }
+                }
+            }
+            return nil
+        }
+        return transcript.turns.reversed().lazy
+            .filter { turn in transcript.segments.first(where: { $0.id == turn.segmentID })?.provider == provider }
+            .flatMap { $0.messages.reversed() }
+            .first(where: { $0.role == .assistant && $0.modelID != nil })?.modelID
     }
 
     /// A remembered model the provider no longer offers keeps running behind the
@@ -6843,8 +6914,9 @@ final class ConversationManager {
         try await tasks.setConversationEffort(taskID, effort: effort)
     }
 
-    func setModelID(taskID: UUID, modelID: String) throws {
+    func setModelID(taskID: UUID, modelID: String) async throws {
         let task = try tasks.conversationSubject(taskID)
+        try await tasks.setConversationModelID(taskID, modelID: modelID)
         preferences.set(modelID, forKey: selectedModelKey(for: task.conversationProvider))
     }
 
@@ -9038,7 +9110,7 @@ final class ConversationManager {
         var task = try tasks.conversationSubject(taskID)
         let provider = task.conversationProvider
         let client = clients.client(for: provider)
-        let modelID = requestedModelID ?? provider.defaultModelID
+        let modelID = try requestedModelID ?? self.modelID(taskID: taskID) ?? provider.defaultModelID
         guard Self.isValidModelID(modelID) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
         }
@@ -9047,6 +9119,9 @@ final class ConversationManager {
         let validationWorkspace = try ConversationWorkspaceContext(roots: availableRoots)
         let effort = ConversationEffort(rawValue: task.conversationEffort) ?? .medium
         try await client.validateEffort(effort, modelID: modelID, workspace: validationWorkspace)
+        if requestedModelID != nil {
+            try await setModelID(taskID: taskID, modelID: modelID)
+        }
         try tasks.prepareConversationTurnOutcome(taskID)
         defer { tasks.clearConversationTurnOutcome(taskID) }
         var persistedThreadID = task.activeConversationID
@@ -10610,7 +10685,7 @@ final class PlayhouseBridgeRuntime {
                     throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, numbers, periods, underscores, or hyphens.")
                 }
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
-                try conversations.setModelID(taskID: taskID, modelID: modelID)
+                try await conversations.setModelID(taskID: taskID, modelID: modelID)
                 result = .object(["modelID": .string(modelID)])
             case "conversation.models.cached":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
