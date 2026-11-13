@@ -24424,7 +24424,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitForDisappearance(chat.descendants(matching: .any)["plugin-add-here-composerActions"]))
     }
 
-    // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview without a board card or task header. The Plugins menu reopens the same conversation and preview, including unsaved drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home.
+    // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview without a board card or task header. The editor header shows “Plugin editor” beside its back button. The Plugins menu reopens the same conversation and preview, including unsaved drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home.
     func test_plugin_authoring_task_starts_with_placement_and_skill() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-plugin-author")
         let historyURL = URL(fileURLWithPath: try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]) + ".history")
@@ -24462,6 +24462,12 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Plugin creation presentation")
         element("plugin-creation-start").click()
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 15))
+        let editorTitle = app.staticTexts["Plugin editor"]
+        let editorBackButton = element("back-to-board-button")
+        XCTAssertTrue(editorTitle.waitToExist(timeout: 10), "The editor title appears.")
+        XCTAssertGreaterThan(editorTitle.frame.minX, editorBackButton.frame.maxX, "The title sits to the right of the back button.")
+        XCTAssertEqual(editorTitle.frame.midY, editorBackButton.frame.midY, accuracy: 8, "The title shares the back button's header row.")
+        attachAppWindowScreenshot(named: "Plugin editor full app")
         XCTAssertFalse(try pluginMode())
         func sessions() throws -> [[String: Any]] {
             try XCTUnwrap((try runCLI(["plugin", "sessions"])["result"] as? [String: Any])?["sessions"] as? [[String: Any]])
@@ -28136,7 +28142,17 @@ final class PlayhouseUITests: XCTestCase {
         add(attachment)
     }
 
-    /// Attaches `element` alone, at native pixel density, for UI that is small within its window.
+    /// Attaches the complete app window, including its surrounding panels and context.
+    private func attachAppWindowScreenshot(named name: String) {
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        let attachment = XCTAttachment(screenshot: window.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// Attaches `element` alone, at native pixel density, for non-showcase diagnostics.
     private func attachElementScreenshot(_ element: XCUIElement, named name: String) {
         let attachment = XCTAttachment(screenshot: element.screenshot())
         attachment.name = name
