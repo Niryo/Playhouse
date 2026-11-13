@@ -10590,27 +10590,6 @@ final class PlayhouseBridgeRuntime {
             }
         }
 
-        // Usage state lives in this process's memory too; a window follows its changes.
-        if request.command == "usage.subscribe" {
-            let runtimeScope: String?
-            #if DEBUG
-            runtimeScope = request.dataDirectory
-            #else
-            runtimeScope = nil
-            #endif
-            do {
-                for await report in AgentUsageStore.shared(scope: runtimeScope).changes() {
-                    if Task.isCancelled { break }
-                    eventHandler(BridgeEvent(requestID: request.id, type: "usage_state", payload: try Self.value(report)))
-                }
-                await PlayhouseDiagnostics.endBatch()
-                return .success(request, result: .object(["subscribed": .boolean(false)]))
-            } catch {
-                await PlayhouseDiagnostics.endBatch()
-                return .failure(request, code: "operation_failed", message: error.localizedDescription)
-            }
-        }
-
         // CPU samples also live only in this process's memory (the real PIDs).
         if request.command == "conversation.cpuUsage" || request.command == "conversation.cpuUsage.subscribe" {
             let runtimeScope: String?
@@ -10715,6 +10694,25 @@ final class PlayhouseBridgeRuntime {
                     mentions: mentions,
                     observesGoalTurns: guiRuntime
                 )
+            }
+            // Watchers receive provider pushes immediately and periodically refresh both
+            // accounts to catch usage incurred by other clients or missed notifications.
+            if request.command == "usage.subscribe" {
+                let clients = conversationClients()
+                let refresh = Task { @MainActor in
+                    while !Task.isCancelled {
+                        do { try await Task.sleep(for: .seconds(30)) } catch { break }
+                        guard !Task.isCancelled else { break }
+                        _ = await AgentUsageService.report(clients: clients, refresh: true)
+                    }
+                }
+                defer { refresh.cancel() }
+                for await report in AgentUsageStore.shared(scope: dataDirectory).changes() {
+                    if Task.isCancelled { break }
+                    eventHandler(BridgeEvent(requestID: request.id, type: "usage_state", payload: try Self.value(report)))
+                }
+                await PlayhouseDiagnostics.endBatch()
+                return .success(request, result: .object(["subscribed": .boolean(false)]))
             }
             func pluginLibrary() throws -> PluginLibrary {
                 guard let storeDirectory else {

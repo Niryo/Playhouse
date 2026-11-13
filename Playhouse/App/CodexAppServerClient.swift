@@ -608,7 +608,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
 
     /// Reads the account and its rate limits from the app-server, launching it
     /// if it is not running. Later changes arrive as `account/rateLimits/updated`
-    /// pushes, so this runs on launch and after a login, not on a timer.
+    /// pushes; periodic reads also catch usage from other clients.
     func refreshAgentUsage() async {
         let store = AgentUsageStore.shared(scope: runtimeScope)
         store.setInstalled(.codex, isInstalled)
@@ -624,7 +624,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         // Read through this client's own app-server, never a second one: Codex serializes
         // its sign-in refresh only within one process, so two app-servers on one Codex home
         // could both use the refresh token and sign the user out. Pushes from the same server
-        // keep the numbers current between refreshes. A read that is never answered
+        // update the numbers between refreshes. A read that is never answered
         // fails after a timeout, without stopping the server, so it never blocks later refreshes
         // and the last known account and usage stay.
         await readAccountAndUsage(into: store)
@@ -639,18 +639,25 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         do {
             let workspace = try ConversationWorkspaceContext(roots: [URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)])
             try await ensureInitialized(workspace: workspace)
-            let response = try await request(method: "account/read", params: ["refreshToken": false], timeout: Self.accountReadTimeout)
-            guard let account = response["account"] as? [String: Any] else {
-                store.setAuth(.codex, loggedIn: false, account: nil, plan: nil)
-                return
+            do {
+                let response = try await request(method: "account/read", params: ["refreshToken": false], timeout: Self.accountReadTimeout)
+                guard let account = response["account"] as? [String: Any] else {
+                    store.setAuth(.codex, loggedIn: false, account: nil, plan: nil)
+                    return
+                }
+                let type = account["type"] as? String
+                store.setAuth(
+                    .codex,
+                    loggedIn: true,
+                    account: (account["email"] as? String) ?? (type == "apiKey" ? "API key" : nil),
+                    plan: CodexRateLimits.planName(account["planType"] as? String)
+                )
+            } catch {
+                // Account metadata can fail independently of rate limits (for example,
+                // when Codex cannot load workspace requirements). Keep the last known
+                // identity and still try the usage endpoint.
+                PlayhouseDiagnostics.record("codex.agent_usage.account_read.failed", fields: diagnosticFields(["error": error.localizedDescription]))
             }
-            let type = account["type"] as? String
-            store.setAuth(
-                .codex,
-                loggedIn: true,
-                account: (account["email"] as? String) ?? (type == "apiKey" ? "API key" : nil),
-                plan: CodexRateLimits.planName(account["planType"] as? String)
-            )
             store.recordCodexRead(try await request(method: "account/rateLimits/read", params: [:], timeout: Self.accountReadTimeout))
         } catch {
             PlayhouseDiagnostics.record("codex.agent_usage.refresh.failed", fields: diagnosticFields(["error": error.localizedDescription]))

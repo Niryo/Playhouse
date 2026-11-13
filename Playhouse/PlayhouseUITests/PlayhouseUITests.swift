@@ -648,7 +648,55 @@ final class PlayhouseUITests: XCTestCase {
         attachElementScreenshot(sidebar, named: "Kanban sidebar at 216 points")
     }
 
-    // case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude's usage is read with Claude Code's get_usage control request, which has none for this account yet, so Claude starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Because Claude Code streams rate_limit_event only when a limit's status changes, and a usage-based plan's event has no utilization, every finished Claude turn reads the plan's usage again through get_usage (skipping the local transcript scan) without a refresh: the read replaces the windows with the plan's current ones, keeps get_usage percents as percents, shows a usage-based plan's monthly extra usage as a Spend limit row with the reset time from the stream's overage event, and is persisted; a refresh reads it too, a reply without plan usage keeps the last known rows, a reached spend limit reads as the limit reached, and a usage request that is never answered times out, keeping the last known rows, so later reads work again. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the Scheduled Tasks button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account and plan together on the row beneath the provider name, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. After a Claude turn whose usage read reports the plan's spend, the open window shows Claude's Spend limit row with its percent and reset time and the updated 5h row without a relaunch. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
+    // case-contract: test_agents_info_usage_recovers_when_account_reads_fail | When either provider account metadata read fails, a usage refresh still reads that provider usage and retains its last known account. Codex and Claude usage changes reach the CLI and open Agents info section, and after both account reads recover another refresh updates both usage values and retains the correct accounts.
+    func test_agents_info_usage_recovers_when_account_reads_fail() throws {
+        let codex = try makeCodexFixture(emptyQuestions: false)
+        codexFixtureExecutable = codex.path
+        let claude = dataDirectory.appendingPathComponent("claude-fixture-usage-failure")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"), to: claude)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claude.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"), atomically: true, encoding: .utf8)
+        claudeFixtureExecutable = claude.path
+        launchApp(defaultParent: fixture.parent.path)
+        func text(_ id: String) -> String { let item = element(id); return item.exists ? accessibleLabelOrValue(of: item) : "" }
+        XCTAssertTrue(element("agents-info-codex-window-primary").waitToExist(timeout: 30))
+        XCTAssertTrue(element("agents-info-claude-account").waitToExist(timeout: 30))
+        let codexError = URL(fileURLWithPath: codex.path + ".account-read-error")
+        let claudeError = URL(fileURLWithPath: claude.path + ".auth-status-error")
+        let codexAccount = URL(fileURLWithPath: codex.path + ".account")
+        let claudeUsage = URL(fileURLWithPath: claude.path + ".usage")
+        defer { for url in [codexError, claudeError, codexAccount, claudeUsage] { try? FileManager.default.removeItem(at: url) } }
+        func values(_ codexPercent: Int, _ claudePercent: Int) throws {
+            try JSONSerialization.data(withJSONObject: ["loggedIn": true, "email": "codex-fixture@example.com", "used": [codexPercent, 62]]).write(to: codexAccount, options: .atomic)
+            try JSONSerialization.data(withJSONObject: ["rate_limits_available": true, "rate_limits": ["five_hour": ["utilization": claudePercent, "resets_at": "2099-01-01T00:00:00Z"]]]).write(to: claudeUsage, options: .atomic)
+        }
+        try Data().write(to: codexError); try Data().write(to: claudeError)
+        try values(47, 24)
+        _ = try runCLI(["usage", "get", "--refresh"])
+        XCTAssertTrue(waitUntil({ text("agents-info-codex-window-primary").contains("47%") && text("agents-info-claude-window-five_hour").contains("24%") }, timeout: 40))
+        XCTAssertEqual(text("agents-info-codex-account"), "codex-fixture@example.com Plus")
+        XCTAssertEqual(text("agents-info-claude-account"), "claude-fixture@example.com Max")
+        attachScreenshot(named: "Usage updated while account reads fail")
+        for provider in ["codex", "claude"] {
+            let capture = XCTAttachment(screenshot: element("agents-info-\(provider)").screenshot())
+            capture.name = "\(provider) usage while account read fails"; capture.lifetime = .keepAlways; add(capture)
+        }
+        try FileManager.default.removeItem(at: codexError); try FileManager.default.removeItem(at: claudeError)
+        try values(54, 31)
+        try JSONSerialization.data(withJSONObject: ["loggedIn": true, "email": "codex-recovered@example.com", "used": [54, 62]]).write(to: codexAccount, options: .atomic)
+        try JSONSerialization.data(withJSONObject: ["loggedIn": true, "authMethod": "claude.ai", "email": "claude-recovered@example.com", "subscriptionType": "max"]).write(to: URL(fileURLWithPath: claude.path + ".auth-state"), options: .atomic)
+        _ = try runCLI(["usage", "get", "--refresh"])
+        XCTAssertTrue(waitUntil({ text("agents-info-codex-window-primary").contains("54%") && text("agents-info-claude-window-five_hour").contains("31%") }, timeout: 40))
+        XCTAssertEqual(text("agents-info-codex-account"), "codex-recovered@example.com Plus")
+        XCTAssertEqual(text("agents-info-claude-account"), "claude-recovered@example.com Max")
+        attachScreenshot(named: "Usage after account reads recover")
+        for provider in ["codex", "claude"] {
+            let capture = XCTAttachment(screenshot: element("agents-info-\(provider)").screenshot())
+            capture.name = "\(provider) usage after account recovery"; capture.lifetime = .keepAlways; add(capture)
+        }
+    }
+
+    // case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude's usage is read with Claude Code's get_usage control request, which has none for this account yet, so Claude starts with a signed-in account and no usage. While a usage watch remains open, it periodically refreshes both providers; Codex and Claude usage changed without a push reaches the watch and appears in the open window, and the Codex snapshot persists. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Because Claude Code streams rate_limit_event only when a limit's status changes, and a usage-based plan's event has no utilization, every finished Claude turn reads the plan's usage again through get_usage (skipping the local transcript scan) without a refresh: the read replaces the windows with the plan's current ones, keeps get_usage percents as percents, shows a usage-based plan's monthly extra usage as a Spend limit row with the reset time from the stream's overage event, and is persisted; a refresh reads it too, a reply without plan usage keeps the last known rows, a reached spend limit reads as the limit reached, and a usage request that is never answered times out, keeping the last known rows, so later reads work again. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the Scheduled Tasks button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account and plan together on the row beneath the provider name, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. After a Claude turn whose usage read reports the plan's spend, the open window shows Claude's Spend limit row with its percent and reset time and the updated 5h row without a relaunch. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
     func test_agents_info_shows_provider_usage_and_accounts() throws {
         let codexExecutable = try makeCodexFixture(emptyQuestions: false)
         let codexAccount = URL(fileURLWithPath: codexExecutable.path + ".account")
@@ -702,6 +750,32 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(text("agents-info-claude-empty"), "No data yet", "Claude should say it has no data yet.")
         XCTAssertTrue(element("agents-info-switch-claude").exists && element("agents-info-switch-codex").exists, "Each agent should offer a switch-account button.")
         attachScreenshot(named: "Agents info with Codex usage and Claude awaiting data")
+
+        func attachCodexBlock(_ name: String) {
+            let attachment = XCTAttachment(screenshot: codexBlock.screenshot())
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        attachCodexBlock("Codex usage before external change")
+        let periodicClaudeUsage = URL(fileURLWithPath: claudeExecutable.path + ".usage")
+        try JSONSerialization.data(withJSONObject: ["rate_limits_available": true, "rate_limits": [
+            "five_hour": ["utilization": 24, "resets_at": "2099-01-01T00:00:00Z"],
+        ]]).write(to: periodicClaudeUsage, options: .atomic)
+        // An external Codex client can consume usage without sending this server a push.
+        try JSONSerialization.data(withJSONObject: ["loggedIn": true, "email": "codex-fixture@example.com", "used": [47, 68]])
+            .write(to: codexAccount, options: .atomic)
+        XCTAssertTrue(waitUntil({ text("agents-info-codex-window-primary").contains("47%") }, timeout: 45), "An open window should refresh Codex usage changed elsewhere.")
+        XCTAssertTrue(text("agents-info-codex-window-secondary").contains("68%"))
+        attachScreenshot(named: "Agents info after external Codex usage changes")
+        attachCodexBlock("Codex usage after external change")
+        XCTAssertTrue(waitUntil({ text("agents-info-claude-window-five_hour").contains("24%") }, timeout: 45), "The periodic refresh should also read externally changed Claude usage.")
+        attachScreenshot(named: "Agents info after external Claude usage changes")
+        let claudeAttachment = XCTAttachment(screenshot: claudeBlock.screenshot())
+        claudeAttachment.name = "Claude usage after external change"
+        claudeAttachment.lifetime = .keepAlways
+        add(claudeAttachment)
+        try FileManager.default.removeItem(at: periodicClaudeUsage)
 
         // A Claude turn's rate-limit event reaches the open window without a relaunch.
         let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Claude usage UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "claude"])["result"] as? [String: Any])
@@ -775,6 +849,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: runningTaskID)?["status"] as? String) == "In Progress" }, timeout: 10))
         // The confirmation counts the board's own tasks, so wait until the board shows it running.
         XCTAssertTrue(element("column-in-progress").buttons["task-card-\(runningTaskID.uppercased())"].waitToExist(timeout: 10), "The board should show the Codex task running.")
+        let codexAccountBeforeCancel = try Data(contentsOf: codexAccount)
         element("agents-info-switch-codex").click()
         let sheet = app.sheets.firstMatch
         XCTAssertTrue(sheet.waitToExist(timeout: 10), "Switching with a running Codex task should ask for confirmation.")
@@ -785,7 +860,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitForDisappearance(sheet))
         // A switch would sign out through the fixture, which records the change in its account file.
         XCTAssertFalse(waitUntil({
-            FileManager.default.fileExists(atPath: codexAccount.path) || text("agents-info-codex-account") != "codex-fixture@example.com Plus"
+            (try? Data(contentsOf: codexAccount)) != codexAccountBeforeCancel || text("agents-info-codex-account") != "codex-fixture@example.com Plus"
         }, timeout: 5), "Cancelling must not sign the account out.")
         try? FileManager.default.removeItem(at: holdMarker)
         try Data("release\n".utf8).write(to: turnRelease)

@@ -2686,9 +2686,15 @@ extension ClaudeCodeClient {
     func refreshAgentUsage() async {
         let store = AgentUsageStore.shared(scope: runtimeScope)
         store.setInstalled(.claude, isInstalled)
-        guard isInstalled, let output = await runAuthCommand(["auth", "status", "--json"]),
+        guard isInstalled else { return }
+        guard let output = await runAuthCommand(["auth", "status", "--json"]),
               let status = try? JSONSerialization.jsonObject(with: output.data) as? [String: Any],
-              let loggedIn = status["loggedIn"] as? Bool else { return }
+              let loggedIn = status["loggedIn"] as? Bool else {
+            // Status and usage are independent provider operations. Preserve the
+            // known identity when status fails and try reading usage anyway.
+            await readPlanUsage()
+            return
+        }
         let subscription = (status["subscriptionType"] as? String).map { $0.prefix(1).uppercased() + $0.dropFirst() }
         store.setAuth(
             .claude,
