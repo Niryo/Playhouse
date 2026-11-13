@@ -6067,7 +6067,7 @@ struct TaskConversationView: View {
         let reason = startImplementingUnavailableReason
         let primary: ComposerModel.Primary
         if isDisplayingActiveResponse
-            || (isResponding && providerTurnIsActive && userInputRequest == nil && providerPendingUserInputRequest == nil) {
+            || (providerTurnIsActive && userInputRequest == nil && providerPendingUserInputRequest == nil) {
             primary = .init(kind: "stop", disabled: isPausingResponse || !canPauseResponse, help: "Pause \(provider.displayName) response", label: "Stop response", value: "", testID: "pause-response-button")
         } else if hasPausedResponse {
             primary = .init(kind: "continue", disabled: false, help: "Continue \(provider.displayName) response", label: "Continue response", value: "", testID: "continue-response-button")

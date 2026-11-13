@@ -2729,7 +2729,8 @@ final class PlayhouseUITests: XCTestCase {
         assertHoverEmphasis(for: createButton)
         XCTAssertEqual(createButton.label, "PR. Create a pull request for each repository linked to this completed task")
         assertNativeHelpText(for: createButton, equals: "Create a pull request for each repository linked to this completed task")
-        attachScreenshot(named: "Completed task PR action shows its help text in the archive", fullScreen: true)
+        attachScreenshot(named: "Completed task PR action shows its help text in the archive")
+        attachElementScreenshot(createButton, named: "Completed task PR action help text")
         dismissNativeHelpText(named: "Create a pull request for each repository linked to this completed task")
         let operationLock = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         var operationLockReleased = false
@@ -3574,7 +3575,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(archiveCreatePRButton.waitToExist(timeout: 10))
         XCTAssertEqual(archiveCreatePRButton.label, "PRs. Create pull requests for each repository linked to this completed task")
         attachScreenshot(named: "Done archive labels its multi-repository action PRs")
-        element("done-archive-button").click()
+        element("close-done-archive-button").click()
+        XCTAssertTrue(waitUntil({ !self.element("done-archive-panel").exists }, timeout: 5), "Close the archive before returning to the active task board.")
 
         let activeCreated = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Active linked PR UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
@@ -4600,10 +4602,14 @@ final class PlayhouseUITests: XCTestCase {
         // A model can write its outcome command as answer text instead of running
         // it. The echo is hidden, and it counts only when it names this task.
         // Scoped to message containers: a reply's paragraphs are labelled groups too.
-        let echoedAnswers = app.groups.matching(NSPredicate(
-            format: "identifier BEGINSWITH %@ AND label == %@", "assistant-message-", "Fixture answer with an echoed outcome."
-        ))
         for (turnIndex, (echoedTaskID, expectedColumn)) in [(UUID().uuidString, "Blocked"), (taskID, "Review")].enumerated() {
+            let beforeTurnHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+            let previousAnswerIDs = Set((beforeTurnHistory["messages"] as? [[String: Any]] ?? []).compactMap { message -> String? in
+                guard message["role"] as? String == "assistant",
+                      message["text"] as? String == "Fixture answer with an echoed outcome."
+                else { return nil }
+                return message["id"] as? String
+            })
             XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15), "The composer should accept the echoed-outcome turn.")
             composer.click()
             composer.typeText("Echo the outcome command for \(echoedTaskID).")
@@ -4618,7 +4624,16 @@ final class PlayhouseUITests: XCTestCase {
                 }
             }
             XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == expectedColumn }, timeout: 15), "An echoed outcome for \(echoedTaskID) should leave the task in \(expectedColumn).")
-            XCTAssertTrue(waitUntil({ echoedAnswers.count == turnIndex + 1 }, timeout: 10), "The transcript should show this turn's answer without the echoed command.")
+            let turnHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+            let turnMessages = try XCTUnwrap(turnHistory["messages"] as? [[String: Any]])
+            let visibleAnswer = try XCTUnwrap(turnMessages.last {
+                $0["role"] as? String == "assistant"
+                    && $0["text"] as? String == "Fixture answer with an echoed outcome."
+                    && !previousAnswerIDs.contains($0["id"] as? String ?? "")
+            }, "This turn should add its own saved answer without the echoed command.")
+            let answerBubble = element("assistant-message-\(try XCTUnwrap(visibleAnswer["id"] as? String))")
+            XCTAssertTrue(answerBubble.waitToExist(timeout: 10), "The transcript should show this turn's own answer, not a prior matching reply.")
+            XCTAssertTrue(answerBubble.label.contains("Fixture answer with an echoed outcome."))
             XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "task outcome")).count, 0, "The transcript must not show the echoed outcome command.")
         }
         relaunchApp()
@@ -15585,6 +15600,10 @@ final class PlayhouseUITests: XCTestCase {
         // the last notification; give that regression time to show.
         XCTAssertFalse(waitUntil({ !self.element("pause-response-button").exists }, timeout: 2),
                        "The woken parent's turn must stay active until its next result.")
+        let wakeStopButton = element("pause-response-button")
+        XCTAssertTrue(wakeStopButton.exists, "The composer should keep its Stop control visible during resumed work.")
+        attachScreenshot(named: "Claude woken parent remains active with Stop available")
+        attachElementScreenshot(wakeStopButton, named: "Claude woken parent Stop control")
         XCTAssertEqual(try taskRecord(id: wakeTaskID)?["status"] as? String, "In Progress")
         XCTAssertFalse(transcriptContains("WAKE FINAL"))
         try "Release the woken parent's final answer.\n".write(to: wakeRelease, atomically: true, encoding: .utf8)
@@ -17006,7 +17025,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(response.waitToExist(timeout: 10))
         XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
         XCTAssertTrue(response.label.contains("Additional detail: Retry this answer."))
-        XCTAssertTrue(card.staticTexts["Answered"].exists)
+        XCTAssertTrue(card.staticTexts["Answered"].waitToExist(timeout: 10), "The queued answer should settle as Answered after its response appears.")
         let deliveredAnswered = try XCTUnwrap(try runCLI(["conversation", "answered-async", taskID])["result"] as? [String: Any])
         XCTAssertEqual(deliveredAnswered["itemIDs"] as? [String], ["item_playhouse_async_question"], "The delivered async answer should be recorded as answered.")
     }
@@ -20479,6 +20498,7 @@ final class PlayhouseUITests: XCTestCase {
     /// Opens a rule's actions menu, waiting out a closing panel's animation and
     /// clicking again if the first click landed while it was still on screen.
     private func openRuleActions(_ key: String, file: StaticString = #filePath, line: UInt = #line) {
+        app.activate()
         let actions = element("rule-actions-\(key)")
         XCTAssertTrue(waitUntil({ actions.exists && actions.isHittable && !self.element("rule-editor-panel").exists && !self.element("new-rule-panel").exists }, timeout: 10),
                       "\(key) should have an actions menu.", file: file, line: line)
@@ -23682,13 +23702,24 @@ final class PlayhouseUITests: XCTestCase {
         let across = element("plugin-catalog-skills-page-scroll")
         @discardableResult func reveal(_ element: XCUIElement) -> XCUIElement {
             XCTAssertTrue(element.waitToExist(timeout: 10), "\(element) should exist before scrolling to it.")
+            // Composite groups can be visible while XCTest reports no hit point
+            // for the parent inside this nested scroll view; later actions target
+            // their interactive child directly.
+            func hasHitTarget(_ element: XCUIElement) -> Bool {
+                let frame = element.frame
+                return element.isHittable || page.frame.contains(CGPoint(x: frame.midX, y: frame.midY))
+            }
             // The horizontal scroll view reports its whole content's frame, so both
             // directions are judged against the visible catalog page.
             var scrolls = 0
-            while !element.isHittable, scrolls < 20 {
+            while !hasHitTarget(element), scrolls < 20 {
                 let visible = page.frame, target = element.frame
                 if target.midY < visible.minY + 20 || target.midY > visible.maxY - 20 {
                     page.scroll(byDeltaX: 0, deltaY: target.midY > visible.midY ? -250 : 250)
+                } else if target.midX < visible.midX && target.minX < visible.minX + 20 {
+                    across.scroll(byDeltaX: 250, deltaY: 0)
+                } else if target.midX > visible.midX && target.maxX > visible.maxX - 20 {
+                    across.scroll(byDeltaX: -250, deltaY: 0)
                 } else if target.midX < visible.minX + 20 || target.midX > visible.maxX - 20 {
                     across.scroll(byDeltaX: target.midX > visible.midX ? -250 : 250, deltaY: 0)
                 } else {
@@ -23696,8 +23727,19 @@ final class PlayhouseUITests: XCTestCase {
                 }
                 scrolls += 1
             }
-            XCTAssertTrue(element.isHittable, "\(element) should be on screen after scrolling the catalog page.")
+            XCTAssertTrue(hasHitTarget(element), "\(element) should be on screen after scrolling the catalog page.")
             return element
+        }
+        func clickNativeRadio(_ label: String) {
+            let button = pair("skills-tab-picker").native.radioButtons[label]
+            if button.isHittable {
+                button.click()
+                return
+            }
+            // This Picker is visibly inside the nested horizontal comparison
+            // scroll view, but AppKit doesn't expose a hit point for its radio
+            // buttons to XCTest. Tap the same visible screen frame directly.
+            button.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
         }
         func assertSameSize(_ identifier: String) {
             let (js, native) = pair(identifier)
@@ -23763,14 +23805,16 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(js("skill-row-release-notes").exists, "Global replaces the repository's skills.")
         XCTAssertTrue(native("native-skill-row-release-notes").exists, "The native page stays on Repo.")
         attachScreenshot(named: "Skills page: JavaScript on Global, native still on Repo")
-        reveal(pair("skills-tab-picker").native).radioButtons["Global"].click()
+        reveal(pair("skills-tab-picker").native)
+        clickNativeRadio("Global")
         XCTAssertTrue(native("native-skill-row-shared-notes").waitToExist(timeout: 5), "The native picker moves its own page.")
         for identifier in ["skill-row-shared-notes", "skill-linked-shared-notes", "skill-row-quiet-skill", "skill-toggle-quiet-skill"] {
             assertSameSize(identifier)
         }
         reveal(pair("skills-tab-picker").js).radioButtons["Repo"].click()
         XCTAssertTrue(js("skill-row-release-notes").waitToExist(timeout: 5))
-        reveal(pair("skills-tab-picker").native).radioButtons["Repo"].click()
+        reveal(pair("skills-tab-picker").native)
+        clickNativeRadio("Repo")
         XCTAssertTrue(native("native-skill-row-release-notes").waitToExist(timeout: 5))
 
         // The switch runs onToggle and turns Use off; Use runs its handler.
@@ -23810,7 +23854,8 @@ final class PlayhouseUITests: XCTestCase {
         reveal(pair("skills-tab-picker").js).radioButtons["Built-in"].click()
         XCTAssertTrue(js("skill-row-simplify").waitToExist(timeout: 5))
         XCTAssertFalse(js("skill-select-simplify").exists, "A built-in skill shows no checkbox.")
-        reveal(native("native-skill-row-release-notes")).press(forDuration: 1.0)
+        let nativeSkillText = reveal(native("native-skill-text-release-notes"))
+        nativeSkillText.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.0)
         XCTAssertTrue(native("native-skills-selection-count").waitToExist(timeout: 5), "The native row starts selecting too.")
         for identifier in ["skills-selection-count", "skills-fix-selected", "skills-delete-selected", "skills-selection-done"] {
             assertSameSize(identifier)
@@ -23822,7 +23867,8 @@ final class PlayhouseUITests: XCTestCase {
         reveal(js("skills-selection-done")).click()
         XCTAssertTrue(waitUntil({ !js("skills-selection-count").exists && self.pluginText(lastAction) == "Last: done selecting" }, timeout: 5), "Done ends selecting.")
         XCTAssertTrue(js("skill-toggle-release-notes").waitToExist(timeout: 5), "Rows show their controls again.")
-        reveal(native("native-skills-selection-done")).click()
+        let nativeDone = reveal(native("native-skills-selection-done"))
+        nativeDone.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
 
         // The actions menu runs onMenu with the chosen item's id.
         reveal(js("skill-actions-release-notes")).click()
