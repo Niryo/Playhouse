@@ -137,6 +137,8 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
     /// Installed plugins' entries (and Add Plugin mode's placeholder) beside
     /// the Skills button; native, and absent from the catalog's copy.
     var pluginActions: AnyView? = nil
+    /// The editor's `@` mentions; native, and absent from the catalog's copy.
+    var mentions = ChatEditorMentions()
 
     var body: some View {
         AtomPanel(
@@ -153,7 +155,7 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
                 common: AtomCommon(testID: prefix + "message-composer-scroll-view", hint: model.editorHelp),
                 onChange: actions.change, onSubmit: actions.submit, onSteerSubmit: actions.steer,
                 onFocusChange: actions.focusChange, onPasteImage: actions.pasteImage,
-                onSelectionChange: actions.selectionChange
+                onSelectionChange: actions.selectionChange, mentions: mentions
             )
             toolbar
         }
@@ -374,5 +376,87 @@ struct ComposerModelPicker: View {
 extension ComposerView where Header == EmptyView, ScheduleContent == EmptyView {
     init(model: ComposerModel, actions: ComposerActions = ComposerActions()) {
         self.init(model: model, actions: actions, header: { EmptyView() }, scheduleContent: { EmptyView() })
+    }
+}
+
+/// The `@` mention menu above the composer: the suggestions for what follows the `@`, the
+/// highlighted one first in keyboard order. Rows are plugin atoms; the list is a native scroll
+/// view so the highlighted row stays in view as the arrow keys move it.
+struct ComposerMentionMenu: View {
+    let query: String
+    let items: [MentionItem]
+    /// Whether `items` are the recent mentions an empty query shows.
+    let showsRecent: Bool
+    let isLoading: Bool
+    let selectedIndex: Int
+    let select: (MentionItem) -> Void
+
+    var body: some View {
+        AtomPanel(
+            props: PanelProps(spacing: 4, fill: "panel", fillOpacity: 1, cornerRadius: 12, stroke: "primary", strokeOpacity: 0.14),
+            common: AtomCommon(testID: "mention-menu", label: "Mentions", value: title, width: 420, padding: 6)
+        ) {
+            AtomText(
+                props: TextProps(text: title, size: 11, weight: "semibold", color: "secondary", lineLimit: 1, truncation: "tail"),
+                common: AtomCommon(testID: "mention-menu-title", paddingX: 8, paddingY: 3)
+            )
+            if items.isEmpty {
+                AtomText(
+                    props: TextProps(text: isLoading ? "Loading…" : "Nothing to mention matches “\(query)”", size: 12, color: "tertiary"),
+                    common: AtomCommon(testID: "mention-menu-empty", paddingX: 8, paddingY: 6)
+                )
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 1) {
+                            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                                row(item, selected: index == selectedIndex).id(item.id)
+                            }
+                        }
+                        .hoverRevealScrollers()
+                    }
+                    // Rows are 30 points with a 1-point gap; ten show before the list scrolls.
+                    .frame(height: min(CGFloat(items.count) * 31, 310))
+                    .onChange(of: selectedIndex) { _, index in
+                        if items.indices.contains(index) { proxy.scrollTo(items[index].id) }
+                    }
+                }
+            }
+        }
+    }
+
+    private var title: String {
+        if !query.isEmpty { return "Mention matching “\(query)”" }
+        return showsRecent ? "Recent mentions" : "Mention a rule, skill, MCP server, agent, repository or task"
+    }
+
+    private func row(_ item: MentionItem, selected: Bool) -> some View {
+        AtomButton(
+            props: ButtonProps(selected: selected),
+            common: AtomCommon(testID: "mention-item-\(item.handle)", label: "@" + item.handle, value: item.kind.title, help: item.detail.isEmpty ? item.title : item.detail),
+            action: { select(item) }
+        ) {
+            AtomStack(
+                props: StackProps(axis: "h", spacing: 8, fill: selected ? "accent" : nil, fillOpacity: 0.16, cornerRadius: 7),
+                common: AtomCommon(minHeight: 30, fillWidth: true, paddingX: 8)
+            ) {
+                AtomIcon(props: IconProps(name: Self.icon(item.kind), size: 12, weight: "medium", color: "secondary"), common: AtomCommon(width: 16))
+                AtomText(props: TextProps(text: "@" + item.handle, size: 13, weight: "semibold", color: "accent", lineLimit: 1, truncation: "middle"))
+                AtomText(props: TextProps(text: item.kind.title, size: 11, weight: "medium", color: "tertiary", lineLimit: 1))
+                AtomSpacer(props: SpacerProps(minLength: 6))
+                AtomText(props: TextProps(text: item.detail, size: 11, color: "secondary", lineLimit: 1, truncation: "tail"))
+            }
+        }
+    }
+
+    static func icon(_ kind: MentionKind) -> String {
+        switch kind {
+        case .rule: "list.bullet.rectangle"
+        case .skill: "sparkles"
+        case .mcp: "server.rack"
+        case .agent: "person.crop.circle"
+        case .repository: "folder"
+        case .task: "checklist"
+        }
     }
 }

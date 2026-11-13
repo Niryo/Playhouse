@@ -708,6 +708,12 @@ enum PlayhouseCLI {
             default:
                 throw CLIError.usage("Unknown rules operation \(operation).")
             }
+        case "mentions":
+            guard rest.first == "list" else { throw CLIError.usage("Use: playhouse mentions list --task <task-id> [--query <text>]") }
+            let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--task", "--query"])
+            var arguments: [String: BridgeValue] = ["taskID": .string(try requiredFlag("--task", flags: flags).first!)]
+            if let query = flags["--query"]?.first { arguments["query"] = .string(query) }
+            return BridgeRequest(command: "mentions.list", arguments: arguments)
         case "schedule":
             guard let operation = rest.first else {
                 throw CLIError.usage("Use: playhouse schedule list|set|clear|pause|resume|run-now|tick ...")
@@ -1143,6 +1149,7 @@ enum PlayhouseCLI {
       playhouse skills delete --skill <skill-id> [--skill <skill-id>...] [--task <task-id>]
       playhouse skills fix --task <task-id> --skill <skill-id> [--skill <skill-id>...]
       playhouse skills bridge --task <task-id> [--message <text>]
+      playhouse mentions list --task <task-id> [--query <text>]
       playhouse rules list [--task <task-id>]
       playhouse rules get --rule <rule-id> [--task <task-id>]
       playhouse rules create --scope <repo|global> [--name <name>] [--path <glob>...] --body <text> [--task <task-id>] [--root <repo-path>]

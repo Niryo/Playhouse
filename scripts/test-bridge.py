@@ -2782,7 +2782,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(any(message["text"] == "Do not overtake Mars" for message in recovered_messages))
         self.assertIn("Another thought about Mars", [message["text"] for message in recovered_messages])
 
-    # case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a fixed standard-width (200-point) Kanban sidebar and left of the columns while they scroll, and places its Scheduled Tasks button inside the sidebar below the full logo header. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
+    # case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a fixed standard-width (216-point) Kanban sidebar, 8% wider than its previous 200-point width and left of the columns while they scroll, and places its Scheduled Tasks button inside the sidebar below the full logo header. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):
         response, _ = self.call_cli("status")
         status = self.assert_success(response)
@@ -2883,7 +2883,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["savedPrompt"], "Protected draft")
 
-    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory, and run.sh drops PLAYHOUSE_BRIDGE_SERVICE_NAME and PLAYHOUSE_BRIDGE_SOCKET_PATH inherited from another Playhouse app, saying so, while keeping the launching worktree's own bridge. After its build and right before it opens the app, run.sh again stops this worktree's app and bridge daemon, so a daemon started from the previous build during the build cannot serve the new app. A saved conversation remains visible after an app restart.
+    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory, and run.sh drops PLAYHOUSE_BRIDGE_SERVICE_NAME and PLAYHOUSE_BRIDGE_SOCKET_PATH inherited from another Playhouse app, saying so, while keeping the launching worktree's own bridge. run.sh keeps this worktree's running app open during its build and stops this worktree's app and bridge daemon only once, after the build and right before it opens the app, so a daemon started from the previous build during the build cannot serve the new app. A saved conversation remains visible after an app restart.
     def test_worktree_app_profiles_isolate_identity_and_store(self):
         script = Path(__file__).resolve().parent / "app-profile.sh"
         linked = self.fixture / "existing-worktree"
@@ -2990,10 +2990,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn("playhouse_clear_inherited_bridge_overrides\nopen -n", (Path(script).parent / "run.sh").read_text(encoding="utf-8"),
                       "run.sh must clear inherited bridge overrides right before it opens the app.")
         run_script = (Path(script).parent / "run.sh").read_text(encoding="utf-8")
-        self.assertIn('terminate_running_playhouse "started from the previous build"\nplayhouse_clear_inherited_bridge_overrides\nopen -n', run_script,
+        self.assertIn('terminate_running_playhouse "now that the new build is ready"\nplayhouse_clear_inherited_bridge_overrides\nopen -n', run_script,
                       "run.sh must stop a daemon started from the previous build right before it opens the app.")
-        self.assertLess(run_script.index("xcodebuild build"), run_script.index('terminate_running_playhouse "started from the previous build"'),
-                        "run.sh must stop the previous build's processes again after xcodebuild finishes.")
+        self.assertLess(run_script.index("xcodebuild build"), run_script.index('terminate_running_playhouse "now that the new build is ready"'),
+                        "run.sh must stop the previous build's processes after xcodebuild finishes.")
+        self.assertEqual(run_script.count("\nterminate_running_playhouse "), 1,
+                         "run.sh must keep the running app open during the build and stop it only once, after the build.")
         # The bridge daemon and CLI ship flat in Contents/MacOS and resolve
         # their identity from this same Info.plist via `Bundle.main` (no
         # separate XPC bundle/Info.plist to cross-check anymore); the service
@@ -3777,7 +3779,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.primary, "rev-parse", branch), branch_head, "The branch must keep its commits without merging.")
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_done_task_accepts_follow_up_conversation | A Done task keeps its conversation open: the UI shows the composer with an archived hint naming the merge target instead of a read-only notice, and its changes read reports no changes rather than a Git error for the removed worktree; and a follow-up sent from a Done task runs a real provider turn in the source repository of its removed worktree. The turn is told the task is archived, that a question-only turn leaves it Done, that it has no worktree for edits, and to run `task repository renew` before any Git change; its completed outcome leaves the task Done with no new worktree, the follow-up and its reply persist in the history across fresh reads, and switching the Done task's provider is still rejected.
+    # case-contract: test_done_task_accepts_follow_up_conversation | A Done task keeps its conversation open: the UI shows the composer with an archived hint saying a follow-up reopens the task in a fresh worktree from the merge target, instead of a read-only notice; its changes read reports no changes rather than a Git error for the removed worktree, and switching its provider is rejected. A follow-up sent from a Done task moves it back to In Progress before the turn starts, so it shows in the board's In Progress column while the agent works, with a fresh worktree renewed for the removed one. The real provider turn runs in that fresh worktree and is told it as an active task worktree rather than that the task is archived; its completed outcome moves the task to Review, the removed worktree stays removed, and the follow-up and its reply persist in the history across fresh reads. A Done task with no worktree to renew (one with only a context root) reopens to In Progress for its follow-up the same way, keeps that root, and its completed outcome moves it to Review.
     def test_done_task_accepts_follow_up_conversation(self):
         task = self.create_repo_task("Archived follow-up", [self.primary], materialize=True)
         record = task["repositoryWorktrees"][0]
@@ -3787,34 +3789,129 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(worktree.exists(), "Moving to Done removes the managed worktree before the follow-up.")
         changes = self.assert_success(self.call_cli("task", "changes", "list", task["id"])[0])
         self.assertEqual((changes["unviewed"], changes["viewed"]), ([], []), "A Done task reads no Git changes for its removed worktree instead of failing.")
+        done_switch, _ = self.call_cli("conversation", "provider", task["id"], "set", "claude", expected_status=2)
+        self.assert_failure(done_switch, "invalid_argument")
+        self.assertIn("Done tasks are closed", done_switch["error"]["message"])
         executable = self.data_directory / "codex-fixture"
         question = "Which files did this archived task change?"
-        self.complete_fixture_turn(task["id"], message=question, expected_status="Done")
+        running = {}
+
+        def inspect_running_follow_up():
+            # While the agent works on the follow-up, the task sits in the board's In Progress column.
+            current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+            self.assertEqual(current["status"], "In Progress", "A follow-up moves the Done task back to In Progress.")
+            board = self.assert_success(self.call_cli("board", "list")[0])["tasks"]
+            self.assertEqual(next(item for item in board if item["id"] == task["id"])["status"], "In Progress")
+            running["record"] = current["repositoryWorktrees"][0]
+
+        self.complete_fixture_turn(task["id"], message=question, while_turn_held=inspect_running_follow_up)
+        fresh = running["record"]
+        fresh_worktree = Path(fresh["worktreePath"])
+        self.assertNotEqual(fresh["worktreePath"], record["worktreePath"], "The reopened task works in a fresh worktree.")
+        self.assertFalse(fresh["isPending"])
+        self.assertEqual(fresh["repositoryPath"], record["repositoryPath"])
+        self.assertTrue(fresh_worktree.exists(), "Reopening renews the removed worktree.")
+        self.assertFalse(worktree.exists(), "The removed worktree stays removed.")
         turn_data = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
         follow_up = turn_data["turns"][-1]
         self.assertIn(question, follow_up["userMessage"])
-        self.assertEqual(follow_up["cwd"], record["repositoryPath"], "A Done task's follow-up runs in the source repository of its removed worktree.")
-        self.assertEqual(follow_up["runtimeWorkspaceRoots"], [record["repositoryPath"]])
+        self.assertEqual(follow_up["cwd"], fresh["worktreePath"], "The follow-up runs in the fresh worktree.")
+        self.assertEqual(follow_up["runtimeWorkspaceRoots"], [fresh["worktreePath"]])
         instructions = turn_data["threadResumeDeveloperInstructions"][-1]
-        self.assertIn("This task is Done (archived)", instructions)
-        self.assertIn("A question-only turn leaves the task Done", instructions)
-        self.assertIn(f"task repository renew {task['id']} --repo <path>", instructions)
-        self.assertIn("Active task worktrees for edits: none", instructions, "An archived task offers no worktree for edits until it renews one.")
+        self.assertNotIn("This task is Done (archived)", instructions, "The follow-up runs as an active task.")
+        self.assertIn(f"Active task worktrees for edits: {record['repositoryPath']} -> {fresh['worktreePath']}", instructions)
         current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
-        self.assertEqual(current["status"], "Done", "The completed outcome of a follow-up leaves the task Done.")
-        self.assertEqual(current["repositoryWorktrees"][0]["worktreePath"], record["worktreePath"], "A question-only turn creates no worktree.")
-        self.assertFalse(worktree.exists())
+        self.assertEqual(current["status"], "Review", "The follow-up's completed outcome moves the reopened task to Review.")
+        self.assertEqual(current["repositoryWorktrees"][0]["worktreePath"], fresh["worktreePath"])
         history = self.assert_success(self.call_cli(
             "conversation", "history", task["id"],
             extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )[0])["messages"]
-        self.assertTrue(any(message["role"] == "user" and question in message["text"] for message in history), "The follow-up persists in the Done task's history.")
+        self.assertTrue(any(message["role"] == "user" and question in message["text"] for message in history), "The follow-up persists in the reopened task's history.")
         self.assertGreaterEqual(sum(1 for message in history if message["role"] == "assistant"), 2, "The follow-up's reply joins the earlier conversation.")
-        done_switch, _ = self.call_cli("conversation", "provider", task["id"], "set", "claude", expected_status=2)
-        self.assert_failure(done_switch, "invalid_argument")
-        self.assertIn("Done tasks are closed", done_switch["error"]["message"])
 
-    # case-contract: test_merged_task_renew_opens_fresh_worktree_and_new_pr | `task repository renew` starts follow-up Git work after a pull request merged. It is rejected while the repository has no linked pull request, while the linked pull request is unmerged, and while the merged worktree has uncommitted changes, leaving the task unchanged. A merged PR status read persists that it merged, and the next turn is told the merged branch is finished and to renew before Git changes. Renewing from inside the agent's turn retires the record with its merged PR to the task's past repositories, keeps the merged branch, removes the old worktree once that turn ends, and creates a fresh worktree on a new suffixed branch based on the merge target as just fetched from the remote, so it holds the merged commits even when the local target is stale. A new pull request then opens from the fresh worktree, and the card shows the merged PR in purple beside the new one; once the task is Done, the archive row lists both. A Done task renews too, from inside its follow-up turn: it returns to In Progress with a fresh worktree for every repository whose worktree was removed (a past link only for records that had a pull request), and that turn's completed outcome moves it to Review, keeping both merged PRs on fresh reads.
+        # A task with only a context root has no worktree to renew; its follow-up still reopens it.
+        rooted = self.assert_success(self.call_cli("task", "create", "--title", "Archived rooted follow-up", "--prompt", "Fixture task description.", "--root", self.primary)[0])
+        self.complete_fixture_turn(rooted["id"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "move", rooted["id"], "Done")[0])["status"], "Done")
+        rooted_running = {}
+
+        def inspect_rooted_follow_up():
+            rooted_running["record"] = self.assert_success(self.call_cli("task", "get", rooted["id"])[0])
+
+        self.complete_fixture_turn(rooted["id"], message="One more question.", while_turn_held=inspect_rooted_follow_up)
+        self.assertEqual(rooted_running["record"]["status"], "In Progress", "A follow-up reopens a Done task that has no worktree to renew.")
+        self.assertEqual(rooted_running["record"]["repositoryWorktrees"], [])
+        self.assertEqual(rooted_running["record"]["workspaceRoots"], [str(self.primary)])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", rooted["id"])[0])["status"], "Review")
+
+    # case-contract: test_done_task_follow_up_reopen_failure_keeps_task_done | A follow-up to a Done task whose merge target no longer exists cannot renew its removed worktree: the send fails with the missing merge target error, the task stays Done with no new worktree and no provider turn, and the follow-up is not left pending as a submitted prompt, so the UI composer keeps its text.
+    def test_done_task_follow_up_reopen_failure_keeps_task_done(self):
+        target = "reopen-failure-target"
+        self.run_git(self.primary, "branch", target, "main")
+
+        def remove_target():
+            if self.branch_exists(self.primary, target):
+                self.run_git(self.primary, "branch", "-D", target)
+
+        self.addCleanup(remove_target)
+        task = self.create_repo_task("Reopen failure", [self.primary], merge_targets={self.primary: target}, materialize=True)
+        record = task["repositoryWorktrees"][0]
+        self.assertEqual(self.assert_success(self.call_cli("task", "move", task["id"], "Done")[0])["status"], "Done")
+        self.assertFalse(Path(record["worktreePath"]).exists())
+        self.run_git(self.primary, "branch", "-D", target)
+        executable = self.data_directory / "codex-fixture"
+        history_path = Path(str(executable) + ".history")
+        turns_before = len(json.loads(history_path.read_text(encoding="utf-8"))["turns"])
+        failed, _ = self.call_cli(
+            "conversation", "send", task["id"], "--message", "Can you follow up on this?",
+            expected_status=1, extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assert_failure(failed, "operation_failed")
+        self.assertIn(f"The merge target '{target}' doesn't exist", failed["error"]["message"])
+        current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(current["status"], "Done", "A follow-up that cannot reopen the task leaves it Done.")
+        self.assertEqual(current["repositoryWorktrees"][0]["worktreePath"], record["worktreePath"], "A failed reopen creates no worktree.")
+        self.assertIsNone(current.get("pendingSubmittedPrompt"), "The failed follow-up is not left pending.")
+        self.assertEqual(len(json.loads(history_path.read_text(encoding="utf-8"))["turns"]), turns_before, "No provider turn runs.")
+
+    # case-contract: test_done_task_follow_up_setup_failure_restores_draft | A Done task with only a context folder reopens without creating a worktree, but if that folder disappears and no default parent is configured, a bridge follow-up send fails before a provider turn starts; the task moves to Waiting Response, and the submitted prompt returns to its draft. The test then restores the folder so the UI can reopen the task and display the returned draft.
+    def test_done_task_follow_up_setup_failure_restores_draft(self):
+        context_root = self.data_directory / "removed-follow-up-context"
+        context_root.mkdir()
+        self.assert_success(self.call_cli("settings", "set-parent", self.fixture)[0])
+        task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Missing follow-up root", "--prompt", "Fixture task description.", "--root", context_root,
+        )[0])
+        self.complete_fixture_turn(task["id"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "move", task["id"], "Done")[0])["status"], "Done")
+        shutil.rmtree(context_root)
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "codex-fixture"
+        history_path = Path(str(executable) + ".history")
+        turns_before = len(json.loads(history_path.read_text(encoding="utf-8"))["turns"])
+        failed, _ = self.call_cli(
+            "conversation", "send", task["id"], "--message", "Follow up after the context folder vanished.",
+            expected_status=1, extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assert_failure(failed, "settings_required")
+        self.assertIn("repository root folder", failed["error"]["message"].lower())
+        current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(current["status"], "Waiting Response")
+        self.assertEqual(current["repositoryWorktrees"], [])
+        self.assertIsNone(current.get("pendingSubmittedPrompt"))
+        self.assertTrue(current["hasUnsentDraft"])
+        self.assertEqual(
+            current["savedPrompt"],
+            "Follow up after the context folder vanished.\n\nFixture task description.",
+            "The submitted follow-up returns to draft without losing the prior unsent draft.",
+        )
+        board = self.assert_success(self.call_cli("board", "list")[0])["tasks"]
+        self.assertEqual(next(item for item in board if item["id"] == task["id"])["status"], "Waiting Response")
+        self.assertEqual(len(json.loads(history_path.read_text(encoding="utf-8"))["turns"]), turns_before, "No provider turn runs.")
+        context_root.mkdir()
+
+    # case-contract: test_merged_task_renew_opens_fresh_worktree_and_new_pr | `task repository renew` starts follow-up Git work after a pull request merged. It is rejected while the repository has no linked pull request, while the linked pull request is unmerged, and while the merged worktree has uncommitted changes, leaving the task unchanged. A merged PR status read persists that it merged, and the next turn is told the merged branch is finished and to renew before Git changes. Renewing from inside the agent's turn retires the record with its merged PR to the task's past repositories, keeps the merged branch, removes the old worktree once that turn ends, and creates a fresh worktree on a new suffixed branch based on the merge target as just fetched from the remote, so it holds the merged commits even when the local target is stale. A new pull request then opens from the fresh worktree, and the card shows the merged PR in purple beside the new one; once the task is Done, the archive row lists both. A Done task renews too: a follow-up to it returns it to In Progress before its turn starts, and `task repository renew` on a Done task does the same, each with a fresh worktree for every repository whose worktree was removed (a past link only for records that had a pull request); that turn's completed outcome moves it to Review, keeping both merged PRs on fresh reads.
     def test_merged_task_renew_opens_fresh_worktree_and_new_pr(self):
         remote_root = self.data_directory / "renew-remotes"
         self.assertFalse(remote_root.exists(), "Each case must start with an isolated remote fixture directory.")
@@ -3942,8 +4039,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(archived["repositoryWorktrees"][0]["isPullRequestMerged"])
 
         def reopen_during_turn():
-            reopened = self.assert_success(self.call_cli(*renew_command, extra_environment=gh_environment)[0])
-            self.assertEqual(reopened["status"], "In Progress", "Renewing a Done task moves it back to In Progress.")
+            # The follow-up itself renewed the removed worktree before its turn started.
+            reopened = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+            self.assertEqual(reopened["status"], "In Progress", "A follow-up moves the Done task back to In Progress.")
             renewal["reopened"] = reopened
 
         self.complete_fixture_turn(task["id"], message="Please make one more change.", expected_status="Review", extra_environment=gh_environment, while_turn_held=reopen_during_turn)
@@ -9780,7 +9878,14 @@ class PlayhouseBridgeTests(unittest.TestCase):
         active_updates = []
         try:
             deadline = time.monotonic() + 15
-            while (not ready.exists() or len(active_children) < 2) and time.monotonic() < deadline:
+            while (
+                not ready.exists()
+                or len(active_children) < 2
+                or sum(
+                    activity.get("childThreadID") == "00000000-0000-0000-0000-000000000002"
+                    for activity in active_updates
+                ) < 2
+            ) and time.monotonic() < deadline:
                 if process.stdout is not None:
                     readable, _, _ = select.select([process.stdout], [], [], 0.02)
                     if readable:
@@ -10412,9 +10517,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         assistant = next(message for message in visible["messages"] if message["role"] == "assistant")
         self.assertEqual(assistant["modelID"], "claude-opus-5-5", "Changing the selected model must not rewrite prior turn attribution.")
 
-    # case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
+    # case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting a first Goal on an Untitled task generates and persists its title from the objective before the Goal starts, while title failure uses the first eight objective words as fallback; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI shows the generated title after reopening the task and restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
     def test_thread_goal_lifecycle_persists_through_cli_xpc(self):
-        task_id = self.create_task(title="Durable goal", roots=[self.primary])["id"]
+        task_id = self.create_task(title="Untitled task", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-goal"
         shutil.copyfile(fixture, executable)
@@ -10430,6 +10535,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         goal_text = "Migrate the project and keep the full test suite green."
         result, _ = self.call_cli("conversation", "goal", task_id, "set", "--text", goal_text, extra_environment=env)
         self.assertEqual(self.assert_success(result)["objective"], goal_text)
+        titled_task, _ = self.call_cli("task", "get", task_id)
+        self.assertEqual(self.assert_success(titled_task)["title"], "Generated fixture title",
+                         "The first Goal should generate and persist the Untitled task's title from its objective.")
         launch_arguments = json.loads(Path(str(executable) + ".launch-args").read_text(encoding="utf-8"))
         self.assertIn("features.goals=true", launch_arguments, "CLI/XPC Goal commands must enable Codex's Goals app-server feature.")
         task, _ = self.call_cli("task", "get", task_id)
@@ -10469,6 +10577,26 @@ class PlayhouseBridgeTests(unittest.TestCase):
         replacement_reported_seconds = float(replacement_goal.get("timeUsedSeconds") or 0)
         expected_baseline = prior_reported_seconds if replacement_reported_seconds >= prior_reported_seconds else 0
         self.assertAlmostEqual(float(replacement_baseline), expected_baseline, places=3, msg="A new Goal must use only the prior total when Codex reports cumulative time.")
+
+        failure_fixture = self.data_directory / "codex-fixture-goal-title-failure"
+        shutil.copyfile(fixture, failure_fixture)
+        failure_fixture.chmod(0o755)
+        failure_home = self.data_directory / "codex-home-title-failure"
+        failure_home.mkdir()
+        failure_environment = {
+            "CODEX_HOME": str(failure_home),
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(failure_fixture),
+        }
+        failure_task_id = self.create_task(title="Untitled task", roots=[self.primary])["id"]
+        failure_objective = "Explain how repository setup works for new contributors"
+        fallback_goal, _ = self.call_cli(
+            "conversation", "goal", failure_task_id, "set", "--text", failure_objective,
+            extra_environment=failure_environment,
+        )
+        self.assertEqual(self.assert_success(fallback_goal)["objective"], failure_objective)
+        fallback_task, _ = self.call_cli("task", "get", failure_task_id)
+        self.assertEqual(self.assert_success(fallback_task)["title"], failure_objective,
+                         "A failed first-Goal title generation should use the deterministic objective fallback.")
 
     def recorded_codex_app_servers(self, launches):
         """The app-servers a `-single-server` fixture recorded: socket servers, and stdio launches
@@ -10732,7 +10860,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         probe = self.data_directory / "codex-question-ownership-probe"
         core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "HoverRevealScrollers", "WorkspaceChanges", "CodexAppServerClient",
                 "CodexSocketConnection", "AgentRunHost", "ContextCompaction", "ConversationModel", "ClaudeCodeClient", "ProviderRequestLog", "ProcessCPUSampler", "AgentUsage", "AgentUsageStore", "ConversationTranscriptStore",
-                "StandaloneChatStore", "SkillCatalog", "RuleCatalog", "McpCatalog", "CodexConfigTOML", "BridgeCore", "TaskSchedule"]
+                "StandaloneChatStore", "SkillCatalog", "RuleCatalog", "MentionCatalog", "McpCatalog", "CodexConfigTOML", "BridgeCore", "TaskSchedule"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine", "JavaScriptCore"):
             command.extend(["-framework", framework])
@@ -14762,6 +14890,134 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
     def rule_section(self, catalog, name):
         return self.rules_by_name(next(section for section in catalog["repositories"] if section["name"] == name)["rules"])
+
+    # case-contract: test_mentions_menu_lists_expands_and_remembers_recent | Typing @ in the composer opens a mention menu that lists, in order, the task's enabled rules, then its skills, MCP servers, agents (Claude Code's .claude/agents and Codex's .codex/agents, an agent both define being one item that names both files, the running provider's first), repositories (the task's own and those under the repository root), then other board tasks; before anything was mentioned, an empty query shows that whole list. Typing after the @ filters it, items whose handle starts with the query first, and a query nothing matches shows an empty state. The arrow keys move the highlight, Return or Tab inserts the highlighted item, and a click inserts the clicked one, as @handle drawn in the accent color; Escape closes the menu while keeping the typed text. Sending appends a <playhouse-mentions> block naming each mentioned item with its full path or details (for the task's repository, also its worktree), only for known handles that start a word, and the provider receives it while the transcript shows only the typed message, once, with its mentions drawn in the accent color, and the task's saved prompt keeps the typed text. Steering an active Codex turn expands its mentions the same way, exactly once, and shows the steer once, while a steer that misses its turn is queued as typed. The sent mentions become the recent mentions, most recent first and ten at most, which an empty query then shows instead, and they persist across fresh CLI processes. Listing mentions without a task is a usage error, and for an unknown task is not_found.
+    def test_mentions_menu_lists_expands_and_remembers_recent(self):
+        repository = self.make_skill_repository("mention-repo", {
+            "AGENTS.md": "# Mention repo rules\nKeep it tidy.\n",
+            ".agents/skills/mention-skill/SKILL.md": self.skill_manifest("mention-skill", "A skill to mention"),
+            **{f".agents/skills/mention-extra-{n}/SKILL.md": self.skill_manifest(f"mention-extra-{n}", "Another skill to mention") for n in range(1, 5)},
+            ".mcp.json": json.dumps({"mcpServers": {"docs-server": {"type": "stdio", "command": "node", "args": ["docs.js"]}}}),
+            ".claude/agents/reviewer.md": "---\nname: reviewer\ndescription: Reviews changes\n---\n\nReview the diff.\n",
+            ".codex/agents/reviewer.toml": 'name = "reviewer"\ndescription = "Reviews changes"\ndeveloper_instructions = """Review."""\n',
+            ".codex/agents/helper.toml": 'name = "helper"\ndescription = "Codex-only helper"\n',
+        })
+        environment = self.install_claude_fixture("claude-fixture-mentions")
+        history_path = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".history")
+        other = self.create_task("Other mention task", roots=[])
+        task = self.create_skills_task("Mention task", [repository], provider="claude")
+        task_id = task["id"]
+        worktree = task["repositoryWorktrees"][0]["worktreePath"]
+
+        listed = self.assert_success(self.call_cli("mentions", "list", "--task", task_id)[0])
+        items = listed["items"]
+        by_handle = {item["handle"]: item for item in items}
+        order = ["rule", "skill", "mcp", "agent", "repository", "task"]
+        kinds = [item["kind"] for item in items]
+        self.assertEqual(kinds, sorted(kinds, key=order.index), "Rules come first, then skills, MCP servers, agents, repositories and tasks.")
+        self.assertEqual(kinds[0], "rule")
+        self.assertEqual(len(by_handle), len(items), "Every handle is unique.")
+        rule = by_handle["mention-repo/AGENTS.md"]
+        self.assertEqual(rule["kind"], "rule")
+        self.assertSamePath(rule["reference"].split("`")[1], Path(worktree) / "AGENTS.md")
+        self.assertEqual(by_handle["mention-skill"]["kind"], "skill")
+        self.assertIn("mention-skill/SKILL.md", by_handle["mention-skill"]["reference"])
+        self.assertEqual(by_handle["docs-server"]["kind"], "mcp")
+        reviewer = by_handle["reviewer"]
+        self.assertEqual(reviewer["kind"], "agent")
+        self.assertEqual(reviewer["detail"], "Reviews changes")
+        self.assertIn(".claude/agents/reviewer.md", reviewer["reference"], "An agent both providers define names Claude's subagent file.")
+        self.assertIn(".codex/agents/reviewer.toml", reviewer["reference"], "and Codex's agent file, in one item.")
+        self.assertLess(reviewer["reference"].index("Claude Code subagent"), reviewer["reference"].index("Codex agent"),
+                        "The running provider's definition comes first.")
+        self.assertEqual(by_handle["helper"]["kind"], "agent")
+        own = by_handle["mention-repo"]
+        self.assertEqual(own["kind"], "repository")
+        self.assertEqual(own["id"], f"repository:{repository}")
+        self.assertIn(worktree, own["reference"], "The task's own repository names its worktree.")
+        self.assertEqual(by_handle["primary"]["kind"], "repository", "Repositories under the repository root are listed too.")
+        self.assertEqual(by_handle["Other-mention-task"]["id"], f"task:{other['id']}")
+        self.assertNotIn("Mention-task", by_handle, "The task never mentions itself.")
+        self.assertEqual(listed["recentIDs"], [])
+        self.assertEqual([item["id"] for item in listed["suggestions"]], [item["id"] for item in items],
+                         "Before anything was mentioned, an empty query shows the whole list.")
+        searched = self.assert_success(self.call_cli("mentions", "list", "--task", task_id, "--query", "rev")[0])["suggestions"]
+        self.assertEqual(searched[0]["handle"], "reviewer", "A handle that starts with the query comes first.")
+        self.assertTrue(all("rev" in (item["handle"] + item["title"] + item["detail"]).lower() for item in searched))
+        self.assertEqual(self.assert_success(self.call_cli("mentions", "list", "--task", task_id, "--query", "zzz-nothing")[0])["suggestions"], [])
+
+        message = "Ask @reviewer to check @mention-repo, then mail me@example.com about @unknown."
+        # Without an unsent draft to keep, the send becomes the task's saved prompt.
+        self.assert_success(self.call_cli("task", "prompt", task_id, "--text", "")[0])
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", message, extra_environment=environment)[0])
+        turn = next(turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if (turn.get("userText") or "").startswith("Ask @reviewer"))
+        sent = turn["userText"]
+        self.assertTrue(sent.startswith(message + "\n\n<playhouse-mentions>\n"), sent)
+        self.assertTrue(sent.endswith("</playhouse-mentions>"), sent)
+        lines = [line for line in sent.splitlines() if line.startswith("- @")]
+        self.assertEqual(len(lines), 2, f"Only the known handles that start a word are expanded: {lines}")
+        self.assertEqual(lines[0], f"- @reviewer (agent): {reviewer['reference']}")
+        self.assertEqual(lines[1], f"- @mention-repo (repository): {own['reference']}", "Trailing punctuation still ends the mention.")
+        history = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        stored = next(entry for entry in history["messages"] if entry["role"] == "user" and entry["text"].startswith(message))
+        self.assertIn("<playhouse-mentions>", stored["text"], "The transcript keeps the block, which the conversation view hides.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["savedPrompt"], message,
+                         "The task's saved prompt keeps the typed text.")
+
+        after = self.assert_success(self.call_cli("mentions", "list", "--task", task_id)[0])
+        self.assertEqual(after["recentIDs"], ["agent:reviewer", f"repository:{repository}"], "Sent mentions become recent, in order.")
+        self.assertEqual([item["handle"] for item in after["suggestions"]], ["reviewer", "mention-repo"],
+                         "An empty query now shows the recent mentions instead of the whole list.")
+
+        many = [item["handle"] for item in items if item["handle"] not in ("reviewer", "mention-repo")][:11]
+        self.assertEqual(len(many), 11)
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", " ".join("@" + handle for handle in many),
+                                          extra_environment=environment)[0])
+        recent = self.assert_success(self.call_cli("mentions", "list", "--task", task_id)[0])["recentIDs"]
+        self.assertEqual(recent, [by_handle[handle]["id"] for handle in many[:10]], "At most ten recent mentions are kept, newest first.")
+
+        # Steering a Codex turn expands its mentions too, the running provider's agent file first;
+        # a steer that misses its turn is queued as typed and expanded once when it is sent.
+        steer_task = self.create_skills_task("Mention steer task", [repository], provider="codex")["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        codex = self.data_directory / "codex-fixture-mention-steer-serial-success-wait"
+        shutil.copyfile(fixture, codex)
+        codex.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        codex_environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(codex)}
+        send_command = ["conversation", "send", steer_task, "--message", "Hold this turn for a steer."]
+        process = self.start_cli(*send_command, extra_environment=codex_environment)
+        ready = Path(str(codex) + ".resolve-ready")
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not ready.exists() and process.poll() is None:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "The fixture holds the turn active for steering.")
+            Path(str(codex) + ".reject-next-steer").write_text("The expected turn ID is stale.\n", encoding="utf-8")
+            missed = self.assert_success(self.call_cli("conversation", "steer", steer_task, "--message", "@helper later",
+                                                       extra_environment=codex_environment)[0])
+            self.assertTrue(missed["queued"])
+            queued = self.assert_success(self.call_cli("conversation", "queue-list", steer_task)[0])
+            self.assertEqual([item["text"] for item in queued], ["@helper later"], "A missed steer is queued as typed, not expanded.")
+            self.assert_success(self.call_cli("conversation", "queue-remove", steer_task, queued[0]["id"])[0])
+            steered = self.assert_success(self.call_cli("conversation", "steer", steer_task, "--message", "Hurry, @reviewer.",
+                                                        extra_environment=codex_environment)[0])
+            self.assertTrue(steered["accepted"])
+        finally:
+            Path(str(codex) + ".resolve-continue").write_text("Release the active turn.\n", encoding="utf-8")
+        self.finish_cli(process, send_command)
+        steer_history = json.loads(Path(str(codex) + ".history").read_text(encoding="utf-8"))
+        steer_text = "".join(item.get("text", "") for request in steer_history["steerRequests"] for item in request.get("input", []))
+        self.assertTrue(steer_text.startswith("Hurry, @reviewer.\n\n<playhouse-mentions>\n"), steer_text)
+        self.assertEqual(steer_text.count("<playhouse-mentions>"), 1)
+        agent_line = next(line for line in steer_text.splitlines() if line.startswith("- @reviewer (agent): "))
+        self.assertLess(agent_line.index("Codex agent `reviewer`"), agent_line.index("Claude Code subagent"),
+                        "A Codex task names Codex's agent file first.")
+
+        self.assert_failure(self.call_cli("mentions", "list", "--task", str(uuid.uuid4()), expected_status=3)[0], "not_found")
+        self.assert_failure(self.call_cli("mentions", "list", expected_status=2)[0], "invalid_argument")
 
     # case-contract: test_rules_catalog_lists_repo_global_and_managed_rules | The Skills page, titled Skills, Rules & MCP, switches to its Rules list with a Skills | Rules | MCP picker. Rules lists each task repository's instruction files from its worktree (AGENTS.override.md, AGENTS.md, CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, and every .md file under .claude/rules, keyed by the source repository and the file's path), the user's global rules (~/.agents/AGENTS.md, Codex's AGENTS.md, and Claude's CLAUDE.md and rules folder), and the organization's managed CLAUDE.md. Each rule names the agents that follow it in Playhouse sessions and the ones that read it natively: a repository AGENTS.md beside a CLAUDE.md is followed by both but read natively only by Codex, ~/.agents/AGENTS.md is read natively by neither yet shared with both, a CLAUDE.md symlinked to AGENTS.md is one Linked rule read natively by both, AGENTS.override.md is Codex's own and leaves the AGENTS.md beside it to Claude, a .claude/rules file shows its paths globs, the managed CLAUDE.md is Claude's only and read-only, and an @import of a missing file is flagged as a problem. A repository without rules shows an empty state. Reading a rule returns its file exactly, and an unknown rule is not_found.
     def test_rules_catalog_lists_repo_global_and_managed_rules(self):

@@ -2653,6 +2653,30 @@ final class BoardTaskManager {
         return prepared
     }
 
+    /// Moves a Done task back to In Progress for a follow-up turn, so a task an agent is
+    /// working on sits in the board's columns rather than the archive. Moving to Done removed
+    /// its managed worktrees, so each one is renewed from the merge target first.
+    @discardableResult
+    func reopenDoneTask(_ id: UUID) async throws -> BoardTask {
+        let task = try requireTask(id)
+        guard task.status == .done else { return task }
+        if let removed = task.repositoryWorktrees.first(where: {
+            !$0.isPending && !FileManager.default.fileExists(atPath: $0.worktreePath)
+        }) {
+            return try await renewRepository(id, repositoryPath: removed.repositoryPath)
+        }
+        return try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.status == .done else { return task }
+            task.status = .inProgress
+            task.lifecycleRevision += 1
+            task.statusMessage = nil
+            try await saveTaskContext(taskID: id)
+            PlayhouseDiagnostics.record("task.reopened", fields: ["taskID": id.uuidString])
+            return task
+        }
+    }
+
     /// Removes a worktree the task no longer uses once its current turn ends, because the
     /// turn's provider may still run in it. A restart picks the intent up through
     /// `reconcileDeferredRepositoryRemovals`.
@@ -4147,7 +4171,7 @@ final class BoardTaskManager {
                 task.hasUnsentDraft = !submitted && !replacingDraft && (task.savedPrompt != nil || !task.draftImageDataURLs.isEmpty)
             }
             task.pendingSubmittedPrompt = submitted ? prompt : nil
-            // A follow-up on a Done task leaves it Done until a worktree is renewed.
+            // A Done task stays Done until its follow-up's send reopens it (`reopenDoneTask`).
             if let status, task.status != .done {
                 task.status = status
                 if status != .inProgress { clearProgressReport(task) }
@@ -7367,6 +7391,28 @@ final class ConversationManager {
         case "set":
             let normalizedObjective = objective?.trimmingCharacters(in: .whitespacesAndNewlines)
             let previousGoal = try await client.getGoal(threadID: threadID, workspace: workspace)
+            if previousGoal == nil, let normalizedObjective,
+               ["Untitled task", "Generating title…"].contains(task.title) {
+                let reserved: Bool
+                if task.title != "Generating title…" {
+                    reserved = try await tasks.renameIfTitleMatches(
+                        taskID,
+                        expectedTitle: task.title,
+                        title: "Generating title…"
+                    ) != nil
+                } else {
+                    reserved = true
+                }
+                if reserved {
+                    _ = try await generateAndApplyTitle(
+                        taskID: taskID,
+                        prompt: normalizedObjective,
+                        workspace: workspace,
+                        clients: clients.helperClients(preferring: task.conversationProvider)
+                    )
+                    task = try tasks.conversationSubject(taskID)
+                }
+            }
             let goal = try await client.setGoal(threadID: threadID, objective: normalizedObjective, status: "active", workspace: workspace, observeRuntime: observeRuntime)
             if let goal, let normalizedObjective {
                 CodexGoalGenerationStore.recordSet(taskID: taskID, objective: normalizedObjective, previousGoal: previousGoal, goal: goal, defaults: preferences)
@@ -7445,8 +7491,15 @@ final class ConversationManager {
         }
         let task = try tasks.conversationSubject(taskID)
         guard let threadID = task.activeConversationID else { return false }
+        let steeredText = await expandMentions(normalizedText, for: task)
         // The running turn records and streams the steered input itself.
-        return try await client(for: task).steerActiveTurn(threadID: threadID, text: normalizedText, imageDataURLs: imageDataURLs)
+        return try await client(for: task).steerActiveTurn(threadID: threadID, text: steeredText, imageDataURLs: imageDataURLs)
+    }
+
+    /// `text` with the context block that tells the provider what its `@` mentions refer to.
+    private func expandMentions(_ text: String, for task: any ConversationSubject) async -> String {
+        guard let mentions = clients.mentions else { return text }
+        return await mentions.expand(text, for: task, tasks: tasks, settings: settingsManager)
     }
 
     func answerUserInput(taskID: UUID, requestID: String, threadID: String, answers: [String: [String]]) throws -> Bool {
@@ -7622,6 +7675,8 @@ final class ConversationManager {
                 message: "Chat pages belong to the standalone chat, so a task conversation cannot take --context-page."
             )
         }
+        // After validation, so a rejected send leaves the recent mentions as they were.
+        let text = isPlayhouseNudge ? text : await expandMentions(text, for: task)
         let operationClient = client(for: task)
         operationClient.beginConversationOperation()
         defer { operationClient.finishConversationOperation() }
@@ -9284,8 +9339,8 @@ final class ConversationManager {
                 }
             }
         } else if (try? tasks.conversationSubject(taskID).status) == .done {
-            // A follow-up on a Done task that never renewed a worktree has nothing to
-            // sync or review, so every outcome leaves it Done.
+            // A follow-up reopens a Done task before its turn, so a task still Done here has
+            // no worktree to sync or review, and every outcome leaves it Done.
         } else if let outcome = statusOutcome.flatMap(TurnOutcome.init(rawValue:)) {
             switch outcome {
             case .inProgress:
@@ -9348,6 +9403,9 @@ final class ConversationManager {
         let persistedText = hideSensitiveRecoveryPrompt
             ? Self.privatePromptPlaceholder(for: normalizedText)
             : Self.redactingSensitiveText(normalizedText, values: sensitiveUserInputAnswerValues)
+        // The provider and the transcript get the mention block; the task's own prompt, title and
+        // worktree names keep what was typed.
+        let typedText = MentionText.displayText(persistedText)
         guard !normalizedText.isEmpty || !imageDataURLs.isEmpty else { throw PlayhouseManagerError.invalidMessage }
         guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
@@ -9359,8 +9417,7 @@ final class ConversationManager {
         guard Self.isValidModelID(modelID) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
         }
-        // A Done task keeps its conversation: follow-up questions run against the source
-        // repositories, and Git work first renews a worktree (`task repository renew`).
+        // A Done task keeps its conversation; a follow-up reopens it below, once validated.
         let availableRoots = Self.launchRoots(task).compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
         let validationWorkspace = try ConversationWorkspaceContext(roots: availableRoots)
         let effort = ConversationEffort(rawValue: task.conversationEffort) ?? .medium
@@ -9379,31 +9436,53 @@ final class ConversationManager {
                 client.clearTurnStarting(threadID: threadID)
             }
         }
-        // A task with explicit workspace roots is self-contained and may be
-        // sent through CLI/XPC before the UI has initialized the global
-        // default-parent setting. Rootless tasks still require that setting,
-        // except standalone chat, which has no repository at all and must stay
-        // usable even when no default repository parent is configured.
-        let repositoryRoot: URL? = task.isStandaloneChat ? nil : try (Self.launchRoots(task)
-            .compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
-            .first ?? settingsManager.requireRepositoryRootFolder())
+        // A follow-up on a Done task moves it back to In Progress in fresh worktrees, so the
+        // board shows it while the agent works. A failed send then leaves it waiting for the
+        // user rather than Done with worktrees that the archive does not account for.
+        let reopensDoneTask = !isPlayhouseNudge && !task.isStandaloneChat && task.status == .done
+        if reopensDoneTask {
+            do {
+                try await tasks.reopenDoneTask(taskID)
+                task = try tasks.conversationSubject(taskID)
+            } catch {
+                // A reopen that failed after leaving Done waits for the user; either way the
+                // follow-up returns to the composer as the unsent draft.
+                if (try? tasks.conversationSubject(taskID).status) != .done {
+                    _ = try? await tasks.setLifecycleStatus(taskID, to: .waitingResponse, message: error.localizedDescription)
+                }
+                try? await tasks.returnUnsentSubmittedPromptToDraft(taskID)
+                throw error
+            }
+        }
         let shouldGenerateTitle = !isPlayhouseNudge
             && !normalizedText.isEmpty
             && ["Untitled task", "Generating title…"].contains(task.title)
         // A caller that already saved the submitted prompt (the composer does,
         // so it survives navigation) supplies the status it replaced.
-        let priorStatus = statusBeforeSubmission ?? task.status
+        let priorStatus = reopensDoneTask ? .waitingResponse : statusBeforeSubmission ?? task.status
         let priorStatusMessage = task.statusMessage
-        if !isPlayhouseNudge {
-            _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
-        }
         let resolveTitleBeforeWorktree: Bool
         let workspace: ConversationWorkspaceContext
         let titleGeneration: Task<Void, Never>?
+        var repositoryRoot: URL? = nil
         var resolvedWorktreeTitle: String? = ["Untitled task", "Generating title…"].contains(task.title)
             ? nil
             : task.title
         do {
+            if reopensDoneTask {
+                _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
+            }
+            // A task with explicit workspace roots is self-contained and may be
+            // sent through CLI/XPC before the UI has initialized the global
+            // default-parent setting. Rootless tasks still require that setting,
+            // except standalone chat, which has no repository at all and must stay
+            // usable even when no default repository parent is configured.
+            repositoryRoot = task.isStandaloneChat ? nil : try (Self.launchRoots(task)
+                .compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
+                .first ?? settingsManager.requireRepositoryRootFolder())
+            if !isPlayhouseNudge && !reopensDoneTask {
+                _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
+            }
             // Resolve the first submitted prompt's title before preparing any
             // repositories. The app's model context can lag repository changes
             // made through the bridge, so using this snapshot to detect an auto
@@ -9424,7 +9503,7 @@ final class ConversationManager {
                     let titleWorkspace = try ConversationWorkspaceContext(roots: titleRoots)
                     resolvedWorktreeTitle = try await generateAndApplyTitle(
                         taskID: taskID,
-                        prompt: persistedText,
+                        prompt: typedText,
                         workspace: titleWorkspace,
                         clients: clients.helperClients(preferring: provider)
                     )
@@ -9442,12 +9521,12 @@ final class ConversationManager {
             if !task.isStandaloneChat {
                 task = try await tasks.prepareRepositoryWorktrees(
                     taskID,
-                    fallbackPrompt: isPlayhouseNudge && !task.hasUnsentDraft ? (task.savedPrompt ?? persistedText) : persistedText,
-                    resolvedTitle: resolvedWorktreeTitle ?? persistedText
+                    fallbackPrompt: isPlayhouseNudge && !task.hasUnsentDraft ? (task.savedPrompt ?? typedText) : typedText,
+                    resolvedTitle: resolvedWorktreeTitle ?? typedText
                 )
             }
             if !isPlayhouseNudge, !normalizedText.isEmpty {
-                _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
+                _ = try await tasks.savePrompt(taskID, prompt: typedText, status: .inProgress, submitted: true)
             }
             let roots = Self.launchRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) }
             workspace = try launchWorkspace(for: task, roots: roots, message: normalizedText)
@@ -9467,7 +9546,7 @@ final class ConversationManager {
                         do {
                             _ = try await self.generateAndApplyTitle(
                                 taskID: taskID,
-                                prompt: persistedText,
+                                prompt: typedText,
                                 workspace: workspace,
                                 clients: titleClients
                             )
@@ -10371,6 +10450,7 @@ final class PlayhouseBridgeRuntime {
             let skills = SkillCatalogManager(environment: agentEnvironment, preferences: preferences)
             let rules = RuleCatalogManager(environment: agentEnvironment, preferences: preferences)
             let mcp = McpCatalogManager(environment: agentEnvironment, preferences: preferences)
+            let mentions = MentionCatalogManager(environment: agentEnvironment, preferences: preferences, skills: skills, rules: rules, mcp: mcp)
             func conversationClients() -> ConversationClients {
                 ConversationClients(
                     codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: callerCodexHome, dataDirectory: dataDirectory, runDirectory: storeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }),
@@ -10378,6 +10458,7 @@ final class PlayhouseBridgeRuntime {
                     skills: skills,
                     rules: rules,
                     mcp: mcp,
+                    mentions: mentions,
                     observesGoalTurns: guiRuntime
                 )
             }
@@ -11178,6 +11259,14 @@ final class PlayhouseBridgeRuntime {
                     bridge.invocations = skills.invocations(in: request.arguments["message"]?.string ?? "", roots: [])
                     result = try Self.value(bridge)
                 }
+            case "mentions.list":
+                let task = try taskManager.conversationSubject(request.requiredUUID("taskID"))
+                let catalog = await mentions.catalog(for: task, tasks: taskManager, settings: settings)
+                result = .object([
+                    "items": try Self.value(catalog.items),
+                    "recentIDs": try Self.value(catalog.recentIDs),
+                    "suggestions": try Self.value(catalog.suggestions(query: request.arguments["query"]?.string ?? "")),
+                ])
             case "rules.list":
                 result = try Self.value(rules.catalog(roots: skillRoots()))
             case "rules.get":

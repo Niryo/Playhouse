@@ -584,7 +584,7 @@ final class PlayhouseUITests: XCTestCase {
         }
     }
 
-    // case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a fixed standard-width (200-point) Kanban sidebar and left of the columns while they scroll, and places its Scheduled Tasks button inside the sidebar below the full logo header. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
+    // case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a fixed standard-width (216-point) Kanban sidebar, 8% wider than its previous 200-point width and left of the columns while they scroll, and places its Scheduled Tasks button inside the sidebar below the full logo header. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
     func test_service_reports_bridge_version() throws {
         launchApp(defaultParent: fixture.parent.path)
         XCTAssertEqual(app.windows.count, 1, "Playhouse should open one board window on launch.")
@@ -594,7 +594,7 @@ final class PlayhouseUITests: XCTestCase {
         let sidebar = element(withAccessibilityLabel: "Kanban sidebar")
         let scheduledTasksButton = element("scheduled-tasks-button")
         XCTAssertTrue(sidebar.waitToExist(timeout: 5), "The Kanban sidebar should be visible.")
-        XCTAssertEqual(sidebar.frame.width, 200, accuracy: 2, "The Kanban sidebar should use the standard 200-point macOS sidebar width.")
+        XCTAssertEqual(sidebar.frame.width, 216, accuracy: 2, "The Kanban sidebar should be 10% narrower than the previous 240-point width.")
         XCTAssertTrue(scheduledTasksButton.isHittable, "The Scheduled Tasks button should be hittable.")
         XCTAssertTrue(sidebar.frame.contains(scheduledTasksButton.frame), "The Scheduled Tasks button should be inside the sidebar.")
         XCTAssertGreaterThanOrEqual(
@@ -645,6 +645,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertGreaterThan(daemonPID, 0)
         XCTAssertEqual(kill(pid_t(daemonPID), 0), 0, "The reported daemon process should be running.")
         attachScreenshot(named: "Playhouse board opened with a healthy bridge")
+        attachElementScreenshot(sidebar, named: "Kanban sidebar at 216 points")
     }
 
     // case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude's usage is read with Claude Code's get_usage control request, which has none for this account yet, so Claude starts with a signed-in account and no usage. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Because Claude Code streams rate_limit_event only when a limit's status changes, and a usage-based plan's event has no utilization, every finished Claude turn reads the plan's usage again through get_usage (skipping the local transcript scan) without a refresh: the read replaces the windows with the plan's current ones, keeps get_usage percents as percents, shows a usage-based plan's monthly extra usage as a Spend limit row with the reset time from the stream's overage event, and is persisted; a refresh reads it too, a reply without plan usage keeps the last known rows, a reached spend limit reads as the limit reached, and a usage request that is never answered times out, keeping the last known rows, so later reads work again. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the Scheduled Tasks button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account and plan together on the row beneath the provider name, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. After a Claude turn whose usage read reports the plan's spend, the open window shows Claude's Spend limit row with its percent and reset time and the updated 5h row without a relaunch. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
@@ -905,7 +906,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(element("message-composer").value as? String, "Protected draft")
     }
 
-    // case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory, and run.sh drops PLAYHOUSE_BRIDGE_SERVICE_NAME and PLAYHOUSE_BRIDGE_SOCKET_PATH inherited from another Playhouse app, saying so, while keeping the launching worktree's own bridge. After its build and right before it opens the app, run.sh again stops this worktree's app and bridge daemon, so a daemon started from the previous build during the build cannot serve the new app. A saved conversation remains visible after an app restart.
+    // case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory. The run.sh launch resolver replaces a PLAYHOUSE_DATA_DIRECTORY inherited from another Playhouse app's profile directory with the launching worktree's own and rejects any other foreign data directory, and run.sh drops PLAYHOUSE_BRIDGE_SERVICE_NAME and PLAYHOUSE_BRIDGE_SOCKET_PATH inherited from another Playhouse app, saying so, while keeping the launching worktree's own bridge. run.sh keeps this worktree's running app open during its build and stops this worktree's app and bridge daemon only once, after the build and right before it opens the app, so a daemon started from the previous build during the build cannot serve the new app. A saved conversation remains visible after an app restart.
     func test_worktree_app_profiles_isolate_identity_and_store() throws {
         let script = repositoryRoot.appendingPathComponent("scripts/app-profile.sh")
         func profileScriptEnvironment() throws -> [String: String] {
@@ -1052,11 +1053,13 @@ final class PlayhouseUITests: XCTestCase {
         let runScript = try String(contentsOf: script.deletingLastPathComponent().appendingPathComponent("run.sh"), encoding: .utf8)
         XCTAssertTrue(runScript.contains("playhouse_clear_inherited_bridge_overrides\nopen -n"),
                       "run.sh must clear inherited bridge overrides right before it opens the app.")
-        XCTAssertTrue(runScript.contains("terminate_running_playhouse \"started from the previous build\"\nplayhouse_clear_inherited_bridge_overrides\nopen -n"),
+        XCTAssertTrue(runScript.contains("terminate_running_playhouse \"now that the new build is ready\"\nplayhouse_clear_inherited_bridge_overrides\nopen -n"),
                       "run.sh must stop a daemon started from the previous build right before it opens the app.")
         let buildIndex = try XCTUnwrap(runScript.range(of: "xcodebuild build")).lowerBound
-        let relaunchStopIndex = try XCTUnwrap(runScript.range(of: "terminate_running_playhouse \"started from the previous build\"")).lowerBound
-        XCTAssertLessThan(buildIndex, relaunchStopIndex, "run.sh must stop the previous build's processes again after xcodebuild finishes.")
+        let relaunchStopIndex = try XCTUnwrap(runScript.range(of: "terminate_running_playhouse \"now that the new build is ready\"")).lowerBound
+        XCTAssertLessThan(buildIndex, relaunchStopIndex, "run.sh must stop the previous build's processes after xcodebuild finishes.")
+        XCTAssertEqual(runScript.components(separatedBy: "\nterminate_running_playhouse ").count - 1, 1,
+                       "run.sh must keep the running app open during the build and stop it only once, after the build.")
         let launchedIdentifier = try XCTUnwrap(Bundle(url: appBundle)?.bundleIdentifier)
         let sourceProfile = try profile(for: repositoryRoot)
         XCTAssertTrue(launchedIdentifier.hasPrefix(try XCTUnwrap(sourceProfile["bundleID"]) + ".e2e."), "The test app must use the actual source checkout's identity, not a repository fixture's identity.")
@@ -2727,7 +2730,8 @@ final class PlayhouseUITests: XCTestCase {
         assertHoverEmphasis(for: createButton)
         XCTAssertEqual(createButton.label, "PR. Create a pull request for each repository linked to this completed task")
         assertNativeHelpText(for: createButton, equals: "Create a pull request for each repository linked to this completed task")
-        attachScreenshot(named: "Completed task PR action shows its help text in the archive", fullScreen: true)
+        attachScreenshot(named: "Completed task PR action shows its help text in the archive")
+        attachElementScreenshot(createButton, named: "Completed task PR action help text")
         dismissNativeHelpText(named: "Create a pull request for each repository linked to this completed task")
         let operationLock = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         var operationLockReleased = false
@@ -3302,7 +3306,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "No alert for a probe that failed after the task moved to Done", fullScreen: true)
     }
 
-    // case-contract: test_done_task_accepts_follow_up_conversation | A Done task keeps its conversation open: the UI shows the composer with an archived hint naming the merge target instead of a read-only notice, and its changes read reports no changes rather than a Git error for the removed worktree; and a follow-up sent from a Done task runs a real provider turn in the source repository of its removed worktree. The turn is told the task is archived, that a question-only turn leaves it Done, that it has no worktree for edits, and to run `task repository renew` before any Git change; its completed outcome leaves the task Done with no new worktree, the follow-up and its reply persist in the history across fresh reads, and switching the Done task's provider is still rejected.
+    // case-contract: test_done_task_accepts_follow_up_conversation | A Done task keeps its conversation open: the UI shows the composer with an archived hint saying a follow-up reopens the task in a fresh worktree from the merge target, instead of a read-only notice; its changes read reports no changes rather than a Git error for the removed worktree, and switching its provider is rejected. A follow-up sent from a Done task moves it back to In Progress before the turn starts, so it shows in the board's In Progress column while the agent works, with a fresh worktree renewed for the removed one. The real provider turn runs in that fresh worktree and is told it as an active task worktree rather than that the task is archived; its completed outcome moves the task to Review, the removed worktree stays removed, and the follow-up and its reply persist in the history across fresh reads. A Done task with no worktree to renew (one with only a context root) reopens to In Progress for its follow-up the same way, keeps that root, and its completed outcome moves it to Review.
     func test_done_task_accepts_follow_up_conversation() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3322,11 +3326,11 @@ final class PlayhouseUITests: XCTestCase {
         element("done-archive-button").click()
         let archived = element("done-archive-task-\(taskID)")
         XCTAssertTrue(archived.waitToExist(timeout: 10))
-        archived.click()
+        archived.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
         let hint = element("archived-conversation-follow-up-hint")
         XCTAssertTrue(hint.waitToExist(timeout: 10), "A Done task shows the archived follow-up hint above its composer.")
         let hintText = accessibleLabelOrValue(of: hint)
-        XCTAssertTrue(hintText.contains("follow-up changes open a fresh worktree from main"), "The hint names the merge target: \(hintText)")
+        XCTAssertTrue(hintText.contains("a follow-up reopens this task in a fresh worktree from main"), "The hint names the merge target: \(hintText)")
         XCTAssertTrue(element("workspace-changes-empty").waitToExist(timeout: 10), "A Done task's changes load as no changes.")
         XCTAssertFalse(element("workspace-changes-error").exists, "A Done task shows no Git error for its removed worktree.")
         XCTAssertFalse(element("archived-conversation-read-only").exists, "A Done task's conversation is no longer read only.")
@@ -3334,17 +3338,33 @@ final class PlayhouseUITests: XCTestCase {
         let providerMenu = element("conversation-provider-menu")
         XCTAssertTrue(providerMenu.waitToExist(timeout: 10))
         XCTAssertFalse(providerMenu.isEnabled, "A Done task still offers no provider switch.")
+        let doneSwitch = try runCLI(["conversation", "provider", taskID, "set", "claude"], expectedStatus: 2)
+        XCTAssertTrue(((doneSwitch["error"] as? [String: Any])?["message"] as? String ?? "").contains("Done tasks are closed"))
         attachScreenshot(named: "Done task keeps its composer with the archived follow-up hint")
+        attachElementScreenshot(hint, named: "Archived hint says a follow-up reopens the task")
 
         let question = "Which files did this archived task change?"
+        var freshWorktreePath: String?
         try completeCurrentTaskWithFixtureAnswers(
             taskTitle: "Archived follow-up UI",
             prompt: question,
-            expectedFinalStatus: "Done",
-            runningStatus: "Done"
+            whileTurnHeld: { [self] in
+                // While the agent works on the follow-up, the task is back on the board.
+                let running = try XCTUnwrap(taskRecord(id: taskID))
+                XCTAssertEqual(running["status"] as? String, "In Progress", "A follow-up moves the Done task back to In Progress.")
+                let fresh = try XCTUnwrap((running["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String)
+                XCTAssertNotEqual(fresh, worktreePath, "The reopened task works in a fresh worktree.")
+                XCTAssertTrue(FileManager.default.fileExists(atPath: fresh), "The fresh worktree exists while the follow-up runs.")
+                freshWorktreePath = fresh
+                XCTAssertTrue(waitUntil({ !self.element("archived-conversation-follow-up-hint").exists }, timeout: 10), "The reopened task is no longer archived.")
+                assertTaskVisible("Archived follow-up UI", inColumn: "In Progress")
+                attachScreenshot(named: "Follow-up moves the Done task back to In Progress")
+                attachElementScreenshot(element("task-card-\(taskID.uppercased())"), named: "Reopened task card in the In Progress column")
+                openTask(named: "Archived follow-up UI")
+            }
         )
         let sentQuestion = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", question)).firstMatch
-        XCTAssertTrue(sentQuestion.waitToExist(timeout: 10), "The follow-up question stays in the Done task's conversation.")
+        XCTAssertTrue(sentQuestion.waitToExist(timeout: 10), "The follow-up question stays in the task's conversation.")
         let replies = app.descendants(matching: .any).matching(NSPredicate(
             format: "identifier BEGINSWITH %@ AND label == %@", "assistant-message-", "Answers received: Blue / fixture-secret."
         ))
@@ -3354,39 +3374,146 @@ final class PlayhouseUITests: XCTestCase {
             replies.allElementsBoundByIndex.contains { $0.frame.minY > sentQuestion.frame.maxY }
         }
         XCTAssertTrue(waitUntil(followUpReplyBelowQuestion, timeout: 10), "The follow-up's reply appears below the follow-up question.")
+        let freshWorktree = try XCTUnwrap(freshWorktreePath)
         let history = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))) as? [String: Any]
         let followUp = try XCTUnwrap((history?["turns"] as? [[String: Any]])?.last)
         XCTAssertTrue((followUp["userMessage"] as? String ?? "").contains(question))
-        XCTAssertEqual(followUp["cwd"] as? String, repositoryPath, "The follow-up runs in the source repository of the removed worktree.")
+        XCTAssertEqual(followUp["cwd"] as? String, freshWorktree, "The follow-up runs in the fresh worktree.")
         let instructions = try XCTUnwrap((history?["threadResumeDeveloperInstructions"] as? [Any])?.last as? String)
-        XCTAssertTrue(instructions.contains("This task is Done (archived)"))
-        XCTAssertTrue(instructions.contains("A question-only turn leaves the task Done"))
-        XCTAssertTrue(instructions.contains("task repository renew \(taskID) --repo <path>"))
-        XCTAssertTrue(instructions.contains("Active task worktrees for edits: none"))
+        XCTAssertFalse(instructions.contains("This task is Done (archived)"), "The follow-up runs as an active task.")
+        XCTAssertTrue(instructions.contains("Active task worktrees for edits: \(repositoryPath) -> \(freshWorktree)"))
+        XCTAssertFalse(element("archived-conversation-follow-up-hint").exists)
+        attachScreenshot(named: "Reopened task answers the follow-up in Review")
+        assertTaskVisible("Archived follow-up UI", inColumn: "Review")
         let current = try XCTUnwrap(taskRecord(id: taskID))
-        XCTAssertEqual(current["status"] as? String, "Done", "The follow-up's completed outcome leaves the task Done.")
-        XCTAssertEqual((current["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String, worktreePath, "A question-only turn creates no worktree.")
-        XCTAssertTrue(element("archived-conversation-follow-up-hint").exists)
-        attachScreenshot(named: "Done task answers the follow-up and stays Done")
-        let doneSwitch = try runCLI(["conversation", "provider", taskID, "set", "claude"], expectedStatus: 2)
-        XCTAssertTrue(((doneSwitch["error"] as? [String: Any])?["message"] as? String ?? "").contains("Done tasks are closed"))
-        element("back-to-board-button").click()
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
+        XCTAssertEqual(current["status"] as? String, "Review", "The follow-up's completed outcome moves the reopened task to Review.")
+        XCTAssertEqual((current["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String, freshWorktree)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktreePath), "The removed worktree stays removed.")
         // A fresh history load keeps the follow-up and both replies.
-        element("done-archive-button").click()
-        let reopened = element("done-archive-task-\(taskID)")
-        XCTAssertTrue(reopened.waitToExist(timeout: 10))
-        reopened.click()
-        XCTAssertTrue(element("archived-conversation-follow-up-hint").waitToExist(timeout: 10))
+        openTask(named: "Archived follow-up UI")
         XCTAssertTrue(sentQuestion.waitToExist(timeout: 10), "The follow-up persists in the reopened conversation.")
-        XCTAssertTrue(element("workspace-changes-empty").waitToExist(timeout: 10), "The reopened Done task still loads no changes.")
-        XCTAssertFalse(element("workspace-changes-error").exists)
         XCTAssertTrue(waitUntil(followUpReplyBelowQuestion, timeout: 10), "The follow-up's reply persists below it in the reopened conversation.")
-        attachScreenshot(named: "Reopened Done task keeps the follow-up and its reply")
+        attachScreenshot(named: "Reopened task keeps the follow-up and its reply")
+        element("back-to-board-button").click()
+
+        // A task with only a context root has no worktree to renew; its follow-up still reopens it.
+        let rooted = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Archived rooted follow-up UI", "--prompt", "Fixture task description.", "--root", fixture.primary.path,
+        ])["result"] as? [String: Any])
+        let rootedID = try XCTUnwrap(rooted["id"] as? String)
+        openTask(named: "Archived rooted follow-up UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Archived rooted follow-up UI")
+        element("back-to-board-button").click()
+        moveTaskToDone(taskID: rootedID)
+        element("done-archive-button").click()
+        let rootedArchived = element("done-archive-task-\(rootedID)")
+        XCTAssertTrue(rootedArchived.waitToExist(timeout: 10))
+        rootedArchived.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(element("archived-conversation-follow-up-hint").waitToExist(timeout: 10))
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Archived rooted follow-up UI", prompt: "One more question.", whileTurnHeld: { [self] in
+            let running = try XCTUnwrap(taskRecord(id: rootedID))
+            XCTAssertEqual(running["status"] as? String, "In Progress", "A follow-up reopens a Done task that has no worktree to renew.")
+            XCTAssertEqual((running["repositoryWorktrees"] as? [Any])?.count, 0)
+            XCTAssertEqual(running["workspaceRoots"] as? [String], [fixture.primary.path])
+            assertTaskVisible("Archived rooted follow-up UI", inColumn: "In Progress")
+        }, reloadConversationAfterTurn: true)
+        assertTaskVisible("Archived rooted follow-up UI", inColumn: "Review")
+        XCTAssertEqual(try taskRecord(id: rootedID)?["status"] as? String, "Review")
+    }
+
+    // case-contract: test_done_task_follow_up_reopen_failure_keeps_task_done | A follow-up to a Done task whose merge target no longer exists cannot renew its removed worktree: the send fails with the missing merge target error, the task stays Done with no new worktree and no provider turn, and the follow-up is not left pending as a submitted prompt, so the UI composer keeps its text.
+    func test_done_task_follow_up_reopen_failure_keeps_task_done() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let target = "reopen-failure-target"
+        try runGit(fixture.primary, "branch", target, "main")
+        addTeardownBlock { [self] in
+            if !((try? runGitOutput(fixture.primary, "branch", "--list", target)) ?? "").isEmpty {
+                try? runGit(fixture.primary, "branch", "-D", target)
+            }
+        }
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Reopen failure UI", "--prompt", "Fixture task description.",
+            "--repo", fixture.primary.path, "--merge-target", "\(fixture.primary.path)=\(target)",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Reopen failure UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Reopen failure UI")
+        let record = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let worktreePath = try XCTUnwrap(record["worktreePath"] as? String)
+        element("back-to-board-button").click()
+        moveTaskToDone(taskID: taskID)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktreePath))
+        try runGit(fixture.primary, "branch", "-D", target)
+        let historyURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
+        let turnsBefore = ((try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any])?["turns"] as? [Any])?.count
+        element("done-archive-button").click()
+        let archived = element("done-archive-task-\(taskID)")
+        XCTAssertTrue(archived.waitToExist(timeout: 10))
+        archived.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(element("archived-conversation-follow-up-hint").waitToExist(timeout: 10))
+        let followUp = "Can you follow up on this?"
+        element("message-composer").click()
+        element("message-composer").typeText(followUp)
+        element("send-message-button").click()
+        let error = element("codex-chat-error")
+        XCTAssertTrue(error.waitToExist(timeout: 15), "The failed reopen shows its error.")
+        XCTAssertTrue(accessibleLabelOrValue(of: error).contains("The merge target '\(target)' doesn't exist"), accessibleLabelOrValue(of: error))
+        XCTAssertTrue(waitUntil({ self.element("message-composer").value as? String == followUp }, timeout: 10), "The composer keeps the failed follow-up.")
+        XCTAssertTrue(element("archived-conversation-follow-up-hint").exists, "The task stays archived.")
+        attachScreenshot(named: "Failed reopen keeps the Done task and the follow-up")
+        attachElementScreenshot(error, named: "Missing merge target error")
+        let current = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertEqual(current["status"] as? String, "Done", "A follow-up that cannot reopen the task leaves it Done.")
+        XCTAssertEqual((current["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String, worktreePath, "A failed reopen creates no worktree.")
+        XCTAssertNil(current["pendingSubmittedPrompt"] as? String, "The failed follow-up is not left pending.")
+        let turnsAfter = ((try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any])?["turns"] as? [Any])?.count
+        XCTAssertEqual(turnsAfter, turnsBefore, "No provider turn runs.")
         element("back-to-board-button").click()
     }
 
-    // case-contract: test_merged_task_renew_opens_fresh_worktree_and_new_pr | `task repository renew` starts follow-up Git work after a pull request merged. It is rejected while the repository has no linked pull request, while the linked pull request is unmerged, and while the merged worktree has uncommitted changes, leaving the task unchanged. A merged PR status read persists that it merged, and the next turn is told the merged branch is finished and to renew before Git changes. Renewing from inside the agent's turn retires the record with its merged PR to the task's past repositories, keeps the merged branch, removes the old worktree once that turn ends, and creates a fresh worktree on a new suffixed branch based on the merge target as just fetched from the remote, so it holds the merged commits even when the local target is stale. A new pull request then opens from the fresh worktree, and the card shows the merged PR in purple beside the new one; once the task is Done, the archive row lists both. A Done task renews too, from inside its follow-up turn: it returns to In Progress with a fresh worktree for every repository whose worktree was removed (a past link only for records that had a pull request), and that turn's completed outcome moves it to Review, keeping both merged PRs on fresh reads.
+    // case-contract: test_done_task_follow_up_setup_failure_restores_draft | A Done task with only a context folder reopens without creating a worktree, but if that folder disappears and no default parent is configured, a bridge follow-up send fails before a provider turn starts; the task moves to Waiting Response, and the submitted prompt returns to its draft. The test then restores the folder so the UI can reopen the task and display the returned draft.
+    func test_done_task_follow_up_setup_failure_restores_draft() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let contextRoot = dataDirectory.appendingPathComponent("removed-follow-up-context", isDirectory: true)
+        try FileManager.default.createDirectory(at: contextRoot, withIntermediateDirectories: true)
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Missing follow-up root UI", "--prompt", "Fixture task description.", "--root", contextRoot.path,
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Missing follow-up root UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Missing follow-up root UI")
+        element("back-to-board-button").click()
+        moveTaskToDone(taskID: taskID)
+        element("done-archive-button").click()
+        let archived = element("done-archive-task-\(taskID)")
+        XCTAssertTrue(archived.waitToExist(timeout: 10))
+        archived.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(element("message-composer").waitToExist(timeout: 10))
+        try FileManager.default.removeItem(at: contextRoot)
+        _ = try runCLI(["settings", "clear-parent"])
+        let followUp = "Follow up after the context folder vanished."
+        let failure = try runCLI(["conversation", "send", taskID, "--message", followUp], expectedStatus: 1)
+        XCTAssertTrue(((failure["error"] as? [String: Any])?["message"] as? String ?? "").lowercased().contains("repository root folder"))
+        let current = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertEqual(current["status"] as? String, "Waiting Response")
+        XCTAssertNil(current["pendingSubmittedPrompt"] as? String)
+        XCTAssertTrue(current["hasUnsentDraft"] as? Bool == true)
+        XCTAssertEqual(current["savedPrompt"] as? String, followUp)
+        XCTAssertEqual((current["repositoryWorktrees"] as? [Any])?.count, 0)
+        try FileManager.default.createDirectory(at: contextRoot, withIntermediateDirectories: true)
+        element("back-to-board-button").click()
+        assertTaskVisible("Missing follow-up root UI", inColumn: "Waiting Response")
+        attachScreenshot(named: "Failed archived follow-up moves to Waiting Response")
+        attachElementScreenshot(element("task-card-\(taskID.uppercased())"), named: "Task card in Waiting Response after setup fails")
+        openTask(named: "Missing follow-up root UI")
+        XCTAssertTrue(waitUntil({ self.element("message-composer").value as? String == followUp }, timeout: 10), "The UI restores the submitted follow-up in the composer.")
+        attachScreenshot(named: "Failed setup restores the follow-up in the composer")
+        attachElementScreenshot(element("message-composer"), named: "Restored follow-up draft in the composer")
+    }
+
+    // case-contract: test_merged_task_renew_opens_fresh_worktree_and_new_pr | `task repository renew` starts follow-up Git work after a pull request merged. It is rejected while the repository has no linked pull request, while the linked pull request is unmerged, and while the merged worktree has uncommitted changes, leaving the task unchanged. A merged PR status read persists that it merged, and the next turn is told the merged branch is finished and to renew before Git changes. Renewing from inside the agent's turn retires the record with its merged PR to the task's past repositories, keeps the merged branch, removes the old worktree once that turn ends, and creates a fresh worktree on a new suffixed branch based on the merge target as just fetched from the remote, so it holds the merged commits even when the local target is stale. A new pull request then opens from the fresh worktree, and the card shows the merged PR in purple beside the new one; once the task is Done, the archive row lists both. A Done task renews too: a follow-up to it returns it to In Progress before its turn starts, and `task repository renew` on a Done task does the same, each with a fresh worktree for every repository whose worktree was removed (a past link only for records that had a pull request); that turn's completed outcome moves it to Review, keeping both merged PRs on fresh reads.
     func test_merged_task_renew_opens_fresh_worktree_and_new_pr() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
@@ -3504,12 +3631,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(archivedNew.waitToExist(timeout: 10), "The Done archive row lists the new PR beside it.")
         XCTAssertLessThan(archivedMerged.frame.minX, archivedNew.frame.minX, "The earlier merged PR comes first.")
         attachScreenshot(named: "Done archive lists the merged PR beside the new one")
-        element("done-archive-task-\(taskID)").click()
+        element("done-archive-task-\(taskID)").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
         XCTAssertTrue(element("archived-conversation-follow-up-hint").waitToExist(timeout: 10))
         var reopenedRecord: [String: Any]?
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Renew merged work UI", prompt: "Please make one more change.", whileTurnHeld: { [self] in
-            reopenedRecord = try runCLI(renew, extraEnvironment: ghEnvironment)["result"] as? [String: Any]
-            XCTAssertEqual(reopenedRecord?["status"] as? String, "In Progress", "Renewing a Done task moves it back to In Progress.")
+            // The follow-up itself renewed the removed worktree before its turn started.
+            reopenedRecord = try taskRecord(id: taskID)
+            XCTAssertEqual(reopenedRecord?["status"] as? String, "In Progress", "A follow-up moves the Done task back to In Progress.")
         })
         XCTAssertFalse(element("archived-conversation-follow-up-hint").exists, "The reopened task is no longer archived.")
         element("back-to-board-button").click()
@@ -3572,7 +3700,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(archiveCreatePRButton.waitToExist(timeout: 10))
         XCTAssertEqual(archiveCreatePRButton.label, "PRs. Create pull requests for each repository linked to this completed task")
         attachScreenshot(named: "Done archive labels its multi-repository action PRs")
-        element("done-archive-button").click()
+        element("close-done-archive-button").click()
+        XCTAssertTrue(waitUntil({ !self.element("done-archive-panel").exists }, timeout: 5), "Close the archive before returning to the active task board.")
 
         let activeCreated = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Active linked PR UI", "--prompt", "Fixture task description.", "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
@@ -4598,10 +4727,14 @@ final class PlayhouseUITests: XCTestCase {
         // A model can write its outcome command as answer text instead of running
         // it. The echo is hidden, and it counts only when it names this task.
         // Scoped to message containers: a reply's paragraphs are labelled groups too.
-        let echoedAnswers = app.groups.matching(NSPredicate(
-            format: "identifier BEGINSWITH %@ AND label == %@", "assistant-message-", "Fixture answer with an echoed outcome."
-        ))
         for (turnIndex, (echoedTaskID, expectedColumn)) in [(UUID().uuidString, "Blocked"), (taskID, "Review")].enumerated() {
+            let beforeTurnHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+            let previousAnswerIDs = Set((beforeTurnHistory["messages"] as? [[String: Any]] ?? []).compactMap { message -> String? in
+                guard message["role"] as? String == "assistant",
+                      message["text"] as? String == "Fixture answer with an echoed outcome."
+                else { return nil }
+                return message["id"] as? String
+            })
             XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15), "The composer should accept the echoed-outcome turn.")
             composer.click()
             composer.typeText("Echo the outcome command for \(echoedTaskID).")
@@ -4616,7 +4749,16 @@ final class PlayhouseUITests: XCTestCase {
                 }
             }
             XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == expectedColumn }, timeout: 15), "An echoed outcome for \(echoedTaskID) should leave the task in \(expectedColumn).")
-            XCTAssertTrue(waitUntil({ echoedAnswers.count == turnIndex + 1 }, timeout: 10), "The transcript should show this turn's answer without the echoed command.")
+            let turnHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+            let turnMessages = try XCTUnwrap(turnHistory["messages"] as? [[String: Any]])
+            let visibleAnswer = try XCTUnwrap(turnMessages.last {
+                $0["role"] as? String == "assistant"
+                    && $0["text"] as? String == "Fixture answer with an echoed outcome."
+                    && !previousAnswerIDs.contains($0["id"] as? String ?? "")
+            }, "This turn should add its own saved answer without the echoed command.")
+            let answerBubble = element("assistant-message-\(try XCTUnwrap(visibleAnswer["id"] as? String))")
+            XCTAssertTrue(answerBubble.waitToExist(timeout: 10), "The transcript should show this turn's own answer, not a prior matching reply.")
+            XCTAssertTrue(answerBubble.label.contains("Fixture answer with an echoed outcome."))
             XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "task outcome")).count, 0, "The transcript must not show the echoed outcome command.")
         }
         relaunchApp()
@@ -14114,7 +14256,7 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 20), "The implementation turn runs in the task's created worktree: \(String(describing: lastRecord?["repositoryWorktrees"])) roots \(String(describing: lastRecord?["workspaceRoots"]))")
     }
 
-    // case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
+    // case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting a first Goal on an Untitled task generates and persists its title from the objective before the Goal starts, while title failure uses the first eight objective words as fallback; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI shows the generated title after reopening the task and restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
     func test_thread_goal_lifecycle_persists_through_cli_xpc() throws {
         if isLiveCodexIntegration {
             codexFixtureExecutable = nil
@@ -14128,14 +14270,23 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(FileManager.default.fileExists(atPath: URL(fileURLWithPath: codexHome).appendingPathComponent("auth.json").path), "Opt-in Goal verification requires an authenticated guest Codex home.")
         }
         launchApp(defaultParent: self.fixture.parent.path)
-        try createTaskFixture(title: "Durable goal", roots: [self.fixture.primary.path])
-        let taskID = try taskID(named: "Durable goal")
+        let initialTaskTitle = usesLiveCodex ? "Durable goal" : "Untitled task"
+        let displayedTaskTitle = usesLiveCodex ? initialTaskTitle : "Generated fixture title"
+        try createTaskFixture(title: initialTaskTitle, roots: [self.fixture.primary.path])
+        let taskID = try taskID(named: initialTaskTitle)
         let objective = "Write a short two-line song about a dog, mark this Goal complete, and finish the task with no follow-up needed."
         if !usesLiveCodex {
             _ = try runCLI(["conversation", "goal", taskID, "set", "--text", objective])
             _ = try runCLI(["conversation", "goal", taskID, "pause"])
         }
-        openTask(named: "Durable goal")
+        openTask(named: displayedTaskTitle)
+        if !usesLiveCodex {
+            let title = element("task-view-title")
+            XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: title) == displayedTaskTitle }, timeout: 10),
+                          "The first Goal should generate and display the task title.")
+            attachScreenshot(named: "First Codex Goal generates the task title")
+            attachElementScreenshot(title, named: "Generated task title close up")
+        }
 
         if !usesLiveCodex {
             let row = element("active-goal-progress-row")
@@ -14167,7 +14318,7 @@ final class PlayhouseUITests: XCTestCase {
             _ = try runCLI(["conversation", "goal", taskID, "set", "--text", replacementObjective])
             _ = try runCLI(["conversation", "goal", taskID, "pause"])
             launchApp(defaultParent: fixture.parent.path)
-            openTask(named: "Durable goal")
+            openTask(named: displayedTaskTitle)
             let replacementRow = element("active-goal-progress-row")
             XCTAssertTrue(replacementRow.waitToExist(timeout: 10), "A replacement Goal should be restored after a CLI/XPC set.")
             XCTAssertTrue(accessibleLabelOrValue(of: element("active-goal-title")).contains(replacementObjective))
@@ -14181,7 +14332,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(waitUntil({ !self.element("active-goal-progress-row").exists }, timeout: 5))
             app.terminate()
             launchApp(defaultParent: fixture.parent.path)
-            openTask(named: "Durable goal")
+            openTask(named: displayedTaskTitle)
             XCTAssertTrue(waitUntil({ !self.element("active-goal-progress-row").exists }, timeout: 10), "A cleared Goal must stay cleared after reopening the task.")
             return
         }
@@ -15583,6 +15734,10 @@ final class PlayhouseUITests: XCTestCase {
         // the last notification; give that regression time to show.
         XCTAssertFalse(waitUntil({ !self.element("pause-response-button").exists }, timeout: 2),
                        "The woken parent's turn must stay active until its next result.")
+        let wakeStopButton = element("pause-response-button")
+        XCTAssertTrue(wakeStopButton.exists, "The composer should keep its Stop control visible during resumed work.")
+        attachScreenshot(named: "Claude woken parent remains active with Stop available")
+        attachElementScreenshot(wakeStopButton, named: "Claude woken parent Stop control")
         XCTAssertEqual(try taskRecord(id: wakeTaskID)?["status"] as? String, "In Progress")
         XCTAssertFalse(transcriptContains("WAKE FINAL"))
         try "Release the woken parent's final answer.\n".write(to: wakeRelease, atomically: true, encoding: .utf8)
@@ -17004,7 +17159,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(response.waitToExist(timeout: 10))
         XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
         XCTAssertTrue(response.label.contains("Additional detail: Retry this answer."))
-        XCTAssertTrue(card.staticTexts["Answered"].exists)
+        XCTAssertTrue(card.staticTexts["Answered"].waitToExist(timeout: 10), "The queued answer should settle as Answered after its response appears.")
         let deliveredAnswered = try XCTUnwrap(try runCLI(["conversation", "answered-async", taskID])["result"] as? [String: Any])
         XCTAssertEqual(deliveredAnswered["itemIDs"] as? [String], ["item_playhouse_async_question"], "The delivered async answer should be recorded as answered.")
     }
@@ -21016,6 +21171,7 @@ final class PlayhouseUITests: XCTestCase {
     /// Opens a rule's actions menu, waiting out a closing panel's animation and
     /// clicking again if the first click landed while it was still on screen.
     private func openRuleActions(_ key: String, file: StaticString = #filePath, line: UInt = #line) {
+        app.activate()
         let actions = element("rule-actions-\(key)")
         XCTAssertTrue(waitUntil({ actions.exists && actions.isHittable && !self.element("rule-editor-panel").exists && !self.element("new-rule-panel").exists }, timeout: 10),
                       "\(key) should have an actions menu.", file: file, line: line)
@@ -21036,6 +21192,221 @@ final class PlayhouseUITests: XCTestCase {
         guard let data = try? Data(contentsOf: historyURL),
               let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
         return (history["turns"] as? [[String: Any]] ?? []).filter { ($0["userText"] as? String)?.isEmpty == false }
+    }
+
+    // case-contract: test_mentions_menu_lists_expands_and_remembers_recent | Typing @ in the composer opens a mention menu that lists, in order, the task's enabled rules, then its skills, MCP servers, agents (Claude Code's .claude/agents and Codex's .codex/agents, an agent both define being one item that names both files, the running provider's first), repositories (the task's own and those under the repository root), then other board tasks; before anything was mentioned, an empty query shows that whole list. Typing after the @ filters it, items whose handle starts with the query first, and a query nothing matches shows an empty state. The arrow keys move the highlight, Return or Tab inserts the highlighted item, and a click inserts the clicked one, as @handle drawn in the accent color; Escape closes the menu while keeping the typed text. Sending appends a <playhouse-mentions> block naming each mentioned item with its full path or details (for the task's repository, also its worktree), only for known handles that start a word, and the provider receives it while the transcript shows only the typed message, once, with its mentions drawn in the accent color, and the task's saved prompt keeps the typed text. Steering an active Codex turn expands its mentions the same way, exactly once, and shows the steer once, while a steer that misses its turn is queued as typed. The sent mentions become the recent mentions, most recent first and ten at most, which an empty query then shows instead, and they persist across fresh CLI processes. Listing mentions without a task is a usage error, and for an unknown task is not_found.
+    func test_mentions_menu_lists_expands_and_remembers_recent() throws {
+        let repository = try makeSkillRepository("mention-repo", skills: [
+            "AGENTS.md": "# Mention repo rules\nKeep it tidy.\n",
+            ".agents/skills/mention-skill/SKILL.md": skillManifest("mention-skill", "A skill to mention"),
+            ".agents/skills/mention-extra-1/SKILL.md": skillManifest("mention-extra-1", "Another skill to mention"),
+            ".agents/skills/mention-extra-2/SKILL.md": skillManifest("mention-extra-2", "Another skill to mention"),
+            ".agents/skills/mention-extra-3/SKILL.md": skillManifest("mention-extra-3", "Another skill to mention"),
+            ".agents/skills/mention-extra-4/SKILL.md": skillManifest("mention-extra-4", "Another skill to mention"),
+            ".mcp.json": #"{"mcpServers": {"docs-server": {"type": "stdio", "command": "node", "args": ["docs.js"]}}}"#,
+            ".claude/agents/reviewer.md": "---\nname: reviewer\ndescription: Reviews changes\n---\n\nReview the diff.\n",
+            ".codex/agents/reviewer.toml": "name = \"reviewer\"\ndescription = \"Reviews changes\"\n",
+            ".codex/agents/helper.toml": "name = \"helper\"\ndescription = \"Codex-only helper\"\n",
+        ])
+        let executable = try installSkillsClaudeFixture("claude-fixture-mentions")
+        let historyURL = URL(fileURLWithPath: executable.path + ".history")
+        // A held Codex turn for the steer at the end; the fixture's name selects its hold mode.
+        let codex = dataDirectory.appendingPathComponent("codex-fixture-mention-steer-serial-success-wait")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: codex)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8).write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        codexFixtureExecutable = codex.path
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Other mention task", roots: [])
+        let task = try createSkillsTask("Mention task", repositories: [repository], provider: "claude")
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let worktree = try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first?["worktreePath"] as? String)
+        _ = try createSkillsTask("Mention steer task", repositories: [repository], provider: "codex")
+        func mentions() throws -> [String: Any] {
+            try XCTUnwrap(try runCLI(["mentions", "list", "--task", taskID])["result"] as? [String: Any])
+        }
+        func menuRowElements() -> [XCUIElement] {
+            app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "mention-item-")).allElementsBoundByIndex
+                .filter(\.exists).sorted { $0.frame.minY < $1.frame.minY }
+        }
+        /// The menu's rows, top to bottom.
+        func menuRows() -> [String] { menuRowElements().map { String($0.identifier.dropFirst("mention-item-".count)) } }
+        func highlightedRow() -> String? {
+            menuRowElements().first(where: \.isSelected).map { String($0.identifier.dropFirst("mention-item-".count)) }
+        }
+        let items = try XCTUnwrap(try mentions()["items"] as? [[String: Any]])
+        let handles = items.compactMap { $0["handle"] as? String }
+        XCTAssertEqual(items.first?["kind"] as? String, "rule", "Rules come first.")
+
+        openTask(named: "Mention task")
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitToExist(timeout: 10))
+        composer.click()
+        composer.typeText("@")
+        let menu = element("mention-menu")
+        XCTAssertTrue(menu.waitToExist(timeout: 10), "Typing @ opens the mention menu.")
+        XCTAssertLessThanOrEqual(menu.frame.maxY, composer.frame.minY, "The menu opens above the composer, leaving the typed text visible.")
+        XCTAssertTrue(element("mention-item-mention-repo/AGENTS.md").waitToExist(timeout: 10))
+        let rows = menuRows()
+        XCTAssertEqual(rows.first, "mention-repo/AGENTS.md", "Before anything was mentioned, the whole list shows, a rule first.")
+        XCTAssertEqual(rows, Array(handles.prefix(rows.count)), "The menu keeps the catalog's order: rules, skills, MCP servers, agents, repositories, tasks.")
+        for row in ["mention-skill", "docs-server", "reviewer", "mention-repo", "Other-mention-task"] {
+            XCTAssertTrue(rows.contains(row), "The menu lists \(row).")
+        }
+        XCTAssertEqual(highlightedRow(), rows.first)
+        composer.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ highlightedRow() == rows[1] }, timeout: 5), "Down moves the highlight to the next row.")
+        composer.typeKey(.downArrow, modifierFlags: [])
+        composer.typeKey(.upArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ highlightedRow() == rows[1] }, timeout: 5), "Up moves it back.")
+        attachScreenshot(named: "Mention menu listing rules, skills, MCP servers and agents")
+        attachElementScreenshot(menu, named: "Mention menu, full list")
+
+        composer.typeText("rev")
+        XCTAssertTrue(waitUntil({ menuRows().first == "reviewer" && highlightedRow() == "reviewer" }, timeout: 5),
+                      "Typing after @ filters, handle prefixes first, and highlights the first match.")
+        XCTAssertFalse(element("mention-item-mention-repo/AGENTS.md").exists)
+        XCTAssertEqual(element("mention-menu-title").value as? String, "Mention matching “rev”")
+        attachElementScreenshot(menu, named: "Mention menu filtered by the typed query")
+        composer.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "@reviewer " }, timeout: 5), "Return inserts the highlighted mention.")
+        XCTAssertTrue(waitUntil({ !self.element("mention-menu").exists }, timeout: 5))
+        XCTAssertTrue(waitUntil({ composer.title == "Mentions @reviewer" }, timeout: 5), "The inserted mention is drawn in the accent color.")
+
+        composer.typeText("check @zzz-nothing")
+        let empty = element("mention-menu-empty")
+        XCTAssertTrue(empty.waitToExist(timeout: 5))
+        XCTAssertTrue((empty.value as? String ?? "").contains("Nothing to mention matches"), "A query nothing matches shows an empty state: \(String(describing: empty.value))")
+        for _ in 0..<"@zzz-nothing".count { composer.typeText(XCUIKeyboardKey.delete.rawValue) }
+        composer.typeText("@mention-re")
+        let repositoryRow = element("mention-item-mention-repo")
+        XCTAssertTrue(repositoryRow.waitToExist(timeout: 5))
+        // XCUITest reports rows of the menu, which floats over the transcript, as not hittable;
+        // a real click at the row's center must still choose it.
+        repositoryRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "@reviewer check @mention-repo " }, timeout: 5), "A click inserts the clicked mention.")
+        composer.typeText("and @docs")
+        XCTAssertTrue(waitUntil({ highlightedRow() == "docs-server" }, timeout: 5))
+        composer.typeKey(.tab, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "@reviewer check @mention-repo and @docs-server " }, timeout: 5), "Tab inserts the highlighted mention.")
+
+        composer.typeText("then @")
+        XCTAssertTrue(menu.waitToExist(timeout: 5))
+        composer.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ !self.element("mention-menu").exists }, timeout: 5), "Escape closes the menu.")
+        XCTAssertEqual(composer.value as? String, "@reviewer check @mention-repo and @docs-server then @", "Escape keeps the typed text.")
+        composer.typeText(XCUIKeyboardKey.delete.rawValue)
+        composer.typeText("report back.")
+        XCTAssertTrue(waitUntil({ composer.title == "Mentions @reviewer, @mention-repo, @docs-server" }, timeout: 5))
+        attachScreenshot(named: "Composer with mentions in the accent color")
+        attachElementScreenshot(element("message-composer-scroll-view"), named: "Composer mentions close up")
+
+        let typed = "@reviewer check @mention-repo and @docs-server then report back."
+        element("send-message-button").click()
+        func sentText() -> String? {
+            guard let data = try? Data(contentsOf: historyURL),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            return (history["turns"] as? [[String: Any]] ?? []).compactMap { $0["userText"] as? String }.first { $0.hasPrefix(typed) }
+        }
+        XCTAssertTrue(waitUntil({ sentText() != nil }, timeout: 20), "The message reaches Claude Code.")
+        let sent = try XCTUnwrap(sentText())
+        XCTAssertTrue(sent.hasPrefix(typed + "\n\n<playhouse-mentions>\n"), sent)
+        XCTAssertEqual(sent.components(separatedBy: "\n").filter { $0.hasPrefix("- @") }.count, 3, sent)
+        XCTAssertTrue(sent.contains("- @reviewer (agent): the Claude Code subagent `reviewer` defined in `"), sent)
+        XCTAssertTrue(sent.contains(".codex/agents/reviewer.toml`"), sent)
+        XCTAssertTrue(sent.contains("- @mention-repo (repository): the Git repository at `\(repository.path)`; this task works on it in its worktree `\(worktree)`"), sent)
+        XCTAssertTrue(sent.contains("- @docs-server (mcp): the MCP server `docs-server`"), sent)
+        let bubble = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "user-message-", typed)).firstMatch
+        XCTAssertTrue(bubble.waitToExist(timeout: 10))
+        XCTAssertFalse(bubble.label.contains("playhouse-mentions"), "The transcript hides the mention block.")
+        XCTAssertTrue(waitUntil({ bubble.textViews.firstMatch.title == "Mentions @reviewer, @mention-repo, @docs-server" }, timeout: 10),
+                      "The sent message draws its mentions in the accent color.")
+        // The fixture turn reports no outcome, so Playhouse nudges it once it completes.
+        let nudge = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "playhouse-message-")).firstMatch
+        XCTAssertTrue(nudge.waitToExist(timeout: 30), "The sent turn completes before the composer is used again.")
+        // The persisted message's bubble ends in -user; once it shows, the live copy must be gone.
+        let sentBubbles = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "user-message-", typed))
+        XCTAssertTrue(waitUntil({ sentBubbles.matching(NSPredicate(format: "identifier ENDSWITH %@", "-user")).count == 1 }, timeout: 10))
+        XCTAssertEqual(sentBubbles.count, 1, "The live message and the one persisted with its mention block are one bubble.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, typed, "The task's saved prompt keeps the typed text.")
+        attachScreenshot(named: "Sent message with its mentions colored")
+        attachElementScreenshot(bubble, named: "Sent message mentions close up")
+
+        let recentIDs = try XCTUnwrap(try mentions()["recentIDs"] as? [String])
+        XCTAssertEqual(Array(recentIDs.prefix(2)), ["agent:reviewer", "repository:\(repository.path)"], "Sent mentions become recent, in order.")
+        XCTAssertEqual(recentIDs.count, 3)
+        composer.click()
+        composer.typeText("@")
+        XCTAssertTrue(menu.waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ menuRows() == ["reviewer", "mention-repo", "docs-server"] }, timeout: 10),
+                      "An empty query now shows the recent mentions, most recent first.")
+        XCTAssertEqual(element("mention-menu-title").value as? String, "Recent mentions")
+        attachElementScreenshot(menu, named: "Mention menu showing recent mentions")
+        // Moving the keyboard out of the composer closes the menu; typing there again reopens it.
+        bubble.textViews.firstMatch.click()
+        XCTAssertTrue(waitUntil({ !self.element("mention-menu").exists }, timeout: 5), "The menu closes when the composer loses focus.")
+        composer.click()
+        composer.typeText(XCUIKeyboardKey.delete.rawValue + "@")
+        XCTAssertTrue(menu.waitToExist(timeout: 5), "Typing in the composer again reopens the menu.")
+        composer.typeKey(.escape, modifierFlags: [])
+        composer.typeText(XCUIKeyboardKey.delete.rawValue)
+
+        // Steering a held Codex turn from the composer expands its mentions, Codex's agent file first.
+        openTask(named: "Mention steer task")
+        let steerComposer = element("message-composer")
+        XCTAssertTrue(waitUntil({ steerComposer.exists && steerComposer.isHittable }, timeout: 15))
+        steerComposer.click()
+        steerComposer.typeText("Hold this turn for a steer.")
+        element("send-message-button").click()
+        let ready = URL(fileURLWithPath: codex.path + ".resolve-ready")
+        let release = URL(fileURLWithPath: codex.path + ".resolve-continue")
+        defer { try? Data("Release the active turn.\n".utf8).write(to: release) }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 20), "The fixture holds the Codex turn.")
+        // A steer that misses its turn is queued as typed; it is expanded only when it is sent.
+        try "The expected turn ID is stale.\n".write(to: URL(fileURLWithPath: codex.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
+        let steerTaskID = try self.taskID(named: "Mention steer task")
+        steerComposer.typeText("@helper later")
+        XCTAssertTrue(waitUntil({ !self.element("mention-menu").exists }, timeout: 5), "The space after a mention closes the menu.")
+        steerComposer.typeKey(.return, modifierFlags: .command)
+        func queuedTexts() -> [String] {
+            ((try? runCLI(["conversation", "queue-list", steerTaskID]))?["result"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+        }
+        XCTAssertTrue(waitUntil({ queuedTexts() == ["@helper later"] }, timeout: 10), "A missed steer is queued as typed, not expanded: \(queuedTexts())")
+        let queuedID = try XCTUnwrap(((try runCLI(["conversation", "queue-list", steerTaskID]))["result"] as? [[String: Any]])?.first?["id"] as? String)
+        let queuedText = element("queued-message-text-\(queuedID)")
+        XCTAssertTrue(queuedText.waitToExist(timeout: 10))
+        XCTAssertEqual(queuedText.value as? String, "@helper later", "The queued follow-up shows only the typed text.")
+        _ = try runCLI(["conversation", "queue-remove", steerTaskID, queuedID])
+        XCTAssertTrue(waitUntil({ (steerComposer.value as? String)?.isEmpty == true }, timeout: 10))
+        steerComposer.click()
+        steerComposer.typeText("Hurry, @rev")
+        XCTAssertTrue(waitUntil({ self.element("mention-item-reviewer").exists }, timeout: 10))
+        steerComposer.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (steerComposer.value as? String) == "Hurry, @reviewer " }, timeout: 5))
+        steerComposer.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ (steerComposer.value as? String)?.isEmpty == true }, timeout: 10), "The steer is accepted and clears the draft.")
+        let steerBubbles = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "user-message-", "Hurry, @reviewer"))
+        XCTAssertTrue(steerBubbles.firstMatch.waitToExist(timeout: 10))
+        // The provider echoes the steer with its mention block; it must still match the local copy.
+        XCTAssertFalse(waitUntil({ steerBubbles.count > 1 }, timeout: 3), "The steer shows once: \(steerBubbles.count)")
+        XCTAssertFalse(steerBubbles.firstMatch.label.contains("playhouse-mentions"), "The steered message hides its mention block.")
+        try Data("Release the active turn.\n".utf8).write(to: release)
+        func steerText() -> String? {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: codex.path + ".history")),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let requests = history["steerRequests"] as? [[String: Any]], !requests.isEmpty else { return nil }
+            return requests.flatMap { ($0["input"] as? [[String: Any]]) ?? [] }.compactMap { $0["text"] as? String }.joined()
+        }
+        XCTAssertTrue(waitUntil({ steerText() != nil }, timeout: 20), "Codex receives the steer.")
+        let steered = try XCTUnwrap(steerText())
+        XCTAssertTrue(steered.hasPrefix("Hurry, @reviewer\n\n<playhouse-mentions>\n"), steered)
+        XCTAssertEqual(steered.components(separatedBy: "<playhouse-mentions>").count, 2, "The steer is expanded exactly once.")
+        let agentLine = try XCTUnwrap(steered.components(separatedBy: "\n").first { $0.hasPrefix("- @reviewer (agent): ") })
+        XCTAssertLessThan(try XCTUnwrap(agentLine.range(of: "Codex agent `reviewer`")).lowerBound,
+                          try XCTUnwrap(agentLine.range(of: "Claude Code subagent")).lowerBound, "A Codex task names Codex's agent file first.")
+
+        XCTAssertEqual(try runCLI(["mentions", "list", "--task", UUID().uuidString], expectedStatus: 3)["error"].flatMap { ($0 as? [String: Any])?["code"] as? String }, "not_found")
+        XCTAssertEqual(try runCLI(["mentions", "list"], expectedStatus: 2)["error"].flatMap { ($0 as? [String: Any])?["code"] as? String }, "invalid_argument")
     }
 
     // case-contract: test_rules_catalog_lists_repo_global_and_managed_rules | The Skills page, titled Skills, Rules & MCP, switches to its Rules list with a Skills | Rules | MCP picker. Rules lists each task repository's instruction files from its worktree (AGENTS.override.md, AGENTS.md, CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, and every .md file under .claude/rules, keyed by the source repository and the file's path), the user's global rules (~/.agents/AGENTS.md, Codex's AGENTS.md, and Claude's CLAUDE.md and rules folder), and the organization's managed CLAUDE.md. Each rule names the agents that follow it in Playhouse sessions and the ones that read it natively: a repository AGENTS.md beside a CLAUDE.md is followed by both but read natively only by Codex, ~/.agents/AGENTS.md is read natively by neither yet shared with both, a CLAUDE.md symlinked to AGENTS.md is one Linked rule read natively by both, AGENTS.override.md is Codex's own and leaves the AGENTS.md beside it to Claude, a .claude/rules file shows its paths globs, the managed CLAUDE.md is Claude's only and read-only, and an @import of a missing file is flagged as a problem. A repository without rules shows an empty state. Reading a rule returns its file exactly, and an unknown rule is not_found.
@@ -24219,13 +24590,24 @@ final class PlayhouseUITests: XCTestCase {
         let across = element("plugin-catalog-skills-page-scroll")
         @discardableResult func reveal(_ element: XCUIElement) -> XCUIElement {
             XCTAssertTrue(element.waitToExist(timeout: 10), "\(element) should exist before scrolling to it.")
+            // Composite groups can be visible while XCTest reports no hit point
+            // for the parent inside this nested scroll view; later actions target
+            // their interactive child directly.
+            func hasHitTarget(_ element: XCUIElement) -> Bool {
+                let frame = element.frame
+                return element.isHittable || page.frame.contains(CGPoint(x: frame.midX, y: frame.midY))
+            }
             // The horizontal scroll view reports its whole content's frame, so both
             // directions are judged against the visible catalog page.
             var scrolls = 0
-            while !element.isHittable, scrolls < 20 {
+            while !hasHitTarget(element), scrolls < 20 {
                 let visible = page.frame, target = element.frame
                 if target.midY < visible.minY + 20 || target.midY > visible.maxY - 20 {
                     page.scroll(byDeltaX: 0, deltaY: target.midY > visible.midY ? -250 : 250)
+                } else if target.midX < visible.midX && target.minX < visible.minX + 20 {
+                    across.scroll(byDeltaX: 250, deltaY: 0)
+                } else if target.midX > visible.midX && target.maxX > visible.maxX - 20 {
+                    across.scroll(byDeltaX: -250, deltaY: 0)
                 } else if target.midX < visible.minX + 20 || target.midX > visible.maxX - 20 {
                     across.scroll(byDeltaX: target.midX > visible.midX ? -250 : 250, deltaY: 0)
                 } else {
@@ -24233,8 +24615,19 @@ final class PlayhouseUITests: XCTestCase {
                 }
                 scrolls += 1
             }
-            XCTAssertTrue(element.isHittable, "\(element) should be on screen after scrolling the catalog page.")
+            XCTAssertTrue(hasHitTarget(element), "\(element) should be on screen after scrolling the catalog page.")
             return element
+        }
+        func clickNativeRadio(_ label: String) {
+            let button = pair("skills-tab-picker").native.radioButtons[label]
+            if button.isHittable {
+                button.click()
+                return
+            }
+            // This Picker is visibly inside the nested horizontal comparison
+            // scroll view, but AppKit doesn't expose a hit point for its radio
+            // buttons to XCTest. Tap the same visible screen frame directly.
+            button.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
         }
         func assertSameSize(_ identifier: String) {
             let (js, native) = pair(identifier)
@@ -24300,14 +24693,16 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(js("skill-row-release-notes").exists, "Global replaces the repository's skills.")
         XCTAssertTrue(native("native-skill-row-release-notes").exists, "The native page stays on Repo.")
         attachScreenshot(named: "Skills page: JavaScript on Global, native still on Repo")
-        reveal(pair("skills-tab-picker").native).radioButtons["Global"].click()
+        reveal(pair("skills-tab-picker").native)
+        clickNativeRadio("Global")
         XCTAssertTrue(native("native-skill-row-shared-notes").waitToExist(timeout: 5), "The native picker moves its own page.")
         for identifier in ["skill-row-shared-notes", "skill-linked-shared-notes", "skill-row-quiet-skill", "skill-toggle-quiet-skill"] {
             assertSameSize(identifier)
         }
         reveal(pair("skills-tab-picker").js).radioButtons["Repo"].click()
         XCTAssertTrue(js("skill-row-release-notes").waitToExist(timeout: 5))
-        reveal(pair("skills-tab-picker").native).radioButtons["Repo"].click()
+        reveal(pair("skills-tab-picker").native)
+        clickNativeRadio("Repo")
         XCTAssertTrue(native("native-skill-row-release-notes").waitToExist(timeout: 5))
 
         // The switch runs onToggle and turns Use off; Use runs its handler.
@@ -24347,7 +24742,8 @@ final class PlayhouseUITests: XCTestCase {
         reveal(pair("skills-tab-picker").js).radioButtons["Built-in"].click()
         XCTAssertTrue(js("skill-row-simplify").waitToExist(timeout: 5))
         XCTAssertFalse(js("skill-select-simplify").exists, "A built-in skill shows no checkbox.")
-        reveal(native("native-skill-row-release-notes")).press(forDuration: 1.0)
+        let nativeSkillText = reveal(native("native-skill-text-release-notes"))
+        nativeSkillText.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.0)
         XCTAssertTrue(native("native-skills-selection-count").waitToExist(timeout: 5), "The native row starts selecting too.")
         for identifier in ["skills-selection-count", "skills-fix-selected", "skills-delete-selected", "skills-selection-done"] {
             assertSameSize(identifier)
@@ -24359,7 +24755,8 @@ final class PlayhouseUITests: XCTestCase {
         reveal(js("skills-selection-done")).click()
         XCTAssertTrue(waitUntil({ !js("skills-selection-count").exists && self.pluginText(lastAction) == "Last: done selecting" }, timeout: 5), "Done ends selecting.")
         XCTAssertTrue(js("skill-toggle-release-notes").waitToExist(timeout: 5), "Rows show their controls again.")
-        reveal(native("native-skills-selection-done")).click()
+        let nativeDone = reveal(native("native-skills-selection-done"))
+        nativeDone.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
 
         // The actions menu runs onMenu with the chosen item's id.
         reveal(js("skill-actions-release-notes")).click()
@@ -25264,7 +25661,7 @@ final class PlayhouseUITests: XCTestCase {
         expectedFinalStatus: String? = nil,
         settleTimeout: TimeInterval = 10,
         whileTurnHeld: (() throws -> Void)? = nil,
-        runningStatus: String = "In Progress"
+        reloadConversationAfterTurn: Bool = false
     ) throws {
         let taskID = try taskID(named: taskTitle)
         let executablePath = try XCTUnwrap(codexFixtureExecutable, "The task fixture has no Codex executable.")
@@ -25292,12 +25689,15 @@ final class PlayhouseUITests: XCTestCase {
         try whileTurnHeld?()
         if reportCompletedOutcome {
             XCTAssertTrue(waitUntil({
-                (try? self.taskRecord(id: taskID)?["status"] as? String) == runningStatus
-            }, timeout: 10), "The task should be \(runningStatus) before reporting the fixture outcome.")
+                (try? self.taskRecord(id: taskID)?["status"] as? String) == "In Progress"
+            }, timeout: 10), "The task should be In Progress before reporting the fixture outcome.")
             let outcome = try runCLI(["task", "outcome", taskID, "completed"])
             XCTAssertEqual((outcome["result"] as? [String: Any])?["outcome"] as? String, "completed")
         }
         try "Release the answered fixture turn.\n".write(to: release, atomically: true, encoding: .utf8)
+        if reloadConversationAfterTurn {
+            openTask(named: taskTitle)
+        }
         let answer = app.descendants(matching: .any).matching(
             NSPredicate(
                 format: "identifier BEGINSWITH %@ AND label == %@",
