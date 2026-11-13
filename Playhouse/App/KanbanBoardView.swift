@@ -80,7 +80,7 @@ private struct TaskConversationPanel: View, Equatable {
 }
 
 struct KanbanBoardView: View {
-    private let boardSidebarWidth: CGFloat = 200
+    private let boardSidebarWidth: CGFloat = 216
     @AppStorage(ChatSidebarLayout.widthKey, store: WorkspaceSettings.preferencesStore)
     private var storedChatSidebarWidth = Double(ChatSidebarLayout.defaultWidth)
     @State private var chatSidebarResizeStartWidth: CGFloat?
