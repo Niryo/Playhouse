@@ -14241,7 +14241,7 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 20), "The implementation turn runs in the task's created worktree: \(String(describing: lastRecord?["repositoryWorktrees"])) roots \(String(describing: lastRecord?["workspaceRoots"]))")
     }
 
-    // case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
+    // case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting a first Goal on an Untitled task generates and persists its title from the objective before the Goal starts, while title failure uses the first eight objective words as fallback; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI shows the generated title after reopening the task and restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
     func test_thread_goal_lifecycle_persists_through_cli_xpc() throws {
         if isLiveCodexIntegration {
             codexFixtureExecutable = nil
@@ -14255,14 +14255,23 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(FileManager.default.fileExists(atPath: URL(fileURLWithPath: codexHome).appendingPathComponent("auth.json").path), "Opt-in Goal verification requires an authenticated guest Codex home.")
         }
         launchApp(defaultParent: self.fixture.parent.path)
-        try createTaskFixture(title: "Durable goal", roots: [self.fixture.primary.path])
-        let taskID = try taskID(named: "Durable goal")
+        let initialTaskTitle = usesLiveCodex ? "Durable goal" : "Untitled task"
+        let displayedTaskTitle = usesLiveCodex ? initialTaskTitle : "Generated fixture title"
+        try createTaskFixture(title: initialTaskTitle, roots: [self.fixture.primary.path])
+        let taskID = try taskID(named: initialTaskTitle)
         let objective = "Write a short two-line song about a dog, mark this Goal complete, and finish the task with no follow-up needed."
         if !usesLiveCodex {
             _ = try runCLI(["conversation", "goal", taskID, "set", "--text", objective])
             _ = try runCLI(["conversation", "goal", taskID, "pause"])
         }
-        openTask(named: "Durable goal")
+        openTask(named: displayedTaskTitle)
+        if !usesLiveCodex {
+            let title = element("task-view-title")
+            XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: title) == displayedTaskTitle }, timeout: 10),
+                          "The first Goal should generate and display the task title.")
+            attachScreenshot(named: "First Codex Goal generates the task title")
+            attachElementScreenshot(title, named: "Generated task title close up")
+        }
 
         if !usesLiveCodex {
             let row = element("active-goal-progress-row")
@@ -14294,7 +14303,7 @@ final class PlayhouseUITests: XCTestCase {
             _ = try runCLI(["conversation", "goal", taskID, "set", "--text", replacementObjective])
             _ = try runCLI(["conversation", "goal", taskID, "pause"])
             launchApp(defaultParent: fixture.parent.path)
-            openTask(named: "Durable goal")
+            openTask(named: displayedTaskTitle)
             let replacementRow = element("active-goal-progress-row")
             XCTAssertTrue(replacementRow.waitToExist(timeout: 10), "A replacement Goal should be restored after a CLI/XPC set.")
             XCTAssertTrue(accessibleLabelOrValue(of: element("active-goal-title")).contains(replacementObjective))
@@ -14308,7 +14317,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(waitUntil({ !self.element("active-goal-progress-row").exists }, timeout: 5))
             app.terminate()
             launchApp(defaultParent: fixture.parent.path)
-            openTask(named: "Durable goal")
+            openTask(named: displayedTaskTitle)
             XCTAssertTrue(waitUntil({ !self.element("active-goal-progress-row").exists }, timeout: 10), "A cleared Goal must stay cleared after reopening the task.")
             return
         }
