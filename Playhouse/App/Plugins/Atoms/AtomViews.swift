@@ -1509,6 +1509,7 @@ struct AtomSidePanel<Base: View, Content: View>: View {
             .frame(width: CGFloat(props.width ?? 340))
             .frame(maxHeight: .infinity, alignment: .top)
             .background(WorkspaceTheme.windowBackground)
+            .background(AccessibilityHitTestAnchor())
             .overlay(alignment: leading ? .trailing : .leading) {
                 Rectangle().fill(Color.primary.opacity(0.10)).frame(width: 1)
             }

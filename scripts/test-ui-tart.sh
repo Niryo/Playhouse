@@ -47,6 +47,7 @@ Environment:
   PLAYHOUSE_UI_TART_ARTIFACTS  Host artifact root
   PLAYHOUSE_UI_SCREEN_WIDTH    Guest screen width in points for the run (default: 1024)
   PLAYHOUSE_UI_SCREEN_HEIGHT   Guest screen height in points for the run (default: 768)
+  PLAYHOUSE_UI_TEST_TIMEOUT_SECONDS Per-case XCTest allowance (default: 180)
   --live-provider <provider>   Run live UI cases against claude or codex; guest access is required
   --stop-vm-after-run          Stop the persistent VM after this run
   --reset-vm-state             Reset guest app/test processes before this run
@@ -520,7 +521,7 @@ if (( reset_failed == 1 )); then
 	test_status=74
 else
 	set +e
-	PLAYHOUSE_UI_TART_GUEST=1 PLAYHOUSE_UI_TESTS_CONFIRMED=1 PLAYHOUSE_UI_DASHBOARD=0 TMPDIR="$guest_tmp" "${source_snapshot_root}/scripts/test-ui.sh" "$@" 2>&1 | tee "$guest_log"
+	PLAYHOUSE_UI_TART_GUEST=1 PLAYHOUSE_UI_TESTS_CONFIRMED=1 PLAYHOUSE_UI_DASHBOARD=0 PLAYHOUSE_UI_TEST_TIMEOUT_SECONDS="${PLAYHOUSE_UI_TEST_TIMEOUT_SECONDS:-180}" TMPDIR="$guest_tmp" "${source_snapshot_root}/scripts/test-ui.sh" "$@" 2>&1 | tee "$guest_log"
 	test_status=${PIPESTATUS[0]}
 	set -e
 fi
