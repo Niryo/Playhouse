@@ -2782,7 +2782,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(any(message["text"] == "Do not overtake Mars" for message in recovered_messages))
         self.assertIn("Another thought about Mars", [message["text"] for message in recovered_messages])
 
-    # case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a fixed standard-width (240-point) Kanban sidebar, 20% wider than its previous 200-point width and left of the columns while they scroll, and places its Scheduled Tasks button inside the sidebar below the full logo header. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
+    # case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, keeps a fixed standard-width (216-point) Kanban sidebar, 8% wider than its previous 200-point width and left of the columns while they scroll, and places its Scheduled Tasks button inside the sidebar below the full logo header. The Dock AppIcon uses the same foreground artwork on a solid #2C2F36 background, and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):
         response, _ = self.call_cli("status")
         status = self.assert_success(response)
