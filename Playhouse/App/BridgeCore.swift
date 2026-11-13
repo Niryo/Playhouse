@@ -7272,14 +7272,16 @@ final class ConversationManager {
     ) async throws -> QueuedConversationMessage {
         let item = try queueMessage(taskID: taskID, text: text, imageDataURLs: imageDataURLs, asyncQuestionItemID: asyncQuestionItemID)
         if shouldDrainMissedSteerImmediately(taskID: taskID) {
-            await dispatchQueuedMessages(
-                taskID: taskID,
-                mode: .code,
-                modelID: nil,
-                onlyMessageID: item.id,
-                onUpdate: onUpdate,
-                onUserInput: onUserInput
-            )
+            Task { @MainActor in
+                await dispatchQueuedMessages(
+                    taskID: taskID,
+                    mode: .code,
+                    modelID: nil,
+                    onlyMessageID: item.id,
+                    onUpdate: onUpdate,
+                    onUserInput: onUserInput
+                )
+            }
         } else if Self.dispatchingQueuedTaskIDs.contains(taskID) {
             Self.pendingQueuedTaskDispatchIDs.insert(taskID)
         }
@@ -7312,7 +7314,9 @@ final class ConversationManager {
             else {
                 try tasks.requeueMissedSteer(taskID: taskID, messageID: messageID)
                 if shouldDrainMissedSteerImmediately(taskID: taskID) {
-                    await dispatchQueuedMessages(taskID: taskID, mode: .code, modelID: nil, onlyMessageID: messageID, onUpdate: { _ in }, onUserInput: { _ in })
+                    Task { @MainActor in
+                        await dispatchQueuedMessages(taskID: taskID, mode: .code, modelID: nil, onlyMessageID: messageID, onUpdate: { _ in }, onUserInput: { _ in })
+                    }
                 } else if Self.dispatchingQueuedTaskIDs.contains(taskID) {
                     Self.pendingQueuedTaskDispatchIDs.insert(taskID)
                 }
