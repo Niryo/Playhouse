@@ -24424,7 +24424,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitForDisappearance(chat.descendants(matching: .any)["plugin-add-here-composerActions"]))
     }
 
-    // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with the generated authoring prompt in the editable composer draft, no provider turn started, and no board card or task header. The user can choose a model and edit the draft before sending; the Plugins menu reopens the same conversation and preview, including unsent drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home.
+    // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with an empty composer, guidance to describe the plugin, no repository title, no provider turn, and no board card or task header. The user can choose a model and write an unsent description that survives reopening. Name, presentation, placement and generated plugin identity persist in provider instructions; invalid setup is rejected. Claude and Codex receive the setup and bundled skill without installing files in the user’s home.
     func test_plugin_authoring_task_starts_with_placement_and_skill() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-plugin-author")
         let historyURL = URL(fileURLWithPath: try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]) + ".history")
@@ -24474,8 +24474,14 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("task-header-status").exists, "The editor has no task status in its header.")
         let pluginID = try XCTUnwrap(boardTask["authoredPluginID"] as? String)
         XCTAssertEqual(boardTask["pluginPlacement"] as? String, "mainSidebar")
-        let authoringDraft = try XCTUnwrap((element("message-composer").value as? String))
-        XCTAssertTrue(authoringDraft.contains(pluginID) && authoringDraft.contains("presentation modal"), "The generated authoring prompt is ready to edit in the composer.")
+        XCTAssertFalse(element("empty-conversation-repository-title").exists, "The plugin editor has no repository title.")
+        XCTAssertEqual(accessibleLabelOrValue(of: element("model-prompt")), "Describe your plugin in the prompt below.")
+        XCTAssertTrue((element("message-composer").value as? String ?? "").isEmpty, "The user starts with an empty composer.")
+        XCTAssertFalse(element("send-message-button").isEnabled, "Nothing is sent before the user describes the plugin.")
+        attachScreenshot(named: "Plugin editor empty state")
+        let authoringDraft = "A countdown timer with a start button."
+        element("message-composer").click()
+        element("message-composer").typeText(authoringDraft)
         XCTAssertTrue(element("send-message-button").isEnabled, "The user can send when ready.")
         let modelPicker = element("model-picker-menu")
         XCTAssertTrue(modelPicker.exists, "The user can choose a model before sending.")
@@ -24494,7 +24500,16 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(draftMenu.menuItems["Edit Timer…"].waitToExist(timeout: 10))
         draftMenu.menuItems["Edit Timer…"].click()
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10), "A draft can be reopened before its plugin folder exists.")
-        XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String) == authoringDraft }, timeout: 10), "The generated authoring draft survives reopening unsent.")
+        XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String) == authoringDraft }, timeout: 10), "The user’s authoring draft survives reopening unsent.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ turns().contains { $0["userText"] as? String == authoringDraft } }, timeout: 20), "The user’s description reaches the provider after Send.")
+        let firstTurn = try XCTUnwrap(turns().first { $0["userText"] as? String == authoringDraft })
+        let arguments = try XCTUnwrap(firstTurn["arguments"] as? [String])
+        let instructionsIndex = try XCTUnwrap(arguments.firstIndex(of: "--append-system-prompt"))
+        let instructions = arguments[instructionsIndex + 1]
+        XCTAssertTrue(instructions.contains("The chosen plugin name is Timer."))
+        XCTAssertTrue(instructions.contains("The chosen presentation is modal."))
+        XCTAssertTrue(instructions.contains(pluginID))
         XCTAssertGreaterThan(element("message-composer").frame.width, 0)
         XCTAssertGreaterThan(element("plugin-creation-preview").frame.width, 0)
         XCTAssertLessThanOrEqual(element("message-composer").frame.maxX, element("plugin-creation-preview").frame.minX + 2)
@@ -24628,6 +24643,59 @@ final class PlayhouseUITests: XCTestCase {
         app.dialogs.buttons["Delete"].click()
         XCTAssertTrue(waitUntil({ (try? self.boardTaskRecords().contains { $0["id"] as? String == legacyDeleteID }) == false }, timeout: 10))
 
+    }
+
+    // case-contract: test_plugin_authoring_codex_instructions_resume | A Codex plugin editor sends the user’s description with the chosen name, presentation, placement and generated plugin identity in thread instructions, automatically supplies the bundled plugin skill, and restores the same setup when the thread resumes on a fresh app-server. The composer starts empty and no turn starts until the user sends.
+    func test_plugin_authoring_codex_instructions_resume() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: true).path
+        let historyURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
+        let daemonEnvironment = ["PLAYHOUSE_BRIDGE_SERVICE_NAME": "\(serviceName!).plugin-codex-\(UUID().uuidString.prefix(8))"]
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: daemonEnvironment)
+        let created = try runCLI(["plugin", "author", "--placement", "mainSidebar", "--name", "Codex timer", "--presentation", "modal", "--provider", "codex"], extraEnvironment: daemonEnvironment)
+        let task = try XCTUnwrap((created["result"] as? [String: Any])?["task"] as? [String: Any])
+        let pluginID = try XCTUnwrap(task["authoredPluginID"] as? String)
+        func history() -> [String: Any] {
+            guard let data = try? Data(contentsOf: historyURL) else { return [:] }
+            return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        }
+        let menu = app.menuBars.menuBarItems["Plugins"]
+        menu.click()
+        XCTAssertTrue(menu.menuItems["Edit Codex timer…"].waitToExist(timeout: 10))
+        menu.menuItems["Edit Codex timer…"].click()
+        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
+        let composer = element("message-composer")
+        XCTAssertTrue((composer.value as? String ?? "").isEmpty)
+        XCTAssertTrue(history().isEmpty, "Creating the editor starts no provider turn.")
+        composer.click()
+        composer.typeText("Build a countdown timer.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ history()["userMessage"] as? String == "Build a countdown timer." }, timeout: 20))
+        let instructions = try XCTUnwrap(history()["threadStartDeveloperInstructions"] as? String)
+        for text in ["The chosen plugin name is Codex timer.", "The chosen presentation is modal.", "Main sidebar placement (`mainSidebar`)", pluginID] {
+            XCTAssertTrue(instructions.contains(text), "Codex receives \(text) in thread instructions.")
+        }
+        let turns = try XCTUnwrap(history()["turns"] as? [[String: Any]])
+        let first = try XCTUnwrap(turns.first { $0["userMessage"] as? String == "Build a countdown timer." })
+        let skills = try XCTUnwrap(first["skillInputs"] as? [[String: Any]])
+        XCTAssertTrue(skills.contains { $0["name"] as? String == "playhouse-plugin" })
+        XCTAssertTrue(waitUntil({
+            guard let result = try? self.runCLI(["plugin", "edit", "--id", pluginID], extraEnvironment: daemonEnvironment),
+                  let payload = result["result"] as? [String: Any],
+                  let task = payload["task"] as? [String: Any],
+                  let status = task["status"] as? String else { return false }
+            return status != "In Progress"
+        }, timeout: 30), "The first turn settles before resuming.")
+        let daemonPID = try XCTUnwrap((try runCLI(["status"], extraEnvironment: daemonEnvironment)["result"] as? [String: Any])?["processID"] as? Int)
+        XCTAssertEqual(kill(pid_t(daemonPID), SIGKILL), 0)
+        XCTAssertTrue(waitUntil({ kill(pid_t(daemonPID), 0) != 0 }, timeout: 10))
+        composer.click()
+        composer.typeText("Make it blue.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ history()["userMessage"] as? String == "Make it blue." }, timeout: 20))
+        let resumed = try XCTUnwrap((history()["threadResumeDeveloperInstructions"] as? [String])?.last)
+        for text in ["The chosen plugin name is Codex timer.", "The chosen presentation is modal.", "Main sidebar placement (`mainSidebar`)", pluginID] {
+            XCTAssertTrue(resumed.contains(text), "Resumed Codex instructions retain \(text).")
+        }
     }
 
     // case-contract: test_plugin_editor_reattaches_after_daemon_restart | A plugin editor follows a running Claude turn after a daemon restart, restores its answer once alongside the preview, and settles without a task outcome nudge. Claude represents the shared reattachment settlement used by both providers.

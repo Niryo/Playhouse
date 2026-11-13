@@ -2322,11 +2322,13 @@ final class BoardTaskManager {
     }
 
     /// Creates an editor conversation without adding a card to the task board.
-    func createPluginConversation(name: String, pluginID: String, placement: String, contextFolder: String, provider: ConversationProvider, prompt: String? = nil) async throws -> BoardTaskRecord {
+    func createPluginConversation(name: String, pluginID: String, placement: String, contextFolder: String, provider: ConversationProvider, authoringName: String? = nil, presentation: String? = nil, prompt: String? = nil) async throws -> BoardTaskRecord {
         let chat = StandaloneChat(provider: provider)
         chat.title = name
         chat.authoredPluginID = pluginID
         chat.pluginPlacement = placement
+        chat.pluginAuthoringName = authoringName
+        chat.pluginAuthoringPresentation = presentation
         chat.pluginContextFolder = contextFolder
         chat.savedPrompt = prompt
         chat.hasUnsentDraft = prompt?.isEmpty == false
@@ -6893,6 +6895,8 @@ final class ConversationManager {
                     isArchived: task.status == .done,
                     pluginPlacement: task.authoringPluginPlacement,
                     pluginID: task.authoringPluginID,
+                    pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
+                    pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
                     pluginsDirectory: clients.skills?.pluginsDirectory
                 ),
                 sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
@@ -7597,6 +7601,8 @@ final class ConversationManager {
                     isPluginEditor: task.authoringPluginID != nil,
                     pluginPlacement: task.authoringPluginPlacement,
                     pluginID: task.authoringPluginID,
+                    pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
+                    pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
                     pluginsDirectory: clients.skills?.pluginsDirectory
                 )
             )
@@ -9849,6 +9855,8 @@ final class ConversationManager {
                     isArchived: task.status == .done,
                     pluginPlacement: task.authoringPluginPlacement,
                     pluginID: task.authoringPluginID,
+                    pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
+                    pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
                     pluginsDirectory: clients.skills?.pluginsDirectory
                 )
             }
@@ -9932,8 +9940,12 @@ final class ConversationManager {
                         contextFolders: task.contextFolderPaths,
                         repositoryRootPath: repositoryRoot?.path,
                         isStandaloneChat: task.isStandaloneChat,
+                        isPluginEditor: task.authoringPluginID != nil,
                         isArchived: task.status == .done,
-                        pluginPlacement: (task as? BoardTask)?.pluginPlacement,
+                        pluginPlacement: task.authoringPluginPlacement,
+                        pluginID: task.authoringPluginID,
+                        pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
+                        pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
                         pluginsDirectory: clients.skills?.pluginsDirectory
                     )
                     if provider == .claude {
@@ -10031,6 +10043,8 @@ final class ConversationManager {
                     isArchived: task.status == .done,
                     pluginPlacement: task.authoringPluginPlacement,
                     pluginID: task.authoringPluginID,
+                    pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
+                    pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
                     pluginsDirectory: clients.skills?.pluginsDirectory
                 ),
                 onDelta: callbacks.onDelta,
@@ -11363,7 +11377,7 @@ final class PlayhouseBridgeRuntime {
                     catch { throw BridgeCommandError(code: "not_found", message: error.localizedDescription) }
                     let created = try await taskManager.createPluginConversation(
                         name: plugin.name, pluginID: plugin.id, placement: plugin.placement,
-                        contextFolder: library.directory.path, provider: settings.defaultConversationProvider)
+                        contextFolder: library.directory.path, provider: settings.defaultConversationProvider, authoringName: plugin.name, presentation: plugin.presentation)
                     _ = settings.bumpPluginsRevision()
                     return created
                 }
@@ -11400,16 +11414,11 @@ final class PlayhouseBridgeRuntime {
                     }
                 }
                 let pluginID = "plugin-" + UUID().uuidString.lowercased()
-                let prompt: String
-                if let name, let presentation {
-                    prompt = "/\(TaskThreadDeveloperInstructions.pluginSkillName) Create a plugin named \(name) in the \(placement.title) placement (\(placement.rawValue)), with presentation \(presentation). Use plugin ID and folder \(pluginID). Ask me what the plugin should do before implementing it."
-                } else {
-                    prompt = "/\(TaskThreadDeveloperInstructions.pluginSkillName) Create a new plugin in the \(placement.title) placement (\(placement.rawValue)). Use plugin ID and folder \(pluginID)."
-                }
+                let prompt = ""
                 let created = try await taskManager.withPluginOperationLock(pluginID) {
                     try await taskManager.createPluginConversation(
                         name: name ?? placement.title, pluginID: pluginID, placement: placement.rawValue,
-                        contextFolder: library.directory.path, provider: provider, prompt: prompt)
+                        contextFolder: library.directory.path, provider: provider, authoringName: name, presentation: presentation)
                 }
                 _ = settings.bumpPluginsRevision()
                 result = .object(["task": try Self.value(created), "prompt": .string(prompt)])

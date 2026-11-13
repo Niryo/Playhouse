@@ -4246,7 +4246,7 @@ struct TaskConversationView: View {
                 ) {
                     if messages.isEmpty && activeGoal?.status != "complete" && !isLoadingHistory {
                         VStack(spacing: 0) {
-                            if task.isStandaloneChat {
+                            if task.isStandaloneChat || task.authoringPluginID != nil {
                                 // A chat has no repository to name, so the placeholder keeps only
                                 // its prompt. The leading spacer balances the trailing one that
                                 // the title would otherwise have pushed against.
@@ -4266,10 +4266,10 @@ struct TaskConversationView: View {
                                     .font(.system(size: 29, weight: .regular))
                                     .foregroundStyle(Color.accentColor.opacity(0.8))
                                     .accessibilityLabel("Conversation")
-                                Text("Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
+                                Text(task.authoringPluginID != nil ? "Describe your plugin in the prompt below." : "Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
                                     .font(.system(size: 14, weight: .medium))
                                     .foregroundStyle(.secondary)
-                                    .accessibilityLabel("Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
+                                    .accessibilityLabel(task.authoringPluginID != nil ? "Describe your plugin in the prompt below." : "Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
                                     .accessibilityIdentifier("model-prompt")
                             }
                             Spacer(minLength: 28)

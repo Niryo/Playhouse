@@ -2894,6 +2894,8 @@ enum TaskThreadDeveloperInstructions {
         isArchived: Bool = false,
         pluginPlacement: String? = nil,
         pluginID: String? = nil,
+        pluginName: String? = nil,
+        pluginPresentation: String? = nil,
         pluginsDirectory: String? = nil
     ) -> String {
         let executable = cliExecutableURL().path
@@ -2904,6 +2906,7 @@ enum TaskThreadDeveloperInstructions {
             You are helping the user create and edit a Playhouse plugin in a standalone editor.
             This conversation is not a task and has no task board status or outcome to report.
             The plugin ID and folder are \(pluginID ?? "unknown"); its folder is inside \(pluginsDirectory ?? "the Playhouse plugins directory"). When it already exists, edit that plugin rather than creating a different one.
+            \(pluginName.map { "The chosen plugin name is \($0)." } ?? "") \(pluginPresentation.map { "The chosen presentation is \($0)." } ?? "")
             \(pluginAuthoringInstructions(placement: pluginPlacement, executable: quotedExecutable, pluginsDirectory: pluginsDirectory))
             """
         }
@@ -2990,7 +2993,7 @@ enum TaskThreadDeveloperInstructions {
         let directory = pluginsDirectory ?? "the plugins folder"
         return """
 
-        Plugin authoring: this task builds a new Playhouse plugin whose entry button goes in the \(placement.title) placement (`\(placement.rawValue)`). Use the /\(pluginSkillName) skill for the plugin system's details, and ask the user for anything the request leaves open (what the plugin does, its name and icon, and whether it opens as a popover, modal, sidebar or page) before writing it.
+        Plugin authoring: this task builds a new Playhouse plugin whose entry button goes in the \(placement.title) placement (`\(placement.rawValue)`). Use the /\(pluginSkillName) skill for the plugin system's details and the chosen name and presentation when supplied. Ask the user for any required details the request leaves open before writing it.
         - Write the plugin to \(directory)/<plugin-id>/ as plugin.json (id, name, icon, placement "\(placement.rawValue)", presentation) and index.js. That folder is this task's context folder; it is not a Git repository and needs no worktree or pull request.
         - Context the plugin receives in Playhouse.props at this placement: \(placement.contextDescription)
         - Check it headlessly with \(executable) plugin render --plugin <plugin-id> [--task <task-id>] [--event <testID>:<event>[:<value>]], then install it with \(executable) plugin refresh, which validates every plugin and shows the valid ones in the app immediately. Fix every reported error before you finish.
