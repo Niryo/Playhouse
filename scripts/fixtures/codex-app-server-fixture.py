@@ -1921,6 +1921,7 @@ def main():
                 deadline = time.monotonic() + 30
                 steer_requests = []
                 rejected_steer_requests = []
+                completed_before_steer = False
                 while not release.exists() and time.monotonic() < deadline:
                     readable, _, _ = stdin_select(0.02)
                     if not readable:
@@ -1932,6 +1933,17 @@ def main():
                     if queued_request.get("method") == "thread/items/list":
                         write({"jsonrpc": "2.0", "id": queued_request.get("id"), "result": {"data": [], "nextCursor": None}})
                     elif queued_request.get("method") == "turn/steer":
+                        complete_first = Path(str(sys.argv[0]) + ".complete-before-steer-rejection")
+                        if complete_first.exists():
+                            complete_first.unlink()
+                            write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                                "threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"},
+                            }})
+                            time.sleep(2)
+                            rejected_steer_requests.append(queued_request.get("params", {}))
+                            write({"jsonrpc": "2.0", "id": queued_request["id"], "error": {"code": -32000, "message": "no active turn to steer"}})
+                            completed_before_steer = True
+                            break
                         rejection = Path(str(sys.argv[0]) + ".reject-next-steer")
                         if rejection.exists():
                             message_text = rejection.read_text(encoding="utf-8").strip()
@@ -1946,7 +1958,7 @@ def main():
                     elif not answer_read_while_held(queued_request):
                         write({"jsonrpc": "2.0", "id": queued_request.get("id"), "error": {"code": -32601, "message": "Unsupported fixture request."}})
                 ready.unlink(missing_ok=True)
-                released = release.exists()
+                released = release.exists() or completed_before_steer
                 release.unlink(missing_ok=True)
                 if not released:
                     os._exit(3)
@@ -1954,10 +1966,11 @@ def main():
                 saved_history["steerRequests"] = saved_history.get("steerRequests", []) + steer_requests
                 saved_history["rejectedSteerRequests"] = saved_history.get("rejectedSteerRequests", []) + rejected_steer_requests
                 history_path.write_text(json.dumps(saved_history), encoding="utf-8")
-                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-                    "threadId": THREAD_ID,
-                    "turn": {"id": TURN_ID, "status": "completed"},
-                }})
+                if not completed_before_steer:
+                    write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                        "threadId": THREAD_ID,
+                        "turn": {"id": TURN_ID, "status": "completed"},
+                    }})
             elif serial_mode:
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,

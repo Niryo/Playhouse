@@ -8606,7 +8606,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(steer_params["input"], [{"type": "text", "text": steer_message}])
         self.assertTrue(steer_params["expectedTurnId"], "Steering must identify the matching active turn.")
 
-    # case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up with its attached image, clears the preview, and marks the row with its image count; the queued image persists across reopening without returning to the composer, and malformed queued images fail validation. Its row Steer uses the active turn ID, delivers both text and image to the provider, appears in the transcript with its image, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
+    # case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, missed composer and queued-row steers start their own turns without blocking other steering and leave the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up with its attached image, clears the preview, and marks the row with its image count; the queued image persists across reopening without returning to the composer, and malformed queued images fail validation. Its row Steer uses the active turn ID, delivers both text and image to the provider, appears in the transcript with its image, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
     def test_conversation_steers_and_queues_active_turn(self):
         task = self.create_repo_task("Active turn message controls", [self.primary])
         task_id = task["id"]
@@ -8758,9 +8758,15 @@ class PlayhouseBridgeTests(unittest.TestCase):
         while time.monotonic() < deadline and not targeted_ready.exists():
             time.sleep(0.02)
         self.assertTrue(targeted_ready.exists(), "A missed queued-row steer should begin its own targeted turn.")
+        targeted_result, _ = self.finish_cli(targeted_process, targeted_command)
+        self.assertTrue(self.assert_success(targeted_result)["accepted"], "The steer request should return while its fallback turn is still running.")
         delivering_queue, _ = self.call_cli("conversation", "queue-list", task_id)
         delivering_item = next(item for item in self.assert_success(delivering_queue) if item["id"] == targeted_record["id"])
         self.assertEqual(delivering_item["state"], "dispatching", "A follow-up stays durably claimed while its own turn runs.")
+        available_row, _ = self.call_cli("conversation", "queue", task_id, "--message", "Another follow-up remains steerable.")
+        available_id = self.assert_success(available_row)["id"]
+        available_result, _ = self.call_cli("conversation", "queue-steer", task_id, available_id)
+        self.assertFalse(self.assert_success(available_result)["queued"], "Another queued message should steer the held fallback turn.")
         overlap_text = "Queue this steer behind the targeted turn."
         Path(str(executable) + ".reject-next-steer").write_text("no active turn to steer\n", encoding="utf-8")
         overlap_steer, _ = self.call_cli(
@@ -8772,8 +8778,6 @@ class PlayhouseBridgeTests(unittest.TestCase):
         overlap_item = next(item for item in self.assert_success(overlap_queue) if item["text"] == overlap_text)
         self.assertEqual(overlap_item["state"], "queued")
         targeted_release.write_text("Release targeted delivery.\n", encoding="utf-8")
-        targeted_result, _ = self.finish_cli(targeted_process, targeted_command)
-        self.assertTrue(self.assert_success(targeted_result)["accepted"])
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             current_queue, _ = self.call_cli("conversation", "queue-list", task_id)
@@ -8830,6 +8834,29 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(final_delivered.count(targeted_row_text), 1)
         self.assertEqual(final_delivered.count(missed_row_text), 1)
 
+        regular_text = "Deliver a missed regular steer without blocking."
+        Path(str(executable) + ".hold-next-queued-turn").write_text("hold regular fallback\n", encoding="utf-8")
+        regular_result, _ = self.call_cli("conversation", "steer", task_id, "--message", regular_text, extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)})
+        self.assertTrue(self.assert_success(regular_result)["queued"], "The regular steer must return before its held fallback completes.")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not targeted_ready.exists():
+            time.sleep(0.02)
+        self.assertTrue(targeted_ready.exists(), "The missed regular steer should start its own held turn.")
+        regular_available, _ = self.call_cli("conversation", "queue", task_id, "--message", "Steer while regular fallback runs.")
+        regular_available_id = self.assert_success(regular_available)["id"]
+        regular_steer, _ = self.call_cli("conversation", "queue-steer", task_id, regular_available_id, extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)})
+        self.assertFalse(self.assert_success(regular_steer)["queued"], "A second row should steer the held regular fallback.")
+        targeted_release.write_text("Release regular fallback.\n", encoding="utf-8")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            regular_queue, _ = self.call_cli("conversation", "queue-list", task_id)
+            if self.assert_success(regular_queue) == []:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.assert_success(regular_queue), [])
+        regular_history, _ = self.call_cli("conversation", "history", task_id, extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)})
+        self.assertEqual([m["text"] for m in self.assert_success(regular_history)["messages"] if m["role"] == "user"].count(regular_text), 1)
+
         immediate_text = "Deliver this missed row immediately as its own turn."
         immediate_row, _ = self.call_cli("conversation", "queue", task_id, "--message", immediate_text)
         immediate_record = self.assert_success(immediate_row)
@@ -8840,8 +8867,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
         immediate_result = self.assert_success(immediate_steer)
         self.assertTrue(immediate_result["accepted"])
         self.assertTrue(immediate_result["queued"], "A missed no-active-turn steer should fall back through the ordinary queue.")
-        immediate_queue, _ = self.call_cli("conversation", "queue-list", task_id)
-        self.assertEqual(self.assert_success(immediate_queue), [], "The synchronous own-turn drain should finish before the request returns.")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            immediate_queue, _ = self.call_cli("conversation", "queue-list", task_id)
+            if self.assert_success(immediate_queue) == []:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.assert_success(immediate_queue), [], "The own-turn drain should finish after the request returns.")
         immediate_history, _ = self.call_cli(
             "conversation", "history", task_id,
             extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
@@ -8860,8 +8892,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
         failed_steer_result = self.assert_success(failed_steer)
         self.assertTrue(failed_steer_result["accepted"])
         self.assertTrue(failed_steer_result["queued"])
-        failure_queue, _ = self.call_cli("conversation", "queue-list", task_id)
-        failure_items = {item["id"]: item for item in self.assert_success(failure_queue)}
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            failure_queue, _ = self.call_cli("conversation", "queue-list", task_id)
+            failure_items = {item["id"]: item for item in self.assert_success(failure_queue)}
+            if failure_items.get(failed_target_record["id"], {}).get("state") == "needsAction":
+                break
+            time.sleep(0.05)
         self.assertEqual(failure_items[failed_target_record["id"]]["state"], "needsAction")
         self.assertEqual(failure_items[later_record["id"]]["state"], "queued", "A failed targeted send must not drain later queued messages.")
 
@@ -12040,8 +12077,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
         later, _ = self.call_cli("conversation", "answer-async", task_id, "item_playhouse_async_later_question",
                                  "--answer", "Finish after the turn.", extra_environment=env)
         self.assertEqual(self.assert_success(later)["text"], "One more check: Finish after the turn.")
-        completed, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
-        completed_history = self.assert_success(completed)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            completed, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+            completed_history = self.assert_success(completed)
+            if "item_playhouse_async_later_question" in completed_history["answeredAsyncQuestionIDs"]:
+                break
+            time.sleep(0.05)
         self.assertEqual(set(completed_history["answeredAsyncQuestionIDs"]),
                          {question["id"], "item_playhouse_async_later_question"})
         self.assertTrue(any("Answers received: One more check: Finish after the turn." in message["text"]
@@ -12065,8 +12107,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
                                   "--answer", "Yes, update paired tests and run required verification",
                                   "--answer", "Retry this answer.", extra_environment=env)
         self.assertTrue(self.assert_success(answer)["queued"])
-        queued, _ = self.call_cli("conversation", "queue-list", task_id, extra_environment=env)
-        queued_item = self.assert_success(queued)[0]
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            queued, _ = self.call_cli("conversation", "queue-list", task_id, extra_environment=env)
+            queued_item = self.assert_success(queued)[0]
+            if queued_item["state"] == "needsAction":
+                break
+            time.sleep(0.05)
         self.assertEqual(queued_item["state"], "needsAction")
         self.assertEqual(queued_item["asyncQuestionItemID"], question["id"])
         pending, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
