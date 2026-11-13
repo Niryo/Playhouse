@@ -7,6 +7,7 @@ Whenever you need to read Swift source, use the `swift-nav` skill in `.agents/sk
 ## Git write operations
 
 - Do not run Git commands that change the working tree, index, refs, or repository history unless the user explicitly authorizes the specific operation in the current conversation.
+- Git operations performed by test runners in isolated temporary fixture repositories and their VM-local test snapshots are authorized; they do not require separate permission. This exception does not apply to the task worktree or any user repository.
 - This includes `git add`, `commit`, `push`, `pull`, `stash`, `restore`, `reset`, `checkout`, `switch`, `clean`, `merge`, `rebase`, `cherry-pick`, branch or tag creation/deletion, and worktree creation/removal.
 - A request to implement, edit, or review code is not permission to run a Git write command. Read-only commands such as `git status`, `git diff`, and `git log` are allowed.
 - Explicitly invoking `$full-ui-verification` authorizes that skill to stage and commit only changes made for its verification and repair work, then push that commit to the current branch's configured upstream. It does not authorize including unrelated or pre-existing staged changes; if those prevent a scoped commit, finish verification and report the commit/push blocker.

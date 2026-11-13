@@ -370,7 +370,7 @@ extension ConversationManager {
                     message: "The side chat can't show questions. Ask the user in your answer instead."
                 )
             },
-            onSteerMessage: { _, _ in }, onProgressMessage: { _ in }, onTurnStarted: { _ in },
+            onSteerMessage: { _, _ in }, onProgressMessage: { _ in }, onMessageTimestamp: { _, _ in }, onTurnStarted: { _ in },
             onTokenUsage: { _ in },
             sensitiveUserInputAnswerValues: [], hideSensitiveRecoveryPrompt: false
         )
@@ -8795,6 +8795,7 @@ final class ConversationManager {
                 let attributedMessages = safeMessages.map { message -> ConversationMessage in
                     var message = message
                     if provider == .codex {
+                        message.createdAt = message.createdAt ?? currentTranscript?.messageTimestamps?[message.id]
                         message.provider = message.provider ?? .codex
                         if message.modelID == nil, let turnID = message.turnID { message.modelID = modelIDs[turnID] }
                     }
@@ -8905,6 +8906,17 @@ final class ConversationManager {
                     phase: safeMessage.phase,
                     asyncQuestions: safeMessage.asyncQuestions
                 ))
+            },
+            onMessageTimestamp: { id, date in
+                do {
+                    try self.transcripts.mutate(taskID, turns: .none) { transcript in
+                        var timestamps = transcript.messageTimestamps ?? [:]
+                        if timestamps[id] == nil { timestamps[id] = date }
+                        transcript.messageTimestamps = timestamps
+                    }
+                } catch {
+                    PlayhouseDiagnostics.record("conversation.timestamp.write_failed", fields: PlayhouseDiagnostics.errorFields(error))
+                }
             },
             onTurnStarted: { turnID in
                 if provider == .codex, let segment {
@@ -9379,6 +9391,7 @@ final class ConversationManager {
                 onUserInput: callbacks.onUserInput,
                 onSteerMessage: callbacks.onSteerMessage,
                 onProgressMessage: callbacks.onProgressMessage,
+                onMessageTimestamp: callbacks.onMessageTimestamp,
                 onTurnStarted: callbacks.onTurnStarted,
                 onTokenUsage: callbacks.onTokenUsage,
                 sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
@@ -9779,6 +9792,8 @@ final class ConversationManager {
         var emittedSafeTurnIDs = Set<String>()
         var visible: [ConversationMessage] = []
         for message in messages {
+            var message = message
+            message.createdAt = message.createdAt ?? transcript.messageTimestamps?[message.id]
             if message.turnID.map(privateReminderTurnIDs.contains) == true { continue }
             guard let turnID = message.turnID, privateTurnIDs.contains(turnID) else {
                 visible.append(message)

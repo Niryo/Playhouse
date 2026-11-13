@@ -2141,6 +2141,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
         onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in },
         onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in },
+        onMessageTimestamp: @escaping (String, Date) -> Void = { _, _ in },
         onTurnStarted: @escaping (String) -> Void,
         onTokenUsage: @escaping (ConversationTurnUsageReport) -> Void = { _ in },
         sensitiveUserInputAnswerValues: [String] = [],

@@ -142,6 +142,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         let onDelta: (String) -> Void
         let onFinal: (String) -> Void
         let onProgress: (ConversationMessage) -> Void
+        let onMessageTimestamp: (String, Date) -> Void
         let onSteer: (String, [String]) -> Void
         let onActivity: (ConversationActivity) -> Void
         let onDiff: (ConversationTurnDiff) -> Void
@@ -150,17 +151,18 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         var activities: [String: ConversationActivity] = [:]
         var startedAtUptime: [String: UInt64] = [:]
         var startedAtDate: [String: Date] = [:]
+        var messageTimestamps: [String: Date] = [:]
         var durations: [String: Int] = [:]
         /// The main thread's per-call usage so far this turn, reported at
         /// completion when the terminal notification carries no usage itself.
         var callUsage = ConversationTokenUsage()
 
         init(onDelta: @escaping (String) -> Void, onFinal: @escaping (String) -> Void,
-             onProgress: @escaping (ConversationMessage) -> Void, onSteer: @escaping (String, [String]) -> Void,
+             onProgress: @escaping (ConversationMessage) -> Void, onMessageTimestamp: @escaping (String, Date) -> Void, onSteer: @escaping (String, [String]) -> Void,
              onActivity: @escaping (ConversationActivity) -> Void, onDiff: @escaping (ConversationTurnDiff) -> Void,
              onAction: @escaping () -> Void,
              onTokenUsage: @escaping (ConversationTurnUsageReport) -> Void = { _ in }) {
-            self.onDelta = onDelta; self.onFinal = onFinal; self.onProgress = onProgress
+            self.onDelta = onDelta; self.onFinal = onFinal; self.onProgress = onProgress; self.onMessageTimestamp = onMessageTimestamp
             self.onSteer = onSteer; self.onActivity = onActivity; self.onDiff = onDiff; self.onAction = onAction
             self.onTokenUsage = onTokenUsage
         }
@@ -885,6 +887,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
         onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in },
         onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in },
+        onMessageTimestamp: @escaping (String, Date) -> Void = { _, _ in },
         onTurnStarted: @escaping (String) -> Void,
         onTokenUsage: @escaping (ConversationTurnUsageReport) -> Void = { _ in },
         sensitiveUserInputAnswerValues: [String] = [],
@@ -893,7 +896,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         guard turnContexts[threadID] == nil else {
             throw BridgeCommandError(code: "invalid_transition", message: "This conversation already has an active send.")
         }
-        let context = TurnContext(onDelta: onDelta, onFinal: onFinalMessage, onProgress: onProgressMessage,
+        let context = TurnContext(onDelta: onDelta, onFinal: onFinalMessage, onProgress: onProgressMessage, onMessageTimestamp: onMessageTimestamp,
                                   onSteer: onSteerMessage, onActivity: onActivity, onDiff: onDiff, onAction: onActionRequest,
                                   onTokenUsage: onTokenUsage)
         turnContexts[threadID] = context
@@ -1075,7 +1078,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     ) async throws -> ConversationReattachResult {
         guard let persistentServer, hasLiveSharedServer else { return .agentGone }
         guard turnContexts[threadID] == nil else { return .notRunning }
-        let context = TurnContext(onDelta: callbacks.onDelta, onFinal: callbacks.onFinalMessage, onProgress: callbacks.onProgressMessage,
+        let context = TurnContext(onDelta: callbacks.onDelta, onFinal: callbacks.onFinalMessage, onProgress: callbacks.onProgressMessage, onMessageTimestamp: callbacks.onMessageTimestamp,
                                   onSteer: callbacks.onSteerMessage, onActivity: callbacks.onActivity, onDiff: callbacks.onDiff,
                                   onAction: callbacks.onActionRequest, onTokenUsage: callbacks.onTokenUsage)
         turnContexts[threadID] = context
@@ -2082,6 +2085,15 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 noteGoalEvent()
             }
             guard let context, let item = params["item"] as? [String: Any] else { return }
+            if let id = item["id"] as? String,
+               let type = item["type"] as? String,
+               ["userMessage", "agentMessage", "plan"].contains(type) {
+                if context.messageTimestamps[id] == nil {
+                    let observedAt = Date()
+                    context.messageTimestamps[id] = observedAt
+                    context.onMessageTimestamp(id, observedAt)
+                }
+            }
             if method == "item/completed",
                let itemType = item["type"] as? String,
                itemType == "agentMessage" || itemType == "plan" {
