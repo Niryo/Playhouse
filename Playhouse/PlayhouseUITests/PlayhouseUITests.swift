@@ -24467,8 +24467,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(editorTitle.waitToExist(timeout: 10), "The editor title appears.")
         XCTAssertGreaterThan(editorTitle.frame.minX, editorBackButton.frame.maxX, "The title sits to the right of the back button.")
         XCTAssertEqual(editorTitle.frame.midY, editorBackButton.frame.midY, accuracy: 8, "The title shares the back button's header row.")
-        attachElementScreenshot(editorBackButton, named: "Plugin editor back button")
-        attachElementScreenshot(editorTitle, named: "Plugin editor title")
+        attachAppWindowScreenshot(named: "Plugin editor full app")
         XCTAssertFalse(try pluginMode())
         func sessions() throws -> [[String: Any]] {
             try XCTUnwrap((try runCLI(["plugin", "sessions"])["result"] as? [String: Any])?["sessions"] as? [[String: Any]])
@@ -28143,7 +28142,17 @@ final class PlayhouseUITests: XCTestCase {
         add(attachment)
     }
 
-    /// Attaches `element` alone, at native pixel density, for UI that is small within its window.
+    /// Attaches the complete app window, including its surrounding panels and context.
+    private func attachAppWindowScreenshot(named name: String) {
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        let attachment = XCTAttachment(screenshot: window.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// Attaches `element` alone, at native pixel density, for non-showcase diagnostics.
     private func attachElementScreenshot(_ element: XCUIElement, named name: String) {
         let attachment = XCTAttachment(screenshot: element.screenshot())
         attachment.name = name
