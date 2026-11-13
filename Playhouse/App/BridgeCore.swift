@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import SwiftData
 import Darwin
 import SQLite3
@@ -3548,6 +3549,28 @@ final class BoardTaskManager {
         }
     }
 
+    private func playStatusSound(for task: any ConversationSubject, from previous: TaskStatus) {
+        guard task is BoardTask, task.status != previous else { return }
+        let name: String
+        switch task.status {
+        case .review: name = "Glass"
+        case .waitingResponse: name = "Ping"
+        default: return
+        }
+        let sound = NSSound(contentsOfFile: "/System/Library/Sounds/\(name).aiff", byReference: true)
+        let played = sound?.play() == true
+        PlayhouseDiagnostics.record(played ? "task.status_sound.played" : "task.status_sound.failed", fields: [
+            "taskID": task.id.uuidString, "status": task.status.rawValue, "sound": name
+        ])
+        // Each transition owns its sound, so overlapping transitions do not interrupt one another.
+        if let sound, played {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                _ = sound
+            }
+        }
+    }
+
     func setLifecycleStatus(_ id: UUID, to status: TaskStatus, message: String? = nil) async throws -> BoardTaskRecord {
         PlayhouseDiagnostics.record("task.lifecycle_status.write.started", fields: [
             "taskID": id.uuidString,
@@ -3557,11 +3580,13 @@ final class BoardTaskManager {
         return try await withTaskOperationLock(id) {
             let task = try requireSubject(id)
             guard task.status != .done else { return BoardTaskRecord(task: task) }
+            let previousStatus = task.status
             task.status = status
             task.lifecycleRevision += 1
             task.statusMessage = message
             if status != .inProgress { clearProgressReport(task) }
             try await saveTaskContext(taskID: id)
+            playStatusSound(for: task, from: previousStatus)
             PlayhouseDiagnostics.record("task.lifecycle_status.write.succeeded", fields: [
                 "taskID": id.uuidString,
                 "status": task.status.rawValue
@@ -3578,6 +3603,7 @@ final class BoardTaskManager {
             task.statusMessage = nil
             if status != .inProgress { clearProgressReport(task) }
             try await saveTaskContext(taskID: id)
+            playStatusSound(for: task, from: expectedStatus)
             PlayhouseDiagnostics.record("task.lifecycle_status.write.succeeded", fields: [
                 "taskID": id.uuidString,
                 "status": task.status.rawValue
@@ -3594,6 +3620,7 @@ final class BoardTaskManager {
             task.statusMessage = nil
             if status != .inProgress { clearProgressReport(task) }
             try await saveTaskContext(taskID: id)
+            playStatusSound(for: task, from: .waitingResponse)
             PlayhouseDiagnostics.record("task.lifecycle_status.write.succeeded", fields: [
                 "taskID": id.uuidString,
                 "status": task.status.rawValue
@@ -4007,6 +4034,7 @@ final class BoardTaskManager {
         }
         return try await withTaskOperationLock(id) {
             let task = try requireSubject(id)
+            let previousStatus = task.status
             let providerName = task.conversationProvider.displayName
             let client = clients.client(for: task.conversationProvider)
             guard let threadID = task.activeConversationID else {
@@ -4017,6 +4045,7 @@ final class BoardTaskManager {
                     }
                     returnSubmittedPromptToDraft(task, submittedPrompt: submittedPrompt)
                     try await saveTaskContext(taskID: id)
+                    playStatusSound(for: task, from: previousStatus)
                 }
                 return BoardTaskRecord(task: task)
             }
@@ -4037,6 +4066,7 @@ final class BoardTaskManager {
                     task.statusMessage = pendingStatusMessage
                     clearProgressReport(task)
                     try await saveTaskContext(taskID: id)
+                    playStatusSound(for: task, from: previousStatus)
                 }
                 return BoardTaskRecord(task: task)
             }
@@ -4057,6 +4087,7 @@ final class BoardTaskManager {
             task.pendingSubmittedPrompt = nil
             clearProgressReport(task)
             try await saveTaskContext(taskID: id)
+            playStatusSound(for: task, from: previousStatus)
             return BoardTaskRecord(task: task)
         }
     }

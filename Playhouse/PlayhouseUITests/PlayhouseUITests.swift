@@ -4281,7 +4281,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("empty-conversation").waitToExist(timeout: 10), "The Backlog's Add button should open a new task conversation.")
     }
 
-    // case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response; once GitHub reports the pull request merged, a retry commits local work, skips syncing the merged branch even though its remote is unreachable, and moves the task to Review.
+    // case-contract: test_waiting_response_task_moves_to_review_manually | A task in Waiting Response moves to Review through the CLI and on the board, both from its card's Move to Review context-menu item, which only Waiting Response cards offer, and by dragging the card onto the Review column. The move runs the same review gate as a completed outcome: local changes on a PR-linked worktree are committed before the task reaches Review. It clears the waiting status, persists across a fresh CLI/XPC read, keeps the linked pull request, returns a task already in Review unchanged, and the moved task can still complete to Done. A Backlog task is rejected and keeps its status; a task whose turn is still running while it shows Waiting Response is rejected and keeps both its status and its uncommitted changes; and when the pull request sync fails, the move reports the error, shown on the board as an alert, and leaves the task in Waiting Response; once GitHub reports the pull request merged, a retry commits local work, skips syncing the merged branch even though its remote is unreachable, and moves the task to Review. Each transition into Waiting Response plays Ping and each transition into Review plays Glass; rejected and repeated moves play no sound.
     func test_waiting_response_task_moves_to_review_manually() throws {
         let questionFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: questionFixture.path))
@@ -4337,6 +4337,7 @@ final class PlayhouseUITests: XCTestCase {
         let menuCard = element("task-card-\(menuTaskID)")
         let moveToReview = element("move-task-to-review-menu-item")
         let rejection = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
+        let soundsBeforeRejection = try diagnosticEvents().filter { $0["event"] as? String == "task.status_sound.played" && $0["taskID"] as? String == menuTaskID }.count
         menuCard.rightClick()
         XCTAssertTrue(moveToReview.waitToExist(timeout: 5), "A Waiting Response card should offer Move to Review.")
         moveToReview.click()
@@ -4346,6 +4347,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Move to Review is rejected while the question's turn still runs")
         rejection.buttons["OK"].click()
         XCTAssertEqual(try taskRecord(id: menuTaskID)?["status"] as? String, "Waiting Response")
+        XCTAssertEqual(try diagnosticEvents().filter { $0["event"] as? String == "task.status_sound.played" && $0["taskID"] as? String == menuTaskID }.count, soundsBeforeRejection)
         XCTAssertTrue(try runGitOutput(worktree, "status", "--porcelain", "--untracked-files=all").contains("manual-review.txt"),
                       "A rejected move must leave the running turn's files untouched.")
         assertTaskVisible("Manual review menu", inColumn: "Waiting Response")
@@ -4444,12 +4446,17 @@ final class PlayhouseUITests: XCTestCase {
             "Review",
             "A task already in Review is returned unchanged."
         )
+        let soundEvents = try diagnosticEvents().filter {
+            $0["event"] as? String == "task.status_sound.played" && $0["taskID"] as? String == dragTaskID
+        }
+        XCTAssertEqual(soundEvents.compactMap { $0["sound"] as? String }, ["Ping", "Ping", "Glass"],
+                       "The waiting and review transitions play distinct sounds; a repeated move is silent.")
         moveTaskToDone(taskID: dragTaskID)
         assertTaskVisible("Manual review menu", inColumn: "Review")
         XCTAssertEqual(try taskRecord(id: backlogTaskID)?["status"] as? String, "Backlog")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. They place the outcome call, still the final CLI action, before the user-visible final reply, which ends the turn so it never ends on a tool call, and they tell the agent not to repeat an answer after a no-visible-output notice. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A status nudge Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while showing the nudge replies.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. They place the outcome call, still the final CLI action, before the user-visible final reply, which ends the turn so it never ends on a tool call, and they tell the agent not to repeat an answer after a no-visible-output notice. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. A status nudge Playhouse sent shows its prompt and the agent's reply in Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while showing the nudge replies. Completed and waiting-response outcomes start Glass and Ping respectively when their turns settle.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -4557,6 +4564,7 @@ final class PlayhouseUITests: XCTestCase {
         let resumedResponse = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(resumedResponseLine.utf8)) as? [String: Any])
         XCTAssertTrue(resumedResponse["ok"] as? Bool == true)
         assertTaskVisible("Progress reports", inColumn: "Waiting Response")
+        XCTAssertEqual(try diagnosticEvents().filter { $0["event"] as? String == "task.status_sound.played" && $0["taskID"] as? String == taskID }.compactMap { $0["sound"] as? String }, ["Glass", "Ping"])
 
         let omittedProcess = Process()
         omittedProcess.executableURL = cliURL
@@ -17199,7 +17207,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(deliveredAnswered["itemIDs"] as? [String], ["item_playhouse_async_question"], "The delivered async answer should be recorded as answered.")
     }
 
-    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. The live turn's activity section renders open and folds away when the interrupted turn settles without an answer, on the conversation that stayed open; the interrupted turn adds no final answer and keeps the activity it reported. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
+    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. The live turn's activity section renders open and folds away when the interrupted turn settles without an answer, on the conversation that stayed open; the interrupted turn adds no final answer and keeps the activity it reported. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt. Recovering a never-started turn into Waiting Response starts Ping once.
     func test_codex_interrupted_turn_blocks_with_reason_and_can_retry() throws {
         _ = try runCLI(["task", "create", "--title", "Interrupted turn", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-interrupted").path
@@ -17314,6 +17322,15 @@ final class PlayhouseUITests: XCTestCase {
         )
         XCTAssertEqual(try taskRecord(named: "Reopen active turn")?["status"] as? String, "Waiting Response")
         attachScreenshot(named: "Playhouse resumes the saved conversation after a clean quit")
+
+        let neverStarted = try XCTUnwrap(try runCLI(["task", "create", "--title", "Never started recovery", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
+        let neverStartedID = try XCTUnwrap(neverStarted["id"] as? String)
+        _ = try runCLI(["task", "prompt", neverStartedID, "--text", "Recover this prompt", "--status", "In Progress", "--submitted", "true"])
+        element("back-to-board-button").click()
+        openTask(named: "Never started recovery")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: neverStartedID)?["status"] as? String) == "Waiting Response" }, timeout: 15))
+        XCTAssertEqual(try diagnosticEvents().filter { $0["event"] as? String == "task.status_sound.played" && $0["taskID"] as? String == neverStartedID }.compactMap { $0["sound"] as? String }, ["Ping"])
+        element("back-to-board-button").click()
 
         let unexpectedTask = try XCTUnwrap(
             (try runCLI(["task", "create", "--title", "Unexpected restart", "--prompt", "Fixture task description.", "--root", fixture.primary.path])["result"] as? [String: Any])
