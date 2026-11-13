@@ -2936,7 +2936,7 @@ enum TaskThreadDeveloperInstructions {
         let renew = "\(executable) task repository renew \(id) --repo <path>"
         let outcome = "Make every edit in the returned worktreePath. When the work is ready, Playhouse opens a new pull request for that worktree, and the merged pull request stays on the task card."
         if isArchived {
-            return "This task is Done (archived) and its task worktrees were removed. You can still answer follow-up questions, using this conversation as context and inspecting the source repository paths read-only. A question-only turn leaves the task Done. Before any change that involves Git (editing repository files, committing, or opening a pull request), run \(renew) for a repository you will change. It gives every repository of this task a fresh worktree on a new branch from the latest merge target (for example origin/master), moves the task back to In Progress, and returns the source-to-worktree mapping. \(outcome)\n"
+            return "This task is Done (archived) and its task worktrees were removed. A follow-up message reopens it: Playhouse moves it back to In Progress and gives every repository whose worktree was removed a fresh worktree on a new branch from the latest merge target (for example origin/master) before the turn starts. \(outcome)\n"
         }
         let merged = repositories.filter { $0.isPullRequestMerged && $0.pullRequestNumber != nil }
         guard !merged.isEmpty else { return "" }
