@@ -172,6 +172,17 @@ extension PlayhouseUITests {
         attachment.lifetime = .keepAlways
         add(attachment)
     }
+    /// Attaches the complete app window, including its surrounding panels and context.
+    func attachAppWindowScreenshot(named name: String) {
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        let attachment = XCTAttachment(screenshot: window.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// Attaches `element` alone, at native pixel density, for non-showcase diagnostics.
     func attachElementScreenshot(_ element: XCUIElement, named name: String) {
         let attachment = XCTAttachment(screenshot: element.screenshot())
         attachment.name = name

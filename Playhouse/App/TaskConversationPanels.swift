@@ -242,6 +242,9 @@ extension TaskConversationView {
                         .nativeHelp("Back to Kanban")
                         .accessibilityLabel("Back to Kanban board")
                         .accessibilityIdentifier("back-to-board-button")
+                        Text("Plugin editor")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         Spacer()
                     }
                     .padding(.horizontal, 26)
