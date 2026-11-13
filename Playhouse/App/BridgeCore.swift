@@ -7067,6 +7067,28 @@ final class ConversationManager {
         case "set":
             let normalizedObjective = objective?.trimmingCharacters(in: .whitespacesAndNewlines)
             let previousGoal = try await client.getGoal(threadID: threadID, workspace: workspace)
+            if previousGoal == nil, let normalizedObjective,
+               ["Untitled task", "Generating title…"].contains(task.title) {
+                let reserved: Bool
+                if task.title != "Generating title…" {
+                    reserved = try await tasks.renameIfTitleMatches(
+                        taskID,
+                        expectedTitle: task.title,
+                        title: "Generating title…"
+                    ) != nil
+                } else {
+                    reserved = true
+                }
+                if reserved {
+                    _ = try await generateAndApplyTitle(
+                        taskID: taskID,
+                        prompt: normalizedObjective,
+                        workspace: workspace,
+                        clients: clients.helperClients(preferring: task.conversationProvider)
+                    )
+                    task = try tasks.conversationSubject(taskID)
+                }
+            }
             let goal = try await client.setGoal(threadID: threadID, objective: normalizedObjective, status: "active", workspace: workspace, observeRuntime: observeRuntime)
             if let goal, let normalizedObjective {
                 CodexGoalGenerationStore.recordSet(taskID: taskID, objective: normalizedObjective, previousGoal: previousGoal, goal: goal, defaults: preferences)

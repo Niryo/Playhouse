@@ -10414,9 +10414,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         assistant = next(message for message in visible["messages"] if message["role"] == "assistant")
         self.assertEqual(assistant["modelID"], "claude-opus-5-5", "Changing the selected model must not rewrite prior turn attribution.")
 
-    # case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
+    # case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting a first Goal on an Untitled task generates and persists its title from the objective before the Goal starts, while title failure uses the first eight objective words as fallback; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI shows the generated title after reopening the task and restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
     def test_thread_goal_lifecycle_persists_through_cli_xpc(self):
-        task_id = self.create_task(title="Durable goal", roots=[self.primary])["id"]
+        task_id = self.create_task(title="Untitled task", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-goal"
         shutil.copyfile(fixture, executable)
@@ -10432,6 +10432,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         goal_text = "Migrate the project and keep the full test suite green."
         result, _ = self.call_cli("conversation", "goal", task_id, "set", "--text", goal_text, extra_environment=env)
         self.assertEqual(self.assert_success(result)["objective"], goal_text)
+        titled_task, _ = self.call_cli("task", "get", task_id)
+        self.assertEqual(self.assert_success(titled_task)["title"], "Generated fixture title",
+                         "The first Goal should generate and persist the Untitled task's title from its objective.")
         launch_arguments = json.loads(Path(str(executable) + ".launch-args").read_text(encoding="utf-8"))
         self.assertIn("features.goals=true", launch_arguments, "CLI/XPC Goal commands must enable Codex's Goals app-server feature.")
         task, _ = self.call_cli("task", "get", task_id)
@@ -10471,6 +10474,26 @@ class PlayhouseBridgeTests(unittest.TestCase):
         replacement_reported_seconds = float(replacement_goal.get("timeUsedSeconds") or 0)
         expected_baseline = prior_reported_seconds if replacement_reported_seconds >= prior_reported_seconds else 0
         self.assertAlmostEqual(float(replacement_baseline), expected_baseline, places=3, msg="A new Goal must use only the prior total when Codex reports cumulative time.")
+
+        failure_fixture = self.data_directory / "codex-fixture-goal-title-failure"
+        shutil.copyfile(fixture, failure_fixture)
+        failure_fixture.chmod(0o755)
+        failure_home = self.data_directory / "codex-home-title-failure"
+        failure_home.mkdir()
+        failure_environment = {
+            "CODEX_HOME": str(failure_home),
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(failure_fixture),
+        }
+        failure_task_id = self.create_task(title="Untitled task", roots=[self.primary])["id"]
+        failure_objective = "Explain how repository setup works for new contributors"
+        fallback_goal, _ = self.call_cli(
+            "conversation", "goal", failure_task_id, "set", "--text", failure_objective,
+            extra_environment=failure_environment,
+        )
+        self.assertEqual(self.assert_success(fallback_goal)["objective"], failure_objective)
+        fallback_task, _ = self.call_cli("task", "get", failure_task_id)
+        self.assertEqual(self.assert_success(fallback_task)["title"], failure_objective,
+                         "A failed first-Goal title generation should use the deterministic objective fallback.")
 
     def recorded_codex_app_servers(self, launches):
         """The app-servers a `-single-server` fixture recorded: socket servers, and stdio launches
