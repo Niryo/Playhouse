@@ -16873,7 +16873,7 @@ Playhouse.render(h(Context));
         self.assert_failure(self.call_cli("plugin", "mode", "--on", "--off", expected_status=2)[0], "invalid_argument")
         self.assertEqual(self.assert_success(self.call_cli("plugin", "mode")[0]), {"enabled": False}, "A refused option changes nothing.")
 
-    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Pressing an Add here placeholder, or `plugin author --placement <placement>`, creates a Backlog task titled New plugin: <placement title> with no repository, the plugins folder in the data directory as its context folder, the placement saved on the task, and the prompt `/playhouse-plugin Create a new plugin in the <title> placement (<id>).`; the window turns Add Plugin mode off, opens that task, and sends the prompt. An unknown placement is refused as invalid_argument. The task's turns carry plugin authoring instructions naming the placement, its context, the plugins folder and the plugin refresh and render commands, and Playhouse's bundled playhouse-plugin skill reaches the agent without being installed anywhere: Claude Code gets it through a Playhouse-owned --add-dir wrapper and loads it, and Codex gets it among the app-server's extra skill roots with the /playhouse-plugin message sent as a structured skill input naming its SKILL.md. An ordinary task's turn gets neither the instructions nor the skill.
+    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Pressing an Add here placeholder, or `plugin author --placement <placement>`, creates a Backlog task titled New plugin: <placement title> with no repository, the plugins folder in the data directory as its context folder, the placement saved on the task, and the prompt `/playhouse-plugin Create a new plugin in the <title> placement (<id>).`; the window turns Add Plugin mode off and opens that task with the generated prompt in the composer as an unsent draft; the user can add a description and send it when ready. An unknown placement is refused as invalid_argument. The task's turns carry plugin authoring instructions naming the placement, its context, the plugins folder and the plugin refresh and render commands, and Playhouse's bundled playhouse-plugin skill reaches the agent without being installed anywhere: Claude Code gets it through a Playhouse-owned --add-dir wrapper and loads it, and Codex gets it among the app-server's extra skill roots with the /playhouse-plugin message sent as a structured skill input naming its SKILL.md. An ordinary task's turn gets neither the instructions nor the skill.
     def test_plugin_authoring_task_starts_with_placement_and_skill(self):
         self.assert_failure(self.call_cli("plugin", "author", "--placement", "titleBar", expected_status=2)[0], "invalid_argument")
         self.assertFalse(self.plugins_folder().exists(), "A refused placement creates nothing.")
@@ -16895,7 +16895,10 @@ Playhouse.render(h(Context));
             self.assertEqual(task["conversationProvider"], provider)
             stored = self.assert_success(self.call_cli("task", "get", task["id"])[0])
             self.assertEqual(stored["savedPrompt"], prompt, "A fresh CLI process reads the task's prompt.")
+            self.assertTrue(stored["hasUnsentDraft"], "The plugin instruction is saved as an unsent draft.")
             self.assertEqual(stored["pluginPlacement"], placement)
+            messages, _ = self.history_texts(task["id"], {})
+            self.assertEqual(messages, [], "Creating a plugin task does not start a conversation turn.")
             started[placement] = (task, prompt)
         self.assertTrue(self.plugins_folder().is_dir(), "Authoring creates the plugins folder.")
 
@@ -16903,8 +16906,9 @@ Playhouse.render(h(Context));
         environment = self.install_claude_fixture("claude-fixture-plugin-author")
         history_path = Path(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] + ".history")
         task, prompt = started["composerActions"]
-        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", prompt, extra_environment=environment)[0])
-        turn = next(turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText") == prompt)
+        submitted_prompt = prompt + " Add a compact greeting button."
+        self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", submitted_prompt, extra_environment=environment)[0])
+        turn = next(turn for turn in json.loads(history_path.read_text(encoding="utf-8"))["turns"] if turn.get("userText") == submitted_prompt)
         arguments = turn["arguments"]
         instructions = arguments[arguments.index("--append-system-prompt") + 1]
         self.assertIn("Plugin authoring", instructions)
@@ -16945,14 +16949,15 @@ Playhouse.render(h(Context));
 
         # Codex: the instructions ride the thread and the skill an extra root plus a structured input.
         task, prompt = started["conversationToolbar"]
-        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-plugin-author", message=prompt)
+        submitted_prompt = prompt + " Add a small toolbar button."
+        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-plugin-author", message=submitted_prompt)
         history = json.loads((self.data_directory / "codex-fixture-plugin-author.history").read_text(encoding="utf-8"))
         self.assertIn("Conversation sidebar toolbar placement (`conversationToolbar`)", history["threadStartDeveloperInstructions"])
         self.assertIn("plugin refresh", history["threadStartDeveloperInstructions"])
         roots = [Path(root) for root in history["skillExtraRoots"] if (Path(root) / "playhouse-plugin" / "SKILL.md").exists()]
         self.assertEqual(len(roots), 1, f"One extra root carries the plugin skill: {history['skillExtraRoots']}")
         self.assertSamePath(roots[0].parent, self.data_directory / "skill-bridge" / "codex")
-        first = next(turn for turn in history["turns"] if turn["userMessage"] == prompt)
+        first = next(turn for turn in history["turns"] if turn["userMessage"] == submitted_prompt)
         self.assertEqual([entry["name"] for entry in first["skillInputs"]], ["playhouse-plugin"])
         self.assertTrue(first["skillInputs"][0]["path"].endswith("skills/playhouse-plugin/SKILL.md"))
         disabled = {os.path.realpath(entry["path"]) for entry in (history.get("threadStartConfig") or {}).get("skills", {}).get("config", []) if entry["enabled"] is False}
