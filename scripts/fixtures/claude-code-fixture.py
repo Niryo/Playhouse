@@ -612,7 +612,15 @@ def read_steered_input(description):
 def respond(user_text, instructions, preserve_no_outcome=False, previous_prompt=""):
     global background_result_sent
     commands = []
-    if user_text.startswith("Classify the latest user message for Playhouse's continuous chat page index."):
+    if user_text.startswith("plugin-preview-fixture "):
+        # Exercise real plugin files while simulating an authoring provider turn.
+        payload = json.loads(user_text.removeprefix("plugin-preview-fixture "))
+        folder = Path(payload["folder"])
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "plugin.json").write_text(json.dumps({"id": folder.name, "name": "Timer", "placement": "mainSidebar", "presentation": "modal"}), encoding="utf-8")
+        (folder / "index.js").write_text("Playhouse.render(h(Text, {testID: 'preview-content'}, " + json.dumps(payload["text"]) + "));", encoding="utf-8")
+        text("msg_plugin_preview", "Plugin preview updated: " + payload["text"])
+    elif user_text.startswith("Classify the latest user message for Playhouse's continuous chat page index."):
         hold = Path(str(sys.argv[0]) + ".hold-classifier")
         if hold.exists():
             hold.unlink(missing_ok=True)

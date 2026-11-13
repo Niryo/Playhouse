@@ -96,6 +96,7 @@ struct KanbanBoardView: View {
     }
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(PluginRegistry.self) private var pluginRegistry
     @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
     @Query(filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" }, sort: \BoardTask.createdAt, order: .reverse) private var allTasks: [BoardTask]
     /// Board cards. Recurring schedule templates aren't board tasks; the Scheduled Tasks page
@@ -153,9 +154,12 @@ struct KanbanBoardView: View {
     @FocusState private var isBoardSearchFocused: Bool
     @State private var isShowingChatSidebar = false
     @State private var chatTask: StandaloneChat?
+    @State private var pluginChat: StandaloneChat?
+    @State private var pluginInitialPrompt: String?
     @State private var isOpeningChatSidebar = false
     /// A modal, sidebar or page plugin opened from the board's sidebar.
     @State private var openBoardPlugin: PluginRecord?
+    @State private var pluginSetupPlacement: PluginPlacement?
     @State private var isStartingPluginTask = false
     @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) private var appearance = "dark"
 
@@ -196,8 +200,38 @@ struct KanbanBoardView: View {
 
     private var mainContent: some View {
         Group {
-            if let selectedTask {
-                conversationView(for: selectedTask)
+            if let placement = pluginSetupPlacement {
+                PluginCreationSetup(placement: placement, isStarting: isStartingPluginTask, onCancel: {
+                    pluginSetupPlacement = nil
+                }, onStart: { name, presentation in
+                    finishPluginSetup(placement, name: name, presentation: presentation)
+                })
+            } else if let pluginChat, let pluginID = pluginChat.authoredPluginID {
+                HStack(spacing: 0) {
+                    TaskConversationView(task: pluginChat, isNewTask: false,
+                        conflictResolutionRequested: false, onConflictResolutionChecked: { _ in },
+                        skillFixPrompt: pluginInitialPrompt, onOpenTask: openTask(_:sending:),
+                        onBack: { self.pluginChat = nil; pluginInitialPrompt = nil })
+                        .id(pluginChat.id)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Divider()
+                    PluginAuthoringPreview(task: pluginChat, pluginID: pluginID)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+            } else if let selectedTask {
+                if let pluginID = selectedTask.authoredPluginID {
+                    HStack(spacing: 0) {
+                        conversationView(for: selectedTask)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        Divider()
+                        PluginAuthoringPreview(task: selectedTask, pluginID: pluginID)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
+                } else {
+                    conversationView(for: selectedTask)
+                }
             } else {
                 boardContent
             }
@@ -220,6 +254,20 @@ struct KanbanBoardView: View {
             if !retained.isEmpty {
                 lifecycleResetNotice = "Existing tasks were cleared. These dirty managed worktrees were kept:\n\n" + retained.joined(separator: "\n")
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .playhouseStartPluginCreation)) { notification in
+            guard let placement = notification.object as? PluginPlacement else { return }
+            PluginRegistry.setAddMode(false)
+            withAnimation(.easeInOut(duration: 0.25)) { pluginSetupPlacement = placement }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .playhouseEditPlugin)) { notification in
+            guard let id = notification.object as? UUID else { return }
+            openPluginConversation(id, prompt: nil)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .playhousePreparePluginEdit)) { notification in
+            guard let id = notification.object as? UUID else { return }
+            if selectedTask?.id == id { selectedTask = nil }
+            if pluginChat?.id == id { pluginChat = nil; pluginInitialPrompt = nil }
         }
         .onReceive(NotificationCenter.default.publisher(for: .playhouseShowBoardSearch)) { _ in
             withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = true }
@@ -945,17 +993,40 @@ struct KanbanBoardView: View {
     /// An Add Plugin mode placeholder was pressed: the new task's agent builds
     /// a plugin for that placement, and the mode ends.
     private func startPluginTask(_ placement: PluginPlacement) {
+        PluginRegistry.setAddMode(false)
+        withAnimation(.easeInOut(duration: 0.25)) { pluginSetupPlacement = placement }
+    }
+
+    private func finishPluginSetup(_ placement: PluginPlacement, name: String, presentation: PluginPresentation) {
         guard !isStartingPluginTask else { return }
         isStartingPluginTask = true
         Task { @MainActor in
             defer { isStartingPluginTask = false }
             do {
-                let started = try await PluginRegistry(client: conversationRuntime.client).author(placement)
-                PluginRegistry.setAddMode(false)
-                openTask(started.taskID, sending: started.prompt)
+                let started = try await pluginRegistry.author(placement, name: name, presentation: presentation)
+                openPluginConversation(started.taskID, prompt: started.prompt)
             } catch {
                 saveError = error.localizedDescription
             }
+        }
+    }
+
+    private func openPluginConversation(_ id: UUID, prompt: String?) {
+        Task { @MainActor in
+            let manager = BoardTaskManager(modelContext: modelContext)
+            for _ in 0..<100 {
+                if let chat = try? manager.standaloneChatModel(id) {
+                    setChatSidebarVisible(false)
+                    pluginInitialPrompt = prompt
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        pluginChat = chat
+                        pluginSetupPlacement = nil
+                    }
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            saveError = "Couldn't open the plugin conversation."
         }
     }
 
@@ -975,7 +1046,10 @@ struct KanbanBoardView: View {
                     setChatSidebarVisible(false)
                     isSelectedTaskNew = false
                     conflictResolutionTaskID = nil
-                    selectedTask = task
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        selectedTask = task
+                        pluginSetupPlacement = nil
+                    }
                     return
                 }
                 try? await Task.sleep(for: .milliseconds(100))
@@ -2500,6 +2574,162 @@ private struct RenameTaskSheet: View {
                     AtomText(props: TextProps(text: "Save"))
                 }
             }
+        }
+    }
+}
+
+
+extension Notification.Name {
+    static let playhouseStartPluginCreation = Notification.Name("playhouseStartPluginCreation")
+    static let playhouseEditPlugin = Notification.Name("playhouseEditPlugin")
+    static let playhousePreparePluginEdit = Notification.Name("playhousePreparePluginEdit")
+}
+
+private struct PluginCreationSetup: View {
+    let placement: PluginPlacement
+    let isStarting: Bool
+    let onCancel: () -> Void
+    let onStart: (String, PluginPresentation) -> Void
+    @State private var name = ""
+    @State private var hasName = false
+    @State private var presentation: PluginPresentation = .popover
+    @FocusState private var nameFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Button("Back", action: onCancel)
+                .buttonHoverPointer().nativeHelp("Cancel plugin creation")
+                .accessibilityIdentifier("plugin-creation-back")
+            Text(hasName ? "How should it open?" : "Name your plugin")
+                .font(.title.bold())
+            Text(hasName ? "Choose how \(name) appears when opened." : "Give your plugin a name to get started.")
+                .foregroundStyle(.secondary)
+            if hasName {
+                Picker("How should it open?", selection: $presentation) {
+                    Text("Popover").tag(PluginPresentation.popover)
+                    Text("Modal").tag(PluginPresentation.modal)
+                    Text("Side panel").tag(PluginPresentation.sidebar)
+                    Text("Page").tag(PluginPresentation.page)
+                }
+                .pickerStyle(.radioGroup)
+                .accessibilityIdentifier("plugin-creation-presentation")
+                HStack {
+                    Button("Back") { hasName = false }
+                        .buttonHoverPointer().nativeHelp("Change plugin name")
+                    Button("Start creating") { onStart(name.trimmingCharacters(in: .whitespacesAndNewlines), presentation) }
+                        .disabled(isStarting)
+                        .buttonHoverPointer().nativeHelp("Start creating this plugin")
+                        .accessibilityIdentifier("plugin-creation-start")
+                }
+            } else {
+                TextField("Plugin name", text: $name)
+                    .focused($nameFocused)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("plugin-creation-name")
+                Button("Continue") {
+                    nameFocused = false
+                    withAnimation { hasName = true }
+                }
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .buttonHoverPointer().nativeHelp("Choose how the plugin opens")
+                    .accessibilityIdentifier("plugin-creation-continue")
+            }
+        }
+        .frame(maxWidth: 420, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { nameFocused = true }
+        .onChange(of: hasName) { _, hasName in
+            if !hasName { nameFocused = true }
+        }
+    }
+}
+
+private struct PluginAuthoringPreview: View {
+    let task: any ConversationSubject
+    let pluginID: String
+    @State private var plugin: PluginRecord?
+    @State private var revision = ""
+    @State private var previewDraft = ""
+    @State private var previewComposerFocused = false
+    @State private var previewComposerHeight: CGFloat = 36
+    @State private var previewSelection = NSRange(location: 0, length: 0)
+    @State private var previewEdit: ChatEditorEdit?
+    @State private var previewFocusRequest = 0
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Preview").font(.headline).padding()
+            Divider()
+            if let plugin, plugin.valid {
+                PluginSurfaceView(plugin: plugin, props: PluginContext.props(
+                    plugin: plugin, appearance: colorScheme == .dark ? "dark" : "light",
+                    task: PluginTaskContext(task: task), composer: PluginComposerContext(draft: previewDraft, selectionLocation: previewSelection.location, selectionLength: previewSelection.length)),
+                    actions: PluginUIActions(composer: applyComposerEdit))
+                    .id(revision)
+                if plugin.placement == PluginPlacement.composerActions.rawValue {
+                    NativeChatEditor(text: Binding(get: { previewDraft }, set: { value in
+                                         DispatchQueue.main.async { previewDraft = value }
+                                     }), height: $previewComposerHeight,
+                                     isFocused: $previewComposerFocused, focusRequest: previewFocusRequest,
+                                     isEnabled: true, autofocusOnAppear: false, accessibilityHelp: "Preview composer",
+                                     inputTestID: "plugin-preview-composer", inputLabel: "Preview message",
+                                     onSubmit: {}, onSteerSubmit: {}, onPasteImage: { _ in },
+                                     onSelectionChange: { selection in
+                                         DispatchQueue.main.async { previewSelection = selection }
+                                     },
+                                     mentions: ChatEditorMentions(edit: previewEdit))
+                        .frame(height: max(36, previewComposerHeight)).padding()
+                }
+            } else {
+                VStack(spacing: 10) {
+                    Image(systemName: "square.on.square") .font(.largeTitle)
+                    Text("Your plugin preview will appear here") .font(.headline)
+                    if let plugin, !plugin.errors.isEmpty {
+                        Text(plugin.errors.joined(separator: "\n")).font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("Describe your plugin in the conversation to get started.").foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("plugin-creation-preview")
+        .task(id: pluginID) {
+            while !Task.isCancelled {
+                refresh()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func applyComposerEdit(_ edit: PluginComposerEdit) {
+        let length = (previewDraft as NSString).length
+        let location = min(max(0, previewSelection.location), length)
+        let selected = min(max(0, previewSelection.length), length - location)
+        let range: NSRange
+        let text: String
+        switch edit {
+        case .setDraft(let value): range = NSRange(location: 0, length: length); text = value
+        case .insertText(let value): range = NSRange(location: location + selected, length: 0); text = value
+        case .replaceSelection(let value): range = NSRange(location: location, length: selected); text = value
+        case .focus:
+            previewFocusRequest += 1
+            return
+        }
+        previewEdit = ChatEditorEdit(id: (previewEdit?.id ?? 0) + 1, range: range, text: text)
+    }
+
+    private func refresh() {
+        guard let folder = task.contextFolderPaths.first else { return }
+        let library = PluginLibrary(dataDirectory: URL(fileURLWithPath: folder).deletingLastPathComponent().path)
+        let current = try? library.plugin(id: pluginID, validate: false)
+        let source = current.flatMap { try? String(contentsOfFile: $0.entryPath, encoding: .utf8) } ?? ""
+        let signature = "\(String(describing: current))\n\(source)"
+        if signature != revision {
+            plugin = current
+            revision = signature
         }
     }
 }

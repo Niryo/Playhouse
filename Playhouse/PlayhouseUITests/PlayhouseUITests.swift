@@ -24334,7 +24334,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitForDisappearance(chat.descendants(matching: .any)["plugin-add-here-composerActions"]))
     }
 
-    // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Pressing an Add here placeholder, or `plugin author --placement <placement>`, creates a Backlog task titled New plugin: <placement title> with no repository, the plugins folder in the data directory as its context folder, the placement saved on the task, and the prompt `/playhouse-plugin Create a new plugin in the <title> placement (<id>).`; the window turns Add Plugin mode off, opens that task, and sends the prompt. An unknown placement is refused as invalid_argument. The task's turns carry plugin authoring instructions naming the placement, its context, the plugins folder and the plugin refresh and render commands, and Playhouse's bundled playhouse-plugin skill reaches the agent without being installed anywhere: Claude Code gets it through a Playhouse-owned --add-dir wrapper and loads it, and Codex gets it among the app-server's extra skill roots with the /playhouse-plugin message sent as a structured skill input naming its SKILL.md. An ordinary task's turn gets neither the instructions nor the skill.
+    // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview without a board card or task header. The Plugins menu reopens the same conversation and preview, including unsaved drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home.
     func test_plugin_authoring_task_starts_with_placement_and_skill() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-plugin-author")
         let historyURL = URL(fileURLWithPath: try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]) + ".history")
@@ -24347,55 +24347,214 @@ final class PlayhouseUITests: XCTestCase {
         _ = try runCLI(["settings", "set-default-provider", "claude"])
         _ = try runCLI(["task", "create", "--title", "Plugin source task", "--prompt", "Fixture task description.", "--root", fixture.primary.path])
         let tasksBefore = try boardTaskRecords().count
+        _ = try runCLI(["settings", "clear-parent"])
         assertCLIError(try runCLI(["plugin", "author", "--placement", "titleBar"], expectedStatus: 2), code: "invalid_argument")
         XCTAssertEqual(try boardTaskRecords().count, tasksBefore, "A refused placement opens no task.")
 
-        // From the board's sidebar.
+        // From the board's sidebar, setup is centered until both choices are made.
         _ = try runCLI(["plugin", "mode", "--on"])
         let boardPlaceholder = element("plugin-add-here-mainSidebar")
         XCTAssertTrue(boardPlaceholder.waitToExist(timeout: 15))
         boardPlaceholder.click()
-        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "New plugin: Main sidebar" }, timeout: 15),
-                      "Pressing Add here opens the new plugin task.")
-        XCTAssertTrue(waitForDisappearance(element("plugin-mode-banner"), timeout: 5), "Choosing a placement ends Add Plugin mode.")
+        XCTAssertTrue(element("plugin-creation-name").waitToExist(timeout: 10))
+        XCTAssertFalse(element("plugin-creation-preview").exists)
+        XCTAssertFalse(element("message-composer").exists)
+        XCTAssertEqual(element("plugin-creation-name").frame.midX, app.windows.firstMatch.frame.midX, accuracy: 35)
+        XCTAssertFalse(element("plugin-creation-continue").isEnabled)
+        attachScreenshot(named: "Plugin creation name")
+        element("plugin-creation-name").click()
+        element("plugin-creation-name").typeText("Timer")
+        element("plugin-creation-continue").click()
+        XCTAssertTrue(element("plugin-creation-presentation").waitToExist(timeout: 5))
+        XCTAssertFalse(element("plugin-creation-preview").exists)
+        XCTAssertFalse(element("message-composer").exists)
+        app.radioButtons["Modal"].click()
+        attachScreenshot(named: "Plugin creation presentation")
+        element("plugin-creation-start").click()
+        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 15))
         XCTAssertFalse(try pluginMode())
-        let boardPrompt = "/playhouse-plugin Create a new plugin in the Main sidebar placement (mainSidebar)."
-        XCTAssertTrue(waitUntil({ turns().contains { $0["userText"] as? String == boardPrompt } }, timeout: 20), "The task sends its prompt as it opens.")
-        let boardTask = try XCTUnwrap(try boardTaskRecords().first { $0["title"] as? String == "New plugin: Main sidebar" })
+        func sessions() throws -> [[String: Any]] {
+            try XCTUnwrap((try runCLI(["plugin", "sessions"])["result"] as? [String: Any])?["sessions"] as? [[String: Any]])
+        }
+        let boardTask = try XCTUnwrap(try sessions().first { $0["title"] as? String == "Timer" })
+        XCTAssertEqual(try boardTaskRecords().count, tasksBefore, "Creating a plugin adds no board card.")
+        XCTAssertFalse(element("task-view-title").exists, "The editor has no regular task header.")
+        XCTAssertFalse(element("task-status-message").exists)
+        XCTAssertFalse(element("add-conversation-repository-button").exists)
+        XCTAssertFalse(element("task-header-status").exists, "The editor has no task status in its header.")
+        let pluginID = try XCTUnwrap(boardTask["authoredPluginID"] as? String)
         XCTAssertEqual(boardTask["pluginPlacement"] as? String, "mainSidebar")
-        XCTAssertEqual((boardTask["repositoryWorktrees"] as? [Any])?.count, 0, "A plugin task needs no repository.")
-        XCTAssertEqual(((boardTask["contextFolders"] as? [String]) ?? []).map(realPath), [realPath(pluginsFolder.path)], "The plugins folder is its context folder.")
-        XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String ?? "").isEmpty }, timeout: 10), "The sent prompt leaves the composer.")
-        attachScreenshot(named: "The plugin task opened from the board's Add here, its prompt sent")
+        XCTAssertTrue(waitUntil({ turns().contains { ($0["userText"] as? String ?? "").contains(pluginID) && ($0["userText"] as? String ?? "").contains("presentation modal") } }, timeout: 20))
+        attachScreenshot(named: "Plugin creation empty preview")
+        element("back-to-board-button").click()
+        let draftMenu = app.menuBars.menuBarItems["Plugins"]
+        draftMenu.click()
+        XCTAssertTrue(draftMenu.menuItems["Edit Timer…"].waitToExist(timeout: 10))
+        draftMenu.menuItems["Edit Timer…"].click()
+        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10), "A draft can be reopened before its plugin folder exists.")
+        XCTAssertGreaterThan(element("message-composer").frame.width, 0)
+        XCTAssertGreaterThan(element("plugin-creation-preview").frame.width, 0)
+        XCTAssertLessThanOrEqual(element("message-composer").frame.maxX, element("plugin-creation-preview").frame.minX + 2)
+        func sendPreviewTurn(_ value: String) throws {
+            let payload = try JSONSerialization.data(withJSONObject: ["folder": pluginsFolder.appendingPathComponent(pluginID).path, "text": value])
+            let message = "plugin-preview-fixture " + (try XCTUnwrap(String(data: payload, encoding: .utf8)))
+            element("message-composer").click()
+            element("message-composer").typeText(message)
+            XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 20))
+            element("send-message-button").click()
+            XCTAssertTrue(waitUntil({ turns().contains { $0["userText"] as? String == message } }, timeout: 20))
+            XCTAssertTrue(app.staticTexts["Plugin preview updated: " + value].waitToExist(timeout: 20))
+            XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["preview-content"]) == value }, timeout: 20))
+        }
+        try sendPreviewTurn("First preview")
+        attachScreenshot(named: "Plugin creation live preview")
+        try sendPreviewTurn("Updated preview")
+        element("message-composer").click()
+        element("message-composer").typeText("A saved draft")
+        element("back-to-board-button").click()
+        let menu = app.menuBars.menuBarItems["Plugins"]
+        menu.click()
+        let edit = menu.menuItems["Edit Timer…"]
+        XCTAssertTrue(edit.waitToExist(timeout: 10))
+        edit.click()
+        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["preview-content"]) == "Updated preview" }, timeout: 10))
+        XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String ?? "").contains("A saved draft") }, timeout: 10))
+        XCTAssertTrue(app.staticTexts["Plugin preview updated: Updated preview"].waitToExist(timeout: 10))
+        attachScreenshot(named: "Reopened plugin editor")
+        _ = try runCLI(["settings", "set-parent", fixture.parent.path])
 
-        let turn = try XCTUnwrap(turns().first { $0["userText"] as? String == boardPrompt })
-        let arguments = try XCTUnwrap(turn["arguments"] as? [String])
-        let instructions = arguments[try XCTUnwrap(arguments.firstIndex(of: "--append-system-prompt")) + 1]
-        XCTAssertTrue(instructions.contains("Main sidebar placement (`mainSidebar`)"), "The turn carries the plugin authoring instructions.")
-        XCTAssertTrue(instructions.contains("plugin refresh"))
-        let directories = arguments.indices.filter { arguments[$0] == "--add-dir" }.map { arguments[$0 + 1] }
-        XCTAssertTrue(directories.contains { FileManager.default.fileExists(atPath: $0 + "/.claude/skills/playhouse-plugin/SKILL.md") },
-                      "Claude Code gets the bundled plugin skill through a Playhouse wrapper.")
-        XCTAssertTrue((turn["skills"] as? [String] ?? []).contains("playhouse-plugin"), "Claude Code loads the plugin skill.")
-
-        // From an open task's composer.
+        // The same setup opens from a conversation's composer.
+        element("back-to-board-button").click()
         openTask(named: "Plugin source task")
         _ = try runCLI(["plugin", "mode", "--on"])
         let composerPlaceholder = element("plugin-add-here-composerActions")
         XCTAssertTrue(composerPlaceholder.waitToExist(timeout: 10))
-        attachScreenshot(named: "Add here beside the composer's Skills button")
         composerPlaceholder.click()
-        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "New plugin: Chat input actions" }, timeout: 15),
-                      "The composer's Add here opens its own plugin task.")
-        let composerPrompt = "/playhouse-plugin Create a new plugin in the Chat input actions placement (composerActions)."
-        XCTAssertTrue(waitUntil({ turns().contains { $0["userText"] as? String == composerPrompt } }, timeout: 20))
-        XCTAssertEqual(turns().filter { $0["userText"] as? String == composerPrompt }.count, 1, "The prompt is sent exactly once.")
-        XCTAssertFalse(element("plugin-mode-banner").exists)
-        let composerTask = try XCTUnwrap(try boardTaskRecords().first { $0["title"] as? String == "New plugin: Chat input actions" })
+        XCTAssertTrue(element("plugin-creation-name").waitToExist(timeout: 10))
+        element("plugin-creation-name").click()
+        element("plugin-creation-name").typeText("Composer plugin")
+        element("plugin-creation-continue").click()
+        element("plugin-creation-start").click()
+        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 15))
+        let composerTask = try XCTUnwrap(try sessions().first { $0["title"] as? String == "Composer plugin" })
         XCTAssertEqual(composerTask["pluginPlacement"] as? String, "composerActions")
-        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'user-message-'")).firstMatch.waitToExist(timeout: 10),
-                      "The prompt shows in the new task's conversation.")
-        attachScreenshot(named: "The plugin task opened from the composer's Add here")
+        let composerPluginID = try XCTUnwrap(composerTask["authoredPluginID"] as? String)
+        try writeInstalledPlugin(composerPluginID, source: Self.pluginContextSource, placement: "composerActions", name: "Composer plugin")
+        let preview = element("plugin-creation-preview")
+        let previewComposer = element("plugin-preview-composer")
+        XCTAssertTrue(previewComposer.waitToExist(timeout: 15))
+        previewComposer.click()
+        previewComposer.typeText("draft")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: preview.descendants(matching: .any)["plugin-draft"]) == "draft" }, timeout: 10))
+        preview.descendants(matching: .any)["plugin-set-draft"].click()
+        XCTAssertTrue(waitUntil({ (previewComposer.value as? String) == "fresh draft" }, timeout: 10))
+        previewComposer.click()
+        previewComposer.typeKey("a", modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: preview.descendants(matching: .any)["plugin-selection"]) == "fresh draft" }, timeout: 10))
+        preview.descendants(matching: .any)["plugin-upper"].click()
+        XCTAssertTrue(waitUntil({ (previewComposer.value as? String) == "FRESH DRAFT" }, timeout: 10))
+        previewComposer.click()
+        previewComposer.typeKey(.leftArrow, modifierFlags: .command)
+        for _ in 0..<5 { previewComposer.typeKey(.rightArrow, modifierFlags: .shift) }
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: preview.descendants(matching: .any)["plugin-selection"]) == "FRESH" }, timeout: 10))
+        preview.descendants(matching: .any)["plugin-insert"].click()
+        XCTAssertTrue(waitUntil({ (previewComposer.value as? String) == "FRESH! DRAFT" }, timeout: 10))
+        element("message-composer").click()
+        element("message-composer").typeText("other")
+        XCTAssertTrue((element("message-composer").value as? String ?? "").contains("other"))
+        preview.descendants(matching: .any)["plugin-focus"].click()
+        app.typeText("?")
+        XCTAssertTrue(waitUntil({ (previewComposer.value as? String)?.contains("?") == true }, timeout: 10))
+
+        // Editing an installed plugin creates its first editor session.
+        element("back-to-board-button").click()
+        try writeInstalledPlugin("installed-editor", source: Self.pluginContextSource, placement: "mainSidebar", name: "Installed editor")
+        _ = try runCLI(["plugin", "refresh"])
+        let installedMenu = app.menuBars.menuBarItems["Plugins"]
+        installedMenu.click()
+        XCTAssertTrue(installedMenu.menuItems["Edit Installed editor…"].waitToExist(timeout: 10))
+        installedMenu.menuItems["Edit Installed editor…"].click()
+        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
+        XCTAssertTrue(try sessions().contains { $0["authoredPluginID"] as? String == "installed-editor" })
+        element("back-to-board-button").click()
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: pluginsFolder.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: pluginsFolder.path) }
+        installedMenu.click()
+        installedMenu.menuItems["Delete Installed editor…"].click()
+        XCTAssertTrue(app.dialogs.buttons["Delete"].waitToExist(timeout: 5))
+        app.dialogs.buttons["Delete"].click()
+        XCTAssertTrue(app.dialogs.buttons["OK"].waitToExist(timeout: 10), "A failed folder removal reports an error.")
+        app.dialogs.buttons["OK"].click()
+        XCTAssertTrue(try sessions().contains { $0["authoredPluginID"] as? String == "installed-editor" })
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: pluginsFolder.path)
+        installedMenu.click()
+        installedMenu.menuItems["Delete Installed editor…"].click()
+        app.dialogs.buttons["Delete"].click()
+        XCTAssertTrue(waitUntil({ (try? sessions().contains { $0["authoredPluginID"] as? String == "installed-editor" }) == false }, timeout: 10))
+
+        // A pre-existing task-backed editor keeps its session, draft and preview when migrated.
+        let legacyResponse = try runCLI(["task", "create", "--title", "New plugin: Legacy editor", "--prompt", "Legacy description", "--provider", "claude"])
+        let legacy = try XCTUnwrap(legacyResponse["result"] as? [String: Any])
+        let legacyID = try XCTUnwrap(legacy["id"] as? String)
+        _ = try runCLI(["conversation", "send", legacyID, "--message", "Remember this legacy conversation"], extraEnvironment: environment)
+        _ = try runCLI(["task", "draft", legacyID, "--text", "Legacy unsent draft"])
+        try writeInstalledPlugin("legacy-editor", source: Self.pluginContextSource, placement: "mainSidebar", name: "Legacy editor")
+        try seedLegacyPluginTask(taskID: legacyID, pluginID: "legacy-editor")
+        _ = try runCLI(["plugin", "refresh"])
+        installedMenu.click()
+        XCTAssertTrue(installedMenu.menuItems["Edit Legacy editor…"].waitToExist(timeout: 10))
+        installedMenu.menuItems["Edit Legacy editor…"].click()
+        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String ?? "").contains("Legacy unsent draft") }, timeout: 10))
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "mainSidebar" }, timeout: 10))
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Remember this legacy conversation")).firstMatch.waitToExist(timeout: 10))
+        XCTAssertFalse(try boardTaskRecords().contains { $0["id"] as? String == legacyID })
+        attachScreenshot(named: "Migrated plugin editor")
+
+        element("back-to-board-button").click()
+        let legacyDeleteResponse = try runCLI(["task", "create", "--title", "New plugin: Delete legacy", "--prompt", "Legacy description"])
+        let legacyDeleteID = try XCTUnwrap((legacyDeleteResponse["result"] as? [String: Any])?["id"] as? String)
+        try writeInstalledPlugin("legacy-delete", source: Self.pluginContextSource, placement: "mainSidebar", name: "Delete legacy")
+        try seedLegacyPluginTask(taskID: legacyDeleteID, pluginID: "legacy-delete")
+        _ = try runCLI(["plugin", "refresh"])
+        installedMenu.click()
+        XCTAssertTrue(installedMenu.menuItems["Delete Delete legacy…"].waitToExist(timeout: 10))
+        installedMenu.menuItems["Delete Delete legacy…"].click()
+        app.dialogs.buttons["Delete"].click()
+        XCTAssertTrue(waitUntil({ (try? self.boardTaskRecords().contains { $0["id"] as? String == legacyDeleteID }) == false }, timeout: 10))
+
+    }
+
+    // case-contract: test_plugin_editor_reattaches_after_daemon_restart | A plugin editor follows a running Claude turn after a daemon restart, restores its answer once alongside the preview, and settles without a task outcome nudge. Claude represents the shared reattachment settlement used by both providers.
+    func test_plugin_editor_reattaches_after_daemon_restart() throws {
+        let environment = try installClaudeFixture(named: "claude-fixture-reattach-plugin")
+        let executable = try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"])
+        launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["plugin", "author", "--placement", "mainSidebar", "--name", "Restart plugin", "--presentation", "modal", "--provider", "claude"], extraEnvironment: environment)
+        let menu = app.menuBars.menuBarItems["Plugins"]
+        XCTAssertTrue(waitUntil({ menu.click(); let found = menu.menuItems["Edit Restart plugin…"].exists; if !found { self.app.typeKey(.escape, modifierFlags: []) }; return found }, timeout: 15))
+        menu.menuItems["Edit Restart plugin…"].click()
+        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeKey("a", modifierFlags: .command)
+        composer.typeKey(.delete, modifierFlags: [])
+        touch(executable + ".reattach-hold-nudge")
+        startRestartChatTurn(executable, "Continue this plugin after restart.")
+        try killDaemon(environment: environment)
+        touch(executable + ".reattach-release-quiet")
+        XCTAssertTrue(app.staticTexts["After restart."].waitToExist(timeout: 30))
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 30))
+        XCTAssertEqual(app.staticTexts.matching(identifier: "After restart.").count, 1, "The recovered answer is shown once.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: executable + ".reattach-hold-nudge"), "The editor did not request a task outcome.")
+        XCTAssertTrue(element("plugin-creation-preview").exists)
+        XCTAssertTrue(waitUntil({ !self.element("codex-chat-error").exists }, timeout: 15), "A successful reconnect clears the transient bridge error.")
+        composer.click()
+        composer.typeText("Continue working")
+        XCTAssertTrue((composer.value as? String ?? "").contains("Continue working"), "The composer accepts the next request.")
+        attachScreenshot(named: "Plugin editor after daemon restart")
     }
 
     // case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports none at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. After a refresh the window shows the valid plugin's button at its placement and the Plugins menu lists every plugin with its placement, an invalid one with its first error. Deleting a plugin from the Plugins menu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
@@ -27077,6 +27236,19 @@ final class PlayhouseUITests: XCTestCase {
         let seedText = String(data: seedOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         XCTAssertEqual(seed.terminationStatus, 0, "The isolated SwiftData task record should be seeded: \(seedText)")
         XCTAssertTrue(seedText.contains("Seeded linked PR #\(number)"), seedText)
+    }
+
+    private func seedLegacyPluginTask(taskID: String, pluginID: String) throws {
+        let process = Process()
+        process.executableURL = WorkspaceFixture.root.appendingPathComponent("seed-task-pr-link")
+        process.arguments = [dataDirectory.path, taskID, "--legacy-plugin", pluginID, pluginsFolder.path]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        process.waitUntilExit()
+        let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0, text)
     }
 
     private func clearTaskProviderSession(taskID: String) throws {

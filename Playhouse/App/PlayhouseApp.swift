@@ -212,6 +212,9 @@ struct PluginsMenuContent: View {
                 if let problem = plugin.errors.first {
                     Text(problem)
                 }
+                Button("Edit \(plugin.name)…") { edit(plugin.id) }
+                    .buttonHoverPointer()
+                    .help("Open this plugin's editor")
                 Button("Delete \(plugin.name)…") { confirmDelete(plugin) }
                     .buttonHoverPointer()
                     .help("Delete this plugin's folder")
@@ -220,6 +223,30 @@ struct PluginsMenuContent: View {
             Button("Reload Plugins") { Task { await registry.reload() } }
                 .buttonHoverPointer()
                 .help("Read the plugins folder again")
+        }
+        ForEach(registry.authoringSessions.filter { session in
+            !registry.plugins.contains { $0.id == session.authoredPluginID }
+        }, id: \.id) { session in
+            if let pluginID = session.authoredPluginID {
+                Button("Edit \(session.title)…") { edit(pluginID) }
+                    .buttonHoverPointer()
+                    .help("Open this plugin's editor")
+            }
+        }
+    }
+
+    private func edit(_ pluginID: String) {
+        Task { @MainActor in
+            do {
+                if let existing = registry.authoringSessions.first(where: { $0.authoredPluginID == pluginID }) {
+                    NotificationCenter.default.post(name: .playhousePreparePluginEdit, object: existing.id)
+                    await Task.yield()
+                }
+                let id = try await registry.edit(pluginID)
+                NotificationCenter.default.post(name: .playhouseEditPlugin, object: id)
+            } catch {
+                NSAlert(error: error).runModal()
+            }
         }
     }
 
@@ -233,6 +260,10 @@ struct PluginsMenuContent: View {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         Task { @MainActor in
             do {
+                if let session = registry.authoringSessions.first(where: { $0.authoredPluginID == plugin.id }) {
+                    NotificationCenter.default.post(name: .playhousePreparePluginEdit, object: session.id)
+                    await Task.yield()
+                }
                 try await registry.delete(plugin.id)
             } catch {
                 let failure = NSAlert(error: error)

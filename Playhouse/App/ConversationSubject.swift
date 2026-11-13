@@ -229,6 +229,13 @@ protocol ConversationSubject: AnyObject, Observable {
 }
 
 extension ConversationSubject {
+    var authoringPluginPlacement: String? {
+        (self as? BoardTask)?.pluginPlacement ?? (self as? StandaloneChat)?.pluginPlacement
+    }
+    var authoringPluginID: String? {
+        (self as? BoardTask)?.authoredPluginID ?? (self as? StandaloneChat)?.authoredPluginID
+    }
+
     var answeredAsyncQuestionIDs: [String] {
         get {
             guard let answeredAsyncQuestionIDsData else { return [] }
@@ -364,6 +371,11 @@ final class StandaloneChat {
     var id: UUID
     var title: String
     var createdAt: Date
+    // Plugin editors have their own persisted conversation, independent of the board
+    // and of the general-purpose standalone chat.
+    var authoredPluginID: String?
+    var pluginPlacement: String?
+    var pluginContextFolder: String?
     var statusRawValue: String
     var lifecycleRevision: Int = 0
     var statusMessage: String?
@@ -402,13 +414,13 @@ final class StandaloneChat {
 }
 
 extension StandaloneChat: ConversationSubject {
-    /// A standalone chat never has a workspace; these stay empty by construction.
-    var workspaceRootPaths: [String] { [] }
+    /// Plugin authoring has a context folder but never has a repository or worktree.
+    var workspaceRootPaths: [String] { contextFolderPaths }
     var repositoryWorktrees: [RepositoryWorktreeRecord] { [] }
-    var contextFolderPaths: [String] { [] }
+    var contextFolderPaths: [String] { pluginContextFolder.map { [$0] } ?? [] }
     var autoCreatePullRequestOnReview: Bool { false }
     var pullRequestMode: PullRequestMode { .manual }
-    var isStandaloneChat: Bool { true }
+    var isStandaloneChat: Bool { authoredPluginID == nil }
 }
 
 extension BoardTask: ConversationSubject {

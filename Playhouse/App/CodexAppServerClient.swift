@@ -2883,13 +2883,23 @@ enum TaskThreadDeveloperInstructions {
         contextFolders: [String] = [],
         repositoryRootPath: String? = nil,
         isStandaloneChat: Bool = false,
+        isPluginEditor: Bool = false,
         isArchived: Bool = false,
         pluginPlacement: String? = nil,
+        pluginID: String? = nil,
         pluginsDirectory: String? = nil
     ) -> String {
         let executable = cliExecutableURL().path
         let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let id = taskID.uuidString
+        if isPluginEditor {
+            return """
+            You are helping the user create and edit a Playhouse plugin in a standalone editor.
+            This conversation is not a task and has no task board status or outcome to report.
+            The plugin ID and folder are \(pluginID ?? "unknown"); its folder is inside \(pluginsDirectory ?? "the Playhouse plugins directory"). When it already exists, edit that plugin rather than creating a different one.
+            \(pluginAuthoringInstructions(placement: pluginPlacement, executable: quotedExecutable, pluginsDirectory: pluginsDirectory))
+            """
+        }
         if isStandaloneChat {
             return """
             You are the assistant inside Playhouse's standalone chat.
