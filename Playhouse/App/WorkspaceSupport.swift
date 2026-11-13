@@ -2085,7 +2085,7 @@ struct WorkspaceSettingsView: View {
 
     private func commitCompactionField(_ id: String) {
         guard let draft = compactionFieldDrafts.removeValue(forKey: id) else { return }
-        guard let value = Int(draft.filter(\.isNumber)) else {
+        guard let value = ContextCompactionSettings.parseInteger(draft) else {
             compactionError = "Enter a whole number."
             return
         }

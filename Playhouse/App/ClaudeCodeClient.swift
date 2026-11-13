@@ -1658,7 +1658,9 @@ final class ClaudeSessionRunner {
         default: detail = details?.summary ?? ""
         }
         return ConversationActivity(
-            id: id, title: automatic ? "Context compacted automatically" : "Context compacted", detail: detail,
+            id: id, title: status == "failed"
+                ? (automatic ? "Automatic context compaction failed" : "Context compaction failed")
+                : (automatic ? "Context compacted automatically" : "Context compacted"), detail: detail,
             status: status, isContextCompaction: true, turnID: activeTurnID, compaction: details
         )
     }

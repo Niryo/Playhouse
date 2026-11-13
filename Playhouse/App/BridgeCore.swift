@@ -5861,6 +5861,21 @@ final class ConversationManager {
         developerInstructions: String?, now: Date, onUpdate: @escaping (ConversationUpdate) -> Void
     ) async -> Bool {
         let turnID = UUID().uuidString.lowercased()
+        var usageReports: [ConversationTurnUsageReport] = []
+        func persistUsage() async {
+            for report in usageReports {
+                let attributed = ConversationTurnUsageReport(
+                    turnID: turnID, usage: report.usage,
+                    toolLabels: report.toolLabels, liveCall: report.liveCall
+                )
+                do {
+                    try await tasks.recordTokenUsage(taskID: taskID, provider: .claude, sourceID: threadID, report: attributed)
+                } catch {
+                    PlayhouseDiagnostics.record("task.token_usage.record_failed", fields: ["taskID": taskID.uuidString])
+                }
+            }
+            usageReports.removeAll()
+        }
         do {
             try transcripts.mutate(taskID, turns: .none) { transcript in
                 transcript.turns.append(.init(id: turnID, segmentID: segmentID))
@@ -5870,12 +5885,13 @@ final class ConversationManager {
                 onActivity: { activity in self.recordClaudeActivity(taskID: taskID, turnID: turnID, activity) },
                 onDiff: { _ in }, onHistory: { _ in }, onActionRequest: {},
                 onUserInput: { _ in }, onSteerMessage: { _, _ in }, onProgressMessage: { _ in },
-                onTurnStarted: { _ in }, onTokenUsage: { _ in }
+                onTurnStarted: { _ in }, onTokenUsage: { usageReports.append($0) }
             )
             try await clients.claude.compactSession(
                 trigger: trigger, threadID: threadID, modelID: modelID, effort: effort,
                 workspace: workspace, developerInstructions: developerInstructions, callbacks: callbacks
             )
+            await persistUsage()
             let after = claudeSessionCacheState(sessionID: threadID)
             let event = ContextCompactionEvent(
                 id: UUID().uuidString.lowercased(), recordedAt: now, trigger: trigger,
@@ -5892,6 +5908,7 @@ final class ConversationManager {
             onUpdate(ConversationUpdate(type: "activity"))
             return event.succeeded
         } catch {
+            await persistUsage()
             let failedEvent = ContextCompactionEvent(
                 id: turnID, recordedAt: now, trigger: trigger,
                 preTokens: state.contextTokens, postTokens: nil,
@@ -5984,10 +6001,11 @@ final class ConversationManager {
 
     /// Called by the existing scheduler tick in both the daemon and LaunchAgent.
     /// Each candidate must still be idle when it acquires the normal turn lock.
-    func idleCompactionTick(now: Date = .now) async -> [String] {
+    func idleCompactionTick(now testTime: Date? = nil) async -> [String] {
         guard settingsManager.contextCompaction.enabled else { return [] }
         var compacted: [String] = []
         for record in (try? tasks.list()) ?? [] {
+            let now = testTime ?? .now
             guard record.conversationProvider == ConversationProvider.claude.rawValue,
                   let sessionID = record.claudeSessionID else { continue }
             let transcript: ConversationTranscript
@@ -6003,10 +6021,18 @@ final class ConversationManager {
                 lastAttemptedCallAt: transcript.contextCompactions?.last?.lastCallAt,
                 now: now, settings: settingsManager.contextCompaction
             )
-            guard decision == .compact, let state, let segment = transcript.segments.last(where: { $0.provider == .claude }),
-                  let subject = try? tasks.conversationSubject(record.id) else { continue }
+            guard decision == .compact, let segment = transcript.segments.last(where: { $0.provider == .claude }) else { continue }
             do {
                 let acquired = try await tasks.withConversationTurnReservationIfFree(record.id) {
+                    let now = testTime ?? .now
+                    guard let state = self.claudeSessionCacheState(sessionID: sessionID),
+                          let current = try? self.transcripts.readState(record.id),
+                          let subject = try? self.tasks.conversationSubject(record.id),
+                          ContextCompactionPolicy.idleDecision(
+                            status: subject.status.rawValue, isBusy: false, state: state,
+                            lastAttemptedCallAt: current.contextCompactions?.last?.lastCallAt,
+                            now: now, settings: self.settingsManager.contextCompaction
+                          ) == .compact else { return false }
                     guard !ClaudeCodeClient.hasActiveRunner(sessionID: sessionID),
                           (try? self.tasks.queuedConversationMessages(taskID: record.id).contains { $0.state == .queued }) != true,
                           (try? self.transcripts.readState(record.id).pendingUserInputRequest) == nil else { return false }
@@ -9571,31 +9597,36 @@ final class ConversationManager {
                     state: state, requestedModel: modelID, provider: provider.rawValue, now: .now, settings: settings
                    ) {
                     phase = "context-compaction"
+                    let compactionInstructions = TaskThreadDeveloperInstructions.make(
+                        taskID: taskID,
+                        repositories: task.repositoryWorktrees,
+                        contextFolders: task.contextFolderPaths,
+                        repositoryRootPath: repositoryRoot?.path,
+                        isStandaloneChat: task.isStandaloneChat,
+                        isArchived: task.status == .done,
+                        pluginPlacement: (task as? BoardTask)?.pluginPlacement,
+                        pluginsDirectory: clients.skills?.pluginsDirectory
+                    )
                     if provider == .claude {
                         compactedBeforeTurn = await runAutomaticCompaction(
                             taskID: taskID, threadID: threadID, trigger: trigger, state: state,
                             // A model switch compacts with the old model, whose cache holds the context.
                             modelID: trigger == .modelSwitch ? (state.model ?? modelID) : modelID,
                             effort: effort, segmentID: segment.segmentID, workspace: workspace,
-                            developerInstructions: TaskThreadDeveloperInstructions.make(
-                                taskID: taskID,
-                                repositories: task.repositoryWorktrees,
-                                contextFolders: task.contextFolderPaths,
-                                repositoryRootPath: repositoryRoot?.path,
-                                isStandaloneChat: task.isStandaloneChat,
-                                isArchived: task.status == .done,
-                                pluginPlacement: (task as? BoardTask)?.pluginPlacement,
-                                pluginsDirectory: clients.skills?.pluginsDirectory
-                            ),
+                            developerInstructions: compactionInstructions,
                             now: .now, onUpdate: onUpdate
                         )
                     } else {
                         compactedBeforeTurn = await runCodexAutomaticCompaction(
                             taskID: taskID, threadID: threadID, trigger: trigger, state: state,
                             modelID: state.model ?? modelID, segmentID: segment.segmentID,
-                            workspace: workspace, developerInstructions: standaloneChatInstructions(),
+                            workspace: workspace, developerInstructions: compactionInstructions,
                             now: .now, onUpdate: onUpdate
                         )
+                    }
+                    try Task.checkCancellation()
+                    if client.wasLastTurnInterrupted(threadID: threadID) {
+                        throw CancellationError()
                     }
                     phase = "thread-start"
                 }
@@ -10481,7 +10512,7 @@ final class PlayhouseBridgeRuntime {
                     }
                     let tickTime = now ?? .now
                     let tickResult = await scheduler.tick(now: tickTime)
-                    let compactions = await conversations.idleCompactionTick(now: tickTime)
+                    let compactions = await conversations.idleCompactionTick(now: now)
                     if !compactions.isEmpty { PlayhouseDiagnostics.record("conversation.compaction.idle_tick", fields: ["taskIDs": compactions.joined(separator: ",")]) }
                     result = try Self.value(tickResult)
                 } else {

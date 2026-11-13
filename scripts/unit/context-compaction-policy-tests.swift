@@ -113,6 +113,14 @@ struct ContextCompactionPolicyTests {
         expect(ContextCompactionTrigger.reported("manual", requested: .warmIdle), .warmIdle, "Playhouse's own /compact keeps its reason")
         expect(ContextCompactionDetails(trigger: .warmIdle, preTokens: 180_000, postTokens: 6_000).summary.hasPrefix("Automatic · "), true, "automatic compactions say so")
 
+        for invalid in ["-100000", "5.5", "200000x", "1,00,000", "", "  "] {
+            expect(ContextCompactionSettings.parseInteger(invalid, groupingSeparator: ","), nil, "reject malformed setting: \(invalid)")
+        }
+        expect(ContextCompactionSettings.parseInteger("200,000", groupingSeparator: ","), 200_000, "accept displayed grouping")
+        expect(ContextCompactionSettings.parseInteger(" 200000 ", groupingSeparator: ","), 200_000, "accept plain integer")
+        let failed = ContextCompactionEvent(id: "failed", recordedAt: now, trigger: .warmIdle, succeeded: false)
+        expect(failed.summary.hasPrefix("Compaction failed"), true, "failed attempts are labelled in Token Stats")
+
         // The session state reader.
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("context-compaction-tests-\(UUID().uuidString)")
         try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

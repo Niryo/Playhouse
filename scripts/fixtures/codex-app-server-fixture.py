@@ -2550,6 +2550,33 @@ def main():
                 return
             turn_list = saved_history.get("messages") or saved_history.get("turns") or []
             compaction_index = len(saved_history.get("compactions", [])) + 1
+            compaction_turn_id = f"turn_compaction_{compaction_index}"
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+            write({"jsonrpc": "2.0", "method": "turn/started", "params": {
+                "threadId": THREAD_ID, "turn": {"id": compaction_turn_id, "status": "inProgress"},
+            }})
+            # Accept reads while compaction is pending. Starting work in this
+            # interval is a protocol error, even though the start RPC succeeded.
+            deadline = time.monotonic() + 0.3
+            while time.monotonic() < deadline:
+                readable, _, _ = stdin_select(0.02)
+                if not readable:
+                    continue
+                incoming = json.loads(sys.stdin.readline())
+                if incoming.get("method") == "turn/start":
+                    write({"jsonrpc": "2.0", "id": incoming["id"], "error": {
+                        "code": -32020, "message": "Work started before compaction completed.",
+                    }})
+                else:
+                    handle_message(incoming)
+            saved_history.setdefault("rpcOrder", []).append({"method": "compaction/completed"})
+            if Path(str(sys.argv[0]) + ".compact-terminal-fail").exists():
+                history_path.write_text(json.dumps(saved_history), encoding="utf-8")
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": THREAD_ID, "turn": {"id": compaction_turn_id, "status": "failed",
+                    "error": {"message": "Compaction failed after acknowledgment."}}, "usage": {},
+                }})
+                return
             record = {
                 "afterTurnCount": len(turn_list),
                 "turnID": turn_list[-1].get("turnID") if turn_list else None,
@@ -2557,7 +2584,9 @@ def main():
             }
             saved_history.setdefault("compactions", []).append(record)
             history_path.write_text(json.dumps(saved_history), encoding="utf-8")
-            write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+            write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                "threadId": THREAD_ID, "turn": {"id": compaction_turn_id, "status": "completed"}, "usage": {},
+            }})
         elif message.get("method") == "thread/read":
             if message.get("params", {}).get("threadId") != CHILD_THREAD_ID:
                 write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32005, "message": "Unknown fixture child thread."}})

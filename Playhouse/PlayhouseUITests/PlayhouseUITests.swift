@@ -19011,7 +19011,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((page["request"] as? [String: Any])?["repeatedItems"] as? Int, 0)
     }
 
-    // case-contract: test_claude_auto_compaction_threshold_and_warm_idle | Claude task launches pass the configured token threshold to Claude Code, disabling automatic compaction removes the threshold environment value, and settings changes persist with invalid values rejected. For an In Progress Claude task whose fixture session has 180,000 context tokens and has been idle 51 minutes, a scheduler tick runs one warm-idle /compact before the cache expires, records its trigger and before/after sizes in token usage, and a second tick does not compact again. The conversation labels the maintenance activity as automatic without adding an empty assistant turn. Crossing 200,000 tokens emits a threshold compaction boundary visible in the conversation and Token Stats. The settings window shows and saves the enabled toggle, threshold, idle wait and minimum context, and its invalid-threshold alert leaves the saved value unchanged. Idle checks skip Done and Backlog tasks, contexts below the minimum, pending user-input requests, an active Claude turn, and an outstanding background task; eligible In Progress, Waiting Response, and Review tasks compact.
+    // case-contract: test_claude_auto_compaction_threshold_and_warm_idle | Claude task launches pass the configured token threshold to Claude Code, disabling automatic compaction removes the threshold environment value, and settings changes persist with invalid values rejected. For an In Progress Claude task whose fixture session has 180,000 context tokens and has been idle 51 minutes, a scheduler tick runs one warm-idle /compact before the cache expires, records its trigger and before/after sizes in token usage, and a second tick does not compact again. Maintenance API token usage contributes to the task total. The conversation labels the maintenance activity as automatic without adding an empty assistant turn. Crossing 200,000 tokens emits a threshold compaction boundary visible in the conversation and Token Stats. The settings window shows and saves the enabled toggle, threshold, idle wait and minimum context, and its invalid-threshold alert leaves the saved value unchanged; negative and malformed integers are rejected without changing saved settings. Idle checks skip Done and Backlog tasks, contexts below the minimum, pending user-input requests, an active Claude turn, and an outstanding background task; eligible In Progress, Waiting Response, and Review tasks compact.
     func test_claude_auto_compaction_threshold_and_warm_idle() throws {
         var environment = try installClaudeFixture(named: "claude-fixture-ui-auto-compaction")
         environment["CLAUDE_CONFIG_DIR"] = dataDirectory.appendingPathComponent("claude-config").path
@@ -19031,9 +19031,11 @@ final class PlayhouseUITests: XCTestCase {
         ], extraEnvironment: environment)
         _ = try runCLI(["task", "prompt", taskID, "--text", "Fixture task description.", "--status", "In Progress"])
         XCTAssertEqual((try runCLI(["task", "get", taskID])["result"] as? [String: Any])?["status"] as? String, "In Progress")
+        let beforeUsage = try XCTUnwrap((try runCLI(["task", "token-usage", taskID])["result"] as? [String: Any])?["totalTokens"] as? Int)
         _ = try runCLI(["schedule", "tick"], extraEnvironment: environment)
         let usageResponse = try runCLI(["task", "token-usage", taskID])
         let usage = try XCTUnwrap(usageResponse["result"] as? [String: Any])
+        XCTAssertEqual((usage["totalTokens"] as? Int ?? 0) - beforeUsage, 180060)
         let compactions = try XCTUnwrap(usage["contextCompactions"] as? [[String: Any]])
         XCTAssertEqual(compactions.count, 1)
         XCTAssertEqual(compactions.first?["trigger"] as? String, "warm-idle")
@@ -19159,6 +19161,18 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Context compaction setting validation alert")
         attachElementScreenshot(settingsError, named: "Invalid context compaction setting shows a save error")
         settingsError.buttons["OK"].click()
+        for (identifier, invalid, key, expected) in [
+            ("auto-compaction-threshold-field", "-100000", "thresholdTokens", 200000),
+            ("auto-compaction-threshold-field", "200000x", "thresholdTokens", 200000),
+            ("auto-compaction-idle-minutes-field", "5.5", "idleMinutes", 50),
+        ] {
+            let field = settings.descendants(matching: .any).matching(identifier: identifier).firstMatch
+            field.click(); field.typeKey("a", modifierFlags: .command); field.typeText(invalid + "\r")
+            XCTAssertTrue(app.sheets.firstMatch.waitToExist(timeout: 5), "Malformed integer must show validation.")
+            app.sheets.firstMatch.buttons["OK"].click()
+            let saved = try XCTUnwrap((try runCLI(["settings", "get"])["result"] as? [String: Any])?["autoCompaction"] as? [String: Any])
+            XCTAssertEqual(saved[key] as? Int, expected)
+        }
         app.typeKey("w", modifierFlags: .command)
 
         func makeIdleTask(_ title: String, root: String = "") throws -> String {
@@ -19263,7 +19277,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertNil(heldTurnError, "The held provider turn should finish successfully.")
     }
 
-    // case-contract: test_claude_cold_resume_and_model_switch_compaction | A Claude session with more than the minimum context is compacted before the next real prompt after its cache has been idle for over 60 minutes, and again before a model switch. The cold-resume and model-switch triggers are persisted with context sizes, each `/compact` fixture turn precedes the real prompt, the visible maintenance rows precede their corresponding prompts, and a model switch runs `/compact` with the old model before the requested model starts. When the cache is expired and automatic compaction is disabled, the first resumed response with near-zero cache reads and a large cache write records one cache miss, visible in Token Stats. If Claude reports a compaction failure, the failed maintenance row is recorded, the event is marked unsuccessful, and the user's prompt still runs and appears in history.
+    // case-contract: test_claude_cold_resume_and_model_switch_compaction | A Claude session with more than the minimum context is compacted before the next real prompt after its cache has been idle for over 60 minutes, and again before a model switch. The cold-resume and model-switch triggers are persisted with context sizes, each `/compact` fixture turn precedes the real prompt, the visible maintenance rows precede their corresponding prompts, and a model switch runs `/compact` with the old model before the requested model starts. When the cache is expired and automatic compaction is disabled, the first resumed response with near-zero cache reads and a large cache write records one cache miss, visible in Token Stats. If Claude reports a compaction failure, the failed maintenance row is recorded, the event is marked unsuccessful, and the user's prompt still runs and appears in history. Failed attempts are labelled as failures in the conversation and Token Stats. Stopping during compaction prevents the submitted work from starting.
     func test_claude_cold_resume_and_model_switch_compaction() throws {
         var environment = try installClaudeFixture(named: "claude-fixture-ui-resume-compaction")
         environment["CLAUDE_CONFIG_DIR"] = dataDirectory.appendingPathComponent("claude-config").path
@@ -19381,15 +19395,36 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue((failedHistory["messages"] as? [[String: Any]] ?? []).contains { $0["text"] as? String == "Continue after failed compaction." })
         openTask(named: "Failed Claude compaction")
         let failedCompactionRow = app.descendants(matching: .any).matching(NSPredicate(
-            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Context compacted automatically"
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Automatic context compaction failed"
         )).firstMatch
         XCTAssertTrue(scrollTranscriptUntilExists(failedCompactionRow), "The failed compaction row should be present in the conversation.")
         XCTAssertTrue(failedCompactionRow.isHittable, "The compaction row must be visible before its screenshot.")
         attachScreenshot(named: "Failed Claude compaction row in conversation")
         attachElementScreenshot(failedCompactionRow, named: "Failed automatic compaction timeline row")
+        returnToBoard()
+        element("task-token-usage-counter-\(failureTask)").click()
+        let failedStat = app.staticTexts["token-stats-compaction-0"]
+        XCTAssertTrue(failedStat.waitToExist(timeout: 10))
+        XCTAssertTrue(pluginText(failedStat).contains("Compaction failed"))
+        attachElementScreenshot(failedStat, named: "Token Stats identifies a failed compaction")
+        element("close-token-stats-button").click()
+
+        _ = try runCLI(["conversation", "send", failureTask, "--message", "fill context to 180000 tokens 61 minutes ago"], extraEnvironment: environment)
+        let hold = URL(fileURLWithPath: executable.path + ".compact-hold")
+        let ready = URL(fileURLWithPath: executable.path + ".compact-ready")
+        try Data().write(to: hold)
+        defer { try? FileManager.default.removeItem(at: hold) }
+        let stoppedSend = try startCLIProcess(["conversation", "send", failureTask, "--message", "Must not run after Stop."], extraEnvironment: environment)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15))
+        _ = try runCLI(["conversation", "stop", failureTask], extraEnvironment: environment)
+        _ = try finishCLIProcess(stoppedSend, expectedStatus: 1)
+        let stoppedHistory = try XCTUnwrap((try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any])?["turns"] as? [[String: Any]])
+        XCTAssertFalse(stoppedHistory.contains { $0["userText"] as? String == "Must not run after Stop." })
+        XCTAssertEqual((try runCLI(["task", "get", failureTask])["result"] as? [String: Any])?["status"] as? String, "Waiting Response")
+
     }
 
-    // case-contract: test_codex_context_compaction_threshold_and_model_switch | With a configured 100,000-token threshold and 150,000-token minimum, a Codex task reporting 120,000 context tokens calls thread/compact/start before its next prompt, records one successful automatic threshold event with a labelled activity, and adds no empty assistant turn. After a same-model turn records 220,000 context tokens, switching models compacts through the RPC first, records the old model and model-switch trigger, and orders compaction before turn/start. If the app-server rejects compaction, Playhouse records a failed activity and event but continues the prompt. Codex uses reported context and model changes; its path does not depend on Claude's prompt-cache TTL or warm-idle scheduler.
+    // case-contract: test_codex_context_compaction_threshold_and_model_switch | With a configured 100,000-token threshold and 150,000-token minimum, a Codex task reporting 120,000 context tokens calls thread/compact/start before its next prompt, records one successful automatic threshold event with a labelled activity, and adds no empty assistant turn. After a same-model turn records 220,000 context tokens, switching models compacts through the RPC first, records the old model and model-switch trigger, and waits for the matching successful terminal notification before turn/start. A failure after the initial acknowledgment is recorded as unsuccessful while the prompt still runs. If the app-server rejects compaction, Playhouse records a failed activity and event but continues the prompt. Codex uses reported context and model changes; its path does not depend on Claude's prompt-cache TTL or warm-idle scheduler.
     func test_codex_context_compaction_threshold_and_model_switch() throws {
         let executable = dataDirectory.appendingPathComponent("codex-fixture-ui-auto-threshold")
         try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
@@ -19420,7 +19455,7 @@ final class PlayhouseUITests: XCTestCase {
         }, "Codex compaction must not add an empty assistant message.")
         let thresholdOrder = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
         XCTAssertEqual((thresholdOrder?["rpcOrder"] as? [[String: String]] ?? []).map { $0["method"] ?? "" },
-                       ["turn/start", "thread/compact/start", "turn/start"],
+                       ["turn/start", "thread/compact/start", "compaction/completed", "turn/start"],
                        "Codex compaction must finish before the next turn starts.")
         openTask(named: "Codex threshold compaction")
         let row = app.descendants(matching: .any).matching(NSPredicate(
@@ -19460,7 +19495,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(switchEvents.last?["preTokens"] as? Int, 220000)
         let history = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
         let methods = (history?["rpcOrder"] as? [[String: String]] ?? []).map { $0["method"] ?? "" }
-        XCTAssertEqual(Array(methods.dropFirst(switchOrderCount)), ["thread/compact/start", "turn/start"])
+        XCTAssertEqual(Array(methods.dropFirst(switchOrderCount)), ["thread/compact/start", "compaction/completed", "turn/start"])
         openTask(named: "Codex threshold compaction")
         let switchRow = app.descendants(matching: .any).matching(NSPredicate(
             format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "context-compaction-row-", "Model switch"
@@ -19503,6 +19538,16 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(failureRow.isHittable, "The compaction row must be visible before its screenshot.")
         attachScreenshot(named: "Codex failed compaction row in conversation")
         attachElementScreenshot(failureRow, named: "Codex compaction failure timeline row")
+        let terminalFailure = URL(fileURLWithPath: executable.path + ".compact-terminal-fail")
+        try Data().write(to: terminalFailure)
+        defer { try? FileManager.default.removeItem(at: terminalFailure) }
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Continue after asynchronous failure.", "--model", "gpt-6-luna"], extraEnvironment: environment)
+        let terminalEvents = try XCTUnwrap((try runCLI(["task", "token-usage", taskID])["result"] as? [String: Any])?["contextCompactions"] as? [[String: Any]])
+        XCTAssertEqual(terminalEvents.count, failureEvents.count + 1)
+        XCTAssertEqual(terminalEvents.last?["succeeded"] as? Bool, false)
+        let terminalHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        XCTAssertTrue((terminalHistory["messages"] as? [[String: Any]] ?? []).contains { $0["text"] as? String == "Continue after asynchronous failure." })
+
     }
 
     // case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.

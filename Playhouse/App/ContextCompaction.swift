@@ -43,6 +43,18 @@ struct ContextCompactionSettings: Equatable {
     static let autoCompactWindowVariable = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 
     var autoCompactWindowTokens: Int? { enabled ? thresholdTokens : nil }
+
+    /// Accept the grouping separator displayed by the settings field, but
+    /// never turn a sign, decimal point or arbitrary text into an integer.
+    static func parseInteger(_ text: String, groupingSeparator: String = Locale.current.groupingSeparator ?? ",") -> Int? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let groups = groupingSeparator.isEmpty ? [trimmed] : trimmed.components(separatedBy: groupingSeparator)
+        guard groups.allSatisfy({ !$0.isEmpty && $0.allSatisfy({ $0.isASCII && $0.isNumber }) }) else { return nil }
+        if groups.count > 1 {
+            guard (1...3).contains(groups[0].count), groups.dropFirst().allSatisfy({ $0.count == 3 }) else { return nil }
+        }
+        return Int(groups.joined())
+    }
 }
 
 /// Why a session's context was compacted.
@@ -118,6 +130,11 @@ struct ContextCompactionEvent: Codable, Equatable, Identifiable {
     var provider: String? = nil
     /// A provider-native compaction activity that represents this request, if available.
     var providerActivityID: String? = nil
+
+    var summary: String {
+        let details = ContextCompactionDetails(trigger: trigger, preTokens: preTokens, postTokens: postTokens).summary
+        return succeeded ? details : "Compaction failed · " + details
+    }
 }
 
 /// A resumed turn whose first model call rewrote the context instead of

@@ -1761,6 +1761,24 @@ def main():
                 history.setdefault("turns", []).append(turn)
                 history_path.write_text(json.dumps(history), encoding="utf-8")
                 write({"type": "command_lifecycle", "command_uuid": current_command_uuid, "state": "started"})
+                if Path(str(sys.argv[0]) + ".compact-hold").exists():
+                    write({"type": "system", "subtype": "status", "status": "compacting"})
+                    Path(str(sys.argv[0]) + ".compact-ready").touch()
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        line = STDIN.readline(0.02)
+                        if line is None:
+                            continue
+                        control = json.loads(line)
+                        if control.get("type") == "control_request" and control.get("request", {}).get("subtype") == "interrupt":
+                            write({"type": "control_response", "response": {
+                                "subtype": "success", "request_id": control.get("request_id"), "response": {},
+                            }})
+                            write({"type": "system", "subtype": "status", "status": None, "compact_result": "failed"})
+                            write({"type": "command_lifecycle", "command_uuid": current_command_uuid, "state": "completed"})
+                            write({"type": "result", "subtype": "error", "is_error": True, "result": "Interrupted"})
+                            return 0
+                    raise TimeoutError("Compaction was not interrupted.")
                 if Path(str(sys.argv[0]) + ".compact-fail").exists():
                     write({"type": "system", "subtype": "status", "status": "compacting"})
                     write({"type": "system", "subtype": "status", "status": None, "compact_result": "failed"})
@@ -1768,7 +1786,7 @@ def main():
                     write_compaction_boundary(session_id, "manual", 180000)
                 write({"type": "command_lifecycle", "command_uuid": current_command_uuid, "state": "completed"})
                 write({"type": "result", "subtype": "success", "is_error": False, "result": "", "usage": {
-                    "input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
+                    "input_tokens": 20, "output_tokens": 40, "cache_read_input_tokens": 180000,
                     "cache_creation_input_tokens": 0
                 }})
                 continue

@@ -233,7 +233,7 @@ extension TokenStatsModel {
                     tools: turn.tools.isEmpty ? nil : turn.tools.joined(separator: " · ")
                 )
             },
-            contextCompactions: summary.contextCompactions.map { ContextCompactionDetails(trigger: $0.trigger, preTokens: $0.preTokens, postTokens: $0.postTokens).summary },
+            contextCompactions: summary.contextCompactions.map(\.summary),
             resumeCacheMisses: summary.promptCacheMisses.map { miss in
                 "Cache read \(format(miss.cacheReadTokens)) tokens · cache rewritten with \(format(miss.cacheWriteTokens)) tokens"
             }
