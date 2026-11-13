@@ -1284,6 +1284,55 @@ struct PressAreaView: NSViewRepresentable {
     }
 }
 
+/// Tracks the whole row independently of the views revealed above it. SwiftUI's
+/// hover target can change when those views appear, producing exit/enter loops.
+private struct OverlayHoverTracker: NSViewRepresentable {
+    var onChange: (Bool) -> Void
+
+    func makeNSView(context: Context) -> TrackingView {
+        let view = TrackingView()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ view: TrackingView, context: Context) {
+        view.onChange = onChange
+    }
+
+    final class TrackingView: NSView {
+        var onChange: (Bool) -> Void = { _ in }
+        private var area: NSTrackingArea?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func isAccessibilityElement() -> Bool { false }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let area { removeTrackingArea(area) }
+            let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+            addTrackingArea(area)
+            self.area = area
+            // A newly installed area does not send an enter for a stationary pointer.
+            // Defer the state update until SwiftUI has finished laying out the view.
+            DispatchQueue.main.async { [weak self] in self?.syncHover() }
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            DispatchQueue.main.async { [weak self] in self?.syncHover() }
+        }
+
+        private func syncHover() {
+            guard let window, window.isKeyWindow else { onChange(false); return }
+            let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+            onChange(visibleRect.contains(point))
+        }
+
+        override func mouseEntered(with event: NSEvent) { onChange(true) }
+        override func mouseExited(with event: NSEvent) { onChange(false) }
+    }
+}
+
 /// Its base laid out as usual, with `overlay` drawn over it at `align` and
 /// moved by the offsets, so the overlay never changes the base's size. It is
 /// one accessibility container, so its identifier never replaces theirs.
@@ -1302,7 +1351,11 @@ struct AtomOverlay<Base: View, Over: View>: View {
                         .offset(x: CGFloat(props.offsetX ?? 0), y: CGFloat(props.offsetY ?? 0))
                 }
             }
-            .onHover { isHovering = $0 }
+            .background {
+                if props.revealOnHover == true {
+                    OverlayHoverTracker { isHovering = $0 }.accessibilityHidden(true)
+                }
+            }
             .atomCommon(common, atom: .overlay, group: true)
     }
 
