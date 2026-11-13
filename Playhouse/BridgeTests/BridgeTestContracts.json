@@ -828,6 +828,10 @@
     "expectation": "Add Plugin mode is off by default; the Plugins menu's Add Plugin Mode item and `plugin mode --on` turn it on, `plugin mode` reports the saved state to a fresh CLI process, `--off` turns it off, and any other option is refused as invalid_argument. While it is on, a bar across the top of the window explains the mode and its Close button turns it off; the board's sidebar shows a labeled Add here button below Scheduled Tasks; an open task shows its sidebar expanded even when the sidebar was collapsed, with a labeled Add here button as the sidebar's first section, above Changes, an Add here icon beside the Terminal button and an Add here icon beside the composer's Skills button; and the standalone chat shows only the composer's Add here icon. Turning the mode off from the CLI removes every placeholder live and returns the sidebar to its saved collapsed state."
   },
   {
+    "id": "test_plugin_draft_versions_and_restore",
+    "expectation": "Plugin edits persist as an isolated draft, saving publishes a new version and preserves history, discard restores the saved preview, and restoring an older version publishes it as a new revision."
+  },
+  {
     "id": "test_plugin_authoring_task_starts_with_placement_and_skill",
     "expectation": "Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview without a board card or task header. The Plugins menu reopens the same conversation and preview, including unsaved drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home."
   },

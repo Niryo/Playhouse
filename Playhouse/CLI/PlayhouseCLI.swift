@@ -445,9 +445,13 @@ enum PlayhouseCLI {
             case "list", "refresh", "sessions":
                 guard rest.count == 1 else { throw CLIError.usage(usage) }
                 return BridgeRequest(command: "plugin.\(rest[0])")
-            case "delete", "edit":
+            case "delete", "edit", "save", "discard", "versions":
                 let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--id"])
                 return BridgeRequest(command: "plugin.\(rest[0])", arguments: ["pluginID": .string(try requiredFlag("--id", flags: flags).first!)])
+            case "restore":
+                let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--id", "--version"])
+                guard let version = Int(try requiredFlag("--version", flags: flags).first!) else { throw CLIError.usage("Version must be an integer.") }
+                return BridgeRequest(command: "plugin.restore", arguments: ["pluginID": .string(try requiredFlag("--id", flags: flags).first!), "version": .integer(version)])
             case "author":
                 let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--placement", "--provider", "--name", "--presentation"])
                 var arguments: [String: BridgeValue] = ["placement": .string(try requiredFlag("--placement", flags: flags).first!)]

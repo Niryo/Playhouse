@@ -64,6 +64,8 @@ enum PluginPresentation: String, CaseIterable, Codable, Sendable {
 struct PluginManifest: Codable, Equatable, Sendable {
     var id: String
     var name: String
+    /// Monotonically increasing published revision; absent in legacy plugins.
+    var version: Int? = nil
     /// An SF Symbol.
     var icon: String?
     var placement: String
@@ -79,6 +81,7 @@ struct PluginManifest: Codable, Equatable, Sendable {
 struct PluginRecord: Codable, Equatable, Sendable, Identifiable {
     let id: String
     let name: String
+    let version: Int
     let icon: String
     let placement: String
     let presentation: String
@@ -135,6 +138,7 @@ enum PluginContext {
             "plugin": .object([
                 "id": .string(plugin.id),
                 "name": .string(plugin.name),
+                "version": .number(Double(plugin.version)),
                 "placement": .string(plugin.placement),
                 "presentation": .string(plugin.presentation)
             ]),
@@ -224,6 +228,128 @@ struct PluginLibrary: Sendable {
         return record(folder: folder, validate: validate)
     }
 
+    /// Drafts and historical revisions live outside the installed-plugin listing.
+    var draftDataDirectory: URL { directory.appendingPathComponent(".drafts", isDirectory: true) }
+    var draftLibrary: PluginLibrary { PluginLibrary(dataDirectory: draftDataDirectory.path, resources: resources) }
+
+    func prepareDraft(id: String) throws {
+        guard Self.isValidID(id) else { throw PluginTreeError(message: "Invalid plugin id.") }
+        let fm = FileManager.default
+        let target = draftLibrary.directory.appendingPathComponent(id)
+        guard !fm.fileExists(atPath: target.path) else { return }
+        try fm.createDirectory(at: draftLibrary.directory, withIntermediateDirectories: true)
+        let source = directory.appendingPathComponent(id)
+        if fm.fileExists(atPath: source.path) { try fm.copyItem(at: source, to: target) }
+    }
+
+    func hasDraftChanges(id: String) -> Bool {
+        guard Self.isValidID(id) else { return false }
+        let fm = FileManager.default
+        let draft = draftLibrary.directory.appendingPathComponent(id)
+        let installed = directory.appendingPathComponent(id)
+        guard fm.fileExists(atPath: draft.path) else { return false }
+        guard fm.fileExists(atPath: installed.path) else { return true }
+        let draftPaths = Set((fm.enumerator(atPath: draft.path)?.allObjects as? [String]) ?? [])
+        let installedPaths = Set((fm.enumerator(atPath: installed.path)?.allObjects as? [String]) ?? [])
+        guard draftPaths == installedPaths else { return true }
+        for path in draftPaths {
+            let left = draft.appendingPathComponent(path).path
+            let right = installed.appendingPathComponent(path).path
+            var isDirectory: ObjCBool = false
+            guard fm.fileExists(atPath: left, isDirectory: &isDirectory) else { return true }
+            if !isDirectory.boolValue && !fm.contentsEqual(atPath: left, andPath: right) { return true }
+        }
+        return false
+    }
+
+    func discardDraft(id: String) throws {
+        guard Self.isValidID(id) else { throw PluginTreeError(message: "Invalid plugin id.") }
+        let fm = FileManager.default
+        let target = draftLibrary.directory.appendingPathComponent(id)
+        let installed = directory.appendingPathComponent(id)
+        guard fm.fileExists(atPath: installed.path) else {
+            if fm.fileExists(atPath: target.path) { try fm.removeItem(at: target) }
+            return
+        }
+        try fm.createDirectory(at: draftLibrary.directory, withIntermediateDirectories: true)
+        let staging = draftLibrary.directory.appendingPathComponent(".reset-" + UUID().uuidString)
+        try fm.copyItem(at: installed, to: staging)
+        defer { try? fm.removeItem(at: staging) }
+        if fm.fileExists(atPath: target.path) {
+            _ = try fm.replaceItemAt(target, withItemAt: staging)
+        } else { try fm.moveItem(at: staging, to: target) }
+    }
+
+    func versions(id: String) throws -> [Int] {
+        guard Self.isValidID(id) else { throw PluginTreeError(message: "Invalid plugin id.") }
+        let folder = directory.appendingPathComponent(".versions").appendingPathComponent(id)
+        return ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).compactMap(Int.init).sorted(by: >)
+    }
+
+    /// Publish a validated draft, preserving the installed tree before replacing it.
+    func saveDraft(id: String, source: PluginLibrary? = nil, resetDraft: Bool = true) throws -> (plugin: PluginRecord, draftSyncFailed: Bool) {
+        let draft = try (source ?? draftLibrary).plugin(id: id)
+        guard draft.valid else { throw PluginTreeError(message: draft.errors.joined(separator: "\n")) }
+        let fm = FileManager.default
+        let installed = directory.appendingPathComponent(id)
+        let old = try? plugin(id: id, validate: false)
+        let next = max(old?.version ?? 0, (try versions(id: id).max()) ?? 0) + 1
+        let staging = directory.appendingPathComponent(".publish-" + UUID().uuidString)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        try fm.copyItem(at: URL(fileURLWithPath: draft.folder), to: staging)
+        defer { try? fm.removeItem(at: staging) }
+        let manifestURL = staging.appendingPathComponent(Self.manifestName)
+        var manifest = try JSONDecoder().decode(PluginManifest.self, from: Data(contentsOf: manifestURL))
+        manifest.version = next
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(manifest).write(to: manifestURL, options: .atomic)
+        if let old {
+            let history = directory.appendingPathComponent(".versions").appendingPathComponent(id)
+            try fm.createDirectory(at: history, withIntermediateDirectories: true)
+            let backup = history.appendingPathComponent(String(old.version))
+            guard !fm.fileExists(atPath: backup.path) else { throw PluginTreeError(message: "Version \(old.version) already exists.") }
+            try fm.copyItem(at: installed, to: backup)
+            let backupManifest = backup.appendingPathComponent(Self.manifestName)
+            if let data = try? Data(contentsOf: backupManifest),
+               var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                json["version"] = old.version
+                do { try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]).write(to: backupManifest, options: .atomic) }
+                catch { try? fm.removeItem(at: backup); throw error }
+            }
+            do { _ = try fm.replaceItemAt(installed, withItemAt: staging) }
+            catch { try? fm.removeItem(at: backup); throw error }
+        } else {
+            try fm.moveItem(at: staging, to: installed)
+        }
+        // Publication already succeeded; preserve the existing draft if refreshing it fails.
+        var draftSyncFailed = false
+        if resetDraft {
+            do { try discardDraft(id: id) } catch { draftSyncFailed = true }
+        }
+        return (try plugin(id: id, validate: false), draftSyncFailed)
+    }
+
+    func restoreVersion(id: String, version: Int) throws -> (plugin: PluginRecord, draftSyncFailed: Bool) {
+        guard Self.isValidID(id), version >= 0 else { throw PluginTreeError(message: "Invalid plugin version.") }
+        let source = directory.appendingPathComponent(".versions").appendingPathComponent(id).appendingPathComponent(String(version))
+        guard FileManager.default.fileExists(atPath: source.path) else { throw PluginTreeError(message: "Plugin version not found.") }
+        // Restore through an isolated staging library: a failed restore must never
+        // remove or overwrite the user's draft. Keep a dirty draft after success.
+        let dirty = hasDraftChanges(id: id)
+        let temporary = directory.appendingPathComponent(".restore-" + UUID().uuidString)
+        let staging = PluginLibrary(dataDirectory: temporary.path, resources: resources)
+        try FileManager.default.createDirectory(at: staging.directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        try FileManager.default.copyItem(at: source, to: staging.directory.appendingPathComponent(id))
+        let restored = try saveDraft(id: id, source: staging, resetDraft: false)
+        var draftSyncFailed = false
+        if !dirty {
+            do { try discardDraft(id: id) } catch { draftSyncFailed = true }
+        }
+        return (restored.plugin, draftSyncFailed)
+    }
+
     /// Removes the plugin's folder.
     func delete(id: String) throws {
         let record = try plugin(id: id, validate: false)
@@ -232,7 +358,11 @@ struct PluginLibrary: Sendable {
         guard folder.deletingLastPathComponent().standardizedFileURL.path == directory.standardizedFileURL.path else {
             throw PluginTreeError(message: "\(folder.path) is not inside \(directory.path).")
         }
-        try FileManager.default.removeItem(at: folder)
+        let fm = FileManager.default
+        try fm.removeItem(at: folder)
+        for auxiliary in [draftLibrary.directory.appendingPathComponent(id), directory.appendingPathComponent(".versions").appendingPathComponent(id)] {
+            if fm.fileExists(atPath: auxiliary.path) { try fm.removeItem(at: auxiliary) }
+        }
     }
 
     private func record(folder: URL, validate: Bool) -> PluginRecord {
@@ -266,7 +396,7 @@ struct PluginLibrary: Sendable {
             errors.append("The entry script \(entry.lastPathComponent) is missing.")
         }
         var record = PluginRecord(
-            id: folderID, name: manifest.name, icon: manifest.icon ?? Self.defaultIcon,
+            id: folderID, name: manifest.name, version: manifest.version ?? 0, icon: manifest.icon ?? Self.defaultIcon,
             placement: manifest.placement, presentation: manifest.presentation,
             width: manifest.width, height: manifest.height,
             folder: folder.path, entryPath: entry.path, valid: errors.isEmpty, errors: errors
@@ -275,7 +405,7 @@ struct PluginLibrary: Sendable {
             let renderErrors = self.renderErrors(record)
             if !renderErrors.isEmpty {
                 record = PluginRecord(
-                    id: record.id, name: record.name, icon: record.icon, placement: record.placement,
+                    id: record.id, name: record.name, version: record.version, icon: record.icon, placement: record.placement,
                     presentation: record.presentation, width: record.width, height: record.height,
                     folder: record.folder, entryPath: record.entryPath, valid: false, errors: renderErrors
                 )

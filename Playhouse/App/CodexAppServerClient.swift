@@ -2993,7 +2993,7 @@ enum TaskThreadDeveloperInstructions {
         Plugin authoring: this task builds a new Playhouse plugin whose entry button goes in the \(placement.title) placement (`\(placement.rawValue)`). Use the /\(pluginSkillName) skill for the plugin system's details, and ask the user for anything the request leaves open (what the plugin does, its name and icon, and whether it opens as a popover, modal, sidebar or page) before writing it.
         - Write the plugin to \(directory)/<plugin-id>/ as plugin.json (id, name, icon, placement "\(placement.rawValue)", presentation) and index.js. That folder is this task's context folder; it is not a Git repository and needs no worktree or pull request.
         - Context the plugin receives in Playhouse.props at this placement: \(placement.contextDescription)
-        - Check it headlessly with \(executable) plugin render --plugin <plugin-id> [--task <task-id>] [--event <testID>:<event>[:<value>]], then install it with \(executable) plugin refresh, which validates every plugin and shows the valid ones in the app immediately. Fix every reported error before you finish.
+        - This folder is a persistent draft. Never modify the installed plugin or publish it; the user chooses Save in the editor. Check the draft with \(executable) plugin render --file \(directory)/<plugin-id>/index.js and fix errors before finishing.
 
         """
     }
