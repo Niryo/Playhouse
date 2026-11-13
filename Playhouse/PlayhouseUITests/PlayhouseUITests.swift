@@ -24424,7 +24424,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitForDisappearance(chat.descendants(matching: .any)["plugin-add-here-composerActions"]))
     }
 
-    // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview without a board card or task header. The Plugins menu reopens the same conversation and preview, including unsaved drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home.
+    // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with the generated authoring prompt in the editable composer draft, no provider turn started, and no board card or task header. The user can choose a model and edit the draft before sending; the Plugins menu reopens the same conversation and preview, including unsent drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home.
     func test_plugin_authoring_task_starts_with_placement_and_skill() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-plugin-author")
         let historyURL = URL(fileURLWithPath: try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]) + ".history")
@@ -24474,14 +24474,27 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("task-header-status").exists, "The editor has no task status in its header.")
         let pluginID = try XCTUnwrap(boardTask["authoredPluginID"] as? String)
         XCTAssertEqual(boardTask["pluginPlacement"] as? String, "mainSidebar")
-        XCTAssertTrue(waitUntil({ turns().contains { ($0["userText"] as? String ?? "").contains(pluginID) && ($0["userText"] as? String ?? "").contains("presentation modal") } }, timeout: 20))
-        attachScreenshot(named: "Plugin creation empty preview")
+        let authoringDraft = try XCTUnwrap((element("message-composer").value as? String))
+        XCTAssertTrue(authoringDraft.contains(pluginID) && authoringDraft.contains("presentation modal"), "The generated authoring prompt is ready to edit in the composer.")
+        XCTAssertTrue(element("send-message-button").isEnabled, "The user can send when ready.")
+        let modelPicker = element("model-picker-menu")
+        XCTAssertTrue(modelPicker.exists, "The user can choose a model before sending.")
+        modelPicker.click()
+        let opusOption = app.buttons["model-option-claude-opus-5-5"]
+        XCTAssertTrue(opusOption.waitToExist(timeout: 10), "The model picker offers a different Claude model.")
+        opusOption.click()
+        modelPicker.click() // Dismissing the picker commits the staged selection.
+        XCTAssertTrue(waitUntil({ self.element("model-picker-menu").label.contains("Opus 5.5") }, timeout: 5), "The selected model changes before the first turn.")
+        XCTAssertEqual(element("message-composer").value as? String, authoringDraft, "Changing models preserves the unsent authoring draft.")
+        XCTAssertTrue(turns().isEmpty, "Creating the plugin does not start a provider turn.")
+        attachScreenshot(named: "Plugin authoring draft ready to review with selected model")
         element("back-to-board-button").click()
         let draftMenu = app.menuBars.menuBarItems["Plugins"]
         draftMenu.click()
         XCTAssertTrue(draftMenu.menuItems["Edit Timer…"].waitToExist(timeout: 10))
         draftMenu.menuItems["Edit Timer…"].click()
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10), "A draft can be reopened before its plugin folder exists.")
+        XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String) == authoringDraft }, timeout: 10), "The generated authoring draft survives reopening unsent.")
         XCTAssertGreaterThan(element("message-composer").frame.width, 0)
         XCTAssertGreaterThan(element("plugin-creation-preview").frame.width, 0)
         XCTAssertLessThanOrEqual(element("message-composer").frame.maxX, element("plugin-creation-preview").frame.minX + 2)
@@ -24489,6 +24502,7 @@ final class PlayhouseUITests: XCTestCase {
             let payload = try JSONSerialization.data(withJSONObject: ["folder": pluginsFolder.appendingPathComponent(pluginID).path, "text": value])
             let message = "plugin-preview-fixture " + (try XCTUnwrap(String(data: payload, encoding: .utf8)))
             element("message-composer").click()
+            element("message-composer").typeKey("a", modifierFlags: .command)
             element("message-composer").typeText(message)
             XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 20))
             element("send-message-button").click()

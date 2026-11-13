@@ -1582,6 +1582,8 @@ struct TaskConversationView: View {
     var onConflictResolutionChecked: (Bool) -> Void = { _ in }
     /// The prompt a task opened from the Skills page's Fix with Agent sends on arrival.
     var skillFixPrompt: String? = nil
+    /// Text prefilled into the composer without starting a turn.
+    var initialDraft: String? = nil
     /// Shows another task's conversation, sending it the prompt once it opens.
     var onOpenTask: (UUID, String) -> Void = { _, _ in }
     /// Opens with the schedule hint showing, set to this kind (the Scheduled Tasks page's New Task).
@@ -2542,6 +2544,9 @@ struct TaskConversationView: View {
             if conflictResolutionRequested && !isReadOnly && !isResponding {
                 conflictResolutionAttempt = 1
                 sendMessage(overrideText: PlayhouseSentMessage.pullRequestConflicts)
+            } else if let initialDraft, !initialDraft.isEmpty, draft.isEmpty, !isReadOnly,
+                      !isResponding, messages.isEmpty, task.pendingSubmittedPrompt == nil {
+                draft = initialDraft
             } else if let skillFixPrompt, !isReadOnly, !isResponding, messages.isEmpty, task.pendingSubmittedPrompt == nil {
                 // Sent as the composer's own draft, so the composer clears as for any send.
                 draft = skillFixPrompt

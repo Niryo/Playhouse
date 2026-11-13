@@ -17604,7 +17604,7 @@ Playhouse.render(h(Context));
         self.assert_failure(self.call_cli("plugin", "mode", "--on", "--off", expected_status=2)[0], "invalid_argument")
         self.assertEqual(self.assert_success(self.call_cli("plugin", "mode")[0]), {"enabled": False}, "A refused option changes nothing.")
 
-    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview without a board card or task header. The Plugins menu reopens the same conversation and preview, including unsaved drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home.
+    # case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with the generated authoring prompt in the editable composer draft, no provider turn started, and no board card or task header. The user can choose a model and edit the draft before sending; the Plugins menu reopens the same conversation and preview, including unsent drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home.
     def test_plugin_authoring_task_starts_with_placement_and_skill(self):
         self.assert_failure(self.call_cli("plugin", "author", "--placement", "titleBar", expected_status=2)[0], "invalid_argument")
         self.assertFalse(self.plugins_folder().exists(), "A refused placement creates nothing.")
@@ -17634,6 +17634,7 @@ Playhouse.render(h(Context));
         configured = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Timer", "--presentation", "modal", "--provider", "claude")[0])
         authored = configured["task"]
         self.assertEqual(authored["title"], "Timer")
+        self.assertIsNone(authored.get("pendingSubmittedPrompt"), "Creating the authoring session leaves its prompt unsent.")
         self.assertIn("presentation modal", configured["prompt"])
         self.assertIn(authored["authoredPluginID"], configured["prompt"])
         stored_authored = self.assert_success(self.call_cli("plugin", "edit", "--id", authored["authoredPluginID"])[0])["task"]
@@ -17643,6 +17644,12 @@ Playhouse.render(h(Context));
         self.assertEqual(stored_authored["authoredPluginID"], authored["authoredPluginID"])
         self.assertEqual(stored_authored["pluginPlacement"], "mainSidebar")
         self.assertEqual(stored_authored["savedPrompt"], configured["prompt"])
+        selected_model = self.assert_success(self.call_cli("conversation", "model", authored["id"], "set", "claude-opus-5-5")[0])
+        self.assertEqual(selected_model["modelID"], "claude-opus-5-5")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", authored["id"])[0])["modelID"], "claude-opus-5-5")
+        after_model_selection = self.assert_success(self.call_cli("plugin", "edit", "--id", authored["authoredPluginID"])[0])["task"]
+        self.assertEqual(after_model_selection["savedPrompt"], configured["prompt"], "Choosing a model preserves the editable authoring draft.")
+        self.assertIsNone(after_model_selection.get("pendingSubmittedPrompt"), "Choosing a model does not send the authoring draft.")
         self.assertIn("Timer", configured["prompt"])
         self.assertIn("mainSidebar", configured["prompt"])
         other = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Timer", "--presentation", "modal")[0])

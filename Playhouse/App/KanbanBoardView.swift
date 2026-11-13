@@ -155,7 +155,7 @@ struct KanbanBoardView: View {
     @State private var isShowingChatSidebar = false
     @State private var chatTask: StandaloneChat?
     @State private var pluginChat: StandaloneChat?
-    @State private var pluginInitialPrompt: String?
+    @State private var pluginInitialDraft: String?
     @State private var isOpeningChatSidebar = false
     /// A modal, sidebar or page plugin opened from the board's sidebar.
     @State private var openBoardPlugin: PluginRecord?
@@ -210,8 +210,8 @@ struct KanbanBoardView: View {
                 HStack(spacing: 0) {
                     TaskConversationView(task: pluginChat, isNewTask: false,
                         conflictResolutionRequested: false, onConflictResolutionChecked: { _ in },
-                        skillFixPrompt: pluginInitialPrompt, onOpenTask: openTask(_:sending:),
-                        onBack: { self.pluginChat = nil; pluginInitialPrompt = nil })
+                        initialDraft: pluginInitialDraft, onOpenTask: openTask(_:sending:),
+                        onBack: { self.pluginChat = nil; pluginInitialDraft = nil })
                         .id(pluginChat.id)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     Divider()
@@ -262,12 +262,12 @@ struct KanbanBoardView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .playhouseEditPlugin)) { notification in
             guard let id = notification.object as? UUID else { return }
-            openPluginConversation(id, prompt: nil)
+            openPluginConversation(id, draft: nil)
         }
         .onReceive(NotificationCenter.default.publisher(for: .playhousePreparePluginEdit)) { notification in
             guard let id = notification.object as? UUID else { return }
             if selectedTask?.id == id { selectedTask = nil }
-            if pluginChat?.id == id { pluginChat = nil; pluginInitialPrompt = nil }
+            if pluginChat?.id == id { pluginChat = nil; pluginInitialDraft = nil }
         }
         .onReceive(NotificationCenter.default.publisher(for: .playhouseShowBoardSearch)) { _ in
             withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = true }
@@ -1004,20 +1004,20 @@ struct KanbanBoardView: View {
             defer { isStartingPluginTask = false }
             do {
                 let started = try await pluginRegistry.author(placement, name: name, presentation: presentation)
-                openPluginConversation(started.taskID, prompt: started.prompt)
+                openPluginConversation(started.taskID, draft: started.prompt)
             } catch {
                 saveError = error.localizedDescription
             }
         }
     }
 
-    private func openPluginConversation(_ id: UUID, prompt: String?) {
+    private func openPluginConversation(_ id: UUID, draft: String?) {
         Task { @MainActor in
             let manager = BoardTaskManager(modelContext: modelContext)
             for _ in 0..<100 {
                 if let chat = try? manager.standaloneChatModel(id) {
                     setChatSidebarVisible(false)
-                    pluginInitialPrompt = prompt
+                    pluginInitialDraft = draft
                     withAnimation(.easeInOut(duration: 0.3)) {
                         pluginChat = chat
                         pluginSetupPlacement = nil

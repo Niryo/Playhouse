@@ -829,7 +829,7 @@
   },
   {
     "id": "test_plugin_authoring_task_starts_with_placement_and_skill",
-    "expectation": "Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview without a board card or task header. The Plugins menu reopens the same conversation and preview, including unsaved drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home."
+    "expectation": "Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with the generated authoring prompt in the editable composer draft, no provider turn started, and no board card or task header. The user can choose a model and edit the draft before sending; the Plugins menu reopens the same conversation and preview, including unsent drafts and history. Name, presentation, placement and plugin identity persist; invalid setup is rejected. Claude and Codex receive plugin instructions and the bundled skill without installing files in the user’s home."
   },
   {
     "id": "test_plugin_editor_reattaches_after_daemon_restart",
