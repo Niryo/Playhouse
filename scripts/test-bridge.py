@@ -12686,6 +12686,42 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any("Playhouse internal outcome nudge:" in m["text"] for m in later["messages"][later_start + 1:] if m["role"] == "user"),
                         "The later turn's own nudge is shown after its message.")
 
+    # case-contract: test_agents_info_usage_recovers_when_account_reads_fail | When either provider account metadata read fails, a usage refresh still reads that provider usage and retains its last known account. Codex and Claude usage changes reach the CLI and open Agents info section, and after both account reads recover another refresh updates both usage values and retains the correct accounts.
+    def test_agents_info_usage_recovers_when_account_reads_fail(self):
+        source = Path(__file__).resolve().parent / "fixtures"
+        codex = self.data_directory / "codex-fixture-usage-failure"
+        claude = self.data_directory / "claude-fixture-usage-failure"
+        for src, target, owner in [("codex-app-server-fixture.py", codex, "codex"), ("claude-code-fixture.py", claude, "claude")]:
+            shutil.copyfile(source / src, target)
+            target.chmod(0o755)
+            (self.data_directory / f".playhouse-{owner}-fixture-owner").write_text(
+                f"Playhouse test owns this {'Codex protocol' if owner == 'codex' else 'Claude Code protocol'} fixture (v1).\n", encoding="utf-8")
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(codex), "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude)}
+        def refresh():
+            result = self.assert_success(self.call_cli("usage", "get", "--refresh", extra_environment=env)[0])
+            return {p["provider"]: p for p in result["providers"]}
+        def percent(state, key):
+            return next(w["usedPercent"] for w in state["snapshot"]["windows"] if w["id"] == key)
+        initial = refresh()
+        self.assertEqual(initial["codex"]["account"], "codex-fixture@example.com")
+        self.assertEqual(initial["claude"]["account"], "claude-fixture@example.com")
+        errors = [Path(str(codex) + ".account-read-error"), Path(str(claude) + ".auth-status-error")]
+        for error in errors: error.touch()
+        def values(codex_used, claude_used):
+            Path(str(codex) + ".account").write_text(json.dumps({"loggedIn": True, "email": "codex-fixture@example.com", "used": [codex_used, 62]}), encoding="utf-8")
+            Path(str(claude) + ".usage").write_text(json.dumps({"rate_limits_available": True, "rate_limits": {"five_hour": {"utilization": claude_used, "resets_at": "2099-01-01T00:00:00Z"}}}), encoding="utf-8")
+        values(47, 24)
+        failed = refresh()
+        self.assertEqual((percent(failed["codex"], "primary"), percent(failed["claude"], "five_hour")), (47, 24))
+        self.assertEqual((failed["codex"]["account"], failed["claude"]["account"]), ("codex-fixture@example.com", "claude-fixture@example.com"))
+        for error in errors: error.unlink()
+        values(54, 31)
+        Path(str(codex) + ".account").write_text(json.dumps({"loggedIn": True, "email": "codex-recovered@example.com", "used": [54, 62]}), encoding="utf-8")
+        Path(str(claude) + ".auth-state").write_text(json.dumps({"loggedIn": True, "authMethod": "claude.ai", "email": "claude-recovered@example.com", "subscriptionType": "max"}), encoding="utf-8")
+        recovered = refresh()
+        self.assertEqual((percent(recovered["codex"], "primary"), percent(recovered["claude"], "five_hour")), (54, 31))
+        self.assertEqual((recovered["codex"]["account"], recovered["claude"]["account"]), ("codex-recovered@example.com", "claude-recovered@example.com"))
+
     # case-contract: test_agents_info_shows_provider_usage_and_accounts | The Agents info section reads Claude and Codex plan usage and accounts through the bridge. A refresh reads both providers: Codex's account, plan, both rolling windows (5h and weekly) with percent used and reset times, and its credits balance come from the app-server, while Claude's usage is read with Claude Code's get_usage control request, which has none for this account yet, so Claude starts with a signed-in account and no usage. While a usage watch remains open, it periodically refreshes both providers; Codex and Claude usage changed without a push reaches the watch and appears in the open window, and the Codex snapshot persists. A Claude turn's rate_limit_event then fills Claude's 5h and weekly windows and its warning status from the stream, a usage watch already open receives that change as a pushed update without asking again, a fresh read returns the same values, and the last-known snapshot is persisted to disk. A later event whose window reset time has already passed reads back as reset (empty, no reset time) and lifts the limit status without any provider call. Because Claude Code streams rate_limit_event only when a limit's status changes, and a usage-based plan's event has no utilization, every finished Claude turn reads the plan's usage again through get_usage (skipping the local transcript scan) without a refresh: the read replaces the windows with the plan's current ones, keeps get_usage percents as percents, shows a usage-based plan's monthly extra usage as a Spend limit row with the reset time from the stream's overage event, and is persisted; a refresh reads it too, a reply without plan usage keeps the last known rows, a reached spend limit reads as the limit reached, and a usage request that is never answered times out, keeping the last known rows, so later reads work again. Switching the Codex account signs out, clears the cached usage, starts a new login that returns its sign-in URL, and shows the new account's account and usage after the login completes; switching the Claude account does the same through the CLI and drops the old account's usage. A signed-out provider reports loggedIn false with no account or usage, a login restores it, and an unknown provider is rejected as invalid_argument. In the visible UI the Agents info section sits at the bottom of the left sidebar, below the Scheduled Tasks button and inside it, titled Agents info, with a separate compact Claude block and Codex block, each showing its account and plan together on the row beneath the provider name, its window rows with percentages and reset times, and a switch-account button; Codex's credits show in its block and Claude's warning status shows as Near limit. After a Claude turn whose usage read reports the plan's spend, the open window shows Claude's Spend limit row with its percent and reset time and the updated 5h row without a relaunch. A signed-out provider shows a Log in button instead of usage, which starts the login and brings usage back, and switching the account signs out and in without asking when no task for that provider is running. The section is open by default and its title is a button that minimizes it: the agent blocks go away and the title moves down to rest at the bottom of the sidebar, and expanding brings them back; the choice is remembered, so a section minimized before a relaunch is still minimized afterwards. Every read reports whether each CLI is installed from the same executable lookup Playhouse launches it with; an agent whose CLI is not installed has no block, and with neither installed the section is not shown. While a task for a provider is running, its switch-account button first asks for confirmation naming how many of its tasks are running, and cancelling keeps the account.
     def test_agents_info_shows_provider_usage_and_accounts(self):
         source = Path(__file__).resolve().parent / "fixtures"

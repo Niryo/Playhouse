@@ -1343,6 +1343,8 @@ def auth_command(arguments):
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {
         "loggedIn": True, "authMethod": "claude.ai", "email": "claude-fixture@example.com", "subscriptionType": "max"}
     if arguments[:1] == ["status"]:
+        if Path(str(sys.argv[0]) + ".auth-status-error").exists():
+            return 1
         print(json.dumps(state))
     elif arguments[:1] == ["logout"]:
         state_path.write_text(json.dumps({"loggedIn": False}), encoding="utf-8")

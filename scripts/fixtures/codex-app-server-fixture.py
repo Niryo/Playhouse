@@ -977,6 +977,10 @@ def handle_account_request(message):
     if method == "account/read" and hang.is_file():
         hang.unlink(missing_ok=True)
         return
+    account_error = Path(str(sys.argv[0]) + ".account-read-error")
+    if method == "account/read" and account_error.exists():
+        write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32603, "message": "failed to load workspace requirements"}})
+        return
     if method == "account/read":
         account = {"type": "chatgpt", "email": state["email"], "planType": "plus"} if state["loggedIn"] else None
         reply({"account": account, "requiresOpenaiAuth": True})

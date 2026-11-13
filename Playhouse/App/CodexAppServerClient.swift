@@ -605,18 +605,25 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         do {
             let workspace = try ConversationWorkspaceContext(roots: [URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)])
             try await ensureInitialized(workspace: workspace)
-            let response = try await request(method: "account/read", params: ["refreshToken": false], timeout: Self.accountReadTimeout)
-            guard let account = response["account"] as? [String: Any] else {
-                store.setAuth(.codex, loggedIn: false, account: nil, plan: nil)
-                return
+            do {
+                let response = try await request(method: "account/read", params: ["refreshToken": false], timeout: Self.accountReadTimeout)
+                guard let account = response["account"] as? [String: Any] else {
+                    store.setAuth(.codex, loggedIn: false, account: nil, plan: nil)
+                    return
+                }
+                let type = account["type"] as? String
+                store.setAuth(
+                    .codex,
+                    loggedIn: true,
+                    account: (account["email"] as? String) ?? (type == "apiKey" ? "API key" : nil),
+                    plan: CodexRateLimits.planName(account["planType"] as? String)
+                )
+            } catch {
+                // Account metadata can fail independently of rate limits (for example,
+                // when Codex cannot load workspace requirements). Keep the last known
+                // identity and still try the usage endpoint.
+                PlayhouseDiagnostics.record("codex.agent_usage.account_read.failed", fields: diagnosticFields(["error": error.localizedDescription]))
             }
-            let type = account["type"] as? String
-            store.setAuth(
-                .codex,
-                loggedIn: true,
-                account: (account["email"] as? String) ?? (type == "apiKey" ? "API key" : nil),
-                plan: CodexRateLimits.planName(account["planType"] as? String)
-            )
             store.recordCodexRead(try await request(method: "account/rateLimits/read", params: [:], timeout: Self.accountReadTimeout))
         } catch {
             PlayhouseDiagnostics.record("codex.agent_usage.refresh.failed", fields: diagnosticFields(["error": error.localizedDescription]))

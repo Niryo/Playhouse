@@ -1,5 +1,9 @@
 [
   {
+    "id": "test_agents_info_usage_recovers_when_account_reads_fail",
+    "expectation": "When either provider account metadata read fails, a usage refresh still reads that provider usage and retains its last known account. Codex and Claude usage changes reach the CLI and open Agents info section, and after both account reads recover another refresh updates both usage values and retains the correct accounts."
+  },
+  {
     "id": "test_standalone_chat_legacy_hidden_task_migrates",
     "expectation": "A standalone chat left in the store as a hidden board task is converted once into its own model: it keeps its ID so the existing conversation transcript stays attached, keeps its provider session, carries its in-flight turn state across with the status message and progress report that explain it, is removed from the board so it never lists or resolves as a task, and reopening the chat returns that same migrated chat rather than creating a second one."
   },
