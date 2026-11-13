@@ -321,7 +321,7 @@ struct SkillsPageHeader: View {
                 common: AtomCommon(testID: "\(prefix)skills-back-button", label: "Back to the conversation", help: "Back to the conversation"),
                 action: actions.back
             ) {
-                AtomPanel(props: PanelProps(fillOpacity: 0.07, cornerRadius: 13), common: AtomCommon(width: 26, height: 26)) {
+                AtomPanel(props: PanelProps(fillOpacity: 0.07, cornerRadius: 13), common: AtomCommon(width: 26, height: 26, padding: 0)) {
                     AtomIcon(props: IconProps(name: "chevron.left", size: 13, weight: "semibold"))
                 }
             }

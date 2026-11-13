@@ -15804,7 +15804,7 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assert_failure(self.render_plugin(plugin, "--event", "label:onPress", expected_status=2), "invalid_argument")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "NoSuchPage", expected_status=2)[0], "invalid_argument")
 
-    # case-contract: test_plugin_stack_surface_composes_panel_and_choice_bar | The Plugin Catalog's Stack page draws a surface on a Stack in both axes, while its Stacks without surface props draw nothing: a column filled accent at 0.18 with an accent border and an 8-point radius keeps its children at its top leading corner, inside its padding, when its 220-point minWidth and 90-point minHeight are larger than they are; a capsule row filled #2E7D32 with a dashed border lays its icon and text out side by side on that green; and a border-only Stack with align unset (a Stack's default, center) and fillWidth stretches across the page, draws its border and no fill with rounded corners, and keeps its text centered both ways in its 60-point minHeight. The Panel page shows each Panel beside the Stack it is shorthand for (a column Stack with group, fill primary at 0.05 and radius 8 unless set), and each pair is the same size, including the accent Log in Panel and the single decorated row Stack that replaces its nested row. `plugin render` reports the surface props on those nodes with no errors and none on the plain Stacks, and a mistyped surface prop on a Stack (fill, fillOpacity, cornerRadius, capsule, strokeWidth or dash) or an unknown one (shadow, or axis on a Panel) is reported in errors with exit 1, naming the prop and what is wrong. The ChoiceBar page also composes the bar from atoms, a decorated row Stack of Buttons each marked selected (the Button's selected prop) around a decorated Stack with a Text: it is the same size as the ChoiceBar atom beside it, its Overview button carries the selected trait, and clicking Wasters runs its onPress, which moves the selected trait to it (Composed: wasters) while the ChoiceBar atom stays on Overview; a mistyped selected on a Button is reported with its path.
+    # case-contract: test_plugin_stack_surface_composes_panel_and_choice_bar | The Plugin Catalog's Stack page draws a surface on a Stack in both axes, while its Stacks without surface props draw nothing: a column filled accent at 0.18 with an accent border and an 8-point radius keeps its children at its top leading corner, inside its padding, when its 220-point minWidth and 90-point minHeight are larger than they are; a capsule row filled #2E7D32 with a dashed border lays its icon and text out side by side on that green; and a border-only Stack with align unset (a Stack's default, center) and fillWidth stretches across the page, draws its border and no fill with rounded corners, and keeps its text centered both ways in its 60-point minHeight. The Panel page shows each Panel beside the Stack it is shorthand for (a column Stack with group, fill primary at 0.05, radius 8 and padding 12 unless set), and each pair is the same size, including a Panel with no padding prop beside a Stack padded 12, including the accent Log in Panel and the single decorated row Stack that replaces its nested row. `plugin render` reports the surface props on those nodes with no errors and none on the plain Stacks, and a mistyped surface prop on a Stack (fill, fillOpacity, cornerRadius, capsule, strokeWidth or dash) or an unknown one (shadow, or axis on a Panel) is reported in errors with exit 1, naming the prop and what is wrong. The ChoiceBar page also composes the bar from atoms, a decorated row Stack of Buttons each marked selected (the Button's selected prop) around a decorated Stack with a Text: it is the same size as the ChoiceBar atom beside it, its Overview button carries the selected trait, and clicking Wasters runs its onPress, which moves the selected trait to it (Composed: wasters) while the ChoiceBar atom stays on Overview; a mistyped selected on a Button is reported with its path.
     def test_plugin_stack_surface_composes_panel_and_choice_bar(self):
         surface_keys = {"fill", "fillOpacity", "cornerRadius", "capsule", "stroke", "strokeOpacity", "strokeWidth", "dash"}
         stacks = self.assert_success(self.call_cli("plugin", "render", "--page", "Stack")[0])
@@ -15829,8 +15829,9 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         panels = self.assert_success(self.call_cli("plugin", "render", "--page", "Panel")[0])
         self.assertEqual(panels["errors"], [])
         tree = panels["tree"]
-        panel_defaults = {"fill": "primary", "fillOpacity": 0.05, "cornerRadius": 8}
-        for name in ["panel-default", "panel-capsule"]:
+        panel_defaults = {"fill": "primary", "fillOpacity": 0.05, "cornerRadius": 8, "padding": 12}
+        self.assertNotIn("padding", self.plugin_node(tree, "panel-padded")["props"], "The padded Panel sets no padding: 12 is its default.")
+        for name in ["panel-padded", "panel-default", "panel-capsule"]:
             panel = self.plugin_node(tree, name)
             stack = self.plugin_node(tree, f"{name}-stack")
             self.assertEqual((panel["type"], stack["type"], stack["props"]["axis"], stack["props"]["align"], stack["props"]["group"]), ("Panel", "Stack", "v", "leading", True))
@@ -16081,7 +16082,19 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(backlog["updates"], 0, "No column re-rendered.")
         self.assert_failure(self.call_cli("plugin", "render", "--page", "KanbanColumn", "--event", "column-backlog:onPress", expected_status=2)[0], "invalid_argument")
 
-    # case-contract: test_plugin_presentation_atoms_open_modal_page_and_side_panel | Plugins present UI the three ways the board does, each a controlled atom whose first child is what it is presented from and stays laid out as usual. On the Plugin Catalog's Modal page, the Open modal button runs onPress (Last: open) and opens a 320-point sheet over the window showing the modal's title and a Done button; Done closes it (Last: done), and Escape closes it again through onDismiss (Last: dismiss). On the Page page, Open page (Last: open) slides a page over the whole 420 by 220 point view below it, covering that view's frame and showing its title, and its Back button closes it (Last: back), uncovering the view. On the SidePanel page, Open trailing (Last: open trailing) slides a 200-point panel as tall as the 480 by 240 point view below it in over that view's trailing edge, Open leading (Last: open leading) over its leading edge, and the panel's close button closes it (Last: close). `plugin render` keeps each atom's presented content in the tree after its first child, and opening or closing is one commit that updates only the presentation atom's props and the readout. Only a Modal raises onDismiss: a Page or SidePanel given an onDismiss handler, or a Modal, Page or SidePanel without isPresented or with a mistyped width or edge, is reported in errors.
+    # case-contract: test_plugin_card_uses_default_content_padding | The Plugin Catalog's Card page gives a Card with no padding prop its 14-point default, while `padding: 0` removes it. `plugin render --page Card` omits the default common padding but keeps the explicit zero override on the second Card, and in the UI two otherwise identical cards have the same width while the default-padded card is 28 points taller; each card keeps its own content inside the surface.
+    def test_plugin_card_uses_default_content_padding(self):
+        rendered = self.assert_success(self.call_cli("plugin", "render", "--page", "Card")[0])
+        self.assertEqual(rendered["errors"], [])
+        default_card = self.plugin_node(rendered["tree"], "card-demo")
+        zero_card = self.plugin_node(rendered["tree"], "card-zero-padding")
+        self.assertEqual((default_card["type"], default_card["props"]["testID"]), ("Card", "card-demo"))
+        self.assertNotIn("padding", default_card["props"], "Card uses its default content padding.")
+        self.assertEqual((zero_card["type"], zero_card["props"]["padding"]), ("Card", 0), "Card padding remains overrideable.")
+        self.assertEqual([child["type"] for child in default_card["children"]], ["Stack"])
+        self.assertEqual([child["type"] for child in zero_card["children"]], ["Stack"])
+
+    # case-contract: test_plugin_presentation_atoms_open_modal_page_and_side_panel | Plugins present UI the three ways the board does, each a controlled atom whose first child is what it is presented from and stays laid out as usual. On the Plugin Catalog's Modal page, the Open modal button runs onPress (Last: open) and opens a 320-point sheet over the window that starts with the standard header its title props describe (its icon, the Modal title and its subtitle, and a close button) above content that brings no padding of its own yet sits 24 points in from the sheet's edges (the default inset) and a default spacing below the header, with a Done button; Done closes it (Last: done), the header's close button closes it through onDismiss (Last: dismiss), and Escape closes it again through onDismiss. On the Popover page the anchor opens a popover whose content, again with no padding of its own, is inset 14 points by default and spaced apart, and Escape dismisses it; a titled Modal and a second Popover each override inset to 0 and spacing to 4, which the UI geometry and `plugin render` tree both confirm. On the Page page, Open page (Last: open) slides a page over the whole 420 by 220 point view below it, covering that view's frame and showing its title, and its Back button closes it (Last: back), uncovering the view. On the SidePanel page, Open trailing (Last: open trailing) slides a 200-point panel as tall as the 480 by 240 point view below it in over that view's trailing edge, Open leading (Last: open leading) over its leading edge, and the panel's close button closes it (Last: close). `plugin render` keeps each atom's presented content in the tree after its first child, and opening or closing is one commit that updates only the presentation atom's props and the readout. `plugin render` reports the Modal's title, subtitle and icon with no inset or spacing set and the Popover's content with no Stack of its own, and an explicit inset and spacing override the defaults with no errors. Only a Modal raises onDismiss: a Page or SidePanel given an onDismiss handler, or a Modal, Page or SidePanel without isPresented or with a mistyped width or edge, or a mistyped Modal title or inset or Popover spacing, is reported in errors.
     def test_plugin_presentation_atoms_open_modal_page_and_side_panel(self):
         def commit(rendered, step):
             return {entry["step"]: entry for entry in rendered["commits"]}[step]
@@ -16091,8 +16104,14 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         self.assertEqual(modal_page["errors"], [])
         modal = self.plugin_node(modal_page["tree"], "modal-demo")
         self.assertEqual((modal["type"], modal["props"]["isPresented"], modal["props"]["width"], modal["events"]), ("Modal", False, 320, ["onDismiss"]))
+        self.assertEqual((modal["props"]["title"], modal["props"]["subtitle"], modal["props"]["icon"]), ("Modal title", "A standard header over padded content", "macwindow"),
+                         "The sheet's standard header comes from the Modal's own title props.")
+        self.assertNotIn("inset", modal["props"], "The content is padded by the Modal's default inset.")
+        self.assertNotIn("spacing", modal["props"])
         self.assertEqual(modal["children"][0]["props"]["testID"], "modal-open", "The first child presents the sheet.")
-        self.plugin_node(modal["children"][1], "modal-title")
+        self.assertEqual([child["type"] for child in modal["children"][1:]], ["Text", "Stack"], "The content brings no title or padding Stack of its own.")
+        self.assertNotIn("padding", modal["children"][1]["props"])
+        self.plugin_node(modal["children"][1], "modal-body")
         self.plugin_node(modal_page["tree"], "modal-done")
         last = self.plugin_node(modal_page["tree"], "modal-last")
         opened = self.assert_success(self.call_cli("plugin", "render", "--page", "Modal", "--event", "modal-open:onPress",
@@ -16108,6 +16127,28 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
         reopened = self.assert_success(self.call_cli("plugin", "render", "--page", "Modal", "--event", "modal-open:onPress")[0])
         self.assertTrue(self.plugin_node(reopened["tree"], "modal-demo")["props"]["isPresented"])
         self.assertEqual(self.plugin_text(self.plugin_node(reopened["tree"], "modal-last")), "Last: open")
+        modal_override = self.assert_success(self.call_cli("plugin", "render", "--page", "Modal", "--event", "modal-override-open:onPress")[0])
+        compact_modal = self.plugin_node(modal_override["tree"], "modal-override")
+        self.assertEqual((compact_modal["props"]["isPresented"], compact_modal["props"]["inset"], compact_modal["props"]["spacing"], compact_modal["props"]["title"]), (True, 0, 4, "Compact modal"))
+        self.assertEqual(self.plugin_node(modal_override["tree"], "modal-override-body")["props"]["testID"], "modal-override-body")
+
+        # Popover: its content padded and spaced by default, with no Stack of its own.
+        popover_page = self.assert_success(self.call_cli("plugin", "render", "--page", "Popover", "--event", "popover-anchor:onPress")[0])
+        self.assertEqual(popover_page["errors"], [])
+        popover = self.plugin_node(popover_page["tree"], "popover-demo")
+        self.assertEqual((popover["type"], popover["props"]["isPresented"], popover["props"]["width"]), ("Popover", True, 220))
+        self.assertNotIn("inset", popover["props"])
+        self.assertEqual([child["props"]["testID"] for child in popover["children"]], ["popover-anchor", "popover-title", "popover-body"])
+        self.assertEqual(self.plugin_text(self.plugin_node(popover_page["tree"], "popover-last")), "Last: toggle")
+        override_page = self.assert_success(self.call_cli("plugin", "render", "--page", "Popover", "--event", "popover-override-anchor:onPress")[0])
+        self.assertEqual(override_page["errors"], [])
+        override_popover = self.plugin_node(override_page["tree"], "popover-override")
+        self.assertEqual((override_popover["props"]["isPresented"], override_popover["props"]["inset"], override_popover["props"]["spacing"]), (True, 0, 4), "Popover inset and spacing overrides are preserved.")
+        self.assertEqual([child["props"]["testID"] for child in override_popover["children"]], ["popover-override-anchor", "popover-override-title", "popover-override-body"])
+        overridden = self.render_plugin('Playhouse.render(h(Modal, { isPresented: true, title: "Sized", inset: 0, spacing: 4 }, h(Text, null, "Base"), h(Text, null, "Content")));')
+        self.assertEqual(overridden["result"]["errors"], [], "inset and spacing override the defaults.")
+        sized = next(node for node in self.plugin_nodes(overridden["result"]["tree"]) if node["type"] == "Modal")
+        self.assertEqual((sized["props"]["inset"], sized["props"]["spacing"], sized["props"]["title"]), (0, 4, "Sized"))
 
         # Page: the covered view, then the page.
         page_page = self.assert_success(self.call_cli("plugin", "render", "--page", "Page", "--event", "page-open:onPress")[0])
@@ -16145,6 +16186,9 @@ Playhouse.render(h(PillPicker, { selected: "a", options: [{ value: "a", label: "
             ('Playhouse.render(h(Page, { isPresented: true, onDismiss: function () {} }, h(Text, null, "Base")));', '<Page> has no event "onDismiss"'),
             ('Playhouse.render(h(SidePanel, { isPresented: true, onDismiss: function () {} }, h(Text, null, "Base")));', '<SidePanel> has no event "onDismiss"'),
             ('Playhouse.render(h(Modal, { width: 300 }, h(Text, null, "Base")));', "<Modal> has an invalid prop: isPresented: missing"),
+            ('Playhouse.render(h(Modal, { isPresented: true, title: 3 }, h(Text, null, "Base")));', "<Modal> has an invalid prop: title: expected a string, found 3"),
+            ('Playhouse.render(h(Modal, { isPresented: true, inset: "wide" }, h(Text, null, "Base")));', "<Modal> has an invalid prop: inset: expected a number, found a string"),
+            ('Playhouse.render(h(Popover, { isPresented: true, spacing: true }, h(Text, null, "Base")));', "<Popover> has an invalid prop: spacing: expected a number, found a boolean"),
             ('Playhouse.render(h(Page, {}, h(Text, null, "Base")));', "<Page> has an invalid prop: isPresented: missing"),
             ('Playhouse.render(h(SidePanel, { isPresented: true, width: "wide" }, h(Text, null, "Base")));', "<SidePanel> has an invalid prop: width: expected a number, found a string"),
             ('Playhouse.render(h(SidePanel, { isPresented: true, edge: 3 }, h(Text, null, "Base")));', "<SidePanel> has an invalid prop: edge: expected a string, found 3"),
@@ -16827,7 +16871,7 @@ function Context() {
   }
   var task = props.task;
   var composer = props.composer;
-  return h(Stack, { spacing: 6 },
+  return h(Stack, { spacing: 6, align: "leading" },
     h(Text, { testID: "plugin-placement" }, props.plugin.placement),
     h(Text, { testID: "plugin-task" }, task ? task.title : "no task"),
     h(Text, { testID: "plugin-repositories" }, props.repositories ? props.repositories.map(function (r) { return r.repositoryPath.split("/").pop(); }).join(",") : "no repositories"),
@@ -17017,7 +17061,7 @@ Playhouse.render(h(Context));
         self.assertTrue(self.plugins_folder().is_dir(), "A refused delete leaves the plugins folder.")
         self.assertEqual(self.assert_success(self.call_cli("plugin", "list")[0])["revision"], 2, "A refused delete does not bump the revision.")
 
-    # case-contract: test_plugin_surfaces_receive_context_and_host_access | An installed plugin receives its placement's context in Playhouse.props: the plugin and the appearance everywhere, the task with its repositories and context folders in the conversation placements, and the composer's draft and selected text in the composer placement, while the board's sidebar gets no task. `plugin render --plugin <id> --task <id>` renders it headlessly with that real context. Playhouse.bridge runs any bridge command but plugin render against the real store (a rename is seen by a fresh CLI process) and rejects a failing one with its code; Playhouse.ui close, openTask and the composer's setDraft, insertText, replaceSelection and focus are recorded headlessly; a composer call from the board's sidebar and a plugin render call are refused the same way in both hosts; and --task without --plugin or an unknown plugin is refused. In the window a page plugin from the board's sidebar covers the board, reads the real board, and its openTask opens that task without sending anything; a composer popover plugin opens anchored to its button showing the draft and the selected text, and its replaceSelection replaces the selected text in the composer; a sidebar plugin from the conversation sidebar slides in at the trailing edge showing the task's title and repository, inserts text after the selection, replaces the draft, renames the task, and closes with its close button; and a modal plugin beside the Terminal button opens as a sheet with the task's context and closes itself with Playhouse.ui.close.
+    # case-contract: test_plugin_surfaces_receive_context_and_host_access | An installed plugin receives its placement's context in Playhouse.props: the plugin and the appearance everywhere, the task with its repositories and context folders in the conversation placements, and the composer's draft and selected text in the composer placement, while the board's sidebar gets no task. `plugin render --plugin <id> --task <id>` renders it headlessly with that real context. Playhouse.bridge runs any bridge command but plugin render against the real store (a rename is seen by a fresh CLI process) and rejects a failing one with its code; Playhouse.ui close, openTask and the composer's setDraft, insertText, replaceSelection and focus are recorded headlessly; a composer call from the board's sidebar and a plugin render call are refused the same way in both hosts; and --task without --plugin or an unknown plugin is refused. In the window a page plugin from the board's sidebar covers the board, reads the real board, and its openTask opens that task without sending anything; a composer popover plugin opens anchored to its button showing the draft and the selected text, and its replaceSelection replaces the selected text in the composer; a sidebar plugin from the conversation sidebar slides in at the trailing edge showing the task's title and repository, inserts text after the selection, replaces the draft, renames the task, and closes with its close button; and a modal plugin beside the Terminal button opens as a sheet with the task's context and closes itself with Playhouse.ui.close. Every presentation starts with the app's standard modal header (the plugin's icon, its name and a close button) above the plugin's atoms, which bring no padding of their own yet sit inside the presentation's inset, as does the header: 24 points in a page or sheet, 20 in a sidebar, and 16 in a popover, whose header title is smaller than a sheet's.
     def test_plugin_surfaces_receive_context_and_host_access(self):
         self.write_installed_plugin("context-composer", self.PLUGIN_CONTEXT_SOURCE, placement="composerActions")
         self.write_installed_plugin("context-board", self.PLUGIN_CONTEXT_SOURCE, placement="mainSidebar", presentation="page")

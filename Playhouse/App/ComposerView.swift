@@ -213,7 +213,7 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
             ),
             action: actions.startImplementing
         ) {
-            AtomPanel(props: PanelProps(fill: "accent", fillOpacity: 1, cornerRadius: 15.5), common: AtomCommon(height: 31, paddingX: 11)) {
+            AtomPanel(props: PanelProps(fill: "accent", fillOpacity: 1, cornerRadius: 15.5), common: AtomCommon(height: 31, padding: 0, paddingX: 11)) {
                 AtomText(props: TextProps(text: "Start Implementing", size: 12, weight: "semibold", color: "white"))
             }
         }
@@ -250,7 +250,7 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
 
     private func scheduleButton(_ schedule: ComposerModel.Schedule) -> some View {
         AtomPopover(
-            props: PopoverProps(isPresented: schedule.open, arrowEdge: "top"),
+            props: PopoverProps(isPresented: schedule.open, arrowEdge: "top", inset: 0),
             common: AtomCommon(testID: prefix + "schedule-popover"),
             onDismiss: actions.dismissSchedule,
             anchor: {
@@ -260,7 +260,7 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
                 ) {
                     AtomPanel(
                         props: PanelProps(fill: "accent", fillOpacity: schedule.on ? 0.14 : 0, cornerRadius: 13),
-                        common: AtomCommon(width: 26, height: 26)
+                        common: AtomCommon(width: 26, height: 26, padding: 0)
                     ) {
                         AtomIcon(props: IconProps(name: schedule.on ? "clock.fill" : "clock", size: 12, weight: "medium", color: schedule.on ? "accent" : "secondary"))
                     }
@@ -286,7 +286,7 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
             case "schedule":
                 AtomPanel(
                     props: PanelProps(fill: "accent", fillOpacity: 1, cornerRadius: 15.5),
-                    common: AtomCommon(height: 31, paddingX: 12, opacity: primary.disabled ? 0.45 : 1)
+                    common: AtomCommon(height: 31, padding: 0, paddingX: 12, opacity: primary.disabled ? 0.45 : 1)
                 ) {
                     AtomLabel(props: LabelProps(text: "Schedule", icon: "clock", size: 12, weight: "semibold", color: "white"))
                 }
@@ -299,7 +299,7 @@ struct ComposerView<Header: View, ScheduleContent: View>: View {
     private func primaryIcon(_ name: String, fill: String, opacity: Double, size: Double, radius: Double, dimmed: Bool = false) -> some View {
         AtomPanel(
             props: PanelProps(fill: fill, fillOpacity: opacity, cornerRadius: radius),
-            common: AtomCommon(width: 31, height: 31, opacity: dimmed ? 0.45 : 1)
+            common: AtomCommon(width: 31, height: 31, padding: 0, opacity: dimmed ? 0.45 : 1)
         ) {
             AtomIcon(props: IconProps(name: name, size: size, weight: "bold", color: "white"))
         }
@@ -319,7 +319,7 @@ struct ComposerModelPicker: View {
 
     var body: some View {
         return AtomPopover(
-            props: PopoverProps(isPresented: picker.open, arrowEdge: "top", width: 320),
+            props: PopoverProps(isPresented: picker.open, arrowEdge: "top", width: 320, inset: 0),
             common: AtomCommon(testID: prefix + "model-picker-popover"),
             onDismiss: dismiss,
             anchor: {

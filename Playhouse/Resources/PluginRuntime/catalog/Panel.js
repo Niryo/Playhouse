@@ -1,8 +1,18 @@
 // Panel: a composite atom, shorthand for a column Stack with a surface and
 // group: true. Its only difference from that Stack is its defaults: fill
-// "primary" at fillOpacity 0.05, cornerRadius 8 and align "leading". Each
-// Panel below sits beside the Stack it stands for.
+// "primary" at fillOpacity 0.05, cornerRadius 8, align "leading" and padding
+// 12, so a Panel with no props looks right out of the box. Each Panel below
+// sits beside the Stack it stands for.
 Playhouse.render(h(Stack, { axis: "v", spacing: 12, align: "leading", width: 460 },
+  h(Text, { size: 11, color: "secondary" }, "No props: padding 12 by default"),
+  h(Stack, { axis: "h", spacing: 12, align: "top" },
+    h(Panel, { width: 220, testID: "panel-padded" },
+      h(Text, { size: 11, weight: "semibold" }, "Out of the box"),
+      h(Text, { size: 9, color: "secondary" }, "Padded with no padding prop")),
+    h(Stack, { axis: "v", align: "leading", group: true, fill: "primary", fillOpacity: 0.05, cornerRadius: 8,
+      width: 220, padding: 12, testID: "panel-padded-stack" },
+      h(Text, { size: 11, weight: "semibold" }, "Out of the box"),
+      h(Text, { size: 9, color: "secondary" }, "Padded with no padding prop"))),
   h(Text, { size: 11, color: "secondary" }, "Default fill (primary at 0.05), spacing: 4, padding: 8"),
   h(Stack, { axis: "h", spacing: 12, align: "top" },
     h(Panel, { spacing: 4, width: 220, padding: 8, testID: "panel-default" },

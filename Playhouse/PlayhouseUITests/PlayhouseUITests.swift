@@ -22536,7 +22536,7 @@ final class PlayhouseUITests: XCTestCase {
         }
     }
 
-    // case-contract: test_plugin_stack_surface_composes_panel_and_choice_bar | The Plugin Catalog's Stack page draws a surface on a Stack in both axes, while its Stacks without surface props draw nothing: a column filled accent at 0.18 with an accent border and an 8-point radius keeps its children at its top leading corner, inside its padding, when its 220-point minWidth and 90-point minHeight are larger than they are; a capsule row filled #2E7D32 with a dashed border lays its icon and text out side by side on that green; and a border-only Stack with align unset (a Stack's default, center) and fillWidth stretches across the page, draws its border and no fill with rounded corners, and keeps its text centered both ways in its 60-point minHeight. The Panel page shows each Panel beside the Stack it is shorthand for (a column Stack with group, fill primary at 0.05 and radius 8 unless set), and each pair is the same size, including the accent Log in Panel and the single decorated row Stack that replaces its nested row. `plugin render` reports the surface props on those nodes with no errors and none on the plain Stacks, and a mistyped surface prop on a Stack (fill, fillOpacity, cornerRadius, capsule, strokeWidth or dash) or an unknown one (shadow, or axis on a Panel) is reported in errors with exit 1, naming the prop and what is wrong. The ChoiceBar page also composes the bar from atoms, a decorated row Stack of Buttons each marked selected (the Button's selected prop) around a decorated Stack with a Text: it is the same size as the ChoiceBar atom beside it, its Overview button carries the selected trait, and clicking Wasters runs its onPress, which moves the selected trait to it (Composed: wasters) while the ChoiceBar atom stays on Overview; a mistyped selected on a Button is reported with its path.
+    // case-contract: test_plugin_stack_surface_composes_panel_and_choice_bar | The Plugin Catalog's Stack page draws a surface on a Stack in both axes, while its Stacks without surface props draw nothing: a column filled accent at 0.18 with an accent border and an 8-point radius keeps its children at its top leading corner, inside its padding, when its 220-point minWidth and 90-point minHeight are larger than they are; a capsule row filled #2E7D32 with a dashed border lays its icon and text out side by side on that green; and a border-only Stack with align unset (a Stack's default, center) and fillWidth stretches across the page, draws its border and no fill with rounded corners, and keeps its text centered both ways in its 60-point minHeight. The Panel page shows each Panel beside the Stack it is shorthand for (a column Stack with group, fill primary at 0.05, radius 8 and padding 12 unless set), and each pair is the same size, including a Panel with no padding prop beside a Stack padded 12, including the accent Log in Panel and the single decorated row Stack that replaces its nested row. `plugin render` reports the surface props on those nodes with no errors and none on the plain Stacks, and a mistyped surface prop on a Stack (fill, fillOpacity, cornerRadius, capsule, strokeWidth or dash) or an unknown one (shadow, or axis on a Panel) is reported in errors with exit 1, naming the prop and what is wrong. The ChoiceBar page also composes the bar from atoms, a decorated row Stack of Buttons each marked selected (the Button's selected prop) around a decorated Stack with a Text: it is the same size as the ChoiceBar atom beside it, its Overview button carries the selected trait, and clicking Wasters runs its onPress, which moves the selected trait to it (Composed: wasters) while the ChoiceBar atom stays on Overview; a mistyped selected on a Button is reported with its path.
     func test_plugin_stack_surface_composes_panel_and_choice_bar() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
@@ -22611,7 +22611,7 @@ final class PlayhouseUITests: XCTestCase {
         let panelDefault = element("panel-default")
         XCTAssertTrue(panelDefault.waitToExist(timeout: 10), "The Panel page shows its Panels.")
         XCTAssertFalse(element("plugin-error").exists, "The Panel page renders without a plugin error.")
-        for name in ["panel-default", "panel-accent", "panel-capsule"] {
+        for name in ["panel-padded", "panel-default", "panel-accent", "panel-capsule"] {
             let panel = element(name), stack = element("\(name)-stack")
             XCTAssertTrue(panel.waitToExist(timeout: 5) && stack.waitToExist(timeout: 5), "\(name) sits beside the Stack it stands for.")
             XCTAssertEqual(panel.frame.width, stack.frame.width, accuracy: 0.5, "\(name) is as wide as its Stack.")
@@ -22924,7 +22924,22 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Kanban columns: Add pressed in both")
     }
 
-    // case-contract: test_plugin_presentation_atoms_open_modal_page_and_side_panel | Plugins present UI the three ways the board does, each a controlled atom whose first child is what it is presented from and stays laid out as usual. On the Plugin Catalog's Modal page, the Open modal button runs onPress (Last: open) and opens a 320-point sheet over the window showing the modal's title and a Done button; Done closes it (Last: done), and Escape closes it again through onDismiss (Last: dismiss). On the Page page, Open page (Last: open) slides a page over the whole 420 by 220 point view below it, covering that view's frame and showing its title, and its Back button closes it (Last: back), uncovering the view. On the SidePanel page, Open trailing (Last: open trailing) slides a 200-point panel as tall as the 480 by 240 point view below it in over that view's trailing edge, Open leading (Last: open leading) over its leading edge, and the panel's close button closes it (Last: close). `plugin render` keeps each atom's presented content in the tree after its first child, and opening or closing is one commit that updates only the presentation atom's props and the readout. Only a Modal raises onDismiss: a Page or SidePanel given an onDismiss handler, or a Modal, Page or SidePanel without isPresented or with a mistyped width or edge, is reported in errors.
+    // case-contract: test_plugin_card_uses_default_content_padding | The Plugin Catalog's Card page gives a Card with no padding prop its 14-point default, while `padding: 0` removes it. `plugin render --page Card` omits the default common padding but keeps the explicit zero override on the second Card, and in the UI two otherwise identical cards have the same width while the default-padded card is 28 points taller; each card keeps its own content inside the surface.
+    func test_plugin_card_uses_default_content_padding() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        clickPluginsMenuItem("Plugin Catalog")
+        XCTAssertTrue(element("plugin-catalog-atom-Card").waitToExist(timeout: 15))
+        catalogSidebarRow("plugin-catalog-atom-Card").click()
+        let defaultCard = element("card-demo"), zeroCard = element("card-zero-padding")
+        XCTAssertTrue(defaultCard.waitToExist(timeout: 10), "The catalog Card omits padding and uses the default.")
+        XCTAssertTrue(zeroCard.waitToExist(timeout: 10), "The comparison Card explicitly sets padding to zero.")
+        XCTAssertEqual(defaultCard.frame.width, zeroCard.frame.width, accuracy: 1, "Both Cards have the same width and one-line content.")
+        XCTAssertEqual(defaultCard.frame.height - zeroCard.frame.height, 28, accuracy: 2, "With identical one-line content, the default Card adds 14 points on each vertical edge.")
+        attachElementScreenshot(defaultCard, named: "Card atom: default 14-point content padding")
+        attachElementScreenshot(zeroCard, named: "Card atom: explicit zero padding")
+    }
+
+    // case-contract: test_plugin_presentation_atoms_open_modal_page_and_side_panel | Plugins present UI the three ways the board does, each a controlled atom whose first child is what it is presented from and stays laid out as usual. On the Plugin Catalog's Modal page, the Open modal button runs onPress (Last: open) and opens a 320-point sheet over the window that starts with the standard header its title props describe (its icon, the Modal title and its subtitle, and a close button) above content that brings no padding of its own yet sits 24 points in from the sheet's edges (the default inset) and a default spacing below the header, with a Done button; Done closes it (Last: done), the header's close button closes it through onDismiss (Last: dismiss), and Escape closes it again through onDismiss. On the Popover page the anchor opens a popover whose content, again with no padding of its own, is inset 14 points by default and spaced apart, and Escape dismisses it; a titled Modal and a second Popover each override inset to 0 and spacing to 4, which the UI geometry and `plugin render` tree both confirm. On the Page page, Open page (Last: open) slides a page over the whole 420 by 220 point view below it, covering that view's frame and showing its title, and its Back button closes it (Last: back), uncovering the view. On the SidePanel page, Open trailing (Last: open trailing) slides a 200-point panel as tall as the 480 by 240 point view below it in over that view's trailing edge, Open leading (Last: open leading) over its leading edge, and the panel's close button closes it (Last: close). `plugin render` keeps each atom's presented content in the tree after its first child, and opening or closing is one commit that updates only the presentation atom's props and the readout. `plugin render` reports the Modal's title, subtitle and icon with no inset or spacing set and the Popover's content with no Stack of its own, and an explicit inset and spacing override the defaults with no errors. Only a Modal raises onDismiss: a Page or SidePanel given an onDismiss handler, or a Modal, Page or SidePanel without isPresented or with a mistyped width or edge, or a mistyped Modal title or inset or Popover spacing, is reported in errors.
     func test_plugin_presentation_atoms_open_modal_page_and_side_panel() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
@@ -22936,26 +22951,80 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertFalse(element("plugin-error").exists, "The \(atom) page renders without errors.")
         }
 
-        // Modal: a sheet over the window, closed by its Done button or Escape.
+        // Modal: a sheet over the window with the standard header and padded
+        // content, closed by its Done button, its close button or Escape.
         open("Modal")
         let modalLast = element("modal-last")
-        XCTAssertFalse(element("modal-title").exists, "The modal starts closed.")
+        XCTAssertFalse(element("modal-demo-title").exists, "The modal starts closed.")
         XCTAssertLessThan(element("modal-open").frame.width, 200, "The Modal's width sizes its sheet, not the button it is presented from.")
         element("modal-open").click()
-        let modalTitle = element("modal-title")
-        XCTAssertTrue(modalTitle.waitToExist(timeout: 5), "Open modal presents the sheet.")
+        let modalTitle = element("modal-demo-title")
+        XCTAssertTrue(modalTitle.waitToExist(timeout: 5), "Open modal presents the sheet with its standard header.")
         XCTAssertEqual(pluginText(modalLast), "Last: open")
+        XCTAssertEqual(pluginText(modalTitle), "Modal title", "The header shows the Modal's title.")
         let sheet = app.sheets.firstMatch
         XCTAssertTrue(sheet.waitToExist(timeout: 5), "The modal is a sheet over the catalog window.")
-        XCTAssertEqual(element("modal-demo").frame.width, 320, accuracy: 1, "The sheet's content is the modal's 320-point width.")
+        let modalContent = element("modal-demo"), modalBody = element("modal-body"), modalClose = element("modal-demo-close")
+        // The content column is one accessibility container, so its frame is its
+        // children's; the sheet window is the modal's 320-point width.
+        XCTAssertEqual(sheet.frame.width, 320, accuracy: 1, "The sheet is the modal's 320-point width.")
         XCTAssertTrue(sheet.frame.contains(element("modal-done").frame), "The Done button is in the sheet.")
-        attachScreenshot(named: "Modal atom: sheet open", fullScreen: true)
+        let modalSubtitle = sheet.staticTexts["A standard header over padded content"]
+        XCTAssertTrue(modalSubtitle.exists, "The header shows the subtitle.")
+        XCTAssertEqual(modalBody.frame.minX - sheet.frame.minX, 24, accuracy: 1.5, "The content is inset 24 points by default: \(modalBody.frame) in \(sheet.frame)")
+        XCTAssertEqual(modalTitle.frame.minY - sheet.frame.minY, 24, accuracy: 4, "The header is inset from the top too: \(modalTitle.frame) in \(sheet.frame)")
+        XCTAssertGreaterThan(modalTitle.frame.minX, modalBody.frame.minX + 20, "The header's icon sits before the title.")
+        XCTAssertEqual(modalBody.frame.minY - modalSubtitle.frame.maxY, 16, accuracy: 2, "The content follows the subtitle by the default 16-point spacing.")
+        XCTAssertEqual(sheet.frame.maxX - modalClose.frame.maxX, 24, accuracy: 8, "The close button sits at the header's trailing inset: \(modalClose.frame) in \(sheet.frame)")
+        attachScreenshot(named: "Modal atom: standard header over padded content")
+        attachElementScreenshot(modalContent, named: "Modal atom: sheet content")
         element("modal-done").click()
         XCTAssertTrue(waitUntil({ !modalTitle.exists && self.pluginText(modalLast) == "Last: done" }, timeout: 5), "Done closes the sheet through its handler.")
         element("modal-open").click()
         XCTAssertTrue(modalTitle.waitToExist(timeout: 5), "The modal opens again.")
+        modalClose.click()
+        XCTAssertTrue(waitUntil({ !modalTitle.exists && self.pluginText(modalLast) == "Last: dismiss" }, timeout: 5), "The header's close button runs onDismiss, which closes the sheet.")
+        element("modal-open").click()
+        XCTAssertTrue(modalTitle.waitToExist(timeout: 5), "The modal opens again.")
+        XCTAssertEqual(pluginText(modalLast), "Last: open")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(waitUntil({ !modalTitle.exists && self.pluginText(modalLast) == "Last: dismiss" }, timeout: 5), "Escape runs onDismiss, which closes the sheet.")
+        element("modal-override-open").click()
+        let compactSheet = app.sheets.firstMatch
+        let compactTitle = element("modal-override-title"), compactBody = element("modal-override-body")
+        XCTAssertTrue(compactTitle.waitToExist(timeout: 5), "The explicit Modal override opens.")
+        XCTAssertTrue(compactSheet.waitToExist(timeout: 5))
+        let compactHeaderTop = compactTitle.frame.minY - compactSheet.frame.minY
+        XCTAssertEqual(compactHeaderTop, 13.5, accuracy: 2, "The zero inset leaves only the sheet's native top margin.")
+        let compactContentGap = compactBody.frame.minY - compactTitle.frame.maxY
+        XCTAssertEqual(compactContentGap, 15, accuracy: 2, "The 4-point spacing override plus native sheet margin leaves 15 points between header and body.")
+        attachElementScreenshot(compactSheet, named: "Modal atom: explicit inset and spacing overrides")
+        element("modal-override-close").click()
+        XCTAssertTrue(waitForDisappearance(compactTitle, timeout: 5), "The overridden Modal's close button dismisses the sheet.")
+
+        // Popover: its content padded and spaced by default.
+        open("Popover")
+        element("popover-anchor").click()
+        let popoverTitle = element("popover-title"), popoverBody = element("popover-body")
+        XCTAssertTrue(popoverTitle.waitToExist(timeout: 5), "The anchor opens the popover.")
+        let popover = app.popovers.firstMatch
+        XCTAssertTrue(popover.waitToExist(timeout: 5))
+        XCTAssertEqual(popoverBody.frame.minY - popoverTitle.frame.maxY, 10, accuracy: 2, "The popover's children use the 10-point default spacing.")
+        let defaultPopoverHeight = popover.frame.height
+        attachScreenshot(named: "Popover atom: padded content")
+        attachElementScreenshot(popover, named: "Popover atom: content inset 14 points")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ !popoverTitle.exists && self.pluginText(self.element("popover-last")) == "Last: dismiss" }, timeout: 5), "Escape dismisses the popover.")
+        element("popover-override-anchor").click()
+        let overridePopover = app.popovers.firstMatch
+        let overrideTitle = element("popover-override-title"), overrideBody = element("popover-override-body")
+        XCTAssertTrue(overrideTitle.waitToExist(timeout: 5), "The second Popover opens with explicit inset and spacing overrides.")
+        XCTAssertTrue(overridePopover.waitToExist(timeout: 5))
+        XCTAssertEqual(defaultPopoverHeight - overridePopover.frame.height, 34, accuracy: 3, "Matching content and arrow edges isolate 28 points of default inset plus the 6-point spacing difference.")
+        XCTAssertEqual(overrideBody.frame.minY - overrideTitle.frame.maxY, 4, accuracy: 2, "The explicit spacing override is applied.")
+        attachElementScreenshot(overridePopover, named: "Popover atom: explicit inset and spacing overrides")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitForDisappearance(overrideTitle, timeout: 5), "Escape dismisses the overridden Popover too.")
 
         // Page: slides over all of the view below it, closed by its Back button.
         open("Page")
@@ -23304,7 +23373,7 @@ final class PlayhouseUITests: XCTestCase {
       }
       var task = props.task;
       var composer = props.composer;
-      return h(Stack, { spacing: 6 },
+      return h(Stack, { spacing: 6, align: "leading" },
         h(Text, { testID: "plugin-placement" }, props.plugin.placement),
         h(Text, { testID: "plugin-task" }, task ? task.title : "no task"),
         h(Text, { testID: "plugin-repositories" }, props.repositories ? props.repositories.map(function (r) { return r.repositoryPath.split("/").pop(); }).join(",") : "no repositories"),
@@ -23540,8 +23609,21 @@ final class PlayhouseUITests: XCTestCase {
         assertCLIError(try runCLI(["plugin", "delete", "--id", "../plugins"], expectedStatus: 2), code: "invalid_argument")
     }
 
-    // case-contract: test_plugin_surfaces_receive_context_and_host_access | An installed plugin receives its placement's context in Playhouse.props: the plugin and the appearance everywhere, the task with its repositories and context folders in the conversation placements, and the composer's draft and selected text in the composer placement, while the board's sidebar gets no task. `plugin render --plugin <id> --task <id>` renders it headlessly with that real context. Playhouse.bridge runs any bridge command but plugin render against the real store (a rename is seen by a fresh CLI process) and rejects a failing one with its code; Playhouse.ui close, openTask and the composer's setDraft, insertText, replaceSelection and focus are recorded headlessly; a composer call from the board's sidebar and a plugin render call are refused the same way in both hosts; and --task without --plugin or an unknown plugin is refused. In the window a page plugin from the board's sidebar covers the board, reads the real board, and its openTask opens that task without sending anything; a composer popover plugin opens anchored to its button showing the draft and the selected text, and its replaceSelection replaces the selected text in the composer; a sidebar plugin from the conversation sidebar slides in at the trailing edge showing the task's title and repository, inserts text after the selection, replaces the draft, renames the task, and closes with its close button; and a modal plugin beside the Terminal button opens as a sheet with the task's context and closes itself with Playhouse.ui.close.
+    // case-contract: test_plugin_surfaces_receive_context_and_host_access | An installed plugin receives its placement's context in Playhouse.props: the plugin and the appearance everywhere, the task with its repositories and context folders in the conversation placements, and the composer's draft and selected text in the composer placement, while the board's sidebar gets no task. `plugin render --plugin <id> --task <id>` renders it headlessly with that real context. Playhouse.bridge runs any bridge command but plugin render against the real store (a rename is seen by a fresh CLI process) and rejects a failing one with its code; Playhouse.ui close, openTask and the composer's setDraft, insertText, replaceSelection and focus are recorded headlessly; a composer call from the board's sidebar and a plugin render call are refused the same way in both hosts; and --task without --plugin or an unknown plugin is refused. In the window a page plugin from the board's sidebar covers the board, reads the real board, and its openTask opens that task without sending anything; a composer popover plugin opens anchored to its button showing the draft and the selected text, and its replaceSelection replaces the selected text in the composer; a sidebar plugin from the conversation sidebar slides in at the trailing edge showing the task's title and repository, inserts text after the selection, replaces the draft, renames the task, and closes with its close button; and a modal plugin beside the Terminal button opens as a sheet with the task's context and closes itself with Playhouse.ui.close. Every presentation starts with the app's standard modal header (the plugin's icon, its name and a close button) above the plugin's atoms, which bring no padding of their own yet sit inside the presentation's inset, as does the header: 24 points in a page or sheet, 20 in a sidebar, and 16 in a popover, whose header title is smaller than a sheet's.
     func test_plugin_surfaces_receive_context_and_host_access() throws {
+        /// Each presentation starts with the standard header and pads the plugin's atoms by its own inset.
+        func assertSurfaceChrome(_ surface: XCUIElement, name: String, inset: CGFloat, underTitleBar: Bool = false, headerFrame: XCUIElement? = nil, headerChromeTop: CGFloat = 0, _ presentation: String) -> XCUIElement {
+            let title = surface.descendants(matching: .any)["plugin-surface-title"]
+            let placement = surface.descendants(matching: .any)["plugin-placement"]
+            XCTAssertEqual(pluginText(title), name, "The \(presentation) surface's header shows the plugin's name.")
+            XCTAssertTrue(surface.descendants(matching: .any)["plugin-surface-close"].exists, "The \(presentation) surface's header has its close button.")
+            XCTAssertEqual(placement.frame.minX - surface.frame.minX, inset, accuracy: 1.5, "A \(presentation) pads the plugin's atoms \(inset) points: \(placement.frame) in \(surface.frame)")
+            let safeAreaTop = underTitleBar ? CGFloat(32) : 0
+            let headerTop = title.frame.minY - (headerFrame?.frame.minY ?? surface.frame.minY)
+            XCTAssertEqual(headerTop, inset + safeAreaTop + headerChromeTop, accuracy: 2, "A \(presentation) insets its header \(inset) points after its \(safeAreaTop)-point safe area and \(headerChromeTop)-point native chrome: title \(title.frame), surface \(surface.frame), reference \(headerFrame?.frame as Any)")
+            XCTAssertGreaterThan(placement.frame.minY, title.frame.maxY, "The \(presentation) surface's atoms start below its header.")
+            return title
+        }
         try writeInstalledPlugin("context-composer", source: Self.pluginContextSource, placement: "composerActions", presentation: "popover", name: "Context Composer", icon: "textformat")
         try writeInstalledPlugin("context-sidebar", source: Self.pluginContextSource, placement: "conversationSidebar", presentation: "sidebar", name: "Context Sidebar", icon: "sidebar.right")
         try writeInstalledPlugin("context-board", source: Self.pluginContextSource, placement: "mainSidebar", presentation: "page", name: "Context Board", icon: "rectangle.stack")
@@ -23566,6 +23648,7 @@ final class PlayhouseUITests: XCTestCase {
         page.descendants(matching: .any)["plugin-count"].click()
         XCTAssertTrue(waitUntil({ self.pluginText(page.descendants(matching: .any)["plugin-status"]) == "tasks: 1" }, timeout: 10),
                       "Playhouse.bridge reads the real board.")
+        _ = assertSurfaceChrome(page, name: "Context Board", inset: 24, underTitleBar: true, "page")
         attachScreenshot(named: "A page plugin from the board's sidebar, after a bridge call")
         page.descendants(matching: .any)["plugin-focus"].click()
         XCTAssertTrue(waitUntil({ self.pluginText(page.descendants(matching: .any)["plugin-status"]) == "focus: unavailable" }, timeout: 10),
@@ -23603,7 +23686,11 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(pluginText(popover.descendants(matching: .any)["plugin-task"]), "Plugin context task")
         XCTAssertTrue(waitUntil({ self.pluginText(popover.descendants(matching: .any)["plugin-draft"]) == "make this loud" }, timeout: 5), "The plugin sees the draft.")
         XCTAssertEqual(pluginText(popover.descendants(matching: .any)["plugin-selection"]), "loud", "The plugin sees the selected text.")
+        let popoverTitle = assertSurfaceChrome(popover, name: "Context Composer", inset: 16, headerFrame: app.popovers.firstMatch, headerChromeTop: 13, "popover")
+        XCTAssertLessThan(popoverTitle.frame.height, 21, "A popover's header uses the smaller 15-point title: \(popoverTitle.frame)")
+        let popoverHeaderHeight = popoverTitle.frame.height
         attachScreenshot(named: "A composer plugin's popover showing the draft and the selected text")
+        attachElementScreenshot(popover, named: "A popover plugin's compact header over its padded atoms")
         popover.descendants(matching: .any)["plugin-upper"].click()
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "make this LOUD" }, timeout: 10), "replaceSelection replaces the selected text in the composer.")
         attachScreenshot(named: "The composer after the plugin replaced the selection")
@@ -23626,6 +23713,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(pluginText(panel.descendants(matching: .any)["plugin-task"]), "Plugin context task")
         XCTAssertEqual(pluginText(panel.descendants(matching: .any)["plugin-repositories"]), fixture.primary.lastPathComponent)
         XCTAssertEqual(pluginText(panel.descendants(matching: .any)["plugin-draft"]), "no composer", "Only the composer placement gets the draft.")
+            _ = assertSurfaceChrome(panel, name: "Context Sidebar", inset: 20, underTitleBar: true, "sidebar")
         panel.descendants(matching: .any)["plugin-insert"].click()
         XCTAssertTrue(waitUntil({ (composer.value as? String) == "make this LOUD!" }, timeout: 10), "insertText inserts after the selection.")
         panel.descendants(matching: .any)["plugin-set-draft"].click()
@@ -23637,6 +23725,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("task-view-title")) == "Renamed by plugin" }, timeout: 10),
                       "The open task shows the new title.")
         attachScreenshot(named: "A sidebar plugin with the task's context, after editing the draft and renaming the task")
+        attachElementScreenshot(panel, named: "A sidebar plugin's inset header and padded atoms")
         panel.descendants(matching: .any)["plugin-surface-close"].click()
         XCTAssertTrue(waitForDisappearance(panel, timeout: 5), "The sidebar closes with its close button.")
 
@@ -23653,7 +23742,20 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitForStableFrame(sheet), "The sheet finishes opening before it is clicked.")
         XCTAssertEqual(pluginText(sheet.descendants(matching: .any)["plugin-task"]), "Renamed by plugin", "The toolbar placement gets the task.")
         XCTAssertEqual(pluginText(sheet.descendants(matching: .any)["plugin-draft"]), "no composer")
+        // The surface starts with the app's standard modal header and pads the plugin's atoms, which bring no padding of their own.
+        let surfaceTitle = sheet.descendants(matching: .any)["plugin-surface-title"]
+        let surfaceClose = sheet.descendants(matching: .any)["plugin-surface-close"]
+        let placement = sheet.descendants(matching: .any)["plugin-placement"]
+        XCTAssertEqual(pluginText(surfaceTitle), "Context Toolbar", "The header shows the plugin's name.")
+        XCTAssertGreaterThan(surfaceTitle.frame.height, popoverHeaderHeight, "A sheet's header uses the full 19-point title, larger than a popover's.")
+        let sheetWindow = app.sheets.firstMatch
+        XCTAssertEqual(surfaceTitle.frame.minY - sheetWindow.frame.minY, 24, accuracy: 2, "The header is inset 24 points from the sheet's top: \(surfaceTitle.frame) in \(sheetWindow.frame)")
+        XCTAssertGreaterThan(surfaceTitle.frame.minX - sheet.frame.minX, 24 + 16, "The plugin's icon sits before its name, inside the inset.")
+        XCTAssertEqual(sheet.frame.maxX - surfaceClose.frame.maxX, 24, accuracy: 8, "The close button sits at the trailing inset: \(surfaceClose.frame)")
+        XCTAssertEqual(placement.frame.minX - sheet.frame.minX, 24, accuracy: 1.5, "The plugin's atoms are inset 24 points: \(placement.frame) in \(sheet.frame)")
+        XCTAssertGreaterThan(placement.frame.minY, surfaceTitle.frame.maxY + 8, "The plugin's atoms start below the header.")
         attachScreenshot(named: "A modal plugin from the sidebar toolbar")
+        attachElementScreenshot(sheet, named: "A modal plugin's standard header over its padded atoms")
         sheet.descendants(matching: .any)["plugin-close"].click()
         XCTAssertTrue(waitForDisappearance(sheet, timeout: 5), "Playhouse.ui.close dismisses the sheet.")
         XCTAssertEqual(app.sheets.count, 0)
@@ -23899,8 +24001,11 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(element.waitToExist(timeout: 10), "\(element) should exist before scrolling to it.")
             // The horizontal scroll view reports its whole content's frame, so both
             // directions are judged against the visible catalog page.
+            // A control wholly inside the visible page is on screen even when XCTest
+            // reports a segmented picker's group as not hittable (it hit-tests a segment).
+            func onScreen() -> Bool { element.isHittable || page.frame.insetBy(dx: 4, dy: 4).contains(element.frame) }
             var scrolls = 0
-            while !element.isHittable, scrolls < 20 {
+            while !onScreen(), scrolls < 20 {
                 let visible = page.frame, target = element.frame
                 if target.midY < visible.minY + 20 || target.midY > visible.maxY - 20 {
                     page.scroll(byDeltaX: 0, deltaY: target.midY > visible.midY ? -250 : 250)
@@ -23911,7 +24016,7 @@ final class PlayhouseUITests: XCTestCase {
                 }
                 scrolls += 1
             }
-            XCTAssertTrue(element.isHittable, "\(element) should be on screen after scrolling the catalog page.")
+            XCTAssertTrue(onScreen(), "\(element) should be on screen after scrolling the catalog page.")
             return element
         }
         func assertSameSize(_ identifier: String) {

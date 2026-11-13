@@ -971,7 +971,7 @@ private struct ResponseCommentHoverCard: View {
             props: PanelProps(spacing: 8, fill: "window", fillOpacity: 1, cornerRadius: 12),
             common: AtomCommon(
                 testID: "response-comment-hover-card", label: "Highlighted text: \(selectedText). Comment: \(comment)",
-                width: 320, paddingX: 12, paddingY: 12
+                width: 320, padding: 0, paddingX: 12, paddingY: 12
             )
         ) {
             entry("Highlighted text", selectedText, testID: "response-comment-highlighted-text")
@@ -3032,7 +3032,7 @@ struct TaskConversationView: View {
     /// Composed only of plugin atoms (Plugins/Atoms).
     private var mergeInProgressNotice: some View {
         // An explicit label: a combined element of these texts reads back with an empty label.
-        AtomPanel(props: PanelProps(spacing: 8, fillOpacity: 0, align: "center"), common: AtomCommon(fillWidth: true)) {
+        AtomPanel(props: PanelProps(spacing: 8, fillOpacity: 0, align: "center"), common: AtomCommon(fillWidth: true, padding: 0)) {
             AtomIcon(props: IconProps(name: "arrow.triangle.merge", size: 20, color: "secondary"))
             AtomText(props: TextProps(text: "Merge in progress", size: 12, weight: "medium"))
             AtomText(props: TextProps(text: mergeInProgressMessage, size: 10, color: "secondary"))
@@ -4844,7 +4844,7 @@ struct TaskConversationView: View {
 
     /// A hairline that takes the row's remaining width, beside a separator's title.
     private func transcriptRule(opacity: Double) -> some View {
-        AtomPanel(props: PanelProps(fill: "primary", fillOpacity: opacity, cornerRadius: 0), common: AtomCommon(height: 1, fillWidth: true)) {}
+        AtomPanel(props: PanelProps(fill: "primary", fillOpacity: opacity, cornerRadius: 0), common: AtomCommon(height: 1, fillWidth: true, padding: 0)) {}
     }
 
     private func openSubagent(_ activity: ConversationActivity) {
@@ -5885,7 +5885,7 @@ struct TaskConversationView: View {
     private var queuedFollowUpList: some View {
         AtomPanel(
             props: PanelProps(spacing: 0, fill: "primary", fillOpacity: 0.08, cornerRadius: 18, stroke: "primary", strokeOpacity: 0.08),
-            common: AtomCommon(testID: "queued-follow-ups")
+            common: AtomCommon(testID: "queued-follow-ups", padding: 0)
         ) {
             ForEach(waitingFollowUps) { queued in
                 queuedFollowUpRow(queued)
@@ -5954,7 +5954,7 @@ struct TaskConversationView: View {
             ? "Work started" : (conversationRuntime.isTurnActive(threadID: task.codexThreadID ?? "") ? "Working" : "Waiting")
         return AtomPanel(
             props: PanelProps(fill: "primary", fillOpacity: 0.10, cornerRadius: 18, stroke: "primary", strokeOpacity: 0.08),
-            common: AtomCommon(testID: "active-goal-progress-row", value: progress, paddingX: 14, paddingY: 10)
+            common: AtomCommon(testID: "active-goal-progress-row", value: progress, padding: 0, paddingX: 14, paddingY: 10)
         ) {
             AtomStack(props: StackProps(axis: "h", spacing: 10)) {
                 AtomIcon(props: IconProps(name: "scope", size: 17, weight: "medium", color: "secondary"))
@@ -6036,7 +6036,7 @@ struct TaskConversationView: View {
         if pendingCommentCount > 0 {
             AtomPanel(
                 props: PanelProps(fill: "primary", fillOpacity: 0.1, cornerRadius: 13, stroke: "primary", strokeOpacity: 0.08),
-                common: AtomCommon(paddingX: 12, paddingY: 8)
+                common: AtomCommon(padding: 0, paddingX: 12, paddingY: 8)
             ) {
                 AtomLabel(
                     props: LabelProps(text: "\(pendingCommentCount) comment\(pendingCommentCount == 1 ? "" : "s")", icon: "text.bubble", size: 13, weight: "medium", color: "primary"),

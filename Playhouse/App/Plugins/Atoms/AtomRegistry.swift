@@ -136,22 +136,24 @@ enum AtomRegistry {
         }
         register(.popover) { node, runtime in
             let children = node.children.filter { $0.type != PluginNode.textType }
-            return AnyView(AtomPopover(props: try .decode(node.props), common: try .decode(node.props), onDismiss: {
+            let props: PopoverProps = try .decode(node.props)
+            return AnyView(AtomPopover(props: props, common: try .decode(node.props), onDismiss: {
                 runtime.dispatch(nodeID: node.id, event: "onDismiss")
             }, anchor: {
                 if let anchor = children.first { PluginNodeView(node: anchor, runtime: runtime) }
             }, content: {
-                PresentedChildren(children: Array(children.dropFirst()), spacing: 0, runtime: runtime)
+                PresentedChildren(children: Array(children.dropFirst()), spacing: CGFloat(props.spacing ?? PopoverProps.defaultSpacing), runtime: runtime)
             }))
         }
         register(.modal) { node, runtime in
             let children = node.children.filter { $0.type != PluginNode.textType }
-            return AnyView(AtomModal(props: try .decode(node.props), common: try .decode(node.props), onDismiss: {
+            let props: ModalProps = try .decode(node.props)
+            return AnyView(AtomModal(props: props, common: try .decode(node.props), onDismiss: {
                 runtime.dispatch(nodeID: node.id, event: "onDismiss")
             }, base: {
                 if let base = children.first { PluginNodeView(node: base, runtime: runtime) }
             }, content: {
-                PresentedChildren(children: Array(children.dropFirst()), spacing: 0, runtime: runtime)
+                PresentedChildren(children: Array(children.dropFirst()), spacing: CGFloat(props.spacing ?? ModalProps.defaultSpacing), runtime: runtime)
             }))
         }
         register(.page) { node, runtime in

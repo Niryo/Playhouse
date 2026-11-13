@@ -31,7 +31,7 @@ function Header(props) {
     h(Button, {
       shortcut: model.panelOpen || selecting ? undefined : "cancel", testID: prefix + "skills-back-button",
       label: "Back to the conversation", help: "Back to the conversation", onPress: on.back
-    }, h(Panel, { fillOpacity: 0.07, cornerRadius: 13, width: 26, height: 26 },
+    }, h(Panel, { fillOpacity: 0.07, cornerRadius: 13, width: 26, height: 26, padding: 0 },
       h(Icon, { name: "chevron.left", size: 13, weight: "semibold" }))),
     h(Text, { size: 17, weight: "semibold", testID: prefix + "skills-title" }, model.title),
     h(Segmented, {
@@ -257,7 +257,7 @@ function Demo() {
     use: function (id) { last[1]("use " + name(id)); },
     menu: function (id, item) { last[1]("menu " + name(id) + " " + item); }
   };
-  var page = open[0] ? h(Panel, { spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 10, width: 1040, height: 520, testID: model.prefix + "skills-page" },
+  var page = open[0] ? h(Panel, { spacing: 0, fill: "window", fillOpacity: 1, cornerRadius: 10, width: 1040, height: 520, padding: 0, testID: model.prefix + "skills-page" },
     h(Header, { model: model, on: on }),
     h(Divider),
     model.kind === "skills" ? h(Gallery, { model: model, on: on })

@@ -5,7 +5,7 @@ function Demo() {
   var menu = React.useState("none");
   return h(Stack, { axis: "v", spacing: 10, align: "leading", width: 280 },
     h(Card, {
-      testID: "card-demo", label: "Demo card", hint: "Press the card", fillWidth: true, padding: 14,
+      testID: "card-demo", label: "Demo card", hint: "Press the card", fillWidth: true,
       meter: 0.6, meterLabel: "CPU 60%", meterTestID: "card-meter",
       menu: [
         { id: "rename", title: "Rename…", icon: "pencil" },
@@ -16,7 +16,11 @@ function Demo() {
     },
       h(Stack, { axis: "v", spacing: 6, align: "leading", passThrough: true },
         h(Text, { size: 13, weight: "semibold", color: "text" }, "Click or right-click me"),
-        h(Text, { size: 10, color: "secondary" }, "Content with passThrough lets clicks reach the card."))),
+        h(Text, { size: 10, color: "secondary" }, "Same short body."))),
+    h(Card, { testID: "card-zero-padding", label: "Card without padding", fillWidth: true, padding: 0 },
+      h(Stack, { axis: "v", spacing: 6, align: "leading", passThrough: true },
+        h(Text, { size: 13, weight: "semibold", color: "text" }, "Click or right-click me"),
+        h(Text, { size: 10, color: "secondary" }, "Same short body."))),
     h(Text, { size: 11, color: "secondary", testID: "card-pressed" }, "Pressed ", String(pressed[0]), " times"),
     h(Text, { size: 11, color: "secondary", testID: "card-menu" }, "Menu: ", menu[0]));
 }

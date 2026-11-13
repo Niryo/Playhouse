@@ -101,12 +101,28 @@ and their events are listed in the README inside the Playhouse source,
 run `plugin render` on a small script to learn what an atom accepts. An unknown
 prop or atom is reported as an error.
 
+Lean on the atoms' defaults, which match the app's look:
+
+- The surface already shows the plugin's icon and name as a standard header
+  with a close button, and pads its content. Don't repeat the plugin's name as
+  a title, and don't give the root a `padding` or a fixed `width`; it fills the
+  surface (a fixed width wider than the surface is clipped).
+- Group related content in a `Panel`: it is padded 12 points, rounded and
+  lightly filled by default. A `Stack` is bare: it adds no padding or surface
+  unless asked.
+- A `Modal` atom given a `title` (and optional `subtitle` and `icon`) draws
+  the same standard header with a close button that calls `onDismiss`, and
+  pads its content 24 points; a `Popover` pads its content 14 points. Their
+  children need no padding Stack.
+- Every default can be overridden (`padding`, `inset`, `spacing`), but only do
+  so for a reason.
+
 ```js
 function WordCount() {
   var props = Playhouse.useProps();
   var draft = props.composer ? props.composer.draft : "";
   var words = draft.trim() ? draft.trim().split(/\s+/).length : 0;
-  return h(Stack, { spacing: 8, padding: 12 },
+  return h(Stack, { spacing: 8, align: "leading" },
     h(Text, { size: 13, weight: "semibold", testID: "count" }, String(words), " words"),
     h(Button, { style: "bordered", testID: "upper", onPress: function () {
       Playhouse.ui.composer.replaceSelection(props.composer.selection.text.toUpperCase());

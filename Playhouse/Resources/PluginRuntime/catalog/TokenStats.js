@@ -275,7 +275,7 @@ function Example() {
         onPress: function () { open[1](true); lastAction[1]("open"); }
       }),
       h(Text, { size: 11, color: "secondary", testID: "js-last-action" }, "Last: ", lastAction[0])),
-    open[0] ? h(Panel, { fillOpacity: 0.03, cornerRadius: 10, testID: "token-stats-modal" },
+    open[0] ? h(Panel, { fillOpacity: 0.03, cornerRadius: 10, padding: 0, testID: "token-stats-modal" },
       h(TokenStats, { model: Playhouse.props.tokenStats, section: section[0], on: on })) : null);
 }
 

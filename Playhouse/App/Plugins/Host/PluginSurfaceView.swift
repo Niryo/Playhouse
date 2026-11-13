@@ -16,8 +16,11 @@ struct PluginUIActions {
     var composer: ((PluginComposerEdit) -> Void)? = nil
 }
 
-/// One installed plugin's surface: its header (name and close button) and the
-/// atoms its script renders, kept live as its placement's context changes.
+/// One installed plugin's surface: the app's standard modal header (the
+/// plugin's icon and name and a close button, `AtomModalHeader`) and the atoms
+/// its script renders, kept live as its placement's context changes. The
+/// surface pads both by its presentation's `inset` and spaces the script's
+/// root atoms apart, so a plugin needs no title or outer padding of its own.
 /// `Playhouse.bridge` calls go to the bridge daemon as the CLI's do.
 struct PluginSurfaceView: View {
     let plugin: PluginRecord
@@ -27,19 +30,16 @@ struct PluginSurfaceView: View {
     @State private var loadError: String?
 
     var body: some View {
+        let inset = plugin.surfaceInset
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                AtomLabel(props: LabelProps(text: plugin.name, icon: plugin.icon, size: 13, weight: "semibold"))
-                Spacer(minLength: 0)
-                AtomButton(common: AtomCommon(testID: "plugin-surface-close", label: "Close \(plugin.name)", help: "Close"), action: actions.close) {
-                    AtomIcon(props: IconProps(name: "xmark", size: 11, weight: "semibold", color: "secondary"))
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            Divider()
+            AtomModalHeader(
+                title: plugin.name, icon: plugin.icon, titleSize: plugin.presentationKind == .popover ? 15 : 19,
+                idPrefix: "plugin-surface", onClose: actions.close
+            )
+            .padding([.horizontal, .top], inset)
+            .padding(.bottom, 4)
             ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 12) {
                     if let runtime {
                         ForEach(runtime.tree.root.children) { node in
                             PluginNodeView(node: node, runtime: runtime)
@@ -50,7 +50,9 @@ struct PluginSurfaceView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(14)
+                .padding(.horizontal, inset)
+                .padding(.top, inset / 2)
+                .padding(.bottom, inset)
                 .hoverRevealScrollers()
             }
         }
@@ -145,5 +147,15 @@ extension PluginRecord {
         case .page: CGSize(width: 0, height: 0)
         }
         return CGSize(width: width ?? defaults.width, height: height ?? defaults.height)
+    }
+
+    /// The padding around the surface's header and content: a sheet's or a
+    /// page's matches the app's own sheets, and a popover's is tighter.
+    var surfaceInset: CGFloat {
+        switch presentationKind {
+        case .popover: 16
+        case .sidebar: 20
+        case .modal, .page: CGFloat(ModalProps.defaultInset)
+        }
     }
 }

@@ -132,7 +132,7 @@ struct RepositoryChipsView<Picker: View, Settings: View>: View {
                 common: AtomCommon(testID: "\(prefix)add-conversation-repository-button", label: "Add repository", help: "Add a repository"),
                 action: actions.add
             ) {
-                AtomPanel(props: PanelProps(fillOpacity: 0.07, capsule: true), common: AtomCommon(width: 28, height: 28)) {
+                AtomPanel(props: PanelProps(fillOpacity: 0.07, capsule: true), common: AtomCommon(width: 28, height: 28, padding: 0)) {
                     AtomIcon(props: IconProps(name: "plus", size: 12, weight: "semibold"))
                 }
             }
@@ -173,7 +173,7 @@ struct RepositoryChipsView<Picker: View, Settings: View>: View {
                 ) {
                     AtomPanel(
                         props: PanelProps(fill: "panel", fillOpacity: 1, capsule: true, stroke: "primary", strokeOpacity: 0.16),
-                        common: AtomCommon(width: 20, height: 20)
+                        common: AtomCommon(width: 20, height: 20, padding: 0)
                     ) {
                         AtomIcon(props: IconProps(name: "xmark", size: 9, weight: "bold", color: "secondary"))
                     }
