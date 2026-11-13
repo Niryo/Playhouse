@@ -3052,14 +3052,29 @@ def main():
             if not answer_read_while_held(peeked):
                 deferred.append(peeked)
 
-    for line in sys.stdin:
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        handle_message(message)
-        while deferred:
-            handle_message(deferred.pop(0))
+    rate_limits_update = Path(str(sys.argv[0]) + ".rate-limits-updated")
+    while True:
+        ready, _, _ = stdin_select(0.05)
+        if ready:
+            line = sys.stdin.readline()
+            if not line:
+                break
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                message = None
+            if message is not None:
+                handle_message(message)
+                while deferred:
+                    handle_message(deferred.pop(0))
+        if rate_limits_update.is_file():
+            try:
+                used = json.loads(rate_limits_update.read_text(encoding="utf-8"))
+                rate_limits_update.unlink()
+                write({"jsonrpc": "2.0", "method": "account/rateLimits/updated",
+                       "params": {"rateLimits": account_rate_limits(*used)}})
+            except (OSError, ValueError, TypeError):
+                rate_limits_update.unlink(missing_ok=True)
     if not saw_turn:
         return 2
     return 0
