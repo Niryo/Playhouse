@@ -11467,7 +11467,8 @@ final class PlayhouseBridgeRuntime {
                 let pluginID = "plugin-" + UUID().uuidString.lowercased()
                 let prompt = ""
                 let created = try await taskManager.withPluginOperationLock(pluginID) {
-                    try await taskManager.createPluginConversation(
+                    try library.prepareDraft(id: pluginID)
+                    return try await taskManager.createPluginConversation(
                         name: name ?? placement.title, pluginID: pluginID, placement: placement.rawValue,
                         contextFolder: library.draftLibrary.directory.path, provider: provider, authoringName: name, presentation: presentation)
                 }

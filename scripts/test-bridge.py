@@ -17884,6 +17884,7 @@ Playhouse.render(h(Context));
         executable = self.install_provider_fixture("claude", "claude-fixture-reattach-plugin")
         environment = self.restart_service_environment("claude", executable)
         created = self.assert_success(self.call_cli("plugin", "author", "--placement", "mainSidebar", "--name", "Restart plugin", "--presentation", "modal", "--provider", "claude", extra_environment=environment)[0])["task"]
+        self.assertTrue(Path(created["contextFolders"][0]).is_dir(), "The working folder exists before reopening the editor or sending.")
         marker = Path(str(executable) + ".reattach-hold-nudge")
         marker.touch()
         self.start_chat_turn_and_kill_daemon(executable, environment, created["id"], "Continue this plugin after restart.")

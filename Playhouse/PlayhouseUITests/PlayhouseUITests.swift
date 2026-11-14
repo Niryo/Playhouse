@@ -24828,6 +24828,7 @@ final class PlayhouseUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["settings", "set-default-provider", "claude"])
         _ = try runCLI(["plugin", "author", "--placement", "mainSidebar", "--name", "Restart plugin", "--presentation", "modal", "--provider", "claude"], extraEnvironment: environment)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pluginsFolder.appendingPathComponent(".drafts/plugins").path), "The working folder exists before reopening the editor or sending.")
         let menu = app.menuBars.menuBarItems["Plugins"]
         XCTAssertTrue(waitUntil({ menu.click(); let found = menu.menuItems["Edit Restart plugin…"].exists; if !found { self.app.typeKey(.escape, modifierFlags: []) }; return found }, timeout: 15))
         menu.menuItems["Edit Restart plugin…"].click()
