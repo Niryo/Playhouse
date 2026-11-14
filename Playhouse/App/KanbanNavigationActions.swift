@@ -142,20 +142,20 @@ extension KanbanBoardView {
             defer { isStartingPluginTask = false }
             do {
                 let started = try await pluginRegistry.author(placement, name: name, presentation: presentation)
-                openPluginConversation(started.taskID, prompt: started.prompt)
+                openPluginConversation(started.taskID, draft: started.prompt)
             } catch {
                 saveError = error.localizedDescription
             }
         }
     }
 
-    func openPluginConversation(_ id: UUID, prompt: String?) {
+    func openPluginConversation(_ id: UUID, draft: String?) {
         Task { @MainActor in
             let manager = BoardTaskManager(modelContext: modelContext)
             for _ in 0..<100 {
                 if let chat = try? manager.standaloneChatModel(id) {
                     setChatSidebarVisible(false)
-                    pluginInitialPrompt = prompt
+                    pluginInitialDraft = draft
                     withAnimation(.easeInOut(duration: 0.3)) {
                         pluginChat = chat
                         pluginSetupPlacement = nil

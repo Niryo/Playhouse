@@ -195,11 +195,13 @@ extension BoardTaskManager {
     }
 
     /// Creates an editor conversation without adding a card to the task board.
-    func createPluginConversation(name: String, pluginID: String, placement: String, contextFolder: String, provider: ConversationProvider, prompt: String? = nil) async throws -> BoardTaskRecord {
+    func createPluginConversation(name: String, pluginID: String, placement: String, contextFolder: String, provider: ConversationProvider, authoringName: String? = nil, presentation: String? = nil, prompt: String? = nil) async throws -> BoardTaskRecord {
         let chat = StandaloneChat(provider: provider)
         chat.title = name
         chat.authoredPluginID = pluginID
         chat.pluginPlacement = placement
+        chat.pluginAuthoringName = authoringName
+        chat.pluginAuthoringPresentation = presentation
         chat.pluginContextFolder = contextFolder
         chat.savedPrompt = prompt
         chat.hasUnsentDraft = prompt?.isEmpty == false

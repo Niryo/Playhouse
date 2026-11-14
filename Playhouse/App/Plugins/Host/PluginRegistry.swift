@@ -38,7 +38,7 @@ final class PluginRegistry {
     }
 
     /// Creates the task whose agent builds a plugin for `placement`, and
-    /// returns it with the prompt its conversation sends.
+    /// returns it with its initial conversation draft.
     func author(_ placement: PluginPlacement, name: String? = nil, presentation: PluginPresentation? = nil) async throws -> (taskID: UUID, prompt: String) {
         var arguments: [String: BridgeValue] = ["placement": .string(placement.rawValue)]
         if let name { arguments["name"] = .string(name) }

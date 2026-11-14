@@ -540,7 +540,7 @@ final class PlayhouseBridgeRuntime {
                     catch { throw BridgeCommandError(code: "not_found", message: error.localizedDescription) }
                     let created = try await taskManager.createPluginConversation(
                         name: plugin.name, pluginID: plugin.id, placement: plugin.placement,
-                        contextFolder: library.draftLibrary.directory.path, provider: settings.defaultConversationProvider)
+                        contextFolder: library.draftLibrary.directory.path, provider: settings.defaultConversationProvider, authoringName: plugin.name, presentation: plugin.presentation)
                     _ = settings.bumpPluginsRevision()
                     return created
                 }
@@ -602,17 +602,12 @@ final class PlayhouseBridgeRuntime {
                     }
                 }
                 let pluginID = "plugin-" + UUID().uuidString.lowercased()
-                let prompt: String
-                if let name, let presentation {
-                    prompt = "/\(TaskThreadDeveloperInstructions.pluginSkillName) Create a plugin named \(name) in the \(placement.title) placement (\(placement.rawValue)), with presentation \(presentation). Use plugin ID and folder \(pluginID). Ask me what the plugin should do before implementing it."
-                } else {
-                    prompt = "/\(TaskThreadDeveloperInstructions.pluginSkillName) Create a new plugin in the \(placement.title) placement (\(placement.rawValue)). Use plugin ID and folder \(pluginID)."
-                }
-                try library.prepareDraft(id: pluginID)
+                let prompt = ""
                 let created = try await taskManager.withPluginOperationLock(pluginID) {
-                    try await taskManager.createPluginConversation(
+                    try library.prepareDraft(id: pluginID)
+                    return try await taskManager.createPluginConversation(
                         name: name ?? placement.title, pluginID: pluginID, placement: placement.rawValue,
-                        contextFolder: library.draftLibrary.directory.path, provider: provider, prompt: prompt)
+                        contextFolder: library.draftLibrary.directory.path, provider: provider, authoringName: name, presentation: presentation)
                 }
                 _ = settings.bumpPluginsRevision()
                 result = .object(["task": try Self.value(created), "prompt": .string(prompt)])

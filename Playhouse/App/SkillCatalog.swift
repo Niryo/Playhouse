@@ -784,7 +784,7 @@ final class SkillCatalogManager {
         var launch = bridge(roots: roots, playhouseSkills: playhouseSkills)
         launch.invocations = invocations(in: message, roots: roots)
         let named = Set(Self.invokedNames(in: message))
-        for link in launch.codexLinks where playhouseSkills.contains(link.name) && named.contains(link.name) {
+        for link in launch.codexLinks where playhouseSkills.contains(link.name) && (named.contains(link.name) || task.authoringPluginID != nil) {
             launch.invocations.append(SkillInvocation(name: link.name, path: link.source + "/SKILL.md"))
         }
         return launch

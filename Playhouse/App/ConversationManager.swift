@@ -552,6 +552,8 @@ final class ConversationManager {
                     isPluginEditor: task.authoringPluginID != nil,
                     pluginPlacement: task.authoringPluginPlacement,
                     pluginID: task.authoringPluginID,
+                    pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
+                    pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
                     pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                 )
             )

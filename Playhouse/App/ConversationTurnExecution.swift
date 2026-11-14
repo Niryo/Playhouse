@@ -313,6 +313,8 @@ extension ConversationManager {
                     isArchived: task.status == .done,
                     pluginPlacement: task.authoringPluginPlacement,
                     pluginID: task.authoringPluginID,
+                    pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
+                    pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
                     pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                 )
             }
@@ -396,8 +398,12 @@ extension ConversationManager {
                         contextFolders: task.contextFolderPaths,
                         repositoryRootPath: repositoryRoot?.path,
                         isStandaloneChat: task.isStandaloneChat,
+                        isPluginEditor: task.authoringPluginID != nil,
                         isArchived: task.status == .done,
-                        pluginPlacement: (task as? BoardTask)?.pluginPlacement,
+                        pluginPlacement: task.authoringPluginPlacement,
+                        pluginID: task.authoringPluginID,
+                        pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
+                        pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
                         pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                     )
                     if provider == .claude {
@@ -495,6 +501,8 @@ extension ConversationManager {
                     isArchived: task.status == .done,
                     pluginPlacement: task.authoringPluginPlacement,
                     pluginID: task.authoringPluginID,
+                    pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
+                    pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
                     pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                 ),
                 onDelta: callbacks.onDelta,

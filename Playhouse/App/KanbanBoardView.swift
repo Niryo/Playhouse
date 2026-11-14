@@ -156,7 +156,7 @@ struct KanbanBoardView: View {
     @State var chatTask: StandaloneChat?
     @State var pluginChat: StandaloneChat?
     @State var showPluginDraftNotice = false
-    @State var pluginInitialPrompt: String?
+    @State var pluginInitialDraft: String?
     @State var isOpeningChatSidebar = false
     /// A modal, sidebar or page plugin opened from the board's sidebar.
     @State var openBoardPlugin: PluginRecord?
@@ -211,7 +211,7 @@ struct KanbanBoardView: View {
                 HStack(spacing: 0) {
                     TaskConversationView(task: pluginChat, isNewTask: false,
                         conflictResolutionRequested: false, onConflictResolutionChecked: { _ in },
-                        skillFixPrompt: pluginInitialPrompt, onOpenTask: openTask(_:sending:),
+                        initialDraft: pluginInitialDraft, onOpenTask: openTask(_:sending:),
                         onBack: {
                             if let folder = pluginChat.contextFolderPaths.first {
                                 let draftData = URL(fileURLWithPath: folder).deletingLastPathComponent()
@@ -219,7 +219,7 @@ struct KanbanBoardView: View {
                                 let library = PluginLibrary(dataDirectory: data.path)
                                 if library.hasDraftChanges(id: pluginID) { showPluginDraftNotice = true; return }
                             }
-                            self.pluginChat = nil; pluginInitialPrompt = nil
+                            self.pluginChat = nil; pluginInitialDraft = nil
                         })
                         .id(pluginChat.id)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -246,7 +246,7 @@ struct KanbanBoardView: View {
             }
         }
         .alert("Draft saved", isPresented: $showPluginDraftNotice) {
-            Button("OK") { pluginChat = nil; pluginInitialPrompt = nil }
+            Button("OK") { pluginChat = nil; pluginInitialDraft = nil }
                 .buttonHoverPointer().nativeHelp("Close plugin editor")
         } message: { Text("Your changes are saved as a draft. You can return and continue editing later.") }
         .background(WorkspaceTheme.windowBackground)
@@ -275,12 +275,12 @@ struct KanbanBoardView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .playhouseEditPlugin)) { notification in
             guard let id = notification.object as? UUID else { return }
-            openPluginConversation(id, prompt: nil)
+            openPluginConversation(id, draft: nil)
         }
         .onReceive(NotificationCenter.default.publisher(for: .playhousePreparePluginEdit)) { notification in
             guard let id = notification.object as? UUID else { return }
             if selectedTask?.id == id { selectedTask = nil }
-            if pluginChat?.id == id { pluginChat = nil; pluginInitialPrompt = nil }
+            if pluginChat?.id == id { pluginChat = nil; pluginInitialDraft = nil }
         }
         .onReceive(NotificationCenter.default.publisher(for: .playhouseShowBoardSearch)) { _ in
             withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = true }
