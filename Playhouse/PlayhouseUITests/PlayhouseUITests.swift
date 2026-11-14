@@ -24794,6 +24794,7 @@ final class PlayhouseUITests: XCTestCase {
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ history()["userMessage"] as? String == "Build a countdown timer." }, timeout: 20))
         let instructions = try XCTUnwrap(history()["threadStartDeveloperInstructions"] as? String)
+        XCTAssertTrue(instructions.contains("plugin render"), "Codex validates the persistent draft without publishing it.")
         for text in ["The chosen plugin name is Codex timer.", "The chosen presentation is modal.", "Main sidebar placement (`mainSidebar`)", pluginID] {
             XCTAssertTrue(instructions.contains(text), "Codex receives \(text) in thread instructions.")
         }

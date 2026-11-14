@@ -17839,7 +17839,7 @@ Playhouse.render(h(Context));
         self.assert_success(self.call_cli("conversation", "send", task["id"], "--message", prompt, "--answer", "color=Blue", "--answer", "token=fixture-secret", extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)})[0])
         history = json.loads((self.data_directory / "codex-fixture-plugin-author.history").read_text(encoding="utf-8"))
         self.assertIn("Conversation sidebar toolbar placement (`conversationToolbar`)", history["threadStartDeveloperInstructions"])
-        self.assertIn("plugin refresh", history["threadStartDeveloperInstructions"])
+        self.assertIn("plugin render", history["threadStartDeveloperInstructions"])
         self.assertIn("The chosen plugin name is Context Codex.", history["threadStartDeveloperInstructions"])
         self.assertIn("The chosen presentation is popover.", history["threadStartDeveloperInstructions"])
         self.assertIn(task["authoredPluginID"], history["threadStartDeveloperInstructions"])
