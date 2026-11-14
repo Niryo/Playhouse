@@ -24307,6 +24307,7 @@ final class PlayhouseUITests: XCTestCase {
       var composer = props.composer;
       return h(Stack, { spacing: 6, align: "leading" },
         h(Text, { testID: "plugin-placement" }, props.plugin.placement),
+        h(Text, { testID: "plugin-version" }, String(props.plugin.version)),
         h(Text, { testID: "plugin-task" }, task ? task.title : "no task"),
         h(Text, { testID: "plugin-repositories" }, props.repositories ? props.repositories.map(function (r) { return r.repositoryPath.split("/").pop(); }).join(",") : "no repositories"),
         h(Text, { testID: "plugin-draft" }, composer ? composer.draft : "no composer"),
@@ -24424,9 +24425,92 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitForDisappearance(chat.descendants(matching: .any)["plugin-add-here-composerActions"]))
     }
 
+    // case-contract: test_plugin_draft_versions_and_restore | Plugin edits persist as an isolated draft, saving publishes a new version and preserves history, discard restores the saved preview, and restoring an older version publishes it as a new revision.
+    func test_plugin_draft_versions_and_restore() throws {
+        try writeInstalledPlugin("versioned", source: Self.pluginContextSource, placement: "mainSidebar", name: "Versioned")
+        launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["plugin", "refresh"])
+        let menu = app.menuBars.menuBarItems["Plugins"]
+        menu.click()
+        menu.menuItems["Edit Versioned…"].click()
+        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 15))
+        let draft = pluginsFolder.appendingPathComponent(".drafts/plugins/versioned/index.js")
+        let original = try String(contentsOf: draft, encoding: .utf8)
+        let changed = original.replacingOccurrences(of: "props.plugin.placement", with: "\"draft change\"")
+        try changed.write(to: draft, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "draft change" }, timeout: 10))
+        XCTAssertEqual(try String(contentsOf: pluginsFolder.appendingPathComponent("versioned/index.js"), encoding: .utf8), original)
+        attachScreenshot(named: "Plugin draft preview")
+        let toolbarCapture = XCTAttachment(screenshot: element("plugin-creation-preview").screenshot())
+        toolbarCapture.name = "Plugin draft controls"
+        toolbarCapture.lifetime = .keepAlways
+        add(toolbarCapture)
+        element("back-to-board-button").click()
+        XCTAssertTrue(app.sheets.buttons["OK"].waitToExist(timeout: 5))
+        attachScreenshot(named: "Plugin draft saved notice")
+        app.sheets.buttons["OK"].click()
+        menu.click()
+        menu.menuItems["Edit Versioned…"].click()
+        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "draft change" }, timeout: 10))
+        app.buttons["Save"].click()
+        XCTAssertTrue(app.staticTexts["Version 1"].waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ ((try? String(contentsOf: self.pluginsFolder.appendingPathComponent("versioned/index.js"), encoding: .utf8)) == changed) }, timeout: 10))
+        try original.write(to: draft, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "mainSidebar" }, timeout: 10))
+        app.buttons["Discard draft"].click()
+        app.sheets.buttons["Discard"].click()
+        XCTAssertTrue(waitUntil({ (try? String(contentsOf: draft, encoding: .utf8)) == changed }, timeout: 10))
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "draft change" }, timeout: 10))
+        try "invalid javascript !".write(to: draft, atomically: true, encoding: .utf8)
+        app.buttons["Save"].click()
+        XCTAssertTrue(app.sheets.buttons["OK"].waitToExist(timeout: 10))
+        attachScreenshot(named: "Plugin invalid draft error")
+        app.sheets.buttons["OK"].click()
+        app.buttons["Discard draft"].click()
+        app.sheets.buttons["Discard"].click()
+        XCTAssertTrue(waitUntil({ (try? String(contentsOf: draft, encoding: .utf8)) == changed }, timeout: 10))
+        let unsaved = original.replacingOccurrences(of: "props.plugin.placement", with: "\"unsaved draft\"")
+        try unsaved.write(to: draft, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "unsaved draft" }, timeout: 10))
+        app.menuButtons["Restore version"].click()
+        let oldVersion = app.menuItems["Version 0"]
+        XCTAssertTrue(oldVersion.waitToExist(timeout: 5))
+        let historyCapture = XCTAttachment(screenshot: oldVersion.screenshot())
+        historyCapture.name = "Plugin version history item"
+        historyCapture.lifetime = .keepAlways
+        add(historyCapture)
+        oldVersion.click()
+        XCTAssertTrue(waitUntil({ (try? String(contentsOf: self.pluginsFolder.appendingPathComponent("versioned/index.js"), encoding: .utf8)) == original }, timeout: 10))
+        XCTAssertEqual(try String(contentsOf: draft, encoding: .utf8), unsaved, "Restore preserves the dirty draft.")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "unsaved draft" }, timeout: 10))
+        app.buttons["Discard draft"].click()
+        app.sheets.buttons["Discard"].click()
+        XCTAssertTrue(app.staticTexts["Version 2"].waitToExist(timeout: 10))
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "mainSidebar" }, timeout: 10))
+        attachScreenshot(named: "Plugin restored version")
+        try changed.write(to: draft, atomically: true, encoding: .utf8)
+        let draftDirectory = draft.deletingLastPathComponent().deletingLastPathComponent()
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: draftDirectory.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: draftDirectory.path) }
+        app.buttons["Save"].click()
+        XCTAssertTrue(app.sheets.staticTexts["The plugin was published, but the draft could not be refreshed. Your existing draft was preserved."].waitToExist(timeout: 10))
+        attachScreenshot(named: "Plugin published with draft refresh warning")
+        XCTAssertEqual(try String(contentsOf: draft, encoding: .utf8), changed)
+        let publishedManifest = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: pluginsFolder.appendingPathComponent("versioned/plugin.json"))) as? [String: Any])
+        XCTAssertEqual(publishedManifest["version"] as? Int, 3)
+        app.sheets.buttons["OK"].click()
+    }
+
     // case-contract: test_plugin_authoring_task_starts_with_placement_and_skill | Plugin authoring starts with centered name and presentation setup, then opens a standalone conversation beside a live preview with an empty composer, guidance to describe the plugin, no repository title, no provider turn, and no board card or task header. The editor header shows “Plugin editor” beside its back button. The user can choose a model and write an unsent description; the Plugins menu reopens the same conversation and preview with its draft and history. Name, presentation, placement and generated plugin identity persist in provider instructions; invalid setup is rejected. Claude and Codex receive the setup and bundled skill without installing files in the user’s home.
     func test_plugin_authoring_task_starts_with_placement_and_skill() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-plugin-author")
+        let codexExecutable = dataDirectory.appendingPathComponent("codex-fixture-plugin-author-success")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-success"), to: codexExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codexExecutable.path)
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8).write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        codexFixtureExecutable = codexExecutable.path
+        let codexEnvironment = ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": codexExecutable.path]
         let historyURL = URL(fileURLWithPath: try XCTUnwrap(environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"]) + ".history")
         func turns() -> [[String: Any]] {
             guard let data = try? Data(contentsOf: historyURL),
@@ -24524,7 +24608,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertGreaterThan(element("plugin-creation-preview").frame.width, 0)
         XCTAssertLessThanOrEqual(element("message-composer").frame.maxX, element("plugin-creation-preview").frame.minX + 2)
         func sendPreviewTurn(_ value: String) throws {
-            let payload = try JSONSerialization.data(withJSONObject: ["folder": pluginsFolder.appendingPathComponent(pluginID).path, "text": value])
+            let payload = try JSONSerialization.data(withJSONObject: ["folder": pluginsFolder.appendingPathComponent(".drafts/plugins").appendingPathComponent(pluginID).path, "text": value])
             let message = "plugin-preview-fixture " + (try XCTUnwrap(String(data: payload, encoding: .utf8)))
             element("message-composer").click()
             element("message-composer").typeKey("a", modifierFlags: .command)
@@ -24541,6 +24625,8 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("A saved draft")
         element("back-to-board-button").click()
+        XCTAssertTrue(app.sheets.staticTexts["Your changes are saved as a draft. You can return and continue editing later."].waitToExist(timeout: 5))
+        app.sheets.buttons["OK"].click()
         let menu = app.menuBars.menuBarItems["Plugins"]
         menu.click()
         let edit = menu.menuItems["Edit Timer…"]
@@ -24555,6 +24641,7 @@ final class PlayhouseUITests: XCTestCase {
 
         // The same setup opens from a conversation's composer.
         element("back-to-board-button").click()
+        if app.sheets.buttons["OK"].waitToExist(timeout: 2) { app.sheets.buttons["OK"].click() }
         openTask(named: "Plugin source task")
         _ = try runCLI(["plugin", "mode", "--on"])
         let composerPlaceholder = element("plugin-add-here-composerActions")
@@ -24570,6 +24657,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(composerTask["pluginPlacement"] as? String, "composerActions")
         let composerPluginID = try XCTUnwrap(composerTask["authoredPluginID"] as? String)
         try writeInstalledPlugin(composerPluginID, source: Self.pluginContextSource, placement: "composerActions", name: "Composer plugin")
+        _ = try runCLI(["plugin", "discard", "--id", composerPluginID])
         let preview = element("plugin-creation-preview")
         let previewComposer = element("plugin-preview-composer")
         XCTAssertTrue(previewComposer.waitToExist(timeout: 15))
@@ -24621,6 +24709,31 @@ final class PlayhouseUITests: XCTestCase {
         installedMenu.menuItems["Delete Installed editor…"].click()
         app.dialogs.buttons["Delete"].click()
         XCTAssertTrue(waitUntil({ (try? sessions().contains { $0["authoredPluginID"] as? String == "installed-editor" }) == false }, timeout: 10))
+
+        // A migrated Codex editor resumes its original thread with the isolated draft path.
+        let codexTaskResult = try runCLI(["task", "create", "--title", "New plugin: Codex legacy", "--prompt", "Legacy description", "--provider", "codex"])
+        let codexTask = try XCTUnwrap(codexTaskResult["result"] as? [String: Any])
+        let codexID = try XCTUnwrap(codexTask["id"] as? String)
+        _ = try runCLI(["conversation", "send", codexID, "--message", "Before migration"], extraEnvironment: codexEnvironment)
+        try writeInstalledPlugin("legacy-codex", source: Self.pluginContextSource, placement: "mainSidebar", name: "Codex legacy")
+        try seedLegacyPluginTask(taskID: codexID, pluginID: "legacy-codex")
+        _ = try runCLI(["plugin", "refresh"])
+        installedMenu.click()
+        installedMenu.menuItems["Edit Codex legacy…"].click()
+        XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
+        let stopCodex = Process()
+        stopCodex.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        stopCodex.arguments = ["-f", codexExecutable.path]
+        try stopCodex.run()
+        stopCodex.waitUntilExit()
+        _ = try runCLI(["conversation", "send", codexID, "--message", "After migration"], extraEnvironment: codexEnvironment)
+        let codexHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: codexExecutable.path + ".history"))) as? [String: Any])
+        let resumedInstructions = try XCTUnwrap((codexHistory["threadResumeDeveloperInstructions"] as? [String])?.last)
+        XCTAssertTrue(resumedInstructions.contains(pluginsFolder.appendingPathComponent(".drafts/plugins").path))
+        XCTAssertTrue(resumedInstructions.contains("legacy-codex"))
+        XCTAssertTrue(element("plugin-creation-preview").exists)
+        attachScreenshot(named: "Migrated Codex plugin editor")
+        element("back-to-board-button").click()
 
         // A pre-existing task-backed editor keeps its session, draft and preview when migrated.
         let legacyResponse = try runCLI(["task", "create", "--title", "New plugin: Legacy editor", "--prompt", "Legacy description", "--provider", "claude"])
@@ -24866,6 +24979,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertLessThan(min(abs(popoverFrame.minY - composerEntry.frame.maxY), abs(composerEntry.frame.minY - popoverFrame.maxY)), 30,
                           "The popover's arrow edge meets its button.")
         XCTAssertEqual(pluginText(popover.descendants(matching: .any)["plugin-placement"]), "composerActions")
+        XCTAssertEqual(pluginText(popover.descendants(matching: .any)["plugin-version"]), "0")
         XCTAssertEqual(pluginText(popover.descendants(matching: .any)["plugin-task"]), "Plugin context task")
         XCTAssertTrue(waitUntil({ self.pluginText(popover.descendants(matching: .any)["plugin-draft"]) == "make this loud" }, timeout: 5), "The plugin sees the draft.")
         XCTAssertEqual(pluginText(popover.descendants(matching: .any)["plugin-selection"]), "loud", "The plugin sees the selected text.")

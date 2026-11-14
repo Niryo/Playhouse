@@ -2321,6 +2321,15 @@ final class BoardTaskManager {
         return BoardTaskRecord(task: chat)
     }
 
+    func setPluginDraftContext(_ id: UUID, folder: String) throws -> BoardTaskRecord {
+        guard let chat = try standaloneChatModel(id) else {
+            throw BridgeCommandError(code: "not_found", message: "Plugin editor not found.")
+        }
+        chat.pluginContextFolder = folder
+        try modelContext.save()
+        return BoardTaskRecord(task: chat)
+    }
+
     /// Creates an editor conversation without adding a card to the task board.
     func createPluginConversation(name: String, pluginID: String, placement: String, contextFolder: String, provider: ConversationProvider, authoringName: String? = nil, presentation: String? = nil, prompt: String? = nil) async throws -> BoardTaskRecord {
         let chat = StandaloneChat(provider: provider)
@@ -2405,6 +2414,21 @@ final class BoardTaskManager {
                 return BoardTaskRecord(task: chat)
             }
         }
+    }
+
+    /// Serialize filesystem mutations with every active or starting editor turn.
+    func withPluginEditorsReserved<T>(id: String, operation: () async throws -> T) async throws -> T {
+        let ids = try pluginConversations().filter { $0.authoredPluginID == id }.map(\.id)
+            .sorted { $0.uuidString < $1.uuidString }
+        func reserve(_ index: Int) async throws -> T {
+            if index == ids.count { return try await operation() }
+            return try await withConversationTurnReservation(ids[index]) {
+                try await self.withTaskOperationLock(ids[index]) {
+                    try await reserve(index + 1)
+                }
+            }
+        }
+        return try await reserve(0)
     }
 
     /// Lock every editor turn while deleting its plugin, then remove its conversation records.
@@ -6897,7 +6921,7 @@ final class ConversationManager {
                     pluginID: task.authoringPluginID,
                     pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
                     pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
-                    pluginsDirectory: clients.skills?.pluginsDirectory
+                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                 ),
                 sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
                 sensitiveConversation: hasSensitiveRecoveryState,
@@ -7603,7 +7627,7 @@ final class ConversationManager {
                     pluginID: task.authoringPluginID,
                     pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
                     pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
-                    pluginsDirectory: clients.skills?.pluginsDirectory
+                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                 )
             )
             _ = try await tasks.persistConversationID(taskID, provider: .codex, id: id)
@@ -9857,7 +9881,7 @@ final class ConversationManager {
                     pluginID: task.authoringPluginID,
                     pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
                     pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
-                    pluginsDirectory: clients.skills?.pluginsDirectory
+                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                 )
             }
             let threadID: String
@@ -9946,7 +9970,7 @@ final class ConversationManager {
                         pluginID: task.authoringPluginID,
                         pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
                         pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
-                        pluginsDirectory: clients.skills?.pluginsDirectory
+                        pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                     )
                     if provider == .claude {
                         compactedBeforeTurn = await runAutomaticCompaction(
@@ -10045,7 +10069,7 @@ final class ConversationManager {
                     pluginID: task.authoringPluginID,
                     pluginName: (task as? StandaloneChat)?.pluginAuthoringName,
                     pluginPresentation: (task as? StandaloneChat)?.pluginAuthoringPresentation,
-                    pluginsDirectory: clients.skills?.pluginsDirectory
+                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                 ),
                 onDelta: callbacks.onDelta,
                 onFinalMessage: callbacks.onFinalMessage,
@@ -11366,22 +11390,49 @@ final class PlayhouseBridgeRuntime {
             case "plugin.edit":
                 let id = try request.requiredString("pluginID")
                 let editor = try await taskManager.withPluginOperationLock(id) {
-                    if let existing = try taskManager.pluginConversations().first(where: { $0.authoredPluginID == id }) {
-                        return try taskManager.standaloneChatModel(existing.id) != nil
-                            ? existing : await taskManager.migrateLegacyPluginConversation(existing.id)
-                    }
                     let library = try pluginLibrary()
+                    do { try library.prepareDraft(id: id) }
+                    catch let error as PluginTreeError { throw BridgeCommandError(code: "invalid_argument", message: error.message) }
+                    if let existing = try taskManager.pluginConversations().first(where: { $0.authoredPluginID == id }) {
+                        _ = try await taskManager.migrateLegacyPluginConversation(existing.id)
+                        return try taskManager.setPluginDraftContext(existing.id, folder: library.draftLibrary.directory.path)
+                    }
                     let plugin: PluginRecord
                     do { plugin = try library.plugin(id: id, validate: false) }
                     catch let error as PluginTreeError { throw BridgeCommandError(code: "invalid_argument", message: error.message) }
                     catch { throw BridgeCommandError(code: "not_found", message: error.localizedDescription) }
                     let created = try await taskManager.createPluginConversation(
                         name: plugin.name, pluginID: plugin.id, placement: plugin.placement,
-                        contextFolder: library.directory.path, provider: settings.defaultConversationProvider, authoringName: plugin.name, presentation: plugin.presentation)
+                        contextFolder: library.draftLibrary.directory.path, provider: settings.defaultConversationProvider, authoringName: plugin.name, presentation: plugin.presentation)
                     _ = settings.bumpPluginsRevision()
                     return created
                 }
                 result = .object(["task": try Self.value(editor)])
+            case "plugin.versions":
+                let library = try pluginLibrary()
+                let id = try request.requiredString("pluginID")
+                result = .object(["versions": .array(try library.versions(id: id).map { .integer($0) })])
+            case "plugin.save", "plugin.discard", "plugin.restore":
+                let library = try pluginLibrary()
+                let id = try request.requiredString("pluginID")
+                result = try await taskManager.withPluginOperationLock(id) {
+                  try await taskManager.withPluginEditorsReserved(id: id) {
+                    switch request.command {
+                    case "plugin.save":
+                        let published = try library.saveDraft(id: id)
+                        return .object(["plugin": try Self.value(published.plugin), "revision": .integer(settings.bumpPluginsRevision()),
+                                        "draftSyncFailed": .boolean(published.draftSyncFailed)])
+                    case "plugin.discard":
+                        try library.discardDraft(id: id)
+                        return .object(["discarded": .string(id)])
+                    default:
+                        let version = try request.requiredInt("version")
+                        let published = try library.restoreVersion(id: id, version: version)
+                        return .object(["plugin": try Self.value(published.plugin), "revision": .integer(settings.bumpPluginsRevision()),
+                                        "draftSyncFailed": .boolean(published.draftSyncFailed)])
+                    }
+                  }
+                }
             case "plugin.delete":
                 let library = try pluginLibrary()
                 let id = try request.requiredString("pluginID")
@@ -11418,7 +11469,7 @@ final class PlayhouseBridgeRuntime {
                 let created = try await taskManager.withPluginOperationLock(pluginID) {
                     try await taskManager.createPluginConversation(
                         name: name ?? placement.title, pluginID: pluginID, placement: placement.rawValue,
-                        contextFolder: library.directory.path, provider: provider, authoringName: name, presentation: presentation)
+                        contextFolder: library.draftLibrary.directory.path, provider: provider, authoringName: name, presentation: presentation)
                 }
                 _ = settings.bumpPluginsRevision()
                 result = .object(["task": try Self.value(created), "prompt": .string(prompt)])

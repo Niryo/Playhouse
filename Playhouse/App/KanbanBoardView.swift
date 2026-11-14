@@ -156,6 +156,7 @@ struct KanbanBoardView: View {
     @State private var chatTask: StandaloneChat?
     @State private var pluginChat: StandaloneChat?
     @State private var pluginInitialDraft: String?
+    @State private var showPluginDraftNotice = false
     @State private var isOpeningChatSidebar = false
     /// A modal, sidebar or page plugin opened from the board's sidebar.
     @State private var openBoardPlugin: PluginRecord?
@@ -211,7 +212,15 @@ struct KanbanBoardView: View {
                     TaskConversationView(task: pluginChat, isNewTask: false,
                         conflictResolutionRequested: false, onConflictResolutionChecked: { _ in },
                         initialDraft: pluginInitialDraft, onOpenTask: openTask(_:sending:),
-                        onBack: { self.pluginChat = nil; pluginInitialDraft = nil })
+                        onBack: {
+                            if let folder = pluginChat.contextFolderPaths.first {
+                                let draftData = URL(fileURLWithPath: folder).deletingLastPathComponent()
+                                let data = draftData.deletingLastPathComponent().deletingLastPathComponent()
+                                let library = PluginLibrary(dataDirectory: data.path)
+                                if library.hasDraftChanges(id: pluginID) { showPluginDraftNotice = true; return }
+                            }
+                            self.pluginChat = nil; pluginInitialDraft = nil
+                        })
                         .id(pluginChat.id)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     Divider()
@@ -236,6 +245,10 @@ struct KanbanBoardView: View {
                 boardContent
             }
         }
+        .alert("Draft saved", isPresented: $showPluginDraftNotice) {
+            Button("OK") { pluginChat = nil; pluginInitialDraft = nil }
+                .buttonHoverPointer().nativeHelp("Close plugin editor")
+        } message: { Text("Your changes are saved as a draft. You can return and continue editing later.") }
         .background(WorkspaceTheme.windowBackground)
         // The open chat adds its width to the board's minimum, so the content-sized window grows
         // to keep the pushed columns visible, as it did when the chat sat beside the board.
@@ -2649,6 +2662,9 @@ private struct PluginAuthoringPreview: View {
     let pluginID: String
     @State private var plugin: PluginRecord?
     @State private var revision = ""
+    @State private var versions: [Int] = []
+    @State private var operationError: String?
+    @State private var confirmDiscard = false
     @State private var previewDraft = ""
     @State private var previewComposerFocused = false
     @State private var previewComposerHeight: CGFloat = 36
@@ -2659,7 +2675,22 @@ private struct PluginAuthoringPreview: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Preview").font(.headline).padding()
+            HStack {
+                Text("Preview").font(.headline)
+                Spacer()
+                if let plugin { Text("Version \(plugin.version)").foregroundStyle(.secondary) }
+                Menu("Restore version") {
+                    ForEach(versions, id: \.self) { version in
+                        Button("Version \(version)") { perform("plugin.restore", version: version) }
+                            .buttonHoverPointer().nativeHelp("Restore this plugin version")
+                    }
+                }.disabled(versions.isEmpty)
+                Button("Discard draft") { confirmDiscard = true }
+                    .buttonHoverPointer().nativeHelp("Reset the draft to the saved plugin")
+                Button("Save") { perform("plugin.save") }
+                    .keyboardShortcut("s", modifiers: .command)
+                    .buttonHoverPointer().nativeHelp("Publish this plugin draft")
+            }.padding()
             Divider()
             if let plugin, plugin.valid {
                 PluginSurfaceView(plugin: plugin, props: PluginContext.props(
@@ -2694,14 +2725,47 @@ private struct PluginAuthoringPreview: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .alert("Discard draft?", isPresented: $confirmDiscard) {
+            Button("Discard", role: .destructive) { perform("plugin.discard") }
+                .buttonHoverPointer().nativeHelp("Discard the plugin draft")
+            Button("Cancel", role: .cancel) { }
+                .buttonHoverPointer().nativeHelp("Keep the plugin draft")
+        } message: { Text("The preview will be reset to the saved plugin.") }
+        .alert("Plugin operation", isPresented: Binding(get: { operationError != nil }, set: { if !$0 { operationError = nil } })) {
+            Button("OK") { operationError = nil }
+                .buttonHoverPointer().nativeHelp("Dismiss plugin operation message")
+        } message: { Text(operationError ?? "") }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("plugin-creation-preview")
         .task(id: pluginID) {
+            await loadVersions()
             while !Task.isCancelled {
                 refresh()
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+    }
+
+    private func perform(_ command: String, version: Int? = nil) {
+        Task {
+            do {
+                var arguments: [String: BridgeValue] = ["pluginID": .string(pluginID)]
+                if let version { arguments["version"] = .integer(version) }
+                let result = try await DaemonClient().call(command, arguments)
+                if result.object?["draftSyncFailed"]?.bool == true {
+                    operationError = "The plugin was published, but the draft could not be refreshed. Your existing draft was preserved."
+                }
+                await loadVersions()
+                refresh()
+            } catch { operationError = error.localizedDescription }
+        }
+    }
+
+    private func loadVersions() async {
+        do {
+            let result = try await DaemonClient().call("plugin.versions", ["pluginID": .string(pluginID)])
+            versions = try result.object?["versions"]?.decoded([Int].self) ?? []
+        } catch { operationError = error.localizedDescription }
     }
 
     private func applyComposerEdit(_ edit: PluginComposerEdit) {
