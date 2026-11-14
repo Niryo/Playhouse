@@ -203,21 +203,27 @@ struct PluginsMenuContent: View {
             .help("Open the Plugin Catalog")
         if !registry.plugins.isEmpty {
             Divider()
-            // Flat rows rather than per-plugin submenus, so an invalid plugin's error
-            // and every Delete show as soon as the menu opens: each plugin's name and
-            // placement, its first error when it is invalid, and Delete.
             ForEach(registry.plugins) { plugin in
-                Label("\(plugin.name) — \(PluginPlacement(rawValue: plugin.placement)?.title ?? plugin.placement)",
-                      systemImage: plugin.valid ? plugin.icon : "exclamationmark.triangle")
-                if let problem = plugin.errors.first {
-                    Text(problem)
+                Menu {
+                    if let problem = plugin.errors.first {
+                        Text(problem)
+                    }
+                    Button("Edit…") { edit(plugin.id) }
+                        // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
+                        .help("Open this plugin's editor")
+                    Button("Delete…") { confirmDelete(plugin) }
+                        // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
+                        .help("Delete this plugin's folder")
+                    Button("Settings…") {}
+                        // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
+                        .disabled(true)
+                        .help("Plugin settings are not available yet")
+                } label: {
+                    Label("\(plugin.name) — \(PluginPlacement(rawValue: plugin.placement)?.title ?? plugin.placement)",
+                          systemImage: plugin.valid ? plugin.icon : "exclamationmark.triangle")
                 }
-                Button("Edit \(plugin.name)…") { edit(plugin.id) }
-                    .buttonHoverPointer()
-                    .help("Open this plugin's editor")
-                Button("Delete \(plugin.name)…") { confirmDelete(plugin) }
-                    .buttonHoverPointer()
-                    .help("Delete this plugin's folder")
+                    // no-pointer: native submenu triggers use AppKit's menu tracking and cursor.
+                    // no-tooltip: the plugin name, placement and submenu chevron already identify this action.
             }
             Divider()
             Button("Reload Plugins") { Task { await registry.reload() } }

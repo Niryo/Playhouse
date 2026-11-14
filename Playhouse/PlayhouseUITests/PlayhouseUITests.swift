@@ -24647,7 +24647,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Plugin editor after daemon restart")
     }
 
-    // case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports none at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. After a refresh the window shows the valid plugin's button at its placement and the Plugins menu lists every plugin with its placement, an invalid one with its first error. Deleting a plugin from the Plugins menu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
+    // case-contract: test_plugin_install_refresh_and_delete | Each plugin is a folder in the data directory's plugins folder holding plugin.json (id, name, icon, placement, presentation) and its script. `plugin list` reports none at first; after plugins are written, `plugin refresh` validates every folder, bumps the plugins revision, and reports the valid plugin beside invalid ones with their errors (an unknown placement or presentation, a manifest id that does not match its folder, a missing manifest or script, and a script that throws or uses an unknown atom when rendered once with sample context), which a fresh `plugin list` reports the same way without bumping the revision. The CLI reports each plugin's name, icon, placement, validity and first validation errors, and deleting through `plugin delete --id` removes only that plugin's folder. In the window, each plugin has its own submenu labeled with its placement, containing Edit, Delete and a disabled Settings placeholder; an invalid plugin's first error is inside its submenu. The Plugins menu visibly lists each plugin with a submenu indicator and opens a submenu with Edit, Delete and disabled Settings actions; an invalid plugin's first error is visible in its submenu. After a refresh the window shows the valid plugin's button at its placement. Deleting a plugin from its submenu after confirming, or with `plugin delete --id`, removes its folder, its button and its menu entry; an unknown id is not_found and an id that is not a plugin folder name is invalid_argument.
     func test_plugin_install_refresh_and_delete() throws {
         launchApp(defaultParent: fixture.parent.path)
         XCTAssertTrue(element("scheduled-tasks-button").waitToExist(timeout: 15))
@@ -24671,17 +24671,27 @@ final class PlayhouseUITests: XCTestCase {
         menu.click()
         let helloItem = menu.menuItems["Hello Board — Main sidebar"]
         XCTAssertTrue(helloItem.waitToExist(timeout: 5), "The Plugins menu lists the installed plugin with its placement.")
-        XCTAssertTrue(menu.menuItems["Throws — Chat input actions"].exists, "The Plugins menu lists an invalid plugin too.")
+        let throwsItem = menu.menuItems["Throws — Chat input actions"]
+        XCTAssertTrue(throwsItem.exists, "The Plugins menu lists an invalid plugin too.")
         XCTAssertTrue(menu.menuItems["Bad Placement — titleBar"].exists)
-        XCTAssertTrue(menu.menuItems.matching(NSPredicate(format: "title CONTAINS %@", "Plugin exploded")).firstMatch.exists,
-                      "An invalid plugin shows its first error.")
-        XCTAssertEqual(menu.menuItems.matching(NSPredicate(format: "title CONTAINS %@", "Unknown placement")).count, 1,
-                       "Only the invalid plugins show an error, each its own.")
-        XCTAssertFalse(helloItem.isEnabled, "A plugin's row is a label, not a command.")
         attachScreenshot(named: "The Plugins menu lists installed plugins with their placement")
-        menu.menuItems["Delete Hello Board…"].click()
+        XCTAssertTrue(waitUntil({ helloItem.isHittable }, timeout: 5), "The plugin's row is reachable in the open Plugins menu.")
+        helloItem.click()
+        let pluginActions = helloItem.children(matching: .menu).firstMatch.menuItems
+        XCTAssertTrue(waitUntil({ pluginActions["Delete…"].isHittable }, timeout: 5),
+                      "Pressing a plugin row opens its nested submenu.")
+        let editItem = pluginActions["Edit…"]
+        let deleteItem = pluginActions["Delete…"]
+        let settingsItem = pluginActions["Settings…"]
+        XCTAssertTrue(editItem.waitToExist(timeout: 5), "The plugin submenu contains Edit.")
+        XCTAssertTrue(deleteItem.exists, "The plugin submenu contains Delete.")
+        XCTAssertTrue(deleteItem.isHittable, "Delete is reachable in the open Hello Board submenu.")
+        XCTAssertTrue(settingsItem.exists, "The plugin submenu contains the Settings placeholder.")
+        XCTAssertFalse(settingsItem.isEnabled, "Settings is a placeholder until plugin settings are implemented.")
+        attachScreenshot(named: "Plugin submenu with Edit, Delete and Settings")
+        deleteItem.click()
         let confirm = app.dialogs.buttons["Delete"].firstMatch
-        XCTAssertTrue(confirm.waitToExist(timeout: 5), "Deleting from the Plugins menu asks for confirmation.")
+        XCTAssertTrue(confirm.waitToExist(timeout: 5), "Deleting from the Plugins submenu asks for confirmation.")
         XCTAssertTrue(app.dialogs.staticTexts["Delete the plugin Hello Board?"].exists, "The confirmation names the plugin.")
         attachScreenshot(named: "Deleting a plugin asks for confirmation")
         confirm.click()
@@ -24689,10 +24699,19 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: pluginsFolder.appendingPathComponent("hello-board").path), "Deleting removes its folder.")
         XCTAssertFalse(try installedPluginIDs().contains("hello-board"))
 
+        menu.click()
+        let remainingThrowsItem = menu.menuItems["Throws — Chat input actions"]
+        XCTAssertTrue(remainingThrowsItem.waitToExist(timeout: 5), "The invalid plugin remains in the Plugins menu.")
+        XCTAssertTrue(waitUntil({ remainingThrowsItem.isHittable }, timeout: 5), "The invalid plugin row is reachable in the open Plugins menu.")
+        remainingThrowsItem.click()
+        let pluginError = remainingThrowsItem.children(matching: .menu).firstMatch.menuItems.matching(NSPredicate(format: "title CONTAINS %@", "Plugin exploded")).firstMatch
+        XCTAssertTrue(waitUntil({ pluginError.isHittable }, timeout: 5), "The invalid plugin submenu is open and its error is visible.")
+        attachScreenshot(named: "Invalid plugin submenu with its validation error")
+        app.typeKey(.escape, modifierFlags: [])
         _ = try runCLI(["plugin", "delete", "--id", "throws"])
         menu.click()
         XCTAssertTrue(menu.menuItems["Bad Placement — titleBar"].waitToExist(timeout: 5))
-        XCTAssertTrue(waitUntil({ !menu.menuItems["Delete Throws…"].exists && !menu.menuItems["Delete Hello Board…"].exists }, timeout: 10),
+        XCTAssertTrue(waitUntil({ !menu.menuItems["Hello Board — Main sidebar"].exists && !menu.menuItems["Throws — Chat input actions"].exists }, timeout: 10),
                       "The menu drops deleted plugins.")
         attachScreenshot(named: "The Plugins menu after deleting plugins")
         app.typeKey(.escape, modifierFlags: [])
