@@ -1,0 +1,271 @@
+import AppKit
+import SwiftData
+import SwiftUI
+
+extension KanbanBoardView {
+    func chatSidebarResizeHandle(width: CGFloat) -> some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.07))
+            .frame(width: 1)
+            .frame(maxHeight: .infinity)
+            .overlay(alignment: .leading) {
+                // A wide invisible strip makes the 1pt border easy to grab. It starts at the border
+                // and extends only over the board, so the chat transcript's scroller, which runs
+                // along the border's inner side, keeps its own pointer and drags.
+                Color.clear
+                    .frame(width: 9)
+                    .contentShape(Rectangle())
+                    .hoverCursor(.resizeLeftRight)
+                    .gesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                            .onChanged { value in
+                                if chatSidebarResizeStartWidth == nil {
+                                    // Held for the whole drag, so the pointer can leave the thin border.
+                                    NSCursor.resizeLeftRight.push()
+                                }
+                                let start = chatSidebarResizeStartWidth ?? width
+                                chatSidebarResizeStartWidth = start
+                                if chatSidebarReflowWidth == nil { chatSidebarReflowWidth = start }
+                                chatSidebarDragWidth = ChatSidebarLayout.clampedWidth(start + value.translation.width)
+                            }
+                            .onEnded { _ in
+                                endChatSidebarResize()
+                            }
+                    )
+                    .onDisappear {
+                        // A sidebar closed mid-drag may never end the gesture.
+                        endChatSidebarResize()
+                    }
+                    .accessibilityElement()
+                    .accessibilityLabel("Resize chat")
+                    .accessibilityValue("\(Int(width.rounded())) points")
+                    .accessibilityIdentifier("chat-sidebar-resize-handle")
+            }
+    }
+
+    func endChatSidebarResize() {
+        guard chatSidebarResizeStartWidth != nil else { return }
+        NSCursor.pop()
+        if let chatSidebarDragWidth {
+            storedChatSidebarWidth = Double(chatSidebarDragWidth)
+        }
+        chatSidebarResizeStartWidth = nil
+        chatSidebarDragWidth = nil
+        chatSidebarReflowWidth = nil
+    }
+    @MainActor
+    func loadNextArchivePage() {
+        guard isShowingDoneArchive, archiveHasMore, !isLoadingArchivePage else { return }
+        isLoadingArchivePage = true
+        var descriptor = FetchDescriptor<BoardTask>(
+            predicate: #Predicate { $0.statusRawValue == "Done" },
+            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+        )
+        descriptor.fetchOffset = archiveOffset
+        descriptor.fetchLimit = 40
+        do {
+            let page = try modelContext.fetch(descriptor)
+            archiveTasks.append(contentsOf: page)
+            archiveOffset += page.count
+            archiveHasMore = page.count == 40
+        } catch {
+            presentSaveError(error.localizedDescription)
+            archiveHasMore = false
+        }
+        isLoadingArchivePage = false
+    }
+
+    @MainActor
+    func closeDoneArchive() {
+        isShowingDoneArchive = false
+        archiveTasks = []
+        archiveSearchResults = nil
+        archiveOffset = 0
+        archiveHasMore = true
+    }
+
+    func presentSaveError(_ message: String) {
+        saveError = message
+    }
+
+    var isShowingSaveError: Binding<Bool> {
+        Binding(
+            get: { saveError != nil },
+            set: { if !$0 { saveError = nil } }
+        )
+    }
+
+    func openChatSidebar() {
+        if isShowingChatSidebar {
+            setChatSidebarVisible(false)
+            return
+        }
+        guard !isOpeningChatSidebar else { return }
+        if let chatTask {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                self.chatTask = chatTask
+                isShowingChatSidebar = true
+            }
+            return
+        }
+        isOpeningChatSidebar = true
+        Task { @MainActor in
+            defer { isOpeningChatSidebar = false }
+            do {
+                let manager = BoardTaskManager(modelContext: modelContext)
+                let record = try await manager.getOrCreateStandaloneChat(
+                    provider: WorkspaceSettingsManager().defaultConversationProvider
+                )
+                guard let chat = try manager.standaloneChatModel(record.id) else {
+                    throw BridgeCommandError(code: "operation_failed", message: "The standalone chat could not be opened.")
+                }
+                chatTask = chat
+                setChatSidebarVisible(true)
+            } catch {
+                saveError = error.localizedDescription
+            }
+        }
+    }
+
+    func setChatSidebarVisible(_ visible: Bool) {
+        withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = visible }
+    }
+    func startPluginTask(_ placement: PluginPlacement) {
+        PluginRegistry.setAddMode(false)
+        withAnimation(.easeInOut(duration: 0.25)) { pluginSetupPlacement = placement }
+    }
+
+    func finishPluginSetup(_ placement: PluginPlacement, name: String, presentation: PluginPresentation) {
+        guard !isStartingPluginTask else { return }
+        isStartingPluginTask = true
+        Task { @MainActor in
+            defer { isStartingPluginTask = false }
+            do {
+                let started = try await pluginRegistry.author(placement, name: name, presentation: presentation)
+                openPluginConversation(started.taskID, prompt: started.prompt)
+            } catch {
+                saveError = error.localizedDescription
+            }
+        }
+    }
+
+    func openPluginConversation(_ id: UUID, prompt: String?) {
+        Task { @MainActor in
+            let manager = BoardTaskManager(modelContext: modelContext)
+            for _ in 0..<100 {
+                if let chat = try? manager.standaloneChatModel(id) {
+                    setChatSidebarVisible(false)
+                    pluginInitialPrompt = prompt
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        pluginChat = chat
+                        pluginSetupPlacement = nil
+                    }
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            saveError = "Couldn't open the plugin conversation."
+        }
+    }
+
+    /// Shows a task the daemon just created, such as one fixing skills, and
+    /// has its conversation send `prompt` once it opens.
+    func openTask(_ id: UUID, sending prompt: String) {
+        let origin = selectedTask?.id
+        Task { @MainActor in
+            let manager = BoardTaskManager(modelContext: modelContext)
+            // The daemon wrote the task; give this window's store a moment to see it.
+            for _ in 0..<100 {
+                // The user moved on while the store caught up; leave their choice alone.
+                guard selectedTask?.id == origin else { return }
+                if let task = try? manager.taskModel(id) {
+                    // A plugin's openTask shows the task without sending anything.
+                    skillFixPrompts[id] = prompt.isEmpty ? nil : prompt
+                    setChatSidebarVisible(false)
+                    isSelectedTaskNew = false
+                    conflictResolutionTaskID = nil
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        selectedTask = task
+                        pluginSetupPlacement = nil
+                    }
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            saveError = "Playhouse created the task but couldn't open it. Find it in Backlog."
+        }
+    }
+
+    /// Slides in over the board like the Skills page, presented by the board's Page atom. It stays
+    /// up while a task opened from it is showing, so closing that task returns here.
+    var scheduledTasksPage: some View {
+        ScheduledTasksPageView(
+            scheduledTasks: allTasks.filter { $0.scheduleKind != nil },
+            remoteConversations: remoteConversations,
+            onNewTask: { openNewTask(presentingSchedule: .recurring) },
+            onOpenTask: { task in
+                isSelectedTaskNew = false
+                conflictResolutionTaskID = nil
+                presentScheduleOnOpen = nil
+                selectedTask = task
+            },
+            onOpenRunTask: { id in
+                if let task = try? BoardTaskManager(modelContext: modelContext).taskModel(id) {
+                    isShowingScheduledTasks = false
+                    isSelectedTaskNew = false
+                    presentScheduleOnOpen = nil
+                    selectedTask = task
+                }
+            }
+        ) {
+            isShowingScheduledTasks = false
+        }
+    }
+
+    func openNewTask() {
+        openNewTask(presentingSchedule: nil)
+    }
+
+    func openNewTask(presentingSchedule: TaskScheduleKind?) {
+        guard !isCreatingNewTask else { return }
+        isCreatingNewTask = true
+        let attemptID = UUID().uuidString
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        PlayhouseDiagnostics.record("ui.new_task.started", fields: [
+            "attemptID": attemptID
+        ])
+        Task { @MainActor in
+            defer { isCreatingNewTask = false }
+            do {
+                let manager = BoardTaskManager(modelContext: modelContext)
+                let settings = WorkspaceSettingsManager()
+                let created = try await manager.create(
+                    title: "Untitled task",
+                    repositories: [],
+                    contextFolders: [],
+                    provider: settings.defaultConversationProvider,
+                    pullRequestMode: .pullRequest
+                )
+                let newTask = try manager.taskModel(created.id)
+                presentScheduleOnOpen = presentingSchedule
+                selectedTask = newTask
+                isSelectedTaskNew = true
+                PlayhouseDiagnostics.record("ui.new_task.succeeded", fields: [
+                    "attemptID": attemptID,
+                    "taskID": created.id.uuidString,
+                    "durationMilliseconds": String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+                ])
+            } catch {
+                let nsError = error as NSError
+                PlayhouseDiagnostics.record("ui.new_task.failed", fields: [
+                    "attemptID": attemptID,
+                    "durationMilliseconds": String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000),
+                    "errorDomain": nsError.domain,
+                    "errorCode": String(nsError.code),
+                    "errorDescription": error.localizedDescription
+                ])
+                presentSaveError(error.localizedDescription)
+            }
+        }
+    }
+}

@@ -1,0 +1,756 @@
+from test_bridge_support import *
+from test_bridge_support import __file__
+
+class BridgeTestCases05:
+    # case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a compact pull request mode pill in place of the manual PR button, closed on its current mode and defaulting to PR; clicking it slides out Manual, PR, Green, and Merge, and choosing one selects it and folds the pill back onto it. The pill stays beside linked pull requests so autopilot and merge remain switchable. Selecting PR persists as mode pr with Auto PR on and is reflected across a fresh read; `task pr mode` accepts manual, pr, autopilot, and merge (autopilot and merge also turn Auto PR on) and rejects an unknown mode without changing the task. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. Every new task starts in PR mode, whatever mode the previous task was left in; changing one task's mode never changes the default for later tasks. Toggling Auto PR for an unknown task is rejected.
+    def test_task_auto_pr_toggle_creates_pull_request_on_review(self):
+        missing, _ = self.call_cli("task", "pr", "auto", str(uuid.uuid4()), "on", expected_status=3)
+        self.assert_failure(missing, "not_found")
+
+        def remove_fixture_origin(repository, expected_url):
+            # A worktree shares its source repository's git config, so adding
+            # "origin" there leaks into every other task worktree of that
+            # repository; remove it only if it still matches what this case set.
+            current = subprocess.run(
+                ["git", "-C", str(repository), "remote", "get-url", "origin"],
+                check=False, capture_output=True, text=True,
+            )
+            if current.returncode == 0 and current.stdout.strip() == str(expected_url):
+                self.run_git(repository, "remote", "remove", "origin")
+
+        task = self.create_repo_task("Auto PR toggle", [self.primary], merge_targets={self.primary: "main"})
+        self.assertTrue(task["autoCreatePullRequestOnReview"], "A new task must start in PR mode.")
+        self.assertEqual(task["pullRequestMode"], "pr")
+        autopilot = self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "autopilot")[0])
+        self.assertEqual(autopilot["pullRequestMode"], "autopilot")
+        self.assertTrue(autopilot["autoCreatePullRequestOnReview"], "Autopilot opens the pull request too.")
+        merge = self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "merge")[0])
+        self.assertEqual(merge["pullRequestMode"], "merge")
+        self.assertTrue(merge["autoCreatePullRequestOnReview"], "Merge mode opens the pull request too.")
+        invalid_mode, _ = self.call_cli("task", "pr", "mode", task["id"], "sometimes", expected_status=2)
+        self.assert_failure(invalid_mode, "invalid_argument")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["pullRequestMode"], "merge", "A rejected mode must not change the task.")
+        enabled = self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "pr")[0])
+        self.assertTrue(enabled["autoCreatePullRequestOnReview"])
+        self.assertEqual(enabled["pullRequestMode"], "pr")
+        reread = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertTrue(reread["autoCreatePullRequestOnReview"], "The toggle should persist across a fresh CLI connection.")
+        self.assertEqual(reread["pullRequestMode"], "pr")
+
+        remote_root = self.data_directory / "auto-pr-remotes"
+        remote_root.mkdir()
+        (remote_root / ".playhouse-test-owner").write_text("Playhouse bridge test owns these PR remotes.\n", encoding="utf-8")
+        remote = remote_root / "auto-pr.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+
+        gh_directory = self.data_directory / "auto-pr-gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_state = gh_directory / "state"
+        gh_state.write_text("", encoding="utf-8")
+        create_log = gh_directory / "create-calls"
+        gh_environment = {
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "PLAYHOUSE_E2E_GH_STATE_PATH": str(gh_state),
+            "PLAYHOUSE_E2E_GH_CALL_LOG": str(gh_directory / "view-calls"),
+            "PLAYHOUSE_E2E_GH_CREATE_LOG": str(create_log),
+            "PLAYHOUSE_E2E_GH_CREATE_FIRST_NUMBER": "701",
+        }
+
+        # Mirrors complete_fixture_turn's own driving loop (a 90s deadline accommodates
+        # real repository worktree preparation), but adds the remote the first time the
+        # turn holds so the real `gh`/`git` publish path can succeed when the outcome
+        # reports completed with Auto PR on.
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-auto-pr"
+        hold_marker = Path(str(executable) + ".hold-release")
+        hold_marker.touch()
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        copy_file(fixture, executable)
+        executable.chmod(0o755)
+        turn_environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable), **gh_environment}
+        command = ["conversation", "send", task["id"], "--message", "Complete this task.", "--answer", "color=Blue", "--answer", "token=fixture-secret"]
+        active = Path(str(executable) + ".turn-active")
+        release = Path(str(executable) + ".turn-release")
+        active.unlink(missing_ok=True)
+        release.unlink(missing_ok=True)
+        process = self.start_cli(*command, extra_environment=turn_environment)
+        try:
+            deadline = time.monotonic() + 90
+            remote_added = False
+            outcome_count = 0
+            while process.poll() is None and time.monotonic() < deadline:
+                if active.exists() and not release.exists():
+                    if outcome_count == 0:
+                        # The first hold is the real task turn: make the worktree
+                        # publishable, then report its outcome so Auto PR's
+                        # subsequent pull-request-summary turn (a separate,
+                        # task-outcome-less fixture activation on the same
+                        # executable) has something real to describe.
+                        materialized = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+                        record = materialized["repositoryWorktrees"][0]
+                        self.assertFalse(record["isPending"], "The worktree must be ready by the time the turn is active.")
+                        self.addCleanup(remove_fixture_origin, self.primary, remote)
+                        self.run_git(Path(record["worktreePath"]), "remote", "add", "origin", str(remote))
+                        self.run_git(Path(record["worktreePath"]), "push", "origin", "main")
+                        # GitHub rejects a pull request whose branch has no commits.
+                        (Path(record["worktreePath"]) / "task-change.txt").write_text("Auto PR task change.\n", encoding="utf-8")
+                        remote_added = True
+                        response, _ = self.call_cli("task", "outcome", task["id"], "completed", extra_environment=gh_environment)
+                        self.assertEqual(self.assert_success(response)["outcome"], "completed")
+                        outcome_count += 1
+                        # Auto PR's own pull-request-summary turn reuses this same
+                        # executable next; without the hold marker it takes the
+                        # fixture's normal default-answer path instead of pausing
+                        # again for an outcome nothing will ever report.
+                        hold_marker.unlink(missing_ok=True)
+                    release.write_text("Release the fixture turn.\n", encoding="utf-8")
+                time.sleep(0.02)
+            self.assertGreater(outcome_count, 0, "The fixture should hold the turn until its explicit outcome is reported.")
+            self.assertTrue(remote_added, "The remote must be added before the outcome is reported.")
+            response, _ = self.finish_cli(process, command)
+            self.assert_success(response)
+        finally:
+            if process.poll() is None:
+                release.write_text("Release the fixture turn.\n", encoding="utf-8")
+                process.communicate(timeout=20)
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+            hold_marker.unlink(missing_ok=True)
+
+        reviewed = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(reviewed["status"], "Review")
+        self.assertEqual(reviewed["repositoryWorktrees"][0]["pullRequestNumber"], 701)
+        self.assertEqual(reviewed["repositoryWorktrees"][0]["pullRequestURL"], "https://github.com/playhouse-test/fixture/pull/701")
+        create_events = create_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            sum(line.startswith("created\t") for line in create_events), 1,
+            "Auto PR should create the pull request exactly once without the user clicking anything.",
+        )
+
+        default_task = self.create_task("Default PR mode")
+        self.assertTrue(default_task["autoCreatePullRequestOnReview"], "A new task should start in PR mode.")
+        self.assertEqual(default_task["pullRequestMode"], "pr")
+        turned_off = self.assert_success(self.call_cli("task", "pr", "auto", default_task["id"], "off")[0])
+        self.assertFalse(turned_off["autoCreatePullRequestOnReview"])
+        after_off = self.create_task("Default PR mode after switching off")
+        self.assertTrue(after_off["autoCreatePullRequestOnReview"], "A new task should still start in PR mode after another task was switched off.")
+        self.assertEqual(after_off["pullRequestMode"], "pr")
+
+        manual_task = self.create_repo_task("Manual PR toggle", [self.secondary], merge_targets={self.secondary: "main"})
+        self.assertTrue(manual_task["autoCreatePullRequestOnReview"])
+        manual_task = self.assert_success(self.call_cli("task", "pr", "mode", manual_task["id"], "manual")[0])
+        self.assertFalse(manual_task["autoCreatePullRequestOnReview"])
+        self.complete_fixture_turn(manual_task["id"], executable_name="codex-fixture-manual-pr")
+        manual_reviewed = self.assert_success(self.call_cli("task", "get", manual_task["id"])[0])
+        self.assertEqual(manual_reviewed["status"], "Review")
+        self.assertIsNone(
+            manual_reviewed["repositoryWorktrees"][0].get("pullRequestNumber"),
+            "With Auto PR off, reaching Review must not create a pull request by itself.",
+        )
+
+        manual_remote_root = self.data_directory / "manual-pr-remotes"
+        manual_remote_root.mkdir()
+        (manual_remote_root / ".playhouse-test-owner").write_text("Playhouse bridge test owns these PR remotes.\n", encoding="utf-8")
+        manual_remote = manual_remote_root / "manual-pr.git"
+        subprocess.run(["git", "init", "--bare", str(manual_remote)], check=True, capture_output=True, text=True)
+        manual_worktree_path = Path(manual_reviewed["repositoryWorktrees"][0]["worktreePath"])
+        self.addCleanup(remove_fixture_origin, self.secondary, manual_remote)
+        self.run_git(manual_worktree_path, "remote", "add", "origin", str(manual_remote))
+        self.run_git(manual_worktree_path, "push", "origin", "main")
+        (manual_worktree_path / "task-change.txt").write_text("Manual PR task change.\n", encoding="utf-8")
+        manual_create_environment = {
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture-manual-pr"),
+            **gh_environment,
+        }
+        manual_created = self.assert_success(self.call_cli("task", "pr", "create", manual_task["id"], extra_environment=manual_create_environment)[0])
+        self.assertEqual(
+            manual_created["repositoryWorktrees"][0]["pullRequestNumber"], 702,
+            "The manual create flow must still work unchanged when Auto PR stays off.",
+        )
+    # case-contract: test_task_pr_autopilot_fixes_red_pull_request_until_green | `task pr status` reports each linked PR's check state, failing check names, and a green, red, or pending health, and reads unresolved review threads only for an autopilot task; the board colours each linked PR number green, red, or blue by that health and keeps the mode pill beside linked PRs. Autopilot leaves a task inactive unless its mode is autopilot and it sits in Review. With checks still running it sends no turn, and the board re-probes only those autopilot PRs on a slow poll until they settle. When checks fail or review threads are unresolved it sends one visible Playhouse autopilot fix turn through the task's provider that names the failing checks and unresolved threads, asks the model to judge every comment critically and to reply to and resolve each thread whether or not it changes code, and allows waiting-response for blockers it cannot fix (such as a GitHub outage or a Jira ticket the user must add); the task is In Progress during that turn and returns to Review when it reports completed. Once the PR is green autopilot sends nothing, never merges it, and resets its loop guard, so the same red state returning later (picked up by the focus probe) is fixed again. A fix turn that reports waiting-response stops the loop until the user sends the task back to Review, after which autopilot may try the red PR once more; a red state unchanged since the last fix moves the task to Waiting Response with a reason instead of being sent again, and the CLI case also drives the five-attempt cap to its Waiting Response stop. A check rerun counts only by its latest run, as on GitHub: a failure followed by a newer success reads green with no failing checks, a success followed by a newer failure reads red naming the check, and same-named checks from different workflows stay separate (one failing workflow still reads red, failing names listed once), as do commit status contexts by context and untimed entries by rollup order.
+    def test_task_pr_autopilot_fixes_red_pull_request_until_green(self):
+        missing, _ = self.call_cli("task", "pr", "autopilot", str(uuid.uuid4()), expected_status=3)
+        self.assert_failure(missing, "not_found")
+        task = self.create_repo_task("PR autopilot", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        self.assertEqual(task["status"], "Review")
+        self.seed_done_task_pull_request(task["id"], number=801)
+
+        gh_directory = self.data_directory / "autopilot-gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_state = gh_directory / "state"
+        gh_calls = gh_directory / "calls"
+        gh_environment = {"PATH": f"{gh_directory}:{os.environ.get('PATH', '')}"}
+
+        def set_pull_request(checks, threads=0):
+            gh_state.write_text(f"801=unmerged\n801.checks={checks}\n801.threads={threads}\n", encoding="utf-8")
+
+        def history_texts(role):
+            history = self.assert_success(self.call_cli(
+                "conversation", "history", task["id"],
+                extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture")},
+            )[0])
+            return [item["text"] for item in history["messages"] if item["role"] == role]
+
+        set_pull_request("failure", threads=1)
+        manual_status = self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(manual_status[0]["checks"], "failure")
+        self.assertEqual(manual_status[0]["failingChecks"], ["fixture-ci"])
+        self.assertEqual(manual_status[0]["health"], "red")
+        self.assertIsNone(manual_status[0].get("unresolvedReviewThreads"), "Only autopilot tasks read review threads.")
+        self.assertNotIn("threads 801", gh_calls.read_text(encoding="utf-8").splitlines())
+        inactive = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(inactive["action"], "inactive", "Autopilot must not act on a task whose mode is not autopilot.")
+        self.assertEqual(inactive["taskStatus"], "Review")
+
+        # A rerun counts only by its latest run, as on GitHub.
+        for checks, state, failing in (("rerun-success", "success", []), ("rerun-failure", "failure", ["fixture-ci"]), ("workflows", "failure", ["build"]), ("workflows-failing", "failure", ["build"]), ("statuses", "success", []), ("untimed", "success", [])):
+            set_pull_request(checks)
+            rerun_status = self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=gh_environment)[0])
+            self.assertEqual(rerun_status[0]["checks"], state, checks)
+            self.assertEqual(rerun_status[0]["failingChecks"], failing, checks)
+
+        self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "autopilot")[0])
+        set_pull_request("pending")
+        user_messages_before = len(history_texts("user"))
+        pending = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(pending["action"], "pending")
+        self.assertEqual(pending["states"][0]["health"], "pending")
+        self.assertEqual(pending["states"][0]["unresolvedReviewThreads"], 0)
+        self.assertIn("threads 801", gh_calls.read_text(encoding="utf-8").splitlines(), "Autopilot reads the PR's review threads.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
+        self.assertEqual(len(history_texts("user")), user_messages_before, "Pending checks must not start a fix turn.")
+
+        set_pull_request("failure", threads=2)
+        observed = {}
+
+        def while_fixing(environment):
+            observed["status"] = self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"]
+            # The fix is pushed: the threads are answered and resolved, and CI reruns.
+            set_pull_request("pending")
+
+        fixed = self.drive_held_fixture_command(
+            task["id"], ["task", "pr", "autopilot", task["id"]], "completed",
+            on_hold=while_fixing, extra_environment=gh_environment,
+        )
+        self.assertEqual(fixed["action"], "fixed")
+        self.assertEqual(fixed["states"][0]["health"], "red")
+        self.assertEqual(fixed["states"][0]["unresolvedReviewThreads"], 2)
+        self.assertEqual(observed["status"], "In Progress", "A fix turn brings the task back to In Progress.")
+        self.assertEqual(fixed["taskStatus"], "Review", "Reporting completed returns the fixed task to Review.")
+        prompt = history_texts("user")[-1]
+        self.assertTrue(prompt.startswith("Playhouse autopilot:"), prompt)
+        for expected in ("#801", "failing checks: fixture-ci", "2 unresolved review threads", "critically", "reply", "resolve", "waiting-response", "Jira"):
+            self.assertIn(expected, prompt)
+        rerun = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(rerun["action"], "pending", "Rerunning checks after a fix are followed, not fixed again.")
+
+        set_pull_request("success")
+        user_messages_before = len(history_texts("user"))
+        green = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(green["action"], "green")
+        self.assertEqual(green["states"][0]["health"], "green")
+        self.assertEqual(len(history_texts("user")), user_messages_before, "A green PR needs no fix turn.")
+        self.assertNotIn("merged\t", (gh_directory / "create-calls").read_text(encoding="utf-8") if (gh_directory / "create-calls").exists() else "", "Autopilot alone never merges.")
+
+        # The same red state as the first fix comes back after green. Green reset the
+        # loop guard, so autopilot fixes it again, and the model may stop the loop.
+        set_pull_request("failure", threads=2)
+        waiting = self.drive_held_fixture_command(
+            task["id"], ["task", "pr", "autopilot", task["id"]], "waiting-response", extra_environment=gh_environment,
+        )
+        self.assertEqual(waiting["action"], "fixed", "Green must reset the loop guard so a repeated red state is fixed again.")
+        self.assertEqual(waiting["taskStatus"], "Waiting Response")
+        idle = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(idle["action"], "inactive", "Waiting Response stops the autopilot loop.")
+
+        # The user sends the task back to Review: autopilot tries the still-red PR once
+        # more, and when that fix changes nothing it stops with a reason.
+        self.complete_fixture_turn(task["id"])
+        retried = self.drive_held_fixture_command(
+            task["id"], ["task", "pr", "autopilot", task["id"]], "completed", extra_environment=gh_environment,
+        )
+        self.assertEqual(retried["action"], "fixed", "A user's message lets autopilot send the same red state again.")
+        user_messages_before = len(history_texts("user"))
+        stalled = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(stalled["action"], "stalled")
+        current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(current["status"], "Waiting Response")
+        self.assertIn("nothing changed", current["statusMessage"])
+        self.assertEqual(len(history_texts("user")), user_messages_before, "An unchanged red state must not be sent again.")
+
+        # Choosing the mode again restarts the streak; five fixes that never reach green
+        # exhaust it even though each one changed something.
+        self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "autopilot")[0])
+        self.complete_fixture_turn(task["id"])
+        for attempt in range(1, 6):
+            set_pull_request("failure", threads=attempt)
+            result = self.drive_held_fixture_command(
+                task["id"], ["task", "pr", "autopilot", task["id"]], "completed", extra_environment=gh_environment,
+            )
+            self.assertEqual(result["action"], "fixed", f"Fix attempt {attempt} should run.")
+        set_pull_request("failure", threads=6)
+        capped = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(capped["action"], "stalled")
+        capped_task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(capped_task["status"], "Waiting Response")
+        self.assertIn("5 fix turns", capped_task["statusMessage"])
+    # case-contract: test_task_pr_merge_mode_merges_green_pull_request | Merge mode does everything autopilot does (it reads review threads, and red pull requests take the same autopilot fix path covered by the autopilot case) and also merges each linked pull request once it is green: with checks still running, or no checks reported yet on a freshly pushed head, it merges nothing and the task stays in Review; once checks pass (or the head has had no checks past the registration grace, as in a repository without CI) with no unresolved threads and GitHub reporting it mergeable, it merges the PR through GitHub CLI, pinned to the head commit it saw green, with the first merge method the repository allows (squash when allowed, otherwise a merge commit), exactly once; the PR reads as merged, the task stays in Review for the user to complete, and the card shows the merged completion action. A head that still has no checks after the registration grace is merged all the same. A merge GitHub refuses (for example a required review) moves the task to Waiting Response with GitHub's reason instead of retrying.
+    def test_task_pr_merge_mode_merges_green_pull_request(self):
+        task = self.create_repo_task("PR merge mode", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        refused = self.create_repo_task("PR merge refused", [self.secondary], merge_targets={self.secondary: "main"}, materialize=True)
+        self.seed_done_task_pull_request(task["id"], number=811)
+        self.seed_done_task_pull_request(refused["id"], number=812)
+
+        gh_directory = self.data_directory / "merge-gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_state = gh_directory / "state"
+        gh_calls = gh_directory / "calls"
+        merge_log = gh_directory / "create-calls"
+        gh_environment = {"PATH": f"{gh_directory}:{os.environ.get('PATH', '')}"}
+        gh_state.write_text("811=unmerged\n811.checks=pending\n812=unmerged\n812.checks=none\n812.merge=Pull request is not mergeable: a review is required\n", encoding="utf-8")
+
+        def commit_head(worktree, committed_at=None):
+            # The no-checks grace runs from the head's commit time; pin it either way.
+            environment = dict(os.environ)
+            if committed_at:
+                environment.update({"GIT_AUTHOR_DATE": committed_at, "GIT_COMMITTER_DATE": committed_at})
+            subprocess.run(["git", "-C", str(worktree), "commit", "--allow-empty", "-m", "Fixture head"], check=True, capture_output=True, text=True, env=environment)
+
+        def merges():
+            return [line for line in merge_log.read_text(encoding="utf-8").splitlines() if line.startswith("merge")] if merge_log.exists() else []
+
+        chosen = self.assert_success(self.call_cli("task", "pr", "mode", task["id"], "merge")[0])
+        self.assertEqual(chosen["pullRequestMode"], "merge")
+        self.assertTrue(chosen["autoCreatePullRequestOnReview"])
+        pending = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(pending["action"], "pending")
+        self.assertEqual(pending["states"][0]["unresolvedReviewThreads"], 0)
+        self.assertIn("threads 811", gh_calls.read_text(encoding="utf-8").splitlines(), "Merge mode reads review threads like autopilot.")
+        self.assertEqual(merges(), [], "Running checks must not be merged.")
+        commit_head(task["repositoryWorktrees"][0]["worktreePath"])
+        gh_state.write_text(gh_state.read_text(encoding="utf-8").replace("811.checks=pending", "811.checks=none"), encoding="utf-8")
+        no_checks = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(no_checks["action"], "pending", "A freshly pushed head may not have registered its checks yet.")
+        self.assertEqual(no_checks["taskStatus"], "Review")
+        self.assertEqual(merges(), [], "A head with no checks reported yet must not be merged.")
+        gh_state.write_text(gh_state.read_text(encoding="utf-8").replace("811.checks=none", "811.checks=pending"), encoding="utf-8")
+
+        gh_state.write_text(gh_state.read_text(encoding="utf-8").replace("811.checks=pending", "811.checks=success"), encoding="utf-8")
+        merged = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(merged["action"], "merged")
+        self.assertEqual(merged["mergedPullRequests"], [811])
+        self.assertTrue(merged["states"][0]["merged"])
+        self.assertEqual(merged["states"][0]["health"], "merged", "A merged PR reports the merged (purple) health.")
+        self.assertEqual(merges(), ["merged\t811\t--squash"], "A green PR is merged once with the first allowed method.")
+        merge_call = [line for line in merge_log.read_text(encoding="utf-8").splitlines() if line.startswith("merged\t811")]
+        self.assertEqual(len(merge_call), 1)
+        self.assertEqual(merged["taskStatus"], "Review", "Merging leaves the task in Review for the user to complete.")
+        again = self.assert_success(self.call_cli("task", "pr", "autopilot", task["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(again["action"], "merged")
+        self.assertIsNone(again.get("mergedPullRequests"), "An already-merged PR is reported, not merged again.")
+        self.assertEqual(len(merges()), 1, "An already-merged PR is not merged again.")
+        status = self.assert_success(self.call_cli("task", "pr", "status", task["id"], extra_environment=gh_environment)[0])
+        self.assertTrue(status[0]["merged"])
+
+        # Long past the grace with still no checks (a repository without CI): merge mode
+        # still attempts the merge. GitHub refuses it here (a required review), so the
+        # task stops in Waiting Response with GitHub's reason.
+        commit_head(refused["repositoryWorktrees"][0]["worktreePath"], committed_at="2020-01-01T00:00:00Z")
+        self.assert_success(self.call_cli("task", "pr", "mode", refused["id"], "merge")[0])
+        no_ci = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(no_ci["action"], "stalled")
+        no_ci_task = self.assert_success(self.call_cli("task", "get", refused["id"])[0])
+        self.assertEqual(no_ci_task["status"], "Waiting Response")
+        self.assertIn("couldn't merge pull request #812", no_ci_task["statusMessage"])
+        self.assertNotIn("no checks", no_ci_task["statusMessage"])
+        self.assertEqual(merges(), ["merged\t811\t--squash", "merge-failed\t812\t--squash"], "No checks past the grace is still merged, with the first allowed method.")
+
+        # The user sends it back to Review; GitHub still refuses the merge. The
+        # `repo.methods` line, written after #811 merged, disallows squash from here on.
+        self.complete_fixture_turn(refused["id"])
+        gh_state.write_text(gh_state.read_text(encoding="utf-8") + "repo.methods=merge,rebase\n", encoding="utf-8")
+        stalled = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(stalled["action"], "stalled")
+        current = self.assert_success(self.call_cli("task", "get", refused["id"])[0])
+        self.assertEqual(current["status"], "Waiting Response")
+        self.assertIn("couldn't merge pull request #812", current["statusMessage"])
+        self.assertIn("a review is required", current["statusMessage"])
+        self.assertEqual(merges()[-1], "merge-failed\t812\t--merge")
+        idle = self.assert_success(self.call_cli("task", "pr", "autopilot", refused["id"], extra_environment=gh_environment)[0])
+        self.assertEqual(idle["action"], "inactive", "A refused merge does not retry.")
+    # case-contract: test_review_probe_failure_alerts_only_while_in_review | A Review task whose linked pull request probe fails reports it: `task pr status` fails as operation_failed with the GitHub CLI's error, and the board raises its Pull request operation failed alert naming that error. Once the task moves to Done with --allow-unmerged, which removes its worktree, it is Done with no worktree left, and a board probe that was already running when it moved raises no alert.
+    def test_review_probe_failure_alerts_only_while_in_review(self):
+        task = self.create_repo_task("Review probe failure", [self.primary], materialize=True)
+        self.assertEqual(task["status"], "Review")
+        self.seed_done_task_pull_request(task["id"], number=123)
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        directory = self.data_directory / "review-probe-failure-gh"
+        directory.mkdir()
+        executable = directory / "gh"
+        executable.write_text("#!/bin/sh\necho 'fixture probe failure' >&2\nexit 1\n", encoding="utf-8")
+        executable.chmod(0o755)
+        environment = {"PATH": f"{directory}:{os.environ.get('PATH', '')}"}
+        status, _ = self.call_cli("task", "pr", "status", task["id"], expected_status=1, extra_environment=environment)
+        self.assert_failure(status, "operation_failed")
+        self.assertIn("fixture probe failure", status["error"]["message"], "The probe reports the GitHub CLI's own error.")
+        moved, _ = self.call_cli("task", "move", task["id"], "Done", "--allow-unmerged", extra_environment=environment)
+        self.assertEqual(self.assert_success(moved)["status"], "Done")
+        self.assertFalse(worktree.exists(), "Moving to Done removes the worktree a later probe would read.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Done")
+    # case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 20 seconds, with focus events during cooldown coalesced into one trailing refresh. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
+    def test_review_pr_conflicts_probe_and_verify(self):
+        task = self.create_repo_task("Review PR conflict probe", [self.primary, self.secondary], materialize=True)
+        self.assertEqual(task["status"], "Review")
+        self.assertEqual(self.assert_success(self.call_cli("task", "pr", "status", task["id"])[0]), [])
+        self.seed_done_task_pull_request(task["id"], number=123)
+        self.seed_done_task_pull_request(task["id"], number=456, repository_index=1)
+
+        directory = self.data_directory / "review-pr-gh-fixture"
+        directory.mkdir()
+        state = directory / "state"
+        state.write_text("123=CONFLICTING\n456=MERGEABLE\n", encoding="utf-8")
+        started = directory / "started"
+        started.mkdir()
+        executable = directory / "gh"
+        executable.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" != pr ] || [ \"$2\" != view ] || { [ \"$3\" != 123 ] && [ \"$3\" != 456 ]; } || [ \"$4\" != --json ] || [ \"$5\" != mergedAt,mergeable,headRefOid,statusCheckRollup ]; then\n"
+            "  echo 'Unexpected gh fixture command' >&2\n"
+            "  exit 2\n"
+            "fi\n"
+            f"touch {shlex.quote(str(started))}/\"$3\"\n"
+            f"for attempt in $(seq 1 100); do [ -f {shlex.quote(str(started / '123'))} ] && [ -f {shlex.quote(str(started / '456'))} ] && break; sleep 0.02; done\n"
+            f"if [ ! -f {shlex.quote(str(started / '123'))} ] || [ ! -f {shlex.quote(str(started / '456'))} ]; then echo 'PR probes did not run in parallel' >&2; exit 3; fi\n"
+            f"mergeable=$(awk -F= -v number=\"$3\" '$1 == number {{ print $2 }}' {shlex.quote(str(state))})\n"
+            "head=$(git rev-parse HEAD)\n"
+            "if [ \"$mergeable\" = HEAD_MISMATCH ]; then head=remote-head-not-pushed; mergeable=MERGEABLE; fi\n"
+            "if [ \"$mergeable\" = CONFLICTING ]; then printf '{\"mergedAt\":null,\"mergeable\":\"CONFLICTING\",\"headRefOid\":\"%s\",\"statusCheckRollup\":[]}\\n' \"$head\"; else printf '{\"mergedAt\":null,\"mergeable\":\"MERGEABLE\",\"headRefOid\":\"%s\",\"statusCheckRollup\":[]}\\n' \"$head\"; fi\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+        environment = {"PATH": f"{directory}:{os.environ.get('PATH', '')}"}
+        status, _ = self.call_cli("task", "pr", "status", task["id"], extra_environment=environment)
+        states = self.assert_success(status)
+        self.assertEqual({item["number"] for item in states}, {123, 456})
+        self.assertEqual({item["number"] for item in states if item["hasConflicts"]}, {123})
+        self.assertTrue(all(item["headRefOid"] == item["localHeadOid"] for item in states))
+        self.assertTrue((started / "123").is_file() and (started / "456").is_file(), "Both linked PR probes should overlap.")
+
+        (started / "123").unlink()
+        (started / "456").unlink()
+        still_conflicted, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
+        self.assertEqual(self.assert_success(still_conflicted)["status"], "stillConflicted")
+        self.assertTrue((started / "123").is_file() and (started / "456").is_file())
+
+        state.write_text("123=MERGEABLE\n456=HEAD_MISMATCH\n", encoding="utf-8")
+        for number in (123, 456):
+            (started / str(number)).unlink()
+        mismatch, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
+        self.assertEqual(self.assert_success(mismatch)["status"], "stillConflicted", "A mergeable PR with a remote head that is not pushed locally must retain the conflict indicator.")
+        mismatch_status, _ = self.call_cli("task", "pr", "status", task["id"], extra_environment=environment)
+        mismatch_state = next(item for item in self.assert_success(mismatch_status) if item["number"] == 456)
+        self.assertNotEqual(mismatch_state["headRefOid"], mismatch_state["localHeadOid"])
+
+        state.write_text("123=MERGEABLE\n456=MERGEABLE\n", encoding="utf-8")
+        for number in (123, 456):
+            (started / str(number)).unlink()
+        verification, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
+        self.assertEqual(self.assert_success(verification)["status"], "resolved")
+    # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects merge conflicts without mutation, and PR creation still publishes the task branch and reaches the normal GitHub CLI path; conflicts do not block PR creation. CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI confirms PR creation proceeds for a conflicted branch and the existing Fix Conflicts action still appears once the PR is linked.
+    def test_task_pr_conflicts_detect_without_mutation(self):
+        task = self.create_repo_task("PR conflict detection", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        record = task["repositoryWorktrees"][0]
+        worktree = Path(record["worktreePath"])
+        conflict_path = "playhouse-pr-conflict-fixture.txt"
+        remote = self.data_directory / "pr-conflict-origin.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+        self.run_git(self.primary, "remote", "add", "origin", str(remote))
+        self.run_git(self.primary, "push", "--set-upstream", "origin", "main")
+        target_file = self.primary / conflict_path
+        target_file.write_text("target branch version\n", encoding="utf-8")
+        self.run_git(self.primary, "add", conflict_path)
+        self.run_git(self.primary, "commit", "-m", "Update PR target fixture")
+        self.run_git(self.primary, "push", "origin", "main")
+        branch_file = worktree / conflict_path
+        branch_file.write_text("task branch version\n", encoding="utf-8")
+        self.run_git(worktree, "add", conflict_path)
+        self.run_git(worktree, "commit", "-m", "Update task branch fixture")
+        branch_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        target_head = self.run_git(self.primary, "rev-parse", "main").strip()
+
+        checked, _ = self.call_cli("task", "pr", "conflicts", task["id"])
+        self.assertEqual(self.assert_success(checked)["repositories"], [str(self.primary)])
+        self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), branch_head)
+        self.assertEqual(self.run_git(self.primary, "rev-parse", "main").strip(), target_head)
+        self.assertEqual((worktree / conflict_path).read_text(encoding="utf-8"), "task branch version\n")
+        self.assertEqual(target_file.read_text(encoding="utf-8"), "target branch version\n")
+        # The fixture gh fails the first create, so the attempt reaches the normal GitHub CLI
+        # failure without depending on the installed gh or its sign-in.
+        gh_directory = self.data_directory / "gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        copy_file(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        (gh_directory / "state").write_text("", encoding="utf-8")
+        gh_create_log = gh_directory / "create-calls"
+        gh_create_failure = gh_directory / "fail-create-attempt"
+        gh_create_failure.write_text("1", encoding="utf-8")
+        gh_environment = {
+            # PR creation asks the task's provider for the PR text first; use the fixture that ran its turn.
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture"),
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "PLAYHOUSE_E2E_GH_STATE_PATH": str(gh_directory / "state"),
+            "PLAYHOUSE_E2E_GH_CALL_LOG": str(gh_directory / "calls"),
+            "PLAYHOUSE_E2E_GH_CREATE_LOG": str(gh_create_log),
+            "PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH": str(gh_create_failure),
+        }
+        pr_attempt, _ = self.call_cli("task", "pr", "create", task["id"], expected_status=1, extra_environment=gh_environment)
+        self.assert_failure(pr_attempt, "operation_failed")
+        self.assertNotIn("conflicts_require_confirmation", json.dumps(pr_attempt))
+        self.assertNotIn("Pull request conflicts were found", pr_attempt["error"]["message"])
+        self.assertIn("GitHub CLI couldn't complete the request. fixture GitHub create failure", pr_attempt["error"]["message"])
+        failed_creates = [line.split("\t")[1] for line in gh_create_log.read_text(encoding="utf-8").splitlines() if line.startswith("failed\t")]
+        self.assertEqual(
+            [os.path.realpath(path) for path in failed_creates], [os.path.realpath(worktree)],
+            "gh pr create should have run once in the task worktree.",
+        )
+        self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), branch_head)
+        task_branch_ref = f"refs/heads/{record['branch']}"
+        published_branch_head = self.run_git(remote, "rev-parse", task_branch_ref).strip()
+        self.assertEqual(published_branch_head, branch_head, "A conflict must not block publishing the task branch for PR creation.")
+        subprocess.run(["git", "--git-dir", str(remote), "update-ref", "-d", task_branch_ref], check=True, capture_output=True, text=True)
+        self.run_git(worktree, "fetch", "origin", "main")
+        merge = subprocess.run(
+            ["git", "-C", str(worktree), "merge", "--no-commit", "--no-ff", "FETCH_HEAD"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(merge.returncode, 1, f"Expected the real Git fixture merge to conflict: {merge.stderr}")
+        resolved_content = "resolved task and target versions\n"
+        branch_file.write_text(resolved_content, encoding="utf-8")
+        self.run_git(worktree, "add", conflict_path)
+        resolved_only, _ = self.call_cli("task", "pr", "resolve", task["id"], "resolve-only")
+        self.assertEqual(self.assert_success(resolved_only)["id"], task["id"])
+        resolved_only_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertNotEqual(resolved_only_head, branch_head, "Resolve-only should commit a fully staged conflict resolution locally.")
+        self.assertEqual(self.run_git(self.primary, "rev-parse", "main").strip(), target_head, "Conflict resolution must leave the target branch unchanged.")
+        self.assertEqual(branch_file.read_text(encoding="utf-8"), resolved_content)
+        unresolved_remote_branch = subprocess.run(
+            ["git", "--git-dir", str(remote), "show-ref", "--verify", "--quiet", task_branch_ref],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(unresolved_remote_branch.returncode, 1, "Resolve-only must commit locally without publishing the task branch.")
+
+        target_file.write_text("target branch version two\n", encoding="utf-8")
+        self.run_git(self.primary, "add", conflict_path)
+        self.run_git(self.primary, "commit", "-m", "Advance PR target fixture again")
+        self.run_git(self.primary, "push", "origin", "main")
+        target_head_second = self.run_git(self.primary, "rev-parse", "main").strip()
+        branch_file.write_text("task branch version two\n", encoding="utf-8")
+        self.run_git(worktree, "add", conflict_path)
+        self.run_git(worktree, "commit", "-m", "Advance task branch fixture again")
+        branch_head_second = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.run_git(worktree, "fetch", "origin", "main")
+        second_merge = subprocess.run(
+            ["git", "-C", str(worktree), "merge", "--no-commit", "--no-ff", "FETCH_HEAD"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(second_merge.returncode, 1, f"Expected the second real Git fixture merge to conflict: {second_merge.stderr}")
+        pushed_content = "resolved task and target versions two\n"
+        branch_file.write_text(pushed_content, encoding="utf-8")
+        self.run_git(worktree, "add", conflict_path)
+        resolved, _ = self.call_cli("task", "pr", "resolve", task["id"], "resolve-and-push")
+        self.assertEqual(self.assert_success(resolved)["id"], task["id"])
+        resolved_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertNotEqual(resolved_head, branch_head_second, "A fully staged resolution should be committed when resuming the second merge.")
+        self.assertEqual(self.run_git(self.primary, "rev-parse", "main").strip(), target_head_second, "Conflict resolution must leave the target branch unchanged.")
+        self.assertEqual(branch_file.read_text(encoding="utf-8"), pushed_content)
+        remote_branch_head = self.run_git(remote, "rev-parse", task_branch_ref).strip()
+        self.assertEqual(remote_branch_head, resolved_head, "Resolve-and-push must publish the resolved task branch.")
+        remote_content = subprocess.run(
+            ["git", "--git-dir", str(remote), "show", f"{task_branch_ref}:{conflict_path}"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(remote_content, pushed_content)
+        self.assertIsNone(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0].get("pullRequestNumber"))
+        invalid, _ = self.call_cli("task", "pr", "resolve", task["id"], "unknown", expected_status=2)
+        self.assert_failure(invalid, "invalid_argument")
+        self.run_git(self.primary, "remote", "remove", "origin")
+    # case-contract: test_review_sync_pushes_unpushed_changes_on_completion | A completed turn outcome on a task with a PR-linked repository and a configured remote commits local work, merges new remote pull request commits, and pushes the branch before the task reaches Review, so the reviewed worktree holds no local-only changes. A linked repository without a publishing remote is left untouched and still reaches Review. When the sync cannot complete, the task moves to Blocked with the sync failure message instead of resting in Review, and a later successful sync pushes the stranded commits and returns the task to Review. While a provider turn holds the task's worktree, the sync command skips it untouched and reports turn-active. A worktree switched off its task branch fails the sync with a message naming both branches and blocks the task, leaving that other branch and the remote untouched; once switched back, a remote commit whose changes the branch already holds is concluded as a merge commit and pushed, the task returns to Review, and the next sync is up-to-date instead of failing on an unfinished merge. A merge Git refuses outright, such as one with unrelated history, blocks the task with Git's own error after the generic merge failure message, and restoring the remote branch heals it back to Review. A clean merge an earlier sync left unfinished on the task branch is concluded as a merge commit and pushed. A task branch deleted on a reachable remote is reported as no-remote-branch and leaves the task in Review.
+    def test_review_sync_pushes_unpushed_changes_on_completion(self):
+        task = self.create_repo_task("Review sync push", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        record = task["repositoryWorktrees"][0]
+        worktree = Path(record["worktreePath"])
+        branch = record["branch"]
+        self.seed_done_task_pull_request(task["id"], number=123)
+
+        # Without a publishing remote, the sync has nothing to act on and Review is untouched.
+        no_remote, _ = self.call_cli("task", "pr", "sync", task["id"])
+        no_remote_result = self.assert_success(no_remote)
+        self.assertEqual([item["action"] for item in no_remote_result["records"]], ["no-remote"])
+        self.assertEqual(no_remote_result["status"], "Review")
+
+        # While a provider turn owns the worktree, the sync skips instead of mutating it.
+        process, _, active, release = self.start_progress_fixture_turn(task["id"], "codex-fixture-review-sync-hold-release")
+        try:
+            skipped, _ = self.call_cli("task", "pr", "sync", task["id"])
+            skipped_result = self.assert_success(skipped)
+            self.assertEqual(skipped_result.get("skipped"), "turn-active")
+            self.assertEqual(skipped_result["records"], [])
+            outcome, _ = self.call_cli("task", "outcome", task["id"], "completed")
+            self.assertEqual(self.assert_success(outcome)["outcome"], "completed")
+            release.write_text("Release the active turn.\n", encoding="utf-8")
+            process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 0)
+        finally:
+            if process.poll() is None:
+                release.write_text("Release the active turn.\n", encoding="utf-8")
+                process.communicate(timeout=20)
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
+
+        remote = self.data_directory / "review-sync-origin.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+        self.run_git(self.primary, "remote", "add", "origin", str(remote))
+        self.run_git(worktree, "push", "--set-upstream", "origin", branch)
+
+        # A reviewer commit on the remote PR branch the local branch has not seen.
+        clone = self.data_directory / "review-sync-clone"
+        subprocess.run(["git", "clone", "--branch", branch, str(remote), str(clone)], check=True, capture_output=True, text=True)
+        (clone / "remote-side.txt").write_text("Remote reviewer commit.\n", encoding="utf-8")
+        self.run_git(clone, "add", "remote-side.txt")
+        self.run_git(clone, "commit", "-m", "Remote PR commit")
+        self.run_git(clone, "push", "origin", branch)
+        reviewer_head = self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip()
+
+        # Local uncommitted work the completed turn leaves behind.
+        (worktree / "local-side.txt").write_text("Local turn output.\n", encoding="utf-8")
+        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-review-sync")
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain", "--untracked-files=all").strip(), "")
+        local_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), local_head)
+        self.assertNotEqual(local_head, reviewer_head, "The sync should push a merge of the reviewer commit and the local work.")
+        self.assertEqual((worktree / "remote-side.txt").read_text(encoding="utf-8"), "Remote reviewer commit.\n")
+        pushed_local_side = subprocess.run(
+            ["git", "--git-dir", str(remote), "show", f"refs/heads/{branch}:local-side.txt"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(pushed_local_side, "Local turn output.\n")
+
+        # A sync the daemon cannot complete blocks the task instead of resting in Review.
+        self.run_git(self.primary, "remote", "set-url", "origin", str(self.data_directory / "missing-remote.git"))
+        (worktree / "local-side.txt").write_text("Unpushable local change.\n", encoding="utf-8")
+        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-review-sync", expected_status="Blocked")
+        blocked = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertIn("couldn't sync this task's changes with its pull request", blocked.get("statusMessage") or "")
+
+        # A later successful sync pushes the stranded commit and returns the task to Review.
+        self.run_git(self.primary, "remote", "set-url", "origin", str(remote))
+        healed, _ = self.call_cli("task", "pr", "sync", task["id"])
+        healed_result = self.assert_success(healed)
+        self.assertEqual([item["action"] for item in healed_result["records"]], ["pushed"])
+        self.assertEqual(healed_result["status"], "Review")
+        healed_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), healed_head)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
+
+        # A remote commit whose changes the local branch already holds, as after a squash merge.
+        self.run_git(clone, "pull", "--ff-only", "origin", branch)
+        for repository in (clone, worktree):
+            (repository / "duplicate-side.txt").write_text("Same change on both sides.\n", encoding="utf-8")
+            self.run_git(repository, "add", "duplicate-side.txt")
+            self.run_git(repository, "commit", "-m", f"Duplicate change in {repository.name}")
+        self.run_git(clone, "push", "origin", branch)
+        duplicate_remote_head = self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip()
+
+        # A worktree switched off its task branch is never merged into, committed to, or pushed.
+        self.run_git(worktree, "checkout", "-b", "agent-side-branch")
+        side_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        switched, _ = self.call_cli("task", "pr", "sync", task["id"], expected_status=1)
+        self.assert_failure(switched, "operation_failed")
+        self.assertIn("is on branch 'agent-side-branch', not its pull request branch", switched["error"]["message"])
+        self.assertIn(f"'{branch}'", switched["error"]["message"])
+        switched_task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(switched_task["status"], "Blocked")
+        self.assertIn("agent-side-branch", switched_task.get("statusMessage") or "")
+        self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), side_head)
+        self.assertNotEqual(
+            subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "MERGE_HEAD"], check=False, capture_output=True).returncode,
+            0, "A sync on a switched branch must not start a merge.",
+        )
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), duplicate_remote_head)
+
+        # Back on the task branch, the clean merge is committed and pushed rather than left in progress.
+        self.run_git(worktree, "checkout", branch)
+        self.run_git(worktree, "branch", "-D", "agent-side-branch")
+        merged, _ = self.call_cli("task", "pr", "sync", task["id"])
+        merged_result = self.assert_success(merged)
+        self.assertEqual([item["action"] for item in merged_result["records"]], ["merged-and-pushed"])
+        self.assertEqual(merged_result["status"], "Review")
+        self.assertNotIn("agent-side-branch", self.assert_success(self.call_cli("task", "get", task["id"])[0]).get("statusMessage") or "")
+        self.assertNotEqual(
+            subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "MERGE_HEAD"], check=False, capture_output=True).returncode,
+            0, "A merge whose result matches HEAD must still be concluded.",
+        )
+        merged_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertEqual(len(self.run_git(worktree, "rev-list", "--parents", "-n", "1", merged_head).split()), 3)
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), merged_head)
+        again, _ = self.call_cli("task", "pr", "sync", task["id"])
+        self.assertEqual([item["action"] for item in self.assert_success(again)["records"]], ["up-to-date"])
+
+        # A fatal merge failure reports Git's own error instead of only a generic message.
+        unrelated = self.run_git(clone, "commit-tree", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-m", "Unrelated history").strip()
+        self.run_git(clone, "push", "--force", "origin", f"{unrelated}:refs/heads/{branch}")
+        fatal, _ = self.call_cli("task", "pr", "sync", task["id"], expected_status=1)
+        self.assert_failure(fatal, "operation_failed")
+        self.assertIn("Git couldn't merge the remote task branch.", fatal["error"]["message"])
+        self.assertIn("unrelated histories", fatal["error"]["message"])
+        fatal_task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(fatal_task["status"], "Blocked")
+        self.assertIn("unrelated histories", fatal_task.get("statusMessage") or "")
+        self.run_git(worktree, "push", "--force", "origin", f"{merged_head}:refs/heads/{branch}")
+        restored, _ = self.call_cli("task", "pr", "sync", task["id"])
+        restored_result = self.assert_success(restored)
+        self.assertEqual([item["action"] for item in restored_result["records"]], ["up-to-date"])
+        self.assertEqual(restored_result["status"], "Review")
+
+        # A clean merge an earlier sync left unfinished on the task branch is concluded and pushed.
+        self.run_git(clone, "pull", "--ff-only", "origin", branch)
+        for repository in (clone, worktree):
+            (repository / "leftover-side.txt").write_text("Already merged change.\n", encoding="utf-8")
+            self.run_git(repository, "add", "leftover-side.txt")
+            self.run_git(repository, "commit", "-m", f"Leftover change in {repository.name}")
+        self.run_git(clone, "push", "origin", branch)
+        self.run_git(worktree, "fetch", "--quiet", "origin", branch)
+        self.run_git(worktree, "merge", "--no-commit", "--no-ff", "FETCH_HEAD")
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain", "--untracked-files=all").strip(), "")
+        leftover, _ = self.call_cli("task", "pr", "sync", task["id"])
+        leftover_result = self.assert_success(leftover)
+        self.assertEqual([item["action"] for item in leftover_result["records"]], ["pushed"])
+        self.assertEqual(leftover_result["status"], "Review")
+        self.assertNotEqual(
+            subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "MERGE_HEAD"], check=False, capture_output=True).returncode,
+            0, "The sync should conclude a merge an earlier sync left unfinished.",
+        )
+        leftover_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertEqual(len(self.run_git(worktree, "rev-list", "--parents", "-n", "1", leftover_head).split()), 3)
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), leftover_head)
+
+        # A branch deleted on a reachable remote is reported as missing, not as a fetch failure.
+        self.run_git(remote, "update-ref", "-d", f"refs/heads/{branch}")
+        deleted, _ = self.call_cli("task", "pr", "sync", task["id"])
+        deleted_result = self.assert_success(deleted)
+        self.assertEqual([item["action"] for item in deleted_result["records"]], ["no-remote-branch"])
+        self.assertEqual(deleted_result["status"], "Review")
+        self.run_git(self.primary, "remote", "remove", "origin")
