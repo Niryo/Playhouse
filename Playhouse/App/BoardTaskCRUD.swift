@@ -185,6 +185,15 @@ extension BoardTaskManager {
         return BoardTaskRecord(task: chat)
     }
 
+    func setPluginDraftContext(_ id: UUID, folder: String) throws -> BoardTaskRecord {
+        guard let chat = try standaloneChatModel(id) else {
+            throw BridgeCommandError(code: "not_found", message: "Plugin editor not found.")
+        }
+        chat.pluginContextFolder = folder
+        try modelContext.save()
+        return BoardTaskRecord(task: chat)
+    }
+
     /// Creates an editor conversation without adding a card to the task board.
     func createPluginConversation(name: String, pluginID: String, placement: String, contextFolder: String, provider: ConversationProvider, prompt: String? = nil) async throws -> BoardTaskRecord {
         let chat = StandaloneChat(provider: provider)
@@ -267,6 +276,21 @@ extension BoardTaskManager {
                 return BoardTaskRecord(task: chat)
             }
         }
+    }
+
+    /// Serialize filesystem mutations with every active or starting editor turn.
+    func withPluginEditorsReserved<T>(id: String, operation: () async throws -> T) async throws -> T {
+        let ids = try pluginConversations().filter { $0.authoredPluginID == id }.map(\.id)
+            .sorted { $0.uuidString < $1.uuidString }
+        func reserve(_ index: Int) async throws -> T {
+            if index == ids.count { return try await operation() }
+            return try await withConversationTurnReservation(ids[index]) {
+                try await self.withTaskOperationLock(ids[index]) {
+                    try await reserve(index + 1)
+                }
+            }
+        }
+        return try await reserve(0)
     }
 
     /// Lock every editor turn while deleting its plugin, then remove its conversation records.

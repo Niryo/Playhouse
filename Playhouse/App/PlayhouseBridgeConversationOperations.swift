@@ -91,4 +91,57 @@ extension PlayhouseBridgeRuntime {
             throw BridgeCommandError(code: "unsupported_command", message: "Unsupported conversation command: \(request.command).")
         }
     }
+
+    func conversationRuntimeResponse(_ request: BridgeRequest, eventHandler: @escaping (BridgeEvent) -> Void) async -> BridgeResponse {
+        let runtimeScope: String?
+        #if DEBUG
+        runtimeScope = request.dataDirectory
+        #else
+        runtimeScope = nil
+        #endif
+        do {
+            let result: BridgeValue
+            if request.command == "conversation.runtime" {
+                result = try Self.value(ConversationRuntimeSnapshot.current(dataDirectory: runtimeScope))
+            } else {
+                // Streams the daemon's turn state to a window until it disconnects.
+                for await snapshot in ConversationRuntimeSnapshot.changes(dataDirectory: runtimeScope) {
+                    if Task.isCancelled { break }
+                    eventHandler(BridgeEvent(requestID: request.id, type: "runtime_state", payload: try Self.value(snapshot)))
+                }
+                result = .object(["subscribed": .boolean(false)])
+            }
+            await PlayhouseDiagnostics.endBatch()
+            return .success(request, result: result)
+        } catch {
+            await PlayhouseDiagnostics.endBatch()
+            return .failure(request, code: "operation_failed", message: error.localizedDescription)
+        }
+    }
+
+    func conversationCPUUsageResponse(_ request: BridgeRequest, eventHandler: @escaping (BridgeEvent) -> Void) async -> BridgeResponse {
+        let runtimeScope: String?
+        #if DEBUG
+        runtimeScope = request.dataDirectory
+        #else
+        runtimeScope = nil
+        #endif
+        do {
+            let result: BridgeValue
+            if request.command == "conversation.cpuUsage" {
+                result = try Self.value(await TaskCPUUsageSnapshot.current(dataDirectory: runtimeScope))
+            } else {
+                for await snapshot in TaskCPUUsageSnapshot.changes(dataDirectory: runtimeScope) {
+                    if Task.isCancelled { break }
+                    eventHandler(BridgeEvent(requestID: request.id, type: "cpu_usage_state", payload: try Self.value(snapshot)))
+                }
+                result = .object(["subscribed": .boolean(false)])
+            }
+            await PlayhouseDiagnostics.endBatch()
+            return .success(request, result: result)
+        } catch {
+            await PlayhouseDiagnostics.endBatch()
+            return .failure(request, code: "operation_failed", message: error.localizedDescription)
+        }
+    }
 }

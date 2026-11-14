@@ -552,7 +552,7 @@ final class ConversationManager {
                     isPluginEditor: task.authoringPluginID != nil,
                     pluginPlacement: task.authoringPluginPlacement,
                     pluginID: task.authoringPluginID,
-                    pluginsDirectory: clients.skills?.pluginsDirectory
+                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                 )
             )
             _ = try await tasks.persistConversationID(taskID, provider: .codex, id: id)

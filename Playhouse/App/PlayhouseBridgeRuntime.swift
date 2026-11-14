@@ -29,57 +29,12 @@ final class PlayhouseBridgeRuntime {
 
         // Turn state lives in this process's memory, so reading it needs no store.
         if request.command == "conversation.runtime" || request.command == "conversation.runtime.subscribe" {
-            let runtimeScope: String?
-            #if DEBUG
-            runtimeScope = request.dataDirectory
-            #else
-            runtimeScope = nil
-            #endif
-            do {
-                let result: BridgeValue
-                if request.command == "conversation.runtime" {
-                    result = try Self.value(ConversationRuntimeSnapshot.current(dataDirectory: runtimeScope))
-                } else {
-                    // Streams the daemon's turn state to a window until it disconnects.
-                    for await snapshot in ConversationRuntimeSnapshot.changes(dataDirectory: runtimeScope) {
-                        if Task.isCancelled { break }
-                        eventHandler(BridgeEvent(requestID: request.id, type: "runtime_state", payload: try Self.value(snapshot)))
-                    }
-                    result = .object(["subscribed": .boolean(false)])
-                }
-                await PlayhouseDiagnostics.endBatch()
-                return .success(request, result: result)
-            } catch {
-                await PlayhouseDiagnostics.endBatch()
-                return .failure(request, code: "operation_failed", message: error.localizedDescription)
-            }
+            return await conversationRuntimeResponse(request, eventHandler: eventHandler)
         }
 
         // CPU samples also live only in this process's memory (the real PIDs).
         if request.command == "conversation.cpuUsage" || request.command == "conversation.cpuUsage.subscribe" {
-            let runtimeScope: String?
-            #if DEBUG
-            runtimeScope = request.dataDirectory
-            #else
-            runtimeScope = nil
-            #endif
-            do {
-                let result: BridgeValue
-                if request.command == "conversation.cpuUsage" {
-                    result = try Self.value(await TaskCPUUsageSnapshot.current(dataDirectory: runtimeScope))
-                } else {
-                    for await snapshot in TaskCPUUsageSnapshot.changes(dataDirectory: runtimeScope) {
-                        if Task.isCancelled { break }
-                        eventHandler(BridgeEvent(requestID: request.id, type: "cpu_usage_state", payload: try Self.value(snapshot)))
-                    }
-                    result = .object(["subscribed": .boolean(false)])
-                }
-                await PlayhouseDiagnostics.endBatch()
-                return .success(request, result: result)
-            } catch {
-                await PlayhouseDiagnostics.endBatch()
-                return .failure(request, code: "operation_failed", message: error.localizedDescription)
-            }
+            return await conversationCPUUsageResponse(request, eventHandler: eventHandler)
         }
 
         do {
@@ -572,22 +527,49 @@ final class PlayhouseBridgeRuntime {
             case "plugin.edit":
                 let id = try request.requiredString("pluginID")
                 let editor = try await taskManager.withPluginOperationLock(id) {
-                    if let existing = try taskManager.pluginConversations().first(where: { $0.authoredPluginID == id }) {
-                        return try taskManager.standaloneChatModel(existing.id) != nil
-                            ? existing : await taskManager.migrateLegacyPluginConversation(existing.id)
-                    }
                     let library = try pluginLibrary()
+                    do { try library.prepareDraft(id: id) }
+                    catch let error as PluginTreeError { throw BridgeCommandError(code: "invalid_argument", message: error.message) }
+                    if let existing = try taskManager.pluginConversations().first(where: { $0.authoredPluginID == id }) {
+                        _ = try await taskManager.migrateLegacyPluginConversation(existing.id)
+                        return try taskManager.setPluginDraftContext(existing.id, folder: library.draftLibrary.directory.path)
+                    }
                     let plugin: PluginRecord
                     do { plugin = try library.plugin(id: id, validate: false) }
                     catch let error as PluginTreeError { throw BridgeCommandError(code: "invalid_argument", message: error.message) }
                     catch { throw BridgeCommandError(code: "not_found", message: error.localizedDescription) }
                     let created = try await taskManager.createPluginConversation(
                         name: plugin.name, pluginID: plugin.id, placement: plugin.placement,
-                        contextFolder: library.directory.path, provider: settings.defaultConversationProvider)
+                        contextFolder: library.draftLibrary.directory.path, provider: settings.defaultConversationProvider)
                     _ = settings.bumpPluginsRevision()
                     return created
                 }
                 result = .object(["task": try Self.value(editor)])
+            case "plugin.versions":
+                let library = try pluginLibrary()
+                let id = try request.requiredString("pluginID")
+                result = .object(["versions": .array(try library.versions(id: id).map { .integer($0) })])
+            case "plugin.save", "plugin.discard", "plugin.restore":
+                let library = try pluginLibrary()
+                let id = try request.requiredString("pluginID")
+                result = try await taskManager.withPluginOperationLock(id) {
+                  try await taskManager.withPluginEditorsReserved(id: id) {
+                    switch request.command {
+                    case "plugin.save":
+                        let published = try library.saveDraft(id: id)
+                        return .object(["plugin": try Self.value(published.plugin), "revision": .integer(settings.bumpPluginsRevision()),
+                                        "draftSyncFailed": .boolean(published.draftSyncFailed)])
+                    case "plugin.discard":
+                        try library.discardDraft(id: id)
+                        return .object(["discarded": .string(id)])
+                    default:
+                        let version = try request.requiredInt("version")
+                        let published = try library.restoreVersion(id: id, version: version)
+                        return .object(["plugin": try Self.value(published.plugin), "revision": .integer(settings.bumpPluginsRevision()),
+                                        "draftSyncFailed": .boolean(published.draftSyncFailed)])
+                    }
+                  }
+                }
             case "plugin.delete":
                 let library = try pluginLibrary()
                 let id = try request.requiredString("pluginID")
@@ -626,10 +608,11 @@ final class PlayhouseBridgeRuntime {
                 } else {
                     prompt = "/\(TaskThreadDeveloperInstructions.pluginSkillName) Create a new plugin in the \(placement.title) placement (\(placement.rawValue)). Use plugin ID and folder \(pluginID)."
                 }
+                try library.prepareDraft(id: pluginID)
                 let created = try await taskManager.withPluginOperationLock(pluginID) {
                     try await taskManager.createPluginConversation(
                         name: name ?? placement.title, pluginID: pluginID, placement: placement.rawValue,
-                        contextFolder: library.directory.path, provider: provider, prompt: prompt)
+                        contextFolder: library.draftLibrary.directory.path, provider: provider, prompt: prompt)
                 }
                 _ = settings.bumpPluginsRevision()
                 result = .object(["task": try Self.value(created), "prompt": .string(prompt)])

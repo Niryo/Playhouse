@@ -322,7 +322,7 @@ extension ConversationManager {
                     isArchived: task.status == .done,
                     pluginPlacement: task.authoringPluginPlacement,
                     pluginID: task.authoringPluginID,
-                    pluginsDirectory: clients.skills?.pluginsDirectory
+                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                 ),
                 sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
                 sensitiveConversation: hasSensitiveRecoveryState,

@@ -313,7 +313,7 @@ extension ConversationManager {
                     isArchived: task.status == .done,
                     pluginPlacement: task.authoringPluginPlacement,
                     pluginID: task.authoringPluginID,
-                    pluginsDirectory: clients.skills?.pluginsDirectory
+                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                 )
             }
             let threadID: String
@@ -398,7 +398,7 @@ extension ConversationManager {
                         isStandaloneChat: task.isStandaloneChat,
                         isArchived: task.status == .done,
                         pluginPlacement: (task as? BoardTask)?.pluginPlacement,
-                        pluginsDirectory: clients.skills?.pluginsDirectory
+                        pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                     )
                     if provider == .claude {
                         compactedBeforeTurn = await runAutomaticCompaction(
@@ -495,7 +495,7 @@ extension ConversationManager {
                     isArchived: task.status == .done,
                     pluginPlacement: task.authoringPluginPlacement,
                     pluginID: task.authoringPluginID,
-                    pluginsDirectory: clients.skills?.pluginsDirectory
+                    pluginsDirectory: task.authoringPluginID != nil ? task.contextFolderPaths.first : clients.skills?.pluginsDirectory
                 ),
                 onDelta: callbacks.onDelta,
                 onFinalMessage: callbacks.onFinalMessage,

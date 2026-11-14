@@ -66,6 +66,9 @@ struct PluginAuthoringPreview: View {
     let pluginID: String
     @State private var plugin: PluginRecord?
     @State private var revision = ""
+    @State private var versions: [Int] = []
+    @State private var operationError: String?
+    @State private var confirmDiscard = false
     @State private var previewDraft = ""
     @State private var previewComposerFocused = false
     @State private var previewComposerHeight: CGFloat = 36
@@ -76,7 +79,22 @@ struct PluginAuthoringPreview: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Preview").font(.headline).padding()
+            HStack {
+                Text("Preview").font(.headline)
+                Spacer()
+                if let plugin { Text("Version \(plugin.version)").foregroundStyle(.secondary) }
+                Menu("Restore version") {
+                    ForEach(versions, id: \.self) { version in
+                        Button("Version \(version)") { perform("plugin.restore", version: version) }
+                            .buttonHoverPointer().nativeHelp("Restore this plugin version")
+                    }
+                }.disabled(versions.isEmpty)
+                Button("Discard draft") { confirmDiscard = true }
+                    .buttonHoverPointer().nativeHelp("Reset the draft to the saved plugin")
+                Button("Save") { perform("plugin.save") }
+                    .keyboardShortcut("s", modifiers: .command)
+                    .buttonHoverPointer().nativeHelp("Publish this plugin draft")
+            }.padding()
             Divider()
             if let plugin, plugin.valid {
                 PluginSurfaceView(plugin: plugin, props: PluginContext.props(
@@ -111,14 +129,47 @@ struct PluginAuthoringPreview: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .alert("Discard draft?", isPresented: $confirmDiscard) {
+            Button("Discard", role: .destructive) { perform("plugin.discard") }
+                .buttonHoverPointer().nativeHelp("Discard the plugin draft")
+            Button("Cancel", role: .cancel) { }
+                .buttonHoverPointer().nativeHelp("Keep the plugin draft")
+        } message: { Text("The preview will be reset to the saved plugin.") }
+        .alert("Plugin operation", isPresented: Binding(get: { operationError != nil }, set: { if !$0 { operationError = nil } })) {
+            Button("OK") { operationError = nil }
+                .buttonHoverPointer().nativeHelp("Dismiss plugin operation message")
+        } message: { Text(operationError ?? "") }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("plugin-creation-preview")
         .task(id: pluginID) {
+            await loadVersions()
             while !Task.isCancelled {
                 refresh()
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+    }
+
+    private func perform(_ command: String, version: Int? = nil) {
+        Task {
+            do {
+                var arguments: [String: BridgeValue] = ["pluginID": .string(pluginID)]
+                if let version { arguments["version"] = .integer(version) }
+                let result = try await DaemonClient().call(command, arguments)
+                if result.object?["draftSyncFailed"]?.bool == true {
+                    operationError = "The plugin was published, but the draft could not be refreshed. Your existing draft was preserved."
+                }
+                await loadVersions()
+                refresh()
+            } catch { operationError = error.localizedDescription }
+        }
+    }
+
+    private func loadVersions() async {
+        do {
+            let result = try await DaemonClient().call("plugin.versions", ["pluginID": .string(pluginID)])
+            versions = try result.object?["versions"]?.decoded([Int].self) ?? []
+        } catch { operationError = error.localizedDescription }
     }
 
     private func applyComposerEdit(_ edit: PluginComposerEdit) {

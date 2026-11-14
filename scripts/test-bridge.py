@@ -595,6 +595,7 @@ function Context() {
   var composer = props.composer;
   return h(Stack, { spacing: 6, align: "leading" },
     h(Text, { testID: "plugin-placement" }, props.plugin.placement),
+    h(Text, { testID: "plugin-version" }, String(props.plugin.version)),
     h(Text, { testID: "plugin-task" }, task ? task.title : "no task"),
     h(Text, { testID: "plugin-repositories" }, props.repositories ? props.repositories.map(function (r) { return r.repositoryPath.split("/").pop(); }).join(",") : "no repositories"),
     h(Text, { testID: "plugin-draft" }, composer ? composer.draft : "no composer"),

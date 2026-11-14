@@ -155,6 +155,7 @@ struct KanbanBoardView: View {
     @State var isShowingChatSidebar = false
     @State var chatTask: StandaloneChat?
     @State var pluginChat: StandaloneChat?
+    @State var showPluginDraftNotice = false
     @State var pluginInitialPrompt: String?
     @State var isOpeningChatSidebar = false
     /// A modal, sidebar or page plugin opened from the board's sidebar.
@@ -211,7 +212,15 @@ struct KanbanBoardView: View {
                     TaskConversationView(task: pluginChat, isNewTask: false,
                         conflictResolutionRequested: false, onConflictResolutionChecked: { _ in },
                         skillFixPrompt: pluginInitialPrompt, onOpenTask: openTask(_:sending:),
-                        onBack: { self.pluginChat = nil; pluginInitialPrompt = nil })
+                        onBack: {
+                            if let folder = pluginChat.contextFolderPaths.first {
+                                let draftData = URL(fileURLWithPath: folder).deletingLastPathComponent()
+                                let data = draftData.deletingLastPathComponent().deletingLastPathComponent()
+                                let library = PluginLibrary(dataDirectory: data.path)
+                                if library.hasDraftChanges(id: pluginID) { showPluginDraftNotice = true; return }
+                            }
+                            self.pluginChat = nil; pluginInitialPrompt = nil
+                        })
                         .id(pluginChat.id)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     Divider()
@@ -236,6 +245,10 @@ struct KanbanBoardView: View {
                 boardContent
             }
         }
+        .alert("Draft saved", isPresented: $showPluginDraftNotice) {
+            Button("OK") { pluginChat = nil; pluginInitialPrompt = nil }
+                .buttonHoverPointer().nativeHelp("Close plugin editor")
+        } message: { Text("Your changes are saved as a draft. You can return and continue editing later.") }
         .background(WorkspaceTheme.windowBackground)
         // The open chat adds its width to the board's minimum, so the content-sized window grows
         // to keep the pushed columns visible, as it did when the chat sat beside the board.
