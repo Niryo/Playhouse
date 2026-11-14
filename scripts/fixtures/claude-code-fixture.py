@@ -814,6 +814,19 @@ def respond(user_text, instructions, preserve_no_outcome=False, previous_prompt=
             complete_command(steered_uuid)
             complete_command(current_command_uuid)
     elif "playhouse internal outcome nudge:" in user_text.lower() and "outcome-reminder-question" in Path(sys.argv[0]).name:
+        if Path(str(sys.argv[0]) + ".private-reminder-before").exists():
+            Path(str(sys.argv[0]) + ".private-reminder-before-ready").touch()
+            release = Path(str(sys.argv[0]) + ".private-reminder-before-release")
+            deadline = time.monotonic() + 90
+            while not release.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+        hold = Path(str(sys.argv[0]) + ".private-reminder-hold")
+        if hold.exists():
+            Path(str(sys.argv[0]) + ".private-reminder-ready").touch()
+            release = Path(str(sys.argv[0]) + ".private-reminder-release")
+            deadline = time.monotonic() + 60
+            while not release.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
         question_input = {
             "questions": [{
                 "header": "Color",
@@ -1832,6 +1845,16 @@ def main():
                 if "playhouse internal outcome nudge:" not in prior.get("userText", "").lower()
             ), "")
             preserve_no_outcome = any(marker in previous_prompt for marker in ("please inspect the workspace", "start the checks"))
+            private_question_turn = (
+                "playhouse internal outcome nudge:" in user_text.lower()
+                and "outcome-reminder-question" in Path(str(sys.argv[0])).name
+            )
+            if private_question_turn:
+                # Record the received prompt before emitting a control request: the
+                # daemon may reject it and terminate this process immediately.
+                history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
+                history["turns"].append(turn)
+                history_path.write_text(json.dumps(history), encoding="utf-8")
             maybe_burn_cpu()
             if SIDE_CHAT_MARKER in instructions:
                 turn["reportCommands"] = side_chat_respond(user_text, instructions, turn, prior_turns)
@@ -1847,9 +1870,10 @@ def main():
                         "command": outcome,
                         "output": run_tool("toolu_fixture_compaction_outcome", "Bash", {"command": outcome}, outcome),
                     })
-            history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
-            history["turns"].append(turn)
-            history_path.write_text(json.dumps(history), encoding="utf-8")
+            if not private_question_turn:
+                history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
+                history["turns"].append(turn)
+                history_path.write_text(json.dumps(history), encoding="utf-8")
             if PENDING_QUESTION_SUCCESS_MARKER in user_text.lower():
                 # Exercise a completed provider turn whose question remains unanswered.
                 # Let Playhouse persist and emit the request before reporting success.

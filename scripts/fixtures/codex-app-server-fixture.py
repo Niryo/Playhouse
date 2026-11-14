@@ -1562,6 +1562,26 @@ def main():
                 saved_history["turns"] = turns
                 history_path.write_text(json.dumps(saved_history), encoding="utf-8")
             preserve_no_outcome = any(marker in mode for marker in ("nonblocking-slow", "nonblocking-restart-question", "hold-release", "question-isolation"))
+            if mode.endswith("-private-reminder"):
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
+                if is_outcome_reminder:
+                    if Path(str(sys.argv[0]) + ".private-reminder-before").exists():
+                        Path(str(sys.argv[0]) + ".private-reminder-before-ready").touch()
+                        release = Path(str(sys.argv[0]) + ".private-reminder-before-release")
+                        deadline = time.monotonic() + 90
+                        while not release.exists() and time.monotonic() < deadline:
+                            time.sleep(0.02)
+                    question_request(901)
+                    Path(str(sys.argv[0]) + ".private-reminder-ready").touch()
+                else:
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID,
+                        "item": {"id": "private-reminder-answer", "type": "agentMessage", "phase": "final_answer", "text": "The ordinary turn is complete."},
+                    }})
+                    write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                        "threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"},
+                    }})
+                return
             if is_outcome_reminder and "nudged-work" in mode:
                 # The nudge says to keep working when work remains, so this turn
                 # streams commentary and a shell check, answers, and only then
@@ -2631,7 +2651,11 @@ def main():
         elif message.get("method") == "thread/turns/list":
             if message.get("params", {}).get("threadId") == THREAD_ID and TURN_ID:
                 # A client that reconnects mid-turn learns the turn is still running.
-                held = Path(str(sys.argv[0]) + ".interrupt-ready").exists()
+                held = Path(str(sys.argv[0]) + ".interrupt-ready").exists() or (
+                    mode.endswith("-private-reminder")
+                    and Path(str(sys.argv[0]) + ".private-reminder-before-ready").exists()
+                    and not Path(str(sys.argv[0]) + ".private-reminder-question-rejection").exists()
+                )
                 write({"jsonrpc": "2.0", "id": message["id"], "result": {
                     "data": [{"id": TURN_ID, "status": "inProgress" if held else "completed"}],
                     "nextCursor": None,

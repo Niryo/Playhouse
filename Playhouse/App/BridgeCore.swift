@@ -8225,7 +8225,7 @@ final class ConversationManager {
             modelID: modelID ?? provider.defaultModelID,
             segment: segment, claudeTurnID: claudeTurnID,
             hideSensitiveRecoveryPrompt: false, sensitiveUserInputAnswerValues: [],
-            isPlayhouseNudge: false, userInputAnswers: [:], recording: recording,
+            isPlayhouseNudge: transcript.activeTurnIsPlayhouseNudge == true, userInputAnswers: [:], recording: recording,
             onUpdate: onUpdate, onUserInput: { _ in }
         )
         let result: ConversationReattachResult
@@ -9959,6 +9959,11 @@ final class ConversationManager {
                     }
                     phase = "thread-start"
                 }
+            }
+            // Write before starting either provider: a replacement daemon must classify
+            // questions from this turn the same way as the daemon that started it.
+            try transcripts.mutate(taskID, turns: .none) { transcript in
+                transcript.activeTurnIsPlayhouseNudge = isPlayhouseNudge
             }
             let claudeTurnID = provider == .claude ? UUID().uuidString.lowercased() : nil
             // Only a private answer's recovery turn hides its output; a status nudge is shown.

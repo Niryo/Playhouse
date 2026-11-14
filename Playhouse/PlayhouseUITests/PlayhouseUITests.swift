@@ -8851,7 +8851,14 @@ final class PlayhouseUITests: XCTestCase {
         ])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(task["id"] as? String)
         let fixtureName = provider == "codex" ? "codex-fixture-hold-interrupt" : "claude-fixture-ui"
-        let executable = WorkspaceFixture.root.appendingPathComponent(fixtureName).path
+        let executable = (provider == "codex" ? dataDirectory : WorkspaceFixture.root).appendingPathComponent(fixtureName).path
+        if provider == "codex" {
+            try FileManager.default.copyItem(atPath: WorkspaceFixture.root.appendingPathComponent(fixtureName).path, toPath: executable)
+            try "Playhouse test owns this Codex protocol fixture (v1).\n".write(
+                to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"),
+                atomically: true, encoding: .utf8
+            )
+        }
         let ready = URL(fileURLWithPath: executable + ".interrupt-ready")
         let received = URL(fileURLWithPath: executable + ".interrupt-received")
         let release = URL(fileURLWithPath: executable + ".interrupt-release")
@@ -15452,7 +15459,7 @@ final class PlayhouseUITests: XCTestCase {
         element("send-message-button").click()
         let reply = "Answers received: Blue / fixture-secret."
         XCTAssertTrue(transcriptMessage(reply).waitToExist(timeout: 15), "The Sol turn's reply should arrive.")
-        XCTAssertTrue(app.staticTexts["Codex · Sol"].exists)
+        XCTAssertTrue(app.staticTexts["Codex · Sol"].waitToExist(timeout: 10))
         // The turn just ended with Sol still selected: reopening reuses the loaded
         // thread instead of resuming it with the hardcoded default (Luna).
         XCTAssertEqual((try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "gpt-6-sol")
@@ -15485,7 +15492,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(resumes.last, ["requested": "gpt-6-mini", "reported": "gpt-6-sol"],
                        "History resumes with the task's selected model, not the hardcoded default.")
         XCTAssertTrue(transcriptMessage(reply).waitToExist(timeout: 10), "History still shows the Sol reply.")
-        XCTAssertTrue(app.staticTexts["Codex · Sol"].exists)
+        XCTAssertTrue(app.staticTexts["Codex · Sol"].waitToExist(timeout: 10))
         XCTAssertFalse(element("codex-chat-error").waitToExist(timeout: 2),
                        "Loading history must not fail when Codex keeps the loaded thread's model.")
         attachScreenshot(named: "History loads after Codex keeps the Sol thread model")
@@ -16893,6 +16900,106 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitForStatus(taskID, "Waiting Response"), "The answered turn should end in Waiting Response.")
     }
 
+    private func exercisePrivateReminderRestart(provider: String) throws {
+        let name = provider == "claude" ? "claude-fixture-outcome-reminder-question" : "codex-fixture-private-reminder"
+        let executable = dataDirectory.appendingPathComponent(name)
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("\(provider)-fixture-ui"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try "Playhouse test owns this \(provider == "claude" ? "Claude Code" : "Codex") protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-\(provider)-fixture-owner"), atomically: true, encoding: .utf8)
+        if provider == "claude" { claudeFixtureExecutable = executable.path } else { codexFixtureExecutable = executable.path }
+        let environment = restartServiceEnvironment()
+        let title = "\(provider) private reminder restart"
+        let task = try XCTUnwrap(try runCLI(["task", "create", "--title", title, "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", provider])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        touch(executable.path + ".private-reminder-before")
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        openTask(named: title)
+        sendFromComposer("Complete this turn.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable.path + ".private-reminder-before-ready") }, timeout: 30))
+        let run = provider == "claude" ? agentManifest(kind: "claude", service: environment) : nil
+        if provider == "claude" { app.terminate() }
+        try killDaemon(environment: environment)
+        touch(executable.path + ".private-reminder-before-release")
+        if provider == "claude" {
+            let directory = try XCTUnwrap(run?.path.deletingLastPathComponent())
+            let output = directory.appendingPathComponent("agent.out")
+            var committedOffset: Int?
+            XCTAssertTrue(waitUntil({
+                guard let bytes = try? Data(contentsOf: output) else { return false }
+                var offset = 0
+                for line in bytes.split(separator: 10, omittingEmptySubsequences: false) {
+                    offset += line.count + 1
+                    guard offset <= bytes.count else { break }
+                    guard let message = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+                    if message["type"] as? String == "control_request", message["request_id"] as? String == "question-request-1" {
+                        committedOffset = offset
+                        return true
+                    }
+                }
+                return false
+            }, timeout: 20))
+            let manifestURL = directory.appendingPathComponent("run.json")
+            var manifest = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any])
+            XCTAssertFalse(manifest["writeInProgress"] as? Bool ?? true)
+            XCTAssertFalse((manifest["answeredRequestIDs"] as? [String] ?? []).contains("question-request-1"))
+            manifest["consumedOffset"] = try XCTUnwrap(committedOffset)
+            manifest["pendingRequestIDs"] = Array(Set((manifest["pendingRequestIDs"] as? [String] ?? []) + ["question-request-1"])).sorted()
+            try JSONSerialization.data(withJSONObject: manifest).write(to: manifestURL, options: .atomic)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: executable.path + ".private-reminder-question-rejection"))
+            launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+            openTask(named: title)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable.path + ".private-reminder-question-rejection") }, timeout: 45))
+        XCTAssertFalse(element("conversation-user-input-request").exists)
+        XCTAssertFalse(app.staticTexts["Which color should I use?"].exists)
+        attachScreenshot(named: "\(provider)-reattached-private-question-hidden")
+        let history = try runCLI(["conversation", "history", taskID], extraEnvironment: environment)["result"] as? [String: Any]
+        XCTAssertNil(history?["pendingUserInputRequest"])
+    }
+
+    // case-contract: test_claude_private_reminder_question_after_daemon_restart | A Claude private outcome reminder retains its classification when the daemon restarts: an unanswered question already in the committed provider log is replayed, rejected, never becomes a visible or saved pending question, and stays out of runtime snapshots.
+    func test_claude_private_reminder_question_after_daemon_restart() throws {
+        try exercisePrivateReminderRestart(provider: "claude")
+    }
+
+    // case-contract: test_codex_private_reminder_question_after_daemon_restart | A Codex private outcome reminder retains its classification when the daemon restarts: a question raised by the surviving provider turn is rejected, never becomes a visible or saved pending question, and stays out of runtime snapshots.
+    func test_codex_private_reminder_question_after_daemon_restart() throws {
+        try exercisePrivateReminderRestart(provider: "codex")
+    }
+
+    // case-contract: test_codex_outcome_reminder_rejects_user_questions | A Codex question raised during a private outcome reminder is rejected through the provider protocol, never appears in runtime snapshots or the visible conversation, and leaves no saved pending question; the task settles Blocked with the private-turn failure reason.
+    func test_codex_outcome_reminder_rejects_user_questions() throws {
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-private-reminder")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try "Playhouse test owns this Codex protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"), atomically: true, encoding: .utf8)
+        codexFixtureExecutable = executable.path
+        let task = try XCTUnwrap(try runCLI(["task", "create", "--title", "Codex reminder question", "--prompt", "Fixture task description.", "--root", fixture.primary.path, "--provider", "codex"])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        touch(executable.path + ".private-reminder-before")
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Codex reminder question")
+        sendFromComposer("Complete this turn.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable.path + ".private-reminder-before-ready") }, timeout: 30))
+        XCTAssertFalse(element("conversation-user-input-request").exists)
+        touch(executable.path + ".private-reminder-before-release")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable.path + ".private-reminder-ready") }, timeout: 30))
+        var sawPrivateQuestion = false
+        XCTAssertTrue(waitUntil({
+            if self.element("conversation-user-input-request").exists { sawPrivateQuestion = true }
+            return FileManager.default.fileExists(atPath: executable.path + ".private-reminder-question-rejection")
+        }, timeout: 30))
+        XCTAssertFalse(sawPrivateQuestion, "The private reminder question must stay hidden while it is handled.")
+        XCTAssertFalse(element("conversation-user-input-request").exists, "Private questions must never become answer cards.")
+        XCTAssertFalse(app.staticTexts["Which color should I use?"].exists)
+        attachScreenshot(named: "codex-reminder-private-question-hidden")
+        XCTAssertTrue(waitForStatus(taskID, "Blocked", timeout: 30))
+        XCTAssertTrue((try taskRecord(id: taskID)?["statusMessage"] as? String)?.contains("couldn't run the private turn") == true)
+        XCTAssertNil(try XCTUnwrap(try conversationState(taskID))["pendingUserInputRequest"])
+    }
+
     // case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, in-progress, and waiting-response instructions, which fails the private turn; both the question and the private rejection instructions stay out of the transcript. Playhouse then stops driving the work and marks the task Blocked naming that reason, rather than spending the remaining nudges.
 
     func test_claude_outcome_reminder_rejects_user_questions() throws {
@@ -16918,6 +17025,8 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").typeText("Finish while a structured question remains pending.")
         element("send-message-button").click()
         XCTAssertTrue(element("conversation-user-input-request").waitToExist(timeout: 10))
+        attachScreenshot(named: "claude-reminder-ordinary-question")
+        attachElementScreenshot(element("conversation-user-input-request"), named: "claude-reminder-ordinary-question-card")
         // The question flips the task to Waiting Response at once; the turn then ends with no
         // outcome and restores In Progress so the outcome reminder decides. Read the settled state.
         XCTAssertTrue(waitForStatus(taskID, "In Progress", timeout: 10), "A successful turn with a pending question should settle back in In Progress.")
@@ -16934,15 +17043,31 @@ final class PlayhouseUITests: XCTestCase {
             self.transcriptMessage("Answer received: Blue.").exists || self.transcriptMessage("Recovered answer: Blue.").exists
         }, timeout: 10))
         XCTAssertTrue(waitUntil({ !element("conversation-user-input-request").exists }, timeout: 5))
+        touch(executable.path + ".private-reminder-hold")
         element("message-composer").click()
         element("message-composer").typeText("Continue after answering.")
         element("send-message-button").click()
-        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Blocked" }, timeout: 60), "A failed private nudge should stop Playhouse driving and settle the task in Blocked.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: executable.path + ".private-reminder-ready") }, timeout: 30))
+        XCTAssertFalse(element("conversation-user-input-request").exists, "The private reminder must not show a question while the provider is held.")
+        attachScreenshot(named: "claude-reminder-private-question-hidden")
+        touch(executable.path + ".private-reminder-release")
+        var sawPrivateQuestion = false
+        XCTAssertTrue(waitUntil({
+            if self.element("conversation-user-input-request").exists { sawPrivateQuestion = true }
+            return (try? self.taskRecord(id: taskID)?["status"] as? String) == "Blocked"
+        }, timeout: 60), "A failed private nudge should stop Playhouse driving and settle the task in Blocked.")
+        XCTAssertFalse(sawPrivateQuestion, "The private reminder question must stay hidden while it is handled.")
         XCTAssertTrue(
             (try taskRecord(id: taskID)?["statusMessage"] as? String)?.contains("couldn't run the private turn") == true,
             "The Blocked reason must name why Playhouse stopped driving the work."
         )
 
+        XCTAssertTrue(waitUntil({
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".history")),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let turns = history["turns"] as? [[String: Any]] else { return false }
+            return turns.contains { ($0["userText"] as? String)?.contains("Playhouse internal outcome nudge:") == true }
+        }, timeout: 10), "The released fixture must finish recording its reminder.")
         let fixtureTurnsData = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
         let fixtureHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: fixtureTurnsData) as? [String: Any])
         let turns = try XCTUnwrap(fixtureHistory["turns"] as? [[String: Any]])
@@ -16959,6 +17084,7 @@ final class PlayhouseUITests: XCTestCase {
             format: "label CONTAINS %@", "This is a private Playhouse status nudge."
         )).firstMatch.exists, "Claude's private rejection instructions must not appear in the visible transcript.")
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse internal outcome nudge:")).firstMatch.exists)
+        attachScreenshot(named: "claude-reminder-rejected")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitToExist(timeout: 5))
         assertTaskVisible("Claude reminder question", inColumn: "Blocked")
@@ -17389,6 +17515,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(response.waitToExist(timeout: 10))
         XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
         XCTAssertTrue(response.label.contains("Additional detail: Retry this answer."))
+        XCTAssertTrue(scrollTranscriptUntilExists(card), "The answered question should remain in the transcript.")
         XCTAssertTrue(card.staticTexts["Answered"].waitToExist(timeout: 10), "The queued answer should settle as Answered after its response appears.")
         let deliveredAnswered = try XCTUnwrap(try runCLI(["conversation", "answered-async", taskID])["result"] as? [String: Any])
         XCTAssertEqual(deliveredAnswered["itemIDs"] as? [String], ["item_playhouse_async_question"], "The delivered async answer should be recorded as answered.")

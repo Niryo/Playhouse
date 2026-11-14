@@ -114,6 +114,8 @@ struct ConversationTranscript: Codable, Equatable {
     var messageTimestamps: [String: Date]?
     /// Fail-closed marker written before a private recovery prompt is sent.
     var pendingSensitiveUserInputRedaction: Bool?
+    /// Classification of the latest started turn, retained for daemon reattachment.
+    var activeTurnIsPlayhouseNudge: Bool?
     /// Every compaction of the Claude session's context, oldest first: what
     /// fired it and how far it shrank the context.
     var contextCompactions: [ContextCompactionEvent]?

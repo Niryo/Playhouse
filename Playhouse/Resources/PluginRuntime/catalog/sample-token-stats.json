@@ -84,6 +84,8 @@
           "total": "1,600"
         }
       ],
+      "contextCompactions": [],
+      "resumeCacheMisses": [],
       "turns": [
         {
           "id": "turn-1",

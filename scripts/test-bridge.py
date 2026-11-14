@@ -11075,6 +11075,104 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(message["text"] == "Answer received: Blue." for message in result["messages"]))
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
 
+    def exercise_private_reminder_restart(self, provider):
+        name = "claude-fixture-outcome-reminder-question" if provider == "claude" else "codex-fixture-private-reminder"
+        executable = self.install_provider_fixture(provider, name)
+        environment = self.restart_service_environment(provider, executable)
+        task = self.create_task(f"{provider} private reminder restart", provider=provider)
+        Path(str(executable) + ".private-reminder-before").touch()
+        sent = {}
+        sender = threading.Thread(target=lambda: sent.setdefault("turn", self.call_cli(
+            "conversation", "send", task["id"], "--message", "Complete this turn.",
+            expected_status=69, timeout=120, extra_environment=environment)), daemon=True)
+        sender.start()
+        self.wait_for(Path(str(executable) + ".private-reminder-before-ready").is_file, "The private reminder should be running.")
+        run_directory = self.claude_runs(environment)[0][0] if provider == "claude" else None
+        self.kill_daemon(environment)
+        sender.join(timeout=20)
+        self.assertFalse(sender.is_alive())
+        self.assert_failure(sent["turn"][0], "service_unavailable")
+        if run_directory:
+            # Seed the precise crash image where this real output line was committed
+            # before its scheduled rejection handler ran. The provider remains alive.
+            Path(str(executable) + ".private-reminder-before-release").touch()
+            def question_offset():
+                offset = 0
+                for line in (run_directory / "agent.out").read_bytes().splitlines(keepends=True):
+                    offset += len(line)
+                    try:
+                        message = json.loads(line)
+                    except (ValueError, UnicodeDecodeError):
+                        continue
+                    if message.get("type") == "control_request" and message.get("request_id") == "question-request-1":
+                        return offset
+                return None
+            offset = self.wait_for(question_offset, "The provider writes the unanswered private question.")
+            manifest_path = run_directory / "run.json"
+            manifest = json.loads(manifest_path.read_text())
+            self.assertFalse(manifest["writeInProgress"])
+            self.assertNotIn("question-request-1", manifest["answeredRequestIDs"])
+            manifest["consumedOffset"] = offset
+            manifest["pendingRequestIDs"] = sorted(set(manifest["pendingRequestIDs"]) | {"question-request-1"})
+            replacement = manifest_path.with_suffix(".test-replacement")
+            replacement.write_text(json.dumps(manifest), encoding="utf-8")
+            os.replace(replacement, manifest_path)
+            self.assertFalse(Path(str(executable) + ".private-reminder-question-rejection").exists())
+        conversation_watcher = self.start_cli("conversation", "watch", task["id"], extra_environment=environment)
+        watcher = self.start_cli("conversation", "runtime", "--watch", extra_environment=environment, binary_output=True)
+        try:
+            initial_snapshot = self.read_watcher_snapshot(watcher, lambda snapshot: not snapshot.get("pendingUserInput"))
+            if provider != "claude":
+                Path(str(executable) + ".private-reminder-before-release").touch()
+            self.wait_for(Path(str(executable) + ".private-reminder-question-rejection").is_file,
+                          "The reattached provider must receive the private question rejection.", timeout=40)
+            history = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=environment)[0])
+            self.assertIsNone(history.get("pendingUserInputRequest"))
+            self.assertNotIn("Which color should I use?", json.dumps(history))
+        finally:
+            watcher.terminate()
+            output, _ = watcher.communicate(timeout=10)
+            conversation_watcher.terminate()
+            conversation_watcher.communicate(timeout=10)
+        snapshots = [initial_snapshot] + [event["payload"] for line in output.splitlines()
+                     if (event := json.loads(line)).get("type") == "runtime_state"]
+        self.assertGreater(len(snapshots), 1, "The watcher must observe a change after its initial snapshot.")
+        self.assertTrue(all(not snapshot.get("pendingUserInput") for snapshot in snapshots))
+
+    # case-contract: test_claude_private_reminder_question_after_daemon_restart | A Claude private outcome reminder retains its classification when the daemon restarts: an unanswered question already in the committed provider log is replayed, rejected, never becomes a visible or saved pending question, and stays out of runtime snapshots.
+    def test_claude_private_reminder_question_after_daemon_restart(self):
+        self.exercise_private_reminder_restart("claude")
+
+    # case-contract: test_codex_private_reminder_question_after_daemon_restart | A Codex private outcome reminder retains its classification when the daemon restarts: a question raised by the surviving provider turn is rejected, never becomes a visible or saved pending question, and stays out of runtime snapshots.
+    def test_codex_private_reminder_question_after_daemon_restart(self):
+        self.exercise_private_reminder_restart("codex")
+
+    # case-contract: test_codex_outcome_reminder_rejects_user_questions | A Codex question raised during a private outcome reminder is rejected through the provider protocol, never appears in runtime snapshots or the visible conversation, and leaves no saved pending question; the task settles Blocked with the private-turn failure reason.
+    def test_codex_outcome_reminder_rejects_user_questions(self):
+        executable = self.install_provider_fixture("codex", "codex-fixture-private-reminder")
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        task_id = self.create_task("Codex reminder question", roots=[self.primary])["id"]
+        watcher = self.start_cli("conversation", "runtime", "--watch", extra_environment=environment, binary_output=True)
+        try:
+            initial_snapshot = self.read_watcher_snapshot(watcher, lambda snapshot: not snapshot.get("pendingUserInput"))
+            response, events = self.call_cli("conversation", "send", task_id, "--message", "Complete this turn.", extra_environment=environment)
+        finally:
+            watcher.terminate()
+            watcher_output, _ = watcher.communicate(timeout=10)
+        self.assertTrue(self.assert_success(response)["messages"])
+        snapshots = [initial_snapshot] + [event["payload"] for line in watcher_output.splitlines()
+                     if (event := json.loads(line)).get("type") == "runtime_state"]
+        self.assertGreater(len(snapshots), 1, "The watcher must observe a change after its initial snapshot.")
+        self.assertTrue(all(not snapshot.get("pendingUserInput") for snapshot in snapshots), "A private Codex question must never enter a runtime snapshot.")
+        self.assertFalse(any(event.get("type") == "user_input" for event in events))
+        self.wait_for(Path(str(executable) + ".private-reminder-question-rejection").is_file, "The provider receives the private question rejection.")
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        self.assertIsNone(history.get("pendingUserInputRequest"))
+        self.assertNotIn("Which color should I use?", json.dumps(history))
+        task = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(task["status"], "Blocked")
+        self.assertIn("couldn't run the private turn", task.get("statusMessage") or "")
+
     # case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, in-progress, and waiting-response instructions, which fails the private turn; both the question and the private rejection instructions stay out of the transcript. Playhouse then stops driving the work and marks the task Blocked naming that reason, rather than spending the remaining nudges.
     def test_claude_outcome_reminder_rejects_user_questions(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
@@ -11111,10 +11209,22 @@ class PlayhouseBridgeTests(unittest.TestCase):
         answered_history, _ = self.call_cli("conversation", "history", task_id,
                                             extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)})
         self.assertIsNone(self.assert_success(answered_history).get("pendingUserInputRequest"))
-        followup, followup_events = self.call_cli(
-            "conversation", "send", task_id, "--message", "Continue after answering.",
-            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
-        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        watcher = self.start_cli("conversation", "runtime", "--watch", extra_environment=environment, binary_output=True)
+        try:
+            initial_snapshot = self.read_watcher_snapshot(watcher, lambda snapshot: not snapshot.get("pendingUserInput"))
+            followup, followup_events = self.call_cli(
+                "conversation", "send", task_id, "--message", "Continue after answering.",
+                extra_environment=environment,
+            )
+        finally:
+            watcher.terminate()
+            watcher_output, _ = watcher.communicate(timeout=10)
+        snapshots = [initial_snapshot] + [event["payload"] for line in watcher_output.splitlines()
+                     if (event := json.loads(line)).get("type") == "runtime_state"]
+        self.assertGreater(len(snapshots), 1, "The runtime watcher should observe the follow-up turn after its initial snapshot.")
+        self.assertTrue(all(not snapshot.get("pendingUserInput") for snapshot in snapshots),
+                        "A rejected private reminder question must never enter the runtime snapshot.")
         self.assertTrue(self.assert_success(followup)["messages"])
         events = initial_events + followup_events
         self.assertEqual(sum(event.get("type") == "user_input" for event in events), 1,

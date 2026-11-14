@@ -1152,9 +1152,15 @@ final class ClaudeSessionRunner {
             "processAlive": String(run.isRunning),
             "consumedOffset": String(run.manifest.consumedOffset),
         ]))
-        if let request = pendingUserInputRequest {
+        if let pending = pendingQuestion {
+            let request = ConversationUserInputRequest(id: pending.controlRequestID, threadID: sessionID, questions: pending.questions, isBlocking: true, mode: activeMode)
             let handler = userInputHandler
-            Task { @MainActor in await handler?(request) }
+            Task { @MainActor in
+                await handler?(request)
+                guard self.pendingQuestion?.controlRequestID == request.id else { return }
+                self.pendingUserInputRequest = request
+                self.owner?.runnerStateChanged(self)
+            }
         }
         onAttached()
         followAgentRun(run)
@@ -1346,10 +1352,18 @@ final class ClaudeSessionRunner {
         pendingQuestion = PendingQuestion(controlRequestID: requestID, sessionID: sessionID, input: input, questions: questions)
         if !isReplaying { agentRun?.notePending(requestID) }
         let request = ConversationUserInputRequest(id: requestID, threadID: sessionID, questions: questions, isBlocking: true, mode: activeMode)
-        pendingUserInputRequest = request
-        owner?.runnerStateChanged(self)
+        if isReplaying {
+            return
+        }
         let handler = userInputHandler
-        Task { @MainActor in await handler?(request) }
+        Task { @MainActor in
+            await handler?(request)
+            // The handler rejects private reminder questions before they can be shown.
+            // Publish only a request that survived that decision (and any answer).
+            guard self.pendingQuestion?.controlRequestID == requestID else { return }
+            self.pendingUserInputRequest = request
+            self.owner?.runnerStateChanged(self)
+        }
     }
 
     private func clearPendingQuestion() {

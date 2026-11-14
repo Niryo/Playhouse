@@ -204,6 +204,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     private struct PendingUserInput {
         let nativeID: Any
         let request: ConversationUserInputRequest
+        var published = false
         /// The app-server process (or socket connection) that asked. Only that one,
         /// while it is still the running one, can receive a live answer.
         weak var asker: AnyObject?
@@ -1291,12 +1292,13 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     func pendingUserInputRequest(forThread threadID: String) -> ConversationUserInputRequest? {
-        pendingUserInputs[threadID]?.request
+        guard let pending = pendingUserInputs[threadID], pending.published else { return nil }
+        return pending.request
     }
 
     private func clearPendingUserInput(threadID: String) {
         pendingUserInputs.removeValue(forKey: threadID)
-        pendingUserInputRequest = pendingUserInputs.values.first?.request
+        pendingUserInputRequest = pendingUserInputs.values.first(where: \.published)?.request
     }
 
     func isTurnActive(threadID: String) -> Bool {
@@ -1330,7 +1332,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     var pendingUserInputsSnapshot: [String: ConversationUserInputRequest] {
-        pendingUserInputs.mapValues(\.request)
+        pendingUserInputs.filter { $0.value.published }.mapValues(\.request)
     }
 
     /// The running app-server's OS process ID. Every thread on this client
@@ -2378,8 +2380,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 mode: context.mode
             )
             pendingUserInputs[threadID] = PendingUserInput(nativeID: requestID, request: request, asker: source)
-            pendingUserInputRequest = request
             await context.handler(request)
+            if pendingUserInputs[threadID]?.request.id == request.id {
+                pendingUserInputs[threadID]?.published = true
+                pendingUserInputRequest = request
+            }
             return
         case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
             result = ["decision": "decline"]

@@ -870,5 +870,17 @@
   {
     "id": "test_plugin_card_uses_default_content_padding",
     "expectation": "The Plugin Catalog's Card page gives a Card with no padding prop its 14-point default, while `padding: 0` removes it. `plugin render --page Card` omits the default common padding but keeps the explicit zero override on the second Card, and in the UI two otherwise identical cards have the same width while the default-padded card is 28 points taller; each card keeps its own content inside the surface."
+  },
+  {
+    "id": "test_codex_outcome_reminder_rejects_user_questions",
+    "expectation": "A Codex question raised during a private outcome reminder is rejected through the provider protocol, never appears in runtime snapshots or the visible conversation, and leaves no saved pending question; the task settles Blocked with the private-turn failure reason."
+  },
+  {
+    "id": "test_claude_private_reminder_question_after_daemon_restart",
+    "expectation": "A Claude private outcome reminder retains its classification when the daemon restarts: an unanswered question already in the committed provider log is replayed, rejected, never becomes a visible or saved pending question, and stays out of runtime snapshots."
+  },
+  {
+    "id": "test_codex_private_reminder_question_after_daemon_restart",
+    "expectation": "A Codex private outcome reminder retains its classification when the daemon restarts: a question raised by the surviving provider turn is rejected, never becomes a visible or saved pending question, and stays out of runtime snapshots."
   }
 ]
