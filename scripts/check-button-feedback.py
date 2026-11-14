@@ -149,7 +149,7 @@ def main() -> int:
             line_start = source.rfind("\n", 0, start) + 1
             indent = len(source[line_start:start])
             chain = modifier_chain(source, end, indent)
-            if ".buttonHoverPointer()" not in chain:
+            if ".buttonHoverPointer()" not in chain and not re.search(r"//\s*no-pointer:\s*\S", chain):
                 errors.append(f"{location}: {kind} is missing buttonHoverPointer()")
             # Window controls use `.nativeHelp`: SwiftUI's `.help` alone does not present its
             # tooltip for most controls in the main window. Menu items (menu-bar commands and
