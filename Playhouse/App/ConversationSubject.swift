@@ -375,6 +375,8 @@ final class StandaloneChat {
     // and of the general-purpose standalone chat.
     var authoredPluginID: String?
     var pluginPlacement: String?
+    var pluginAuthoringName: String?
+    var pluginAuthoringPresentation: String?
     var pluginContextFolder: String?
     var statusRawValue: String
     var lifecycleRevision: Int = 0

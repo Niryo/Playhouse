@@ -8,67 +8,69 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 CONTRACT_PATH = REPOSITORY_ROOT / "Playhouse/BridgeTests/BridgeTestContracts.json"
-CLI_TEST_PATH = REPOSITORY_ROOT / "scripts/test-bridge.py"
-UI_TEST_PATH = REPOSITORY_ROOT / "Playhouse/PlayhouseUITests/PlayhouseUITests.swift"
+CLI_TEST_PATHS = [
+    REPOSITORY_ROOT / "scripts/test-bridge.py",
+    *sorted((REPOSITORY_ROOT / "scripts/bridge_test_cases").glob("cases_*.py")),
+]
+UI_TEST_PATHS = sorted((REPOSITORY_ROOT / "Playhouse/PlayhouseUITests").glob("PlayhouseUITests*.swift"))
 CONTRACT_ANNOTATION = re.compile(r"^\s*# case-contract: (test_[A-Za-z0-9_]+) \| (.+)$")
 SWIFT_ANNOTATION = re.compile(r"^\s*// case-contract: (test_[A-Za-z0-9_]+) \| (.+)$")
 
 
-def python_cases(path: Path) -> tuple[set[str], dict[str, str]]:
-    source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(path))
-    names = {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name.startswith("test_")
-    }
-    all_names = [
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name.startswith("test_")
-    ]
-    if len(all_names) != len(set(all_names)):
-        raise SystemExit("CLI suite contains duplicate test case names.")
+def python_cases(paths: list[Path]) -> tuple[set[str], dict[str, str]]:
+    names: set[str] = set()
     annotations: dict[str, str] = {}
-    lines = source.splitlines()
-    for index, line in enumerate(lines):
-        match = CONTRACT_ANNOTATION.match(line)
-        if not match:
-            continue
-        case_id, expectation = match.groups()
-        next_code = index + 1
-        while next_code < len(lines) and not lines[next_code].strip():
-            next_code += 1
-        if next_code >= len(lines) or not re.match(r"\s*def " + re.escape(case_id) + r"\s*\(", lines[next_code]):
-            raise SystemExit(f"CLI contract annotation for {case_id} must immediately precede its test.")
-        if case_id in annotations:
-            raise SystemExit(f"CLI has duplicate contract annotations for {case_id}.")
-        annotations[case_id] = expectation
+    for path in paths:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        all_names = [
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_")
+        ]
+        if names.intersection(all_names) or len(all_names) != len(set(all_names)):
+            raise SystemExit("CLI suite contains duplicate test case names.")
+        names.update(all_names)
+        lines = source.splitlines()
+        for index, line in enumerate(lines):
+            match = CONTRACT_ANNOTATION.match(line)
+            if not match:
+                continue
+            case_id, expectation = match.groups()
+            next_code = index + 1
+            while next_code < len(lines) and not lines[next_code].strip():
+                next_code += 1
+            if next_code >= len(lines) or not re.match(r"\s*def " + re.escape(case_id) + r"\s*\(", lines[next_code]):
+                raise SystemExit(f"CLI contract annotation for {case_id} must immediately precede its test.")
+            if case_id in annotations:
+                raise SystemExit(f"CLI has duplicate contract annotations for {case_id}.")
+            annotations[case_id] = expectation
     return names, annotations
 
 
-def swift_cases(path: Path) -> tuple[set[str], dict[str, str]]:
-    lines = path.read_text(encoding="utf-8").splitlines()
-    all_names = re.findall(r"\bfunc\s+(test_[A-Za-z0-9_]+)\s*\(", "\n".join(lines))
-    if len(all_names) != len(set(all_names)):
-        raise SystemExit("UI suite contains duplicate test case names.")
-    names = set(all_names)
+def swift_cases(paths: list[Path]) -> tuple[set[str], dict[str, str]]:
+    names: set[str] = set()
     annotations: dict[str, str] = {}
-    for index, line in enumerate(lines):
-        match = SWIFT_ANNOTATION.match(line)
-        if not match:
-            continue
-        case_id, expectation = match.groups()
-        next_code = index + 1
-        while next_code < len(lines) and not lines[next_code].strip():
-            next_code += 1
-        if next_code >= len(lines) or not re.match(r"\s*func " + re.escape(case_id) + r"\s*\(", lines[next_code]):
-            raise SystemExit(f"UI contract annotation for {case_id} must immediately precede its test.")
-        if case_id in annotations:
-            raise SystemExit(f"UI suite has duplicate contract annotations for {case_id}.")
-        annotations[case_id] = expectation
+    for path in paths:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        all_names = re.findall(r"\bfunc\s+(test_[A-Za-z0-9_]+)\s*\(", "\n".join(lines))
+        if names.intersection(all_names) or len(all_names) != len(set(all_names)):
+            raise SystemExit("UI suite contains duplicate test case names.")
+        names.update(all_names)
+        for index, line in enumerate(lines):
+            match = SWIFT_ANNOTATION.match(line)
+            if not match:
+                continue
+            case_id, expectation = match.groups()
+            next_code = index + 1
+            while next_code < len(lines) and not lines[next_code].strip():
+                next_code += 1
+            if next_code >= len(lines) or not re.match(r"\s*func " + re.escape(case_id) + r"\s*\(", lines[next_code]):
+                raise SystemExit(f"UI contract annotation for {case_id} must immediately precede its test.")
+            if case_id in annotations:
+                raise SystemExit(f"UI suite has duplicate contract annotations for {case_id}.")
+            annotations[case_id] = expectation
     return names, annotations
 
 
@@ -116,10 +118,11 @@ def main() -> None:
         raise SystemExit("Every shared test contract must have a non-empty expectation.")
 
     expected = set(contract_names)
-    cli_names, cli_contracts = python_cases(CLI_TEST_PATH)
-    ui_names, ui_contracts = swift_cases(UI_TEST_PATH)
+    cli_names, cli_contracts = python_cases(CLI_TEST_PATHS)
+    ui_names, ui_contracts = swift_cases(UI_TEST_PATHS)
 
-    problems = composer_coverage_problems(UI_TEST_PATH.read_text(encoding="utf-8"))
+    ui_source = "\n".join(path.read_text(encoding="utf-8") for path in UI_TEST_PATHS)
+    problems = composer_coverage_problems(ui_source)
     for label, actual, annotated in [
         ("CLI", cli_names, cli_contracts),
         ("UI", ui_names, ui_contracts),
