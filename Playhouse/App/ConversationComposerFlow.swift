@@ -318,21 +318,19 @@ extension TaskConversationView {
             modelID: selectedModelID.isEmpty ? nil : selectedModelID
         )
         let taskID = task.id
-        let needsTitle = schedule.kind == .once && Self.placeholderTitles.contains(task.title)
         isSavingSchedule = true
         Task { @MainActor in
             defer { isSavingSchedule = false }
             do {
-                let manager = BoardTaskManager(modelContext: modelContext)
-                _ = try await manager.setSchedule(taskID, request)
+                _ = try await BoardTaskManager(modelContext: modelContext).setSchedule(taskID, request)
                 composerDraft.settledText = draft
                 PlayhouseDiagnostics.record("ui.task.scheduled", fields: ["taskID": taskID.uuidString, "kind": schedule.kind.rawValue])
-                if needsTitle {
-                    // A one-time task waits on the board, so name it now as a first send would.
-                    let conversations = conversationManager
-                    Task { @MainActor in
-                        guard let generated = await conversations.generateTitle(taskID: taskID, prompt: prompt) else { return }
-                        _ = try? await manager.renameIfTitleMatches(taskID, expectedTitle: "Untitled task", title: generated.title)
+                // A one-time task waits on the board, so the daemon names it now as a first send would.
+                if schedule.kind == .once {
+                    do {
+                        try await conversationManager.nameScheduledTask(taskID: taskID)
+                    } catch {
+                        PlayhouseDiagnostics.record("ui.task.schedule_title.failed", fields: PlayhouseDiagnostics.errorFields(error).merging(["taskID": taskID.uuidString]) { _, new in new })
                     }
                 }
                 onBack()
