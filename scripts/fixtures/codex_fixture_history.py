@@ -190,7 +190,12 @@ def list_items(runtime, _session_state, message):
                 _session_state.contents.append({"id": "item_long_history_command_21", "type": "commandExecution", "command": "ls fixture-history",
                                  "cwd": "/tmp/playhouse-fixture", "status": "completed", "exitCode": 0, "durationMs": 5,
                                  "aggregatedOutput": "".join(f"history-file-{line}.txt\n" for line in range(1, 7))})
-            _session_state.contents.append({"id": f"item_long_history_assistant_{_session_state.index}", "type": "agentMessage", "phase": "final_answer", "text": f"Long history assistant {_session_state.index:02d}."})
+            _session_state.text = f"Long history assistant {_session_state.index:02d}."
+            if _session_state.index == 60 and _session_state.mode.endswith("-long-history-success"):
+                # A newest answer taller than the transcript viewport, so a conversation opened
+                # on its question differs visibly from one opened at its end.
+                _session_state.text = "\n\n".join([_session_state.text, *(f"Long history closing paragraph {number:02d}." for number in range(1, 31))])
+            _session_state.contents.append({"id": f"item_long_history_assistant_{_session_state.index}", "type": "agentMessage", "phase": "final_answer", "text": _session_state.text})
     if _session_state.mode.endswith("-tool-activity"):
         # A concurrent `thread/items/list` read — a second CLI call, or a
         # window reopening the same thread mid-turn — rebuilds its snapshot

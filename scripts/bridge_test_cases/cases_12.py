@@ -196,7 +196,7 @@ class BridgeTestCases12:
         assistant = next(item for item in reloaded["messages"] if item.get("role") == "assistant")
         self.assertLess(user["timelineOrder"], reloaded_rows[0]["timelineOrder"])
         self.assertLess(reloaded_rows[0]["timelineOrder"], assistant["timelineOrder"])
-    # case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below. Scrolling upward loads earlier messages automatically in 40-message batches, including when the latest turn alone is shorter than the viewport, while keeping the anchored message in place and preserving chronological order. No separate control is needed on systems that report scroll position; below macOS 15 the transcript keeps an explicit Load earlier messages control inside that runway instead. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn and keeps upward paging working. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order. The transcript's runway above the rendered window is as tall as the unrendered history is estimated to be, from the loaded messages and the stored count a paged read reports, so the scroller knob already reflects the whole conversation when the latest turn opens and keeps about its size as older batches are revealed; one long upward scroll deep into that runway reveals every batch it passes, reading the stored page as needed, and lands on the first messages.
+    # case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below, which is taller than the viewport and runs on past its bottom. Scrolling upward loads earlier messages automatically in 40-message batches, starting from a reader already at the top of the rendered messages; each batch is revealed as the reader nears the oldest rendered message, while the message the reader is on stays in place and chronological order is preserved. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn, pinned the same way, and keeps upward paging working: scrolling on to the top reveals every batch, reading the stored page as needed, and reaches the first messages. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
     def test_conversation_loads_newest_messages_before_older_history(self):
         task_id = self.create_task(title="Long conversation history")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -213,7 +213,11 @@ class BridgeTestCases12:
         messages = self.assert_success(history_response)["messages"]
         self.assertEqual(len(messages), 120)
         self.assertEqual(messages[0]["text"], "Long history user 01.")
-        self.assertEqual(messages[-1]["text"], "Long history assistant 60.")
+        # The newest answer runs to many paragraphs, so the visible transcript can tell a
+        # reopened conversation pinned to its question from one opened at its end.
+        closing = messages[-1]["text"].split("\n\n")
+        self.assertEqual(closing[0], "Long history assistant 60.")
+        self.assertEqual(closing[1:], [f"Long history closing paragraph {number:02d}." for number in range(1, 31)])
         self.assertEqual(
             [message["text"] for message in messages[:4]],
             ["Long history user 01.", "Long history assistant 01.", "Long history user 02.", "Long history assistant 02."],
@@ -233,8 +237,8 @@ class BridgeTestCases12:
         newest = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80", extra_environment=env)[0])
         self.assertEqual(newest["earlierMessageCount"], 40)
         self.assertEqual([message["text"] for message in newest["messages"]], [message["text"] for message in messages[40:]])
-        # The transcript sizes its scroller for the history it has not read yet
-        # from this count, so the page and the count must add up to the whole.
+        # The transcript reports its size and pages backward from this count,
+        # so the page and the count must add up to the whole.
         self.assertEqual(len(newest["messages"]) + newest["earlierMessageCount"], len(messages))
         older = self.assert_success(self.call_cli(
             "conversation", "history", task_id, "--limit", "80", "--before", newest["messages"][0]["id"], extra_environment=env

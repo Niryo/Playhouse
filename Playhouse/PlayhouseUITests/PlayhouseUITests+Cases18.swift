@@ -65,12 +65,12 @@ extension PlayhouseUITests {
             scrollTranscript(by: fine, until: { isVisible(target) && topInViewport(target) < 160 && topInViewport(target) >= 0 }, limit: 20, settle: 0.2)
         }
         XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest 2 of 120 messages" }, timeout: 20), "Reopening should render only the latest turn.")
-        // A short scroll reveals the first older batch; one long upward scroll then reveals every
-        // batch it passes and lands on the first messages, as dragging the scroller's knob does.
+        // A short scroll reveals the first older batch; long upward scrolls then each land on the
+        // oldest rendered message and reveal the batch above it.
         scrollView.scroll(byDeltaX: 0, deltaY: 200)
         XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest 42 of 120 messages" }, timeout: 10), "An upward scroll should reveal the first older batch.")
-        scrollView.scroll(byDeltaX: 0, deltaY: 40_000)
-        XCTAssertTrue(waitUntil({ scrollView.value as? String == "Showing latest 120 of 120 messages" }, timeout: 20), "Scrolling up should reveal every earlier batch.")
+        XCTAssertTrue(revealWholeTranscript(step: 40_000), "Scrolling up should reveal every earlier batch.")
+        XCTAssertEqual(scrollView.value as? String, "Showing latest 120 of 120 messages")
         scrollTranscript(by: 1500, until: { isVisible(oldest) }, limit: 40)
         XCTAssertTrue(waitUntil({ isVisible(oldest) && isVisible(firstAssistant) }, timeout: 5), "The top of the revealed history should show its first messages.")
 
@@ -161,9 +161,8 @@ extension PlayhouseUITests {
         hideSidebar.click()
         XCTAssertTrue(waitUntil({ abs(columnWidth(scrollView.frame.width) - columnWidth(widthBeforeResize)) > 20 }, timeout: 5),
                       "Hiding the task sidebar should change the width of the transcript's column: before=\(widthBeforeResize), after=\(scrollView.frame.width).")
-        // The boxes rescale a moment after the width changes and the restore lands 150 ms after
-        // the resize ends, so judge the position once both have had time, not on a sample taken
-        // before the boxes rescaled.
+        // The sidebar animates away, so judge the position once the width has settled, not on
+        // a sample taken while the rows were still reflowing.
         RunLoop.current.run(until: Date().addingTimeInterval(0.8))
         XCTAssertTrue(isVisible(deepMessage) && abs(topInViewport(deepMessage) - readingTop) <= 100,
                       "A resize should keep the message being read in place; it moved from \(readingTop) to \(topInViewport(deepMessage)).")

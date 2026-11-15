@@ -5,172 +5,48 @@ import SwiftUI
 extension TaskConversationView {
     var conversation: some View {
         GeometryReader { viewport in
-            ScrollViewReader { scrollProxy in
+            let scroll = transcriptScroll
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    // Scroll runway above the rendered window. It keeps an
-                    // upward drag available even when the latest turn alone is
-                    // shorter than the viewport, and it is replaced by the
-                    // earlier messages as soon as they are revealed. It is as
-                    // tall as those messages are estimated to be, so the
-                    // scroller keeps about the same size as they appear.
-                    let runwayHeight = olderConversationRunwayHeight(viewport: viewport.size)
-                    if hasOlderConversationMessages {
-                        Color.clear
-                            .frame(height: runwayHeight)
-                            .accessibilityHidden(true)
-                        // Scroll position is only observable from macOS 15 on,
-                        // so older systems keep an explicit control rather than
-                        // an upward drag that cannot be detected.
-                        if #unavailable(macOS 15) {
-                            Button("Load earlier messages") {
-                                revealOlderConversationMessages(using: scrollProxy)
-                            }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .buttonHoverPointer()
-                            .nativeHelp("Load 40 earlier messages.")
-                            .accessibilityIdentifier("conversation-load-older-button")
-                        }
-                    }
-                    // Tracks how far the top of the rendered window sits below
-                    // the top of the viewport, which is how an upward scroll is
-                    // detected.
-                    GeometryReader { geometry in
-                        Color.clear.preference(
-                            key: ConversationTopMarkerPositionKey.self,
-                            value: geometry.frame(in: .named(Self.conversationScrollCoordinateSpace)).minY
-                        )
-                    }
-                    .frame(height: 0)
-
                 let leadingGoalEntries = goalAchievementTimelineEntries.filter { goalAchievementAnchorMessageID(for: $0) == nil }
                 // Worked out once per pass rather than once per row: each walks the whole transcript, and
                 // every row of it is rebuilt whenever the transcript's width changes, as while resizing the chat.
                 let renderedMessages = renderedConversationMessages
                 let rowContext = makeTranscriptRowContext(rendered: renderedMessages)
-                // Everything before the newest turn is settled, so only its rows near the viewport
-                // render (see `TranscriptVirtualizer`): scrolling, hit testing and layout cost what
-                // is on screen rather than everything revealed so far. The newest turn, where answers
-                // stream and rows grow, always renders in full in the layout below. When the newest
-                // turn starts before the rendered window, as when one live turn outgrows a window
-                // that was never pinned, every rendered row belongs to it and renders in full.
-                let latestTurnStartIndex = rowContext.latestTurnStartID.flatMap { id in
-                    renderedMessages.firstIndex { $0.id == id }
-                } ?? 0
-                let messageReferences = renderedMessages.indices.map { RenderedMessageReference(id: renderedMessages[$0].id, index: $0) }
-                let leadingBoundaries = providerBoundaries.filter { $0.afterMessageID == nil }
-                let hasSettledRows = !messages.isEmpty
-                    && (latestTurnStartIndex > 0 || !leadingGoalEntries.isEmpty || !leadingBoundaries.isEmpty)
-                let settledIDs = messageReferences[..<latestTurnStartIndex].map(\.id)
-                let settledSignatures = settledRowSignatures(renderedMessages[..<latestTurnStartIndex], context: rowContext)
-                let virtualizer = transcriptVirtualizer
-                let _ = { virtualizer.order = settledIDs }()
-                VStack(alignment: .leading, spacing: 16) {
-                if hasSettledRows {
-                    VStack(alignment: .leading, spacing: TranscriptVirtualizer.spacing) {
+                // One layout holds every row, so it knows where each message is the moment it lays
+                // out, which is what `TranscriptScrollController` positions the viewport from. Only
+                // the messages near the viewport render; the rest are boxes of their measured height.
+                TranscriptLayout(
+                    spacing: Self.transcriptRowSpacing,
+                    minimumLatestTurnHeight: max(0, viewport.size.height - Self.conversationVerticalPadding - Self.latestTurnTopMargin),
+                    geometry: scroll.geometry
+                ) {
+                    if !messages.isEmpty {
                         ForEach(leadingGoalEntries) { entry in
                             goalAchievementTimelineRow(entry)
                                 .id(entry.id)
                         }
-                        ForEach(leadingBoundaries) { boundary in
+                        ForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
                             providerBoundaryRow(boundary)
                         }
-                        // Positions are summed from the top of the messages themselves, below the
-                        // leading goal and boundary rows.
-                        VStack(alignment: .leading, spacing: TranscriptVirtualizer.spacing) {
-                            SettledTranscriptRows(
-                                ids: settledIDs, signatures: settledSignatures, virtualizer: virtualizer,
-                                pinnedIDs: Set([annotationSelection?.messageID, currentTextSelection?.messageID].compactMap { $0 })
-                            ) { index in
+                        TranscriptMessageRows(
+                            ids: renderedMessages.map(\.id),
+                            signatures: transcriptRowSignatures(renderedMessages, context: rowContext),
+                            latestTurnStartID: rowContext.latestTurnStartID,
+                            virtualizer: scroll.virtualizer,
+                            pinnedIDs: Set([
+                                renderedMessages.last?.id, rowContext.activityDisclosureAnchorID,
+                                annotationSelection?.messageID, currentTextSelection?.messageID,
+                            ].compactMap { $0 }),
+                            latestTurnLeadingRows: { index in
+                                AnyView(transcriptLeadingRows(for: renderedMessages[index], context: rowContext))
+                            },
+                            row: { index in
                                 // One message's rows measure as one box.
-                                AnyView(VStack(alignment: .leading, spacing: TranscriptVirtualizer.spacing) {
+                                AnyView(VStack(alignment: .leading, spacing: Self.transcriptRowSpacing) {
                                     transcriptRows(for: renderedMessages[index], context: rowContext)
                                 })
                             }
-                        }
-                        .reportGeometry({ $0.frame(in: .named(Self.transcriptContentCoordinateSpace)).minY }) { top in
-                            virtualizer.sectionTop = top
-                            virtualizer.invalidate()
-                        }
-                    }
-                    .onDisappear { virtualizer.resetWidth() }
-                    .reportGeometry({ $0.size.width }) { width in
-                        // Rows far from the viewport keep scaled heights until they show again,
-                        // so keep the reader on the message they were reading once a resize ends.
-                        let anchor = virtualizer.width > 0 && !lastConversationScrollSample.isFollowingLatest ? virtualizer.topVisibleAnchor() : nil
-                        guard virtualizer.updateWidth(width) else { return }
-                        if virtualizer.resizeAnchor == nil { virtualizer.resizeAnchor = anchor }
-                        virtualizer.resizeAnchorTask?.cancel()
-                        virtualizer.resizeAnchorTask = Task { @MainActor in
-                            try? await Task.sleep(nanoseconds: 150_000_000)
-                            guard !Task.isCancelled else { return }
-                            defer { virtualizer.resizeAnchor = nil }
-                            // A reveal restores its own anchor and a history load pins its turn,
-                            // as `followConversationBottom` also defers to.
-                            guard let anchor = virtualizer.resizeAnchor, !lastConversationScrollSample.isFollowingLatest,
-                                  !isRevealingOlderConversationMessages, !isLatestConversationTurnPinPending,
-                                  virtualizer.hasDrifted(from: anchor) else { return }
-                            var transaction = Transaction()
-                            transaction.disablesAnimations = true
-                            withTransaction(transaction) { scrollProxy.scrollTo(anchor.id, anchor: .top) }
-                        }
-                    }
-                }
-                // The newest turn's own stack reserves the filler below it: from its question to
-                // the end of the transcript it is at least a viewport tall, less the bottom padding
-                // and end marker already below it, which lets a turn shorter than the viewport be
-                // pinned to the top, and makes that pin exactly the bottom, which following starts
-                // from. The runway above the window does the same for the other end. Sizing the
-                // filler from measurements instead, which SwiftUI reports a pass later, left it
-                // stale and opened blank overscroll below the transcript. A newer question moves
-                // the previous turn's rows up into the settled rows, which rebuilds them once.
-                ConversationTranscriptLayout(
-                    spacing: 16,
-                    minimumLatestTurnHeight: max(0, viewport.size.height - Self.conversationVerticalPadding - Self.conversationScrollEndHeight)
-                ) {
-                    if messages.isEmpty && activeGoal?.status != "complete" && !isLoadingHistory {
-                        VStack(spacing: 0) {
-                            if task.isStandaloneChat || task.authoringPluginID != nil {
-                                // A chat has no repository to name, so the placeholder keeps only
-                                // its prompt. The leading spacer balances the trailing one that
-                                // the title would otherwise have pushed against.
-                                Spacer(minLength: 0)
-                            } else {
-                                Text(emptyConversationRepositoryTitle)
-                                    .font(.system(size: 30, weight: .bold))
-                                    .foregroundStyle(emptyConversationRepositoryTitleColor)
-                                    .multilineTextAlignment(.center)
-                                    .lineLimit(2)
-                                    .accessibilityLabel(emptyConversationRepositoryTitle)
-                                    .accessibilityIdentifier("empty-conversation-repository-title")
-                                Spacer(minLength: 58)
-                            }
-                            VStack(spacing: 14) {
-                                Image(systemName: "bubble.left.and.bubble.right")
-                                    .font(.system(size: 29, weight: .regular))
-                                    .foregroundStyle(Color.accentColor.opacity(0.8))
-                                    .accessibilityLabel("Conversation")
-                                Text(task.authoringPluginID != nil ? "Describe your plugin in the prompt below." : "Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                                    .accessibilityLabel(task.authoringPluginID != nil ? "Describe your plugin in the prompt below." : "Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
-                                    .accessibilityIdentifier("model-prompt")
-                            }
-                            Spacer(minLength: 28)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 280)
-                        .padding(.horizontal, 30)
-                        .padding(.vertical, 38)
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("empty-conversation")
-                    } else if !messages.isEmpty {
-                        ForEach(messageReferences[latestTurnStartIndex...]) { reference in
-                            transcriptRows(for: renderedMessages[reference.index], context: rowContext)
-                        }
+                        )
                         ForEach(liveChatPageRecalls) { activity in
                             if let pageID = activity.recalledChatPageID {
                                 ChatPageRecallRow(activityID: activity.id, pageID: pageID)
@@ -179,17 +55,16 @@ extension TaskConversationView {
                         if shouldShowActivityDisclosure, activityDisclosureAnchorID == nil {
                             activityList
                         }
-                    }
-
-                    if messages.isEmpty && shouldShowActivityDisclosure {
-                        activityList
-                    }
-                    if messages.isEmpty {
+                    } else {
+                        if activeGoal?.status != "complete" && !isLoadingHistory {
+                            emptyConversationPlaceholder
+                        }
+                        if shouldShowActivityDisclosure {
+                            activityList
+                        }
                         ForEach(providerBoundaries) { boundary in
                             providerBoundaryRow(boundary)
                         }
-                    }
-                    if messages.isEmpty {
                         ForEach(leadingGoalEntries) { entry in
                             goalAchievementTimelineRow(entry)
                                 .id(entry.id)
@@ -210,171 +85,87 @@ extension TaskConversationView {
                     ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
                         contextCompactionTimelineRow(activity)
                     }
-                    Color.clear
-                        .frame(height: 1)
-                        .id("conversation-latest-anchor")
-                    // Spans the newest turn at its natural height, which only
-                    // "does the newest turn fit the viewport?" is asked of.
-                    Color.clear
-                        .background {
-                            GeometryReader { geometry in
-                                Color.clear.preference(
-                                    key: ConversationLatestTurnHeightKey.self,
-                                    value: geometry.size.height
-                                )
-                            }
-                        }
-                        .accessibilityHidden(true)
-                        .layoutValue(key: ConversationLatestTurnExtentKey.self, value: true)
-                }
                 }
                 .padding(.horizontal, 28)
                 .padding(.vertical, Self.conversationVerticalPadding)
-                // A window that holds older messages back needs the runway's
-                // counterpart below even when no turn of its own is rendered.
-                .frame(
-                    minHeight: hasOlderConversationMessages
-                        ? max(0, viewport.size.height - Self.conversationScrollEndHeight)
-                        : nil,
-                    alignment: .top
-                )
                 .frame(maxWidth: 820)
                 .frame(maxWidth: .infinity)
-                // The very end of the scroll content, filler included, which is
-                // where following new content keeps the viewport. Unlike
-                // `scrollToLatest`, following can target it: a scroll that
-                // lands short of the real end changes the scroll extent again,
-                // and that change is followed once more.
-                Color.clear
-                    .frame(height: Self.conversationScrollEndHeight)
-                    .id(Self.conversationScrollEndID)
-                    .accessibilityHidden(true)
-                }
                 .hoverRevealScrollers()
-                .background {
-                    // The scroll observer reports this geometry from macOS 15
-                    // on; before that the content's own frame in the scroll's
-                    // space carries it.
-                    if #unavailable(macOS 15) {
-                        GeometryReader { geometry in
-                            let frame = geometry.frame(in: .named(Self.conversationScrollCoordinateSpace)) // the scroll view's space
-                            Color.clear.preference(
-                                key: ConversationScrollGeometryKey.self,
-                                value: ConversationScrollGeometry(
-                                    offsetY: -frame.minY,
-                                    contentHeight: frame.height,
-                                    maxOffsetY: frame.height - viewport.size.height
-                                )
-                            )
-                        }
-                    }
-                }
-                .coordinateSpace(name: Self.transcriptContentCoordinateSpace)
+                .transcriptScroll(
+                    scroll,
+                    layoutTop: Self.conversationVerticalPadding,
+                    latestTurnMargin: Self.latestTurnTopMargin,
+                    handlers: transcriptScrollHandlers
+                )
             }
-            .coordinateSpace(name: Self.conversationScrollCoordinateSpace)
             .accessibilityIdentifier("conversation-scroll-view")
             .accessibilityValue(hasLoadedConversation
                 ? "Showing latest \(renderedConversationMessages.count) of \(conversationMessages.count + earlierStoredMessageCount) messages"
                 : "Loading conversation history")
-            .onPreferenceChange(ConversationTopMarkerPositionKey.self) { markerY in
-                // Exactly one source drives the reveal: the scroll observer
-                // where it exists, this marker where it does not.
-                if #unavailable(macOS 15) {
-                    handleConversationWindowTop(markerY, using: scrollProxy, allowsJump: true)
-                }
-            }
-            .onPreferenceChange(ConversationScrollGeometryKey.self) { geometry in
-                guard let geometry else { return }
-                transcriptVirtualizer.updateViewport(offsetY: geometry.offsetY, height: viewport.size.height)
-                let old = lastConversationScrollSample.geometry ?? geometry
-                lastConversationScrollSample.geometry = geometry
-                followConversationBottom(from: old, to: geometry, using: scrollProxy)
-            }
-            .modifier(ConversationScrollOffsetObserver { old, new in
-                lastConversationScrollSample.viewportHeight = viewport.size.height
-                transcriptVirtualizer.updateViewport(offsetY: new.offsetY, height: viewport.size.height)
-                followConversationBottom(from: old, to: new, using: scrollProxy)
-                guard lastConversationScrollSample.offsetY != new.offsetY else { return }
-                lastConversationScrollSample.offsetY = new.offsetY
-                handleConversationWindowTop(
-                    conversationWindowTopY(offsetY: new.offsetY, viewportHeight: viewport.size.height),
-                    using: scrollProxy,
-                    allowsJump: true
-                )
-            })
-            .onPreferenceChange(ConversationLatestTurnHeightKey.self) { height in
-                // Only "shorter than the viewport?" is ever asked of this value,
-                // and publishing each revision re-renders the whole transcript,
-                // so cap it once the turn overflows.
-                let clamped = min(height, viewport.size.height + 1)
-                if clamped != latestTurnContentHeight { latestTurnContentHeight = clamped }
-            }
             .onChange(of: isLoadingHistory) { _, isLoading in
                 // Every completed history load reopens on the newest turn,
                 // including reloads that leave the messages unchanged.
                 guard !isLoading else { return }
-                presentLatestConversationTurn(using: scrollProxy)
+                presentLatestConversationTurn()
             }
             .onChange(of: messages.count) { _, _ in
-                scrollToLatestUserMessage(using: scrollProxy, viewportHeight: viewport.size.height)
+                presentNewlySentQuestion()
             }
-            // These compare the transcript only before it is first presented, the only time
-            // their handlers act; a nil on either side is the comparison starting or stopping,
-            // not a change of the transcript.
-            .onChange(of: hasPresentedLatestConversation ? nil : messages.map(\.text)) { previous, current in
-                if previous != nil, current != nil, !hasPresentedLatestConversation {
-                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
-                }
-            }
-            .onChange(of: hasPresentedLatestConversation ? nil : activities) { previous, current in
-                if previous != nil, current != nil, isResponding && !hasPresentedLatestConversation {
-                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
-                }
-            }
-            .onChange(of: isResponding) { _, _ in
-                if !hasPresentedLatestConversation {
-                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
-                }
-            }
-            .onChange(of: activeGoal?.status) { _, status in
-                if status == "complete" && !hasPresentedLatestConversation {
-                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
-                }
-            }
-            .onChange(of: goalAchievementTimelineEntries.count) { _, _ in
-                if !hasPresentedLatestConversation {
-                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
-                }
+            .onChange(of: isResponding) { _, isResponding in
+                if isResponding { scroll.followIfAtBottom() }
             }
             .onChange(of: userInputRequest?.id) { _, requestID in
                 // The question form sits below the latest message; bring it into view
                 // whether it arrives with the history or later from the daemon.
-                guard requestID != nil else { return }
-                Task { @MainActor in
-                    await Task.yield()
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        scrollProxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
-                    }
-                    // The form's rows are placed from estimates until realized, so the first
-                    // scroll can stop short of Submit; scroll again once they are.
-                    var transaction = Transaction()
-                    transaction.disablesAnimations = true
-                    for delay in Self.scrollSettleDelays {
-                        try? await Task.sleep(nanoseconds: delay)
-                        withTransaction(transaction) { scrollProxy.scrollTo("conversation-latest-anchor", anchor: .bottom) }
-                    }
-                }
-            }
+                guard requestID != nil, !isLoadingHistory else { return }
+                scroll.pin(.bottom, animated: true)
             }
         }
     }
 
-    static let conversationScrollCoordinateSpace = "conversation-transcript-scroll"
-    /// The scroll content's own space, in which positions stay put while the transcript scrolls.
-    static let transcriptContentCoordinateSpace = "conversation-transcript-content"
-    static let conversationScrollEndID = "conversation-scroll-end"
-    static let conversationScrollEndHeight: CGFloat = 1
+    /// Shown in place of the transcript while the conversation has no messages.
+    var emptyConversationPlaceholder: some View {
+        VStack(spacing: 0) {
+            if task.isStandaloneChat || task.authoringPluginID != nil {
+                // A chat has no repository to name, so the placeholder keeps only
+                // its prompt. The leading spacer balances the trailing one that
+                // the title would otherwise have pushed against.
+                Spacer(minLength: 0)
+            } else {
+                Text(emptyConversationRepositoryTitle)
+                    .font(.system(size: 30, weight: .bold))
+                    .foregroundStyle(emptyConversationRepositoryTitleColor)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .accessibilityLabel(emptyConversationRepositoryTitle)
+                    .accessibilityIdentifier("empty-conversation-repository-title")
+                Spacer(minLength: 58)
+            }
+            VStack(spacing: 14) {
+                Image(systemName: "bubble.left.and.bubble.right")
+                    .font(.system(size: 29, weight: .regular))
+                    .foregroundStyle(Color.accentColor.opacity(0.8))
+                    .accessibilityLabel("Conversation")
+                Text(task.authoringPluginID != nil ? "Describe your plugin in the prompt below." : "Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(task.authoringPluginID != nil ? "Describe your plugin in the prompt below." : "Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
+                    .accessibilityIdentifier("model-prompt")
+            }
+            Spacer(minLength: 28)
+        }
+        .frame(maxWidth: .infinity, minHeight: 280)
+        .padding(.horizontal, 30)
+        .padding(.vertical, 38)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("empty-conversation")
+    }
+
+    /// Space between the transcript's rows, and between the rows of one message.
+    static let transcriptRowSpacing: CGFloat = 16
     static let conversationVerticalPadding: CGFloat = 24
+    /// Space kept above the newest question when it is pinned to the top of the viewport.
+    static let latestTurnTopMargin: CGFloat = 12
 
     var emptyConversationRepositoryTitle: String {
         var repositoryNames = task.repositoryWorktrees.map {

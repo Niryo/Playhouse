@@ -5,11 +5,6 @@ import SwiftUI
 extension TaskConversationView {
     func loadConversation() async {
         isLoadingHistory = true
-        hasPresentedLatestConversation = false
-        isLatestConversationTurnPinPending = true
-        isOlderConversationRevealArmed = false
-        // Following resumes once the pinned turn is observed at the bottom.
-        lastConversationScrollSample.isFollowingLatest = false
         oldestRenderedMessageID = nil
         errorMessage = nil
         let draftAtLoadStart = draft
