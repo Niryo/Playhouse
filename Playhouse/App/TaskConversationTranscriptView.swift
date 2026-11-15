@@ -141,16 +141,10 @@ extension TaskConversationView {
                     .accessibilityIdentifier("empty-conversation-repository-title")
                 Spacer(minLength: 58)
             }
-            VStack(spacing: 14) {
-                Image(systemName: "bubble.left.and.bubble.right")
-                    .font(.system(size: 29, weight: .regular))
-                    .foregroundStyle(Color.accentColor.opacity(0.8))
-                    .accessibilityLabel("Conversation")
-                Text(task.authoringPluginID != nil ? "Describe your plugin in the prompt below." : "Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel(task.authoringPluginID != nil ? "Describe your plugin in the prompt below." : "Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
-                    .accessibilityIdentifier("model-prompt")
+            if showsEmptyConversationAddRepositoryPrompt {
+                emptyConversationAddRepositoryPrompt
+            } else {
+                emptyConversationModelPrompt
             }
             Spacer(minLength: 28)
         }
@@ -161,24 +155,73 @@ extension TaskConversationView {
         .accessibilityIdentifier("empty-conversation")
     }
 
+    /// A repository task with nothing selected teaches the picker: the big + opens the
+    /// same Add repository hint as the header's + button.
+    var showsEmptyConversationAddRepositoryPrompt: Bool {
+        !isReadOnly && !task.isStandaloneChat && task.authoringPluginID == nil
+            && emptyConversationRepositoryNames.isEmpty
+    }
+
+    var emptyConversationAddRepositoryPrompt: some View {
+        Button(action: showRepositoryPicker) {
+            VStack(spacing: 14) {
+                Image(systemName: "plus")
+                    .font(.system(size: 34, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 76, height: 76)
+                    .background(Circle().fill(Color.accentColor.opacity(0.12)))
+                    .overlay(Circle().strokeBorder(Color.accentColor.opacity(0.35), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])))
+                Text("Click here to add repositories to the context")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .buttonHoverPointer()
+        .nativeHelp("Add a repository")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Click here to add repositories to the context")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityIdentifier("empty-conversation-add-repository-button")
+    }
+
+    var emptyConversationModelPrompt: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(.system(size: 29, weight: .regular))
+                .foregroundStyle(Color.accentColor.opacity(0.8))
+                .accessibilityLabel("Conversation")
+            Text(task.authoringPluginID != nil ? "Describe your plugin in the prompt below." : "Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.secondary)
+                .accessibilityLabel(task.authoringPluginID != nil ? "Describe your plugin in the prompt below." : "Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
+                .accessibilityIdentifier("model-prompt")
+        }
+    }
+
     /// Space between the transcript's rows, and between the rows of one message.
     static let transcriptRowSpacing: CGFloat = 16
     static let conversationVerticalPadding: CGFloat = 24
     /// Space kept above the newest question when it is pinned to the top of the viewport.
     static let latestTurnTopMargin: CGFloat = 12
 
-    var emptyConversationRepositoryTitle: String {
-        var repositoryNames = task.repositoryWorktrees.map {
+    /// The selected repositories' names, or the Git roots' names for a task without worktrees.
+    var emptyConversationRepositoryNames: [String] {
+        let repositoryNames = task.repositoryWorktrees.map {
             URL(fileURLWithPath: $0.repositoryPath).lastPathComponent
         }
-        if repositoryNames.isEmpty {
-            repositoryNames = task.workspaceRootPaths.compactMap { path in
-                let repositoryURL = URL(fileURLWithPath: path, isDirectory: true)
-                let gitMarker = repositoryURL.appendingPathComponent(".git")
-                guard FileManager.default.fileExists(atPath: gitMarker.path) else { return nil }
-                return repositoryURL.lastPathComponent
-            }
+        guard repositoryNames.isEmpty else { return repositoryNames }
+        return task.workspaceRootPaths.compactMap { path in
+            let repositoryURL = URL(fileURLWithPath: path, isDirectory: true)
+            let gitMarker = repositoryURL.appendingPathComponent(".git")
+            guard FileManager.default.fileExists(atPath: gitMarker.path) else { return nil }
+            return repositoryURL.lastPathComponent
         }
+    }
+
+    var emptyConversationRepositoryTitle: String {
+        let repositoryNames = emptyConversationRepositoryNames
         return repositoryNames.isEmpty ? "No repository selected" : repositoryNames.joined(separator: " · ")
     }
 
