@@ -892,7 +892,8 @@ def run_reattach_turn(runtime):
     `.reattach-close-turn-output`; a page classifier prompt is answered at once with a new
     page titled `Restart fallback`; with `.reattach-hold-nudge`, a Playhouse nudge is held
     like any turn (writing "Nudge before restart.") instead of being answered at once.
-    Every input line is logged to `.reattach-stdin`."""
+    With `.reattach-compact`, the held turn reports a compaction start without a uuid;
+    `.reattach-compact-end` writes its boundary while the turn keeps running, and `.reattach-release` writes the boundary if it is still pending. Every input line is logged to `.reattach-stdin`."""
     base = str(runtime.sys.argv[0])
     instructions = runtime.argument("--append-system-prompt") or ""
     turn_uuid = None
@@ -906,6 +907,12 @@ def run_reattach_turn(runtime):
     def finish():
         runtime.write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
         runtime.complete_command(turn_uuid)
+
+    def end_compaction():
+        if runtime.Path(f"{base}.reattach-compact").exists():
+            runtime.Path(f"{base}.reattach-compact").unlink()
+            runtime.write({"type": "system", "subtype": "compact_boundary", "compact_metadata": {
+                "trigger": "auto", "pre_tokens": 190000, "post_tokens": 6000}})
 
     def handle(line):
         nonlocal turn_uuid, reporting
@@ -961,6 +968,10 @@ def run_reattach_turn(runtime):
                 turn_uuid = message.get("uuid")
                 runtime.write({"type": "system", "subtype": "init", "session_id": runtime.argument("--session-id") or runtime.argument("--resume")})
                 runtime.text("msg_reattach_before", "Before restart.")
+                # A compaction starts before the daemon dies and ends after it; with no uuid,
+                # the next daemon cannot know the row the first one reported for it.
+                if runtime.Path(f"{base}.reattach-compact").exists():
+                    runtime.write({"type": "system", "subtype": "status", "status": "compacting"})
                 runtime.Path(f"{base}.reattach-ready").write_text(user_text, encoding="utf-8")
             else:
                 # A steered follow-up reaches the running turn and is answered in it.
@@ -1010,12 +1021,17 @@ def run_reattach_turn(runtime):
             # Consumed, so a later turn of the same fixture runs normally.
             runtime.Path(f"{base}.reattach-exit").unlink(missing_ok=True)
             runtime.os._exit(3)
+        if runtime.Path(f"{base}.reattach-compact-end").exists():
+            # The compaction ends inside the still-running turn.
+            runtime.Path(f"{base}.reattach-compact-end").unlink()
+            end_compaction()
         if reporting is None and runtime.Path(f"{base}.reattach-release-quiet").exists():
             runtime.Path(f"{base}.reattach-release-quiet").unlink()
             runtime.text("msg_reattach_after", "After restart.")
             finish()
         if reporting is None and runtime.Path(f"{base}.reattach-release").exists():
             runtime.Path(f"{base}.reattach-release").unlink()
+            end_compaction()
             runtime.text("msg_reattach_after", "After restart.")
             command = runtime.report_command(instructions, "task outcome", "waiting-response")
             # Like a tool call, the report runs while the turn keeps reading its input.

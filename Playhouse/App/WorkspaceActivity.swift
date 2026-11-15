@@ -178,6 +178,27 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         return merged
     }
 
+    /// Records a compaction row into a list of rows. Only one compaction runs at a time, so the
+    /// row also supersedes every compaction row still in progress under another id: it takes the
+    /// first one's place and the rest are dropped. A compaction whose start was reported more than
+    /// once, or whose finish arrived under a new id, is then one row that ends, instead of rows
+    /// left spinning beside it.
+    static func upsertCompaction(_ activity: ConversationActivity, into activities: inout [ConversationActivity]) {
+        let staleIDs = Set(activities.filter {
+            $0.isContextCompaction && $0.status == "inProgress" && $0.id != activity.id
+        }.map(\.id))
+        if let existing = activities.firstIndex(where: { $0.id == activity.id }) {
+            activities[existing] = activity.preservingTimelineFields(of: activities[existing])
+        } else if let stale = activities.firstIndex(where: { staleIDs.contains($0.id) }) {
+            var replacement = activity.preservingTimelineFields(of: activities[stale])
+            replacement.timelineOrder = activity.timelineOrder ?? activities[stale].timelineOrder
+            activities[stale] = replacement
+        } else {
+            activities.append(activity)
+        }
+        activities.removeAll { staleIDs.contains($0.id) }
+    }
+
     var isSubagent: Bool { childThreadID != nil }
 
     var isActive: Bool { status.lowercased() == "inprogress" || status.lowercased() == "running" }

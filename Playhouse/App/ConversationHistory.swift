@@ -508,7 +508,10 @@ extension ConversationManager {
             let nudgeWork = visibleTurns.suffix(from: min(latestTurnIndex + 1, visibleTurns.endIndex))
                 .flatMap { $0.activities.filter { $0.isSubagent || $0.isTimelineToolCall } }
             let subagents = visibleTurns.enumerated().filter { $0.offset < latestTurnIndex }.flatMap { $0.element.activities.filter(\.isSubagent) }
-            activities = subagents + (latestTurn?.activities ?? []) + nudgeWork + compactions
+            // Compactions come from `compactions`, placed among the messages; the latest
+            // turn's own copies would draw each one a second time.
+            activities = subagents + (latestTurn?.activities ?? []).filter { !$0.isContextCompaction }
+                + nudgeWork + compactions
             diff = nil
         } else {
             activities = codexActivities.filter { !$0.isContextCompaction } + compactions

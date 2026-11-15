@@ -354,9 +354,11 @@ def write_compaction_boundary(session_id, trigger, pre_tokens, post_tokens=6000)
                  "compactMetadata": {"trigger": trigger, "preTokens": pre_tokens, "postTokens": post_tokens}}
         with open(project / f"{session_id}.jsonl", "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry) + "\n")
-    write({"type": "system", "status": "compacting"})
-    write({"type": "system", "status": None, "compact_result": "success"})
-    write({"type": "system", "subtype": "compact_boundary", "compact_metadata": {
+    # Claude Code can report one compaction's start more than once, each under its own uuid.
+    write({"type": "system", "subtype": "status", "status": "compacting", "uuid": f"fixture-compacting-{time.time_ns()}"})
+    write({"type": "system", "subtype": "status", "status": "compacting", "uuid": f"fixture-compacting-{time.time_ns()}"})
+    write({"type": "system", "subtype": "status", "status": None, "compact_result": "success"})
+    write({"type": "system", "subtype": "compact_boundary", "uuid": f"fixture-boundary-{time.time_ns()}", "compact_metadata": {
         "trigger": trigger, "pre_tokens": pre_tokens, "post_tokens": post_tokens
     }})
 

@@ -898,5 +898,9 @@
   {
     "id": "test_plugin_card_uses_default_content_padding",
     "expectation": "The Plugin Catalog's Card page gives a Card with no padding prop its 14-point default, while `padding: 0` removes it. `plugin render --page Card` omits the default common padding but keeps the explicit zero override on the second Card, and in the UI two otherwise identical cards have the same width while the default-padded card is 28 points taller; each card keeps its own content inside the surface."
+  },
+  {
+    "id": "test_claude_compaction_shows_one_row",
+    "expectation": "A Claude compaction is one conversation row. A threshold compaction whose start Claude Code reports twice under different ids before its boundary leaves exactly one completed compaction row in the latest turn's history, with no row still in progress. A compaction that starts before the daemon is killed and ends after it, so its boundary reaches a daemon that never saw the row reported for its start, shows one in-progress row while the turn runs, before and after the restart, then one completed row with its context sizes as soon as the boundary arrives while the turn is still running, and records one compaction event."
   }
 ]

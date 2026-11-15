@@ -628,7 +628,9 @@ extension TaskConversationView {
             }
         case "activity":
             guard let activity = update.activity else { return }
-            if let index = activities.firstIndex(where: { $0.id == activity.id }) {
+            if provider == .claude, activity.isContextCompaction {
+                ConversationActivity.upsertCompaction(activity, into: &activities)
+            } else if let index = activities.firstIndex(where: { $0.id == activity.id }) {
                 activities[index] = activity
             } else {
                 activities.append(activity)
