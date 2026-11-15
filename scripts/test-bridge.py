@@ -90,8 +90,9 @@ from bridge_test_cases.cases_19 import BridgeTestCases19
 from bridge_test_cases.cases_20 import BridgeTestCases20
 from bridge_test_cases.cases_21 import BridgeTestCases21
 from bridge_test_cases.cases_22 import BridgeTestCases22
+from bridge_test_cases.cases_23 import BridgeTestCases23
 
-class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases03, BridgeTestCases04, BridgeTestCases05, BridgeTestCases06, BridgeTestCases07, BridgeTestCases08, BridgeTestCases09, BridgeTestCases10, BridgeTestCases11, BridgeTestCases12, BridgeTestCases13, BridgeTestCases14, BridgeTestCases15, BridgeTestCases16, BridgeTestCases17, BridgeTestCases18, BridgeTestCases19, BridgeTestCases20, BridgeTestCases21, BridgeTestCases22, BridgeTestHelpers01, BridgeTestHelpers02, unittest.TestCase):
+class PlayhouseBridgeTests(BridgeTestCases01, BridgeTestCases02, BridgeTestCases03, BridgeTestCases04, BridgeTestCases05, BridgeTestCases06, BridgeTestCases07, BridgeTestCases08, BridgeTestCases09, BridgeTestCases10, BridgeTestCases11, BridgeTestCases12, BridgeTestCases13, BridgeTestCases14, BridgeTestCases15, BridgeTestCases16, BridgeTestCases17, BridgeTestCases18, BridgeTestCases19, BridgeTestCases20, BridgeTestCases21, BridgeTestCases22, BridgeTestCases23, BridgeTestHelpers01, BridgeTestHelpers02, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cli = arguments.cli.absolute()

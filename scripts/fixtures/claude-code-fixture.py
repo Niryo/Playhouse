@@ -694,6 +694,10 @@ def main():
                 # One line per Claude Code session started, including metadata-only ones.
                 with open(str(sys.argv[0]) + ".sessions", "a", encoding="utf-8") as sessions:
                     sessions.write("initialize\n")
+                # A slow session start: the turn is still launching. Metadata-only sessions
+                # carry no session ID and are never held.
+                if "--session-id" in sys.argv or "--resume" in sys.argv:
+                    wait_for_release("launch", "Claude Code is starting the session.")
                 missing_resume = Path(str(sys.argv[0]) + ".missing-resume")
                 if "--resume" in sys.argv and missing_resume.exists():
                     missing_resume.unlink()

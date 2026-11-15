@@ -72,10 +72,13 @@ def list_items(runtime, _session_state, message):
                 {"type": "image", "url": image_url} for image_url in _session_state.user_images
             ]
             if _session_state.user_content:
-                _session_state.contents.extend([
-                    {"id": f"item_user_fixture_{_session_state.index}", "type": "userMessage", "content": _session_state.user_content},
-                    {"id": f"item_assistant_fixture_{_session_state.index}", "type": "agentMessage", "phase": "final_answer", "text": runtime.answer_text(_session_state.user_message)},
-                ])
+                _session_state.contents.append(
+                    {"id": f"item_user_fixture_{_session_state.index}", "type": "userMessage", "content": _session_state.user_content})
+                _session_state.contents.extend(
+                    {"id": f"item_steer_fixture_{steer_index}_{_session_state.index}", "type": "userMessage", "content": [{"type": "text", "text": steer_text}]}
+                    for steer_index, steer_text in enumerate(_session_state.saved_turn.get("steers", []), start=1))
+                _session_state.contents.append(
+                    {"id": f"item_assistant_fixture_{_session_state.index}", "type": "agentMessage", "phase": "final_answer", "text": runtime.answer_text(_session_state.user_message)})
             _session_state.contents.extend({**record["item"], "_fixture_turn_index": _session_state.index - 1}
                             for record in _session_state.saved_history.get("compactions", []) if record.get("afterTurnCount") == _session_state.index)
     elif _session_state.saved_history.get("turns"):

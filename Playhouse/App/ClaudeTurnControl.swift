@@ -71,6 +71,8 @@ extension ClaudeSessionRunner {
         owner?.runnerStateChanged(self)
         ClaudeCodeClient.markProcessActive(sessionID: sessionID)
         ConversationSteerMailbox.publishActiveTurn(threadID: sessionID, turnID: turnID)
+        turnStartedHandler?(turnID)
+        turnStartedHandler = nil
         PlayhouseDiagnostics.record("claude.turn.started", fields: diagnosticFields([
             "threadID": sessionID,
             "turnID": turnID,

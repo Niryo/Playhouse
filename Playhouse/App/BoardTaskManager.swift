@@ -29,7 +29,10 @@ final class BoardTaskManager {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw PlayhouseManagerError.invalidMessage }
         let task = try conversationSubject(taskID)
-        guard let threadID = task.activeConversationID else {
+        // A task In Progress without a conversation is starting its first message: the follow-up
+        // is saved without a conversation ID and belongs to whichever conversation the task gets.
+        // The saved status is what both the app and the daemon can see.
+        guard let threadID = task.activeConversationID ?? (task.status == .inProgress ? "" : nil) else {
             throw BridgeCommandError(code: "invalid_transition", message: "A follow-up can only be queued after this conversation has a \(task.conversationProvider.displayName) conversation.")
         }
         let item = QueuedConversationMessage(
@@ -68,7 +71,7 @@ final class BoardTaskManager {
         var claimed: QueuedConversationMessage?
         try mutateQueuedMessages(taskID: taskID) { items in
             guard let index = items.firstIndex(where: {
-                $0.state == .queued && $0.threadID == threadID && (messageID == nil || $0.id == messageID)
+                $0.state == .queued && ($0.threadID == threadID || $0.threadID.isEmpty) && (messageID == nil || $0.id == messageID)
             }) else { return }
             items[index].state = .dispatching
             items[index].dispatchingProcessID = Int32(ProcessInfo.processInfo.processIdentifier)
@@ -137,7 +140,7 @@ final class BoardTaskManager {
 
     func retainQueuedMessagesForUserAction(taskID: UUID, threadID: String) throws {
         try mutateQueuedMessages(taskID: taskID) { items in
-            for index in items.indices where items[index].threadID == threadID && items[index].state == .queued {
+            for index in items.indices where (items[index].threadID == threadID || items[index].threadID.isEmpty) && items[index].state == .queued {
                 items[index].state = .needsAction
             }
         }

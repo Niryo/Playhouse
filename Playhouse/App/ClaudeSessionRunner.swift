@@ -149,6 +149,8 @@ final class ClaudeSessionRunner {
     var finalMessageHandler: ((String) -> Void)?
     var progressMessageHandler: ((ConversationMessage) -> Void)?
     var steerMessageHandler: ((String, [String]) -> Void)?
+    /// Called once the turn's message is with Claude Code, when the turn takes an interrupt or a steer.
+    var turnStartedHandler: ((String) -> Void)?
     var activityHandler: ((ConversationActivity) -> Void)?
     var actionRequestHandler: (() -> Void)?
     var userInputHandler: ((ConversationUserInputRequest) async -> Void)?

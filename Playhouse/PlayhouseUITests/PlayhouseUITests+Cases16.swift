@@ -9,13 +9,13 @@ import SQLite3
 import Vision
 
 extension PlayhouseUITests {
-    // case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, missed composer and queued-row steers start their own turns without blocking other steering and leave the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up with its attached image, clears the preview, and marks the row with its image count; the queued image persists across reopening without returning to the composer, and malformed queued images fail validation. Its row Steer uses the active turn ID, delivers both text and image to the provider, appears in the transcript with its image, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
+    // case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, missed composer and queued-row steers start their own turns without blocking other steering and leave the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a follow-up being delivered stays claimed as dispatching and leaves the visible queue while its own turn runs; a missed queued-row steer from the CLI returns to the waiting queue and shows its row again in the app before the targeted turn ends; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn; a steer the provider refuses for any other reason reports the provider's error, is not queued, and returns its text and image to the composer with no message left in the transcript. Plain Return queues a follow-up with its attached image, clears the preview, and marks the row with its image count; the queued image persists across reopening without returning to the composer, and malformed queued images fail validation. Its row Steer uses the active turn ID, delivers both text and image to the provider, appears in the transcript with its image, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
     func test_conversation_steers_and_queues_active_turn() throws {
         let sharedFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-steer-queue-serial-success-wait")
         let fixtureOwner = try String(contentsOf: WorkspaceFixture.root.appendingPathComponent(WorkspaceFixture.ownerMarker), encoding: .utf8)
         XCTAssertEqual(fixtureOwner, WorkspaceFixture.ownerContents, "Only the prepared, owned fixture root may contain the executable app-server fixture.")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: sharedFixture.path), "The focused active-turn fixture should be prepared as an executable by the UI runner.")
-        for suffix in ["resolve-ready", "resolve-continue", "serial-second-turn-started", "history", "reject-next-steer", "hold-next-queued-turn", "queued-turn-ready", "queued-turn-release", "fail-next-turn-start"] {
+        for suffix in ["resolve-ready", "resolve-continue", "serial-first-turn", "serial-second-turn-started", "history", "reject-next-steer", "hold-next-queued-turn", "queued-turn-ready", "queued-turn-release", "fail-next-turn-start", "steers-received", "thread-start-pause", "thread-start-ready", "thread-start-release"] {
             try? FileManager.default.removeItem(at: URL(fileURLWithPath: sharedFixture.path + ".\(suffix)"))
         }
         try "no active turn to steer\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
@@ -118,13 +118,20 @@ extension PlayhouseUITests {
         composer.typeText(uiSteeringText)
         composer.typeKey("v", modifierFlags: .command)
         XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "An image attached to a steer should remain previewed until accepted.")
+        let steersReceived = sharedFixture.path + ".steers-received"
+        try? FileManager.default.removeItem(atPath: steersReceived)
         composer.typeKey(.return, modifierFlags: .command)
-        XCTAssertTrue(transcriptMessage(uiSteeringText).waitToExist(timeout: 10), "Command-Return should steer the active turn with the composer text and image.")
+        XCTAssertTrue(transcriptMessage(uiSteeringText).waitToExist(timeout: 2), "Command-Return should show the steer in the transcript at once.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: steersReceived) }, timeout: 10), "Command-Return should steer the active turn with the composer text and image.")
         // The newer steer starts the newest turn, so the earlier steer now renders lazily and may
         // be out of view: check each steer's own image rather than counting what is on screen.
-        let uiSteerID = userMessageID(uiSteeringText)
-        XCTAssertFalse(uiSteerID.isEmpty, "The Command-Return steer should render as a user message.")
-        XCTAssertTrue(element("chat-image-\(uiSteerID)-0").waitToExist(timeout: 5), "The Command-Return steer should show its image.")
+        // The bubble's ID is looked up again on each poll: it changes when the saved message
+        // replaces the one the window showed first.
+        var uiSteerID = ""
+        XCTAssertTrue(waitUntil({
+            uiSteerID = userMessageID(uiSteeringText)
+            return !uiSteerID.isEmpty && self.element("chat-image-\(uiSteerID)-0").exists
+        }, timeout: 10), "The Command-Return steer should render as a user message with its image.")
         XCTAssertFalse(element("chat-image-\(uiSteerID)-1").exists, "The Command-Return steer should show its one image once.")
         // The newest turn renders eagerly, so its exact counts still hold: one bubble for the steer
         // and one image outside the earlier steer, whether or not that steer is rendered now.
@@ -137,16 +144,39 @@ extension PlayhouseUITests {
         XCTAssertFalse(element("chat-image-\(cliSteerID)-1").exists, "The earlier CLI/XPC steer should keep exactly its one image.")
         XCTAssertFalse(element("pending-chat-images").exists, "An accepted steer should clear its image preview.")
         XCTAssertEqual(composer.value as? String, "", "An accepted Command-Return steer should clear the draft.")
-        try "no active turn to steer\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
+        let rejectNextSteer = sharedFixture.path + ".reject-next-steer"
         let missedUISteerText = "Queue this missed UI steer with its image."
+        let userBubbles: (String) -> Int = { text in
+            self.app.groups.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "user-message-", text)).count
+        }
+        // A refusal that is not a missed turn is an error: the steer returns to the composer.
+        let queueBeforeRefusal = try XCTUnwrap(try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]).count
+        try "The fixture refused this steer.\n".write(to: URL(fileURLWithPath: rejectNextSteer), atomically: true, encoding: .utf8)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setData(uiPNG, forType: .png)
         composer.click()
         composer.typeText(missedUISteerText)
         composer.typeKey("v", modifierFlags: .command)
-        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "The fallback steer's image should remain attached until queue acceptance.")
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "The steer's image should be previewed before Command-Return.")
         composer.typeKey(.return, modifierFlags: .command)
-        XCTAssertTrue(waitUntil({ (composer.value as? String) == "" }, timeout: 10), "A missed UI steer should be accepted into the follow-up queue and clear the composer.")
+        let refusedSteerError = element("codex-chat-error")
+        XCTAssertTrue(refusedSteerError.waitToExist(timeout: 10), "A steer Codex refuses for another reason should report the error.")
+        XCTAssertTrue(refusedSteerError.label.localizedCaseInsensitiveContains("refused this steer"), "The error should be the provider's: \(refusedSteerError.label)")
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == missedUISteerText }, timeout: 5), "A refused steer's text should return to the composer.")
+        XCTAssertTrue(element("pending-chat-images").waitToExist(timeout: 5), "A refused steer's image should return to the composer.")
+        XCTAssertTrue(waitUntil({ userBubbles(missedUISteerText) == 0 }, timeout: 5), "A refused steer should leave the transcript.")
+        XCTAssertEqual((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.count, queueBeforeRefusal, "A refused steer must not be queued.")
+        attachScreenshot(named: "Refused steer returns to the composer with its error")
+        // The same steer again, now missing the turn: it is queued for a turn of its own.
+        try "no active turn to steer\n".write(to: URL(fileURLWithPath: rejectNextSteer), atomically: true, encoding: .utf8)
+        composer.click()
+        composer.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: rejectNextSteer) }, timeout: 10), "Codex should miss the steer.")
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).contains { $0["text"] as? String == missedUISteerText }
+        }, timeout: 10), "A missed UI steer should be accepted into the follow-up queue.")
+        XCTAssertEqual(composer.value as? String, "", "A missed UI steer should leave the composer clear.")
+        XCTAssertTrue(waitUntil({ userBubbles(missedUISteerText) == 0 }, timeout: 5), "A missed steer waits in the queue, not in the transcript.")
         XCTAssertFalse(element("codex-chat-error").exists, "A missed UI steer should not show an error.")
         let missedUISteerQueue = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
         let missedUISteerItem = try XCTUnwrap(missedUISteerQueue?.first(where: { $0["text"] as? String == missedUISteerText }))
@@ -175,11 +205,16 @@ extension PlayhouseUITests {
         XCTAssertTrue(element("steer-queued-message-\(queuedID)").exists, "Reopening should restore the queued row Steer action.")
         try "expected active turn id stale-turn but found fixture-turn\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
         element("steer-queued-message-\(queuedID)").click()
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: rejectNextSteer) }, timeout: 10), "Codex should miss the row's steer.")
+        XCTAssertTrue(element("queued-message-text-\(queuedID)").waitToExist(timeout: 10), "A missed queued steer should return to the visible queue.")
+        XCTAssertTrue(waitUntil({ userBubbles(missedRowSteerText) == 0 }, timeout: 5), "A missed row steer waits in the queue, not in the transcript.")
         XCTAssertFalse(element("codex-chat-error").exists, "A missed queued steer should not surface an error.")
-        let fallbackQueue = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
+        var fallbackQueue: [[String: Any]]?
+        XCTAssertTrue(waitUntil({
+            fallbackQueue = try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
+            return fallbackQueue?.first(where: { $0["id"] as? String == queuedID })?["state"] as? String == "queued"
+        }, timeout: 10), "A missed row steer should remain queued for its own turn.")
         let missedRowFallback = try XCTUnwrap(fallbackQueue?.first(where: { $0["id"] as? String == queuedID }))
-        XCTAssertEqual(missedRowFallback["state"] as? String, "queued", "A missed row steer should remain queued for its own turn.")
-        XCTAssertTrue(element("queued-message-text-\(queuedID)").exists, "A missed queued steer should remain visible in the queue.")
         element("back-to-board-button").click()
         openTask(named: "Active turn message controls")
         let reopenedMissedRow = element("queued-message-text-\(queuedID)")
@@ -352,9 +387,11 @@ extension PlayhouseUITests {
         try "complete before rejecting\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".complete-before-steer-rejection"), atomically: true, encoding: .utf8)
         composer.click()
         composer.typeText(regularFallbackText)
+        // The race turn's marker is still there; without it, its return means the fallback turn is held.
+        try FileManager.default.removeItem(at: targetedReady)
         composer.typeKey(.return, modifierFlags: .command)
-        XCTAssertTrue(waitUntil({ (composer.value as? String) == "" }, timeout: 15), "A missed composer steer should clear while its fallback is held.")
-        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: targetedReady.path) }, timeout: 10))
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: targetedReady.path) }, timeout: 15), "The missed composer steer should run as a held turn of its own.")
+        XCTAssertEqual(composer.value as? String, "", "A missed composer steer should leave the composer clear while its fallback is held.")
         let regularAvailable = try XCTUnwrap(try runCLI(["conversation", "queue", taskID, "--message", "Steer while regular fallback runs."])["result"] as? [String: Any])
         let regularAvailableID = try XCTUnwrap(regularAvailable["id"] as? String)
         let regularButton = element("steer-queued-message-\(regularAvailableID)")
@@ -400,12 +437,14 @@ extension PlayhouseUITests {
         XCTAssertTrue(needsActionIndicator.waitToExist(timeout: 5), "The failed targeted row should visibly require user action.")
         XCTAssertEqual(accessibleLabelOrValue(of: needsActionIndicator), "Follow-up needs your action")
         XCTAssertTrue(element("retry-queued-message-\(failedTargetID)").exists, "The failed targeted row should expose its retry action.")
+        XCTAssertTrue(waitUntil({ userBubbles(failedTargetText) == 0 }, timeout: 5), "A follow-up whose turn never started should not stay in the transcript.")
         XCTAssertTrue(element("queued-message-text-\(laterID)").exists, "The later queued row should remain visible after the targeted failure.")
         let history = try runCLI(["conversation", "history", taskID], extraEnvironment: [
             "PLAYHOUSE_E2E_CODEX_EXECUTABLE": sharedFixture.path
         ])["result"] as? [String: Any]
         let userMessages = (history?["messages"] as? [[String: Any]] ?? []).filter { $0["role"] as? String == "user" }
         XCTAssertEqual(userMessages.compactMap { $0["text"] as? String }.filter { $0 == queuedText }.count, 1)
+        XCTAssertEqual(userMessages.compactMap { $0["text"] as? String }.filter { $0 == missedUISteerText }.count, 1, "The missed composer steer should be in the conversation once, from its own turn.")
         let fixtureHistory = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: sharedFixture.path + ".history"))) as? [String: Any]
         )
@@ -425,7 +464,7 @@ extension PlayhouseUITests {
         // The daemon owns the targeted turns too, so both CLI steers sent during
         // them (the overlap steer and the missed row steer) reach Codex and are
         // rejected before they queue.
-        XCTAssertEqual(rejectedSteerRequests.count, 6, "Rejected steers: \(rejectedSteerRequests.map { ($0["input"] as? [[String: Any]])?.first?["text"] as? String ?? "?" })")
+        XCTAssertEqual(rejectedSteerRequests.count, 7, "Rejected steers: \(rejectedSteerRequests.map { ($0["input"] as? [[String: Any]])?.first?["text"] as? String ?? "?" })")
         XCTAssertEqual(steerRequests.count, 5)
         XCTAssertEqual((steerRequests[3]["input"] as? [[String: String]])?.first?["text"], "Another follow-up remains steerable.")
         XCTAssertEqual(steerRequests[3]["expectedTurnId"] as? String, deliveredTurns.first(where: { $0["userMessage"] as? String == targetedText })?["turnID"] as? String)

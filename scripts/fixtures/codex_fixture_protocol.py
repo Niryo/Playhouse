@@ -103,7 +103,23 @@ def skill_roots(runtime, _session_state, message):
     runtime.write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
 
 
+def wait_for_release(runtime, name, description):
+    """Pauses at a protocol point when the test created `<fixture>.<name>-pause`."""
+    base = str(runtime.sys.argv[0])
+    if not runtime.Path(base + f".{name}-pause").exists():
+        return
+    runtime.Path(base + f".{name}-ready").write_text(f"{description}\n", encoding="utf-8")
+    release = runtime.Path(base + f".{name}-release")
+    deadline = runtime.time.monotonic() + 60
+    while not release.exists() and runtime.time.monotonic() < deadline:
+        runtime.time.sleep(0.02)
+    if not release.exists():
+        runtime.os._exit(3)
+
+
 def start_thread(runtime, _session_state, message):
+    # A slow provider start: the turn is still launching and nothing was sent to it yet.
+    wait_for_release(runtime, "thread-start", "Codex is starting the thread.")
     # `-single-server` modes run several tasks' threads on one server.
     if "-question-isolation-" in _session_state.mode or "-single-server" in _session_state.mode:
         runtime.THREAD_ID = str(runtime.uuid.uuid4())
