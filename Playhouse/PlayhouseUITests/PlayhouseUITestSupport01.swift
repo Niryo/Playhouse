@@ -850,7 +850,7 @@ extension PlayhouseUITests {
     }
     func installedPluginIDs() throws -> [String] {
         let plugins = try XCTUnwrap((try runCLI(["plugin", "list"])["result"] as? [String: Any])?["plugins"] as? [[String: Any]])
-        return plugins.compactMap { $0["id"] as? String }
+        return plugins.filter { $0["builtIn"] as? Bool != true }.compactMap { $0["id"] as? String }
     }
     func startPluginFetchServer() throws -> (base: String, closed: String) {
         let server = try PluginFetchServer()

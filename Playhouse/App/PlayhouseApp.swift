@@ -188,8 +188,10 @@ private struct MainWindowView: View {
     }
 }
 
-/// The app menu's Plugins menu: Add Plugin mode, the Plugin Catalog, and
-/// each installed plugin with its placement, its first error, and Delete.
+/// The app menu's Plugins menu: Add Plugin mode, the Plugin Catalog, the
+/// built-in plugins with Enable or Disable, and each installed plugin with its
+/// placement, its first error, Enable or Disable, and Delete. A built-in
+/// plugin is compiled into the app, so it can't be edited or deleted.
 struct PluginsMenuContent: View {
     let registry: PluginRegistry
     @Environment(\.openWindow) private var openWindow
@@ -201,35 +203,51 @@ struct PluginsMenuContent: View {
         Button("Plugin Catalog") { openWindow(id: "plugin-catalog") }
             .buttonHoverPointer()
             .help("Open the Plugin Catalog")
-        if !registry.plugins.isEmpty {
+        if !registry.builtInPlugins.isEmpty {
             Divider()
-            ForEach(registry.plugins) { plugin in
-                Menu {
-                    if let problem = plugin.errors.first {
-                        Text(problem)
+            Section("Built-in Plugins") {
+                ForEach(registry.builtInPlugins) { plugin in
+                    Menu {
+                        enableButton(plugin)
+                    } label: {
+                        pluginLabel(plugin)
                     }
-                    Button("Edit…") { edit(plugin.id) }
-                        // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
-                        .help("Open this plugin's editor")
-                    Button("Delete…") { confirmDelete(plugin) }
-                        // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
-                        .help("Delete this plugin's folder")
-                    Button("Settings…") {}
-                        // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
-                        .disabled(true)
-                        .help("Plugin settings are not available yet")
-                } label: {
-                    Label("\(plugin.name) — \(PluginPlacement(rawValue: plugin.placement)?.title ?? plugin.placement)",
-                          systemImage: plugin.valid ? plugin.icon : "exclamationmark.triangle")
+                        // no-pointer: native submenu triggers use AppKit's menu tracking and cursor.
+                        // no-tooltip: the plugin name, placement and submenu chevron already identify this action.
                 }
-                    // no-pointer: native submenu triggers use AppKit's menu tracking and cursor.
-                    // no-tooltip: the plugin name, placement and submenu chevron already identify this action.
             }
-            Divider()
-            Button("Reload Plugins") { Task { await registry.reload() } }
-                .buttonHoverPointer()
-                .help("Read the plugins folder again")
         }
+        if !registry.installedPlugins.isEmpty {
+            Divider()
+            Section("Installed Plugins") {
+                ForEach(registry.installedPlugins) { plugin in
+                    Menu {
+                        if let problem = plugin.errors.first {
+                            Text(problem)
+                        }
+                        enableButton(plugin)
+                        Button("Edit…") { edit(plugin.id) }
+                            // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
+                            .help("Open this plugin's editor")
+                        Button("Delete…") { confirmDelete(plugin) }
+                            // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
+                            .help("Delete this plugin's folder")
+                        Button("Settings…") {}
+                            // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
+                            .disabled(true)
+                            .help("Plugin settings are not available yet")
+                    } label: {
+                        pluginLabel(plugin)
+                    }
+                        // no-pointer: native submenu triggers use AppKit's menu tracking and cursor.
+                        // no-tooltip: the plugin name, placement and submenu chevron already identify this action.
+                }
+            }
+        }
+        Divider()
+        Button("Reload Plugins") { Task { await registry.reload() } }
+            .buttonHoverPointer()
+            .help("Read the plugins folder again")
         ForEach(registry.authoringSessions.filter { session in
             !registry.plugins.contains { $0.id == session.authoredPluginID }
         }, id: \.id) { session in
@@ -239,6 +257,27 @@ struct PluginsMenuContent: View {
                     .help("Open this plugin's editor")
             }
         }
+    }
+
+    private func pluginLabel(_ plugin: PluginRecord) -> some View {
+        let placement = PluginPlacement(rawValue: plugin.placement)?.title ?? plugin.placement
+        return Label("\(plugin.name) — \(placement)\(plugin.enabled ? "" : " (Disabled)")",
+                     systemImage: plugin.valid ? plugin.icon : "exclamationmark.triangle")
+    }
+
+    /// A disabled plugin is hidden from every placement and never runs until it's enabled again.
+    private func enableButton(_ plugin: PluginRecord) -> some View {
+        Button(plugin.enabled ? "Disable" : "Enable") {
+            Task { @MainActor in
+                do {
+                    try await registry.setEnabled(plugin.id, !plugin.enabled)
+                } catch {
+                    NSAlert(error: error).runModal()
+                }
+            }
+        }
+            // no-pointer: native submenu actions use AppKit's menu tracking and cursor.
+            .help(plugin.enabled ? "Hide this plugin and stop running it" : "Show and run this plugin again")
     }
 
     private func edit(_ pluginID: String) {

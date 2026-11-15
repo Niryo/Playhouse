@@ -316,10 +316,19 @@
       },
       // Any Playhouse bridge command, the same ones the CLI sends ("task.list", "task.create", …).
       bridge: function (command, args) { return hostCall("bridge", String(command), args || {}); },
+      // Saves one of this plugin's values (null removes it); it comes back as props.state.
+      setState: function (key, value) {
+        var plugin = Playhouse.props.plugin || {};
+        return hostCall("bridge", "plugin.state.set", { pluginID: plugin.id, key: String(key), value: value === undefined ? null : value });
+      },
       // What only the window can do.
       ui: {
         close: function () { return hostCall("ui", "close", {}); },
         openTask: function (taskID) { return hostCall("ui", "openTask", { taskID: String(taskID) }); },
+        // Shows a task.changes.list entry's diff over the conversation.
+        openDiff: function (entry) { return hostCall("ui", "openDiff", entry || {}); },
+        // Tells the window the task's folders changed, so it rereads them and bumps props.workspace.revision.
+        refreshWorkspace: function () { return hostCall("ui", "refreshWorkspace", {}); },
         composer: {
           setDraft: function (text) { return hostCall("ui", "composer.setDraft", { text: String(text) }); },
           insertText: function (text) { return hostCall("ui", "composer.insertText", { text: String(text) }); },

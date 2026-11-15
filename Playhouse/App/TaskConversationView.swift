@@ -39,12 +39,6 @@ struct TaskConversationView: View {
         }
     }
 
-    struct ChangeRepositoryGroup: Identifiable {
-        let repository: String
-        let entries: [WorkspaceChangeEntry]
-        var id: String { repository }
-    }
-
     struct GoalAchievementTimelineEntry: Codable, Identifiable, Equatable {
         let id: String
         let summary: String
@@ -188,8 +182,9 @@ struct TaskConversationView: View {
     @State var subagentHistory: ConversationHistory?
     @State var isLoadingSubagent = false
     @State var subagentError: String?
-    @State var changeInventory = WorkspaceChangeInventory(unviewed: [], viewed: [], mergingRepositories: [])
-    @State var isViewedSectionExpanded = false
+    /// `props.workspace.revision` for the conversation sidebar's plugins (Changes is one),
+    /// bumped whenever the task's folders may have changed.
+    @State var workspaceRevision = 0
     @AppStorage(WorkspaceSettings.taskSidebarCollapsedKey, store: WorkspaceSettings.preferencesStore) var isTaskSidebarCollapsed = false
     /// Add Plugin mode shows the sidebar expanded, so its placements are visible, without
     /// changing the saved collapsed preference it returns to.
@@ -200,19 +195,15 @@ struct TaskConversationView: View {
     @State var openConversationPlugin: PluginRecord?
     @State var isStartingPluginTask = false
     var isTaskSidebarShownCollapsed: Bool { isTaskSidebarCollapsed && !isPluginAddModeOn }
-    @AppStorage(WorkspaceSettings.workspaceChangesSectionCollapsedKey, store: WorkspaceSettings.preferencesStore) var isChangesSectionCollapsed = false
-    /// The loading placeholder is for the first read only; later watcher refreshes keep the
-    /// current list (or empty state) on screen instead of flashing the spinner.
-    @State var hasLoadedChanges = false
-    @State var isLoadingChanges = false
-    @State var changesNeedRefresh = false
+    /// The open diff is rechecked one refresh at a time; a refresh asked for meanwhile runs once after.
+    @State var isRefreshingOpenDiff = false
+    @State var openDiffNeedsRefresh = false
     @State var changeWatcher: WorkspaceChangeWatcher?
     @State var isTerminalPresented = false
     @AppStorage(TerminalPanelLayout.widthKey, store: WorkspaceSettings.preferencesStore)
     var terminalPanelWidth = Double(TerminalPanelLayout.defaultWidth)
     @State var terminalResizeStartWidth: CGFloat?
     @StateObject var terminalSession = TaskTerminalSession()
-    @State var changesError: String?
     @State var selectedChange: WorkspaceChangeEntry?
     @State var selectedDiff: WorkspaceFileDiff?
     @State var isDiffPresented = false
@@ -419,8 +410,6 @@ struct TaskConversationView: View {
     /// Messages read per history request: the newest page on open, then one
     /// more page each time the rendered window reaches the oldest loaded one.
     static let historyPageSize = 80
-    /// Above this many changed files the sidebar shows a notice instead of the list, which would stall layout.
-    static let maxRenderedChangeCount = 1000
 
     /// First message of the newest user turn. Opening a conversation renders
     /// this message and everything after it, so the latest question sits at the
@@ -766,7 +755,13 @@ struct TaskConversationView: View {
                 persistGoalAchievementTimeline()
             }
         }
-        .task(id: task.workspaceRootPaths) {
+        .task(id: WorkspaceWatchKey(roots: task.workspaceRootPaths, isWatched: !pluginRegistry.inlinePlugins(for: .conversationSidebar).isEmpty)) {
+            // Only a sidebar plugin reads the folders, so with none (Changes disabled) nothing watches them.
+            guard !pluginRegistry.inlinePlugins(for: .conversationSidebar).isEmpty else {
+                changeWatcher?.stop()
+                changeWatcher = nil
+                return
+            }
             let watchPaths = await WorkspaceChangeWatcher.watchPaths(workspaceRoots: task.workspaceRootPaths)
             guard !Task.isCancelled else { return }
             changeWatcher?.stop()
@@ -901,4 +896,11 @@ extension View {
             .accessibilityLabel(label)
             .accessibilityIdentifier(id)
     }
+}
+
+/// What the task's folder watcher watches: the task's folders, and only while a conversation
+/// sidebar plugin reads them.
+struct WorkspaceWatchKey: Hashable {
+    let roots: [String]
+    let isWatched: Bool
 }

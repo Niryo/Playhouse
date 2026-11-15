@@ -522,17 +522,66 @@ final class PlayhouseBridgeRuntime {
                 result = .object(["enabled": .boolean(settings.pluginAddMode)])
             case "plugin.list", "plugin.refresh":
                 let library = try pluginLibrary()
-                let plugins = await Task.detached { library.list() }.value
+                let disabled = settings.disabledPluginIDs
+                let installed = await Task.detached { library.list(disabled: disabled) }.value
                 let revision = request.command == "plugin.refresh" ? settings.bumpPluginsRevision() : settings.pluginsRevision
+                let states = settings.pluginStates
+                // The built-ins first, then the installed plugins by id, each with its saved state.
+                let plugins = (BuiltInPlugins.records(disabled: disabled) + installed).map { plugin in
+                    var plugin = plugin
+                    plugin.state = states[plugin.id] ?? [:]
+                    return plugin
+                }
                 result = .object([
                     "directory": .string(library.directory.path),
                     "revision": .integer(revision),
                     "plugins": try Self.value(plugins)
                 ])
+            // A plugin's own saved values, kept across launches and reported as
+            // `Playhouse.props.state`; any plugin keeps its settings here, as the
+            // built-in Changes keeps whether its section is collapsed.
+            case "plugin.state.get", "plugin.state.set":
+                let id = try request.requiredString("pluginID")
+                if !BuiltInPlugins.isBuiltIn(id) {
+                    do { _ = try pluginLibrary().plugin(id: id, validate: false) }
+                    catch let error as PluginLibraryError { throw BridgeCommandError(code: "not_found", message: error.localizedDescription) }
+                    catch let error as PluginTreeError { throw BridgeCommandError(code: "invalid_argument", message: error.message) }
+                }
+                guard request.command == "plugin.state.set" else {
+                    result = .object(["pluginID": .string(id), "state": .object(settings.pluginState(id).mapValues(BridgeValue.init(plugin:)))])
+                    break
+                }
+                let key = try request.requiredString("key").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !key.isEmpty else { throw BridgeCommandError(code: "invalid_argument", message: "A plugin state key can't be empty.") }
+                guard let value = request.arguments["value"] else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "plugin.state.set needs a value; null removes the key.")
+                }
+                let state = settings.setPluginState(id, key: key, value: PluginValue(bridge: value))
+                result = .object([
+                    "pluginID": .string(id),
+                    "state": .object(state.mapValues(BridgeValue.init(plugin:))),
+                    // Windows reload their plugins, so every mounted copy gets the new props.state.
+                    "revision": .integer(settings.bumpPluginsRevision())
+                ])
+            // Disabling hides a plugin's entry (or inline section) and stops it from
+            // running; enabling restores it. The state is kept across launches.
+            case "plugin.enable", "plugin.disable":
+                let id = try request.requiredString("pluginID")
+                if !BuiltInPlugins.isBuiltIn(id) {
+                    do { _ = try pluginLibrary().plugin(id: id, validate: false) }
+                    catch let error as PluginLibraryError { throw BridgeCommandError(code: "not_found", message: error.localizedDescription) }
+                    catch let error as PluginTreeError { throw BridgeCommandError(code: "invalid_argument", message: error.message) }
+                }
+                let enabled = request.command == "plugin.enable"
+                settings.setPluginEnabled(id, enabled)
+                result = .object(["pluginID": .string(id), "enabled": .boolean(enabled), "revision": .integer(settings.bumpPluginsRevision())])
             case "plugin.sessions":
                 result = .object(["sessions": try Self.value(taskManager.pluginConversations())])
             case "plugin.edit":
                 let id = try request.requiredString("pluginID")
+                if BuiltInPlugins.isBuiltIn(id) {
+                    throw BridgeCommandError(code: "invalid_argument", message: "\"\(id)\" is a built-in plugin; it is compiled into Playhouse and can't be edited.")
+                }
                 let editor = try await taskManager.withPluginOperationLock(id) {
                     let library = try pluginLibrary()
                     do { try library.prepareDraft(id: id) }
@@ -580,6 +629,9 @@ final class PlayhouseBridgeRuntime {
             case "plugin.delete":
                 let library = try pluginLibrary()
                 let id = try request.requiredString("pluginID")
+                if BuiltInPlugins.isBuiltIn(id) {
+                    throw BridgeCommandError(code: "invalid_argument", message: "\"\(id)\" is a built-in plugin; it can be disabled but not removed.")
+                }
                 do {
                     try await taskManager.withPluginOperationLock(id) {
                         try await taskManager.deletePlugin(id: id, library: library)
@@ -589,6 +641,9 @@ final class PlayhouseBridgeRuntime {
                 } catch let error as PluginTreeError {
                     throw BridgeCommandError(code: "invalid_argument", message: error.message)
                 }
+                // A plugin installed again later under this id starts enabled, with no saved state.
+                settings.setPluginEnabled(id, true)
+                settings.clearPluginState(id)
                 result = .object(["deleted": .string(id), "revision": .integer(settings.bumpPluginsRevision())])
             // The task an Add Plugin mode placeholder opens: its agent builds a plugin for the placement.
             case "plugin.author":
@@ -606,6 +661,9 @@ final class PlayhouseBridgeRuntime {
                 if name != nil || presentation != nil {
                     guard let name, !name.isEmpty, let presentation, PluginPresentation(rawValue: presentation) != nil else {
                         throw BridgeCommandError(code: "invalid_argument", message: "A plugin name and valid presentation are required.")
+                    }
+                    if presentation == PluginPresentation.inline.rawValue, !PluginPresentation.inlinePlacements.contains(placement) {
+                        throw BridgeCommandError(code: "invalid_argument", message: PluginPresentation.inlinePlacementError(placement))
                     }
                 }
                 let pluginID = "plugin-" + UUID().uuidString.lowercased()
@@ -628,18 +686,26 @@ final class PlayhouseBridgeRuntime {
                     // An installed plugin renders with its placement's real context.
                     if let pluginID = request.arguments["pluginID"]?.string {
                         let plugin: PluginRecord
+                        if BuiltInPlugins.isBuiltIn(pluginID) {
+                            throw BridgeCommandError(code: "invalid_argument", message: "\"\(pluginID)\" is a built-in plugin; it renders natively in the window, not headlessly.")
+                        }
                         do {
                             plugin = try pluginLibrary().plugin(id: pluginID, validate: false)
                         } catch let error as PluginLibraryError {
                             throw BridgeCommandError(code: "not_found", message: error.localizedDescription)
                         }
                         if let problem = plugin.errors.first { throw BridgeCommandError(code: "invalid_argument", message: problem) }
+                        if settings.disabledPluginIDs.contains(plugin.id) {
+                            throw BridgeCommandError(code: "unavailable", message: "The plugin \"\(plugin.id)\" is disabled; enable it to run it.")
+                        }
                         let task = try request.arguments["taskID"]?.string.map { _ in
                             PluginTaskContext(task: try taskManager.conversationSubject(request.requiredUUID("taskID")))
                         }
+                        var stated = plugin
+                        stated.state = settings.pluginState(plugin.id)
                         command.file = plugin.entryPath
                         command.placement = PluginPlacement(rawValue: plugin.placement)
-                        command.baseProps = PluginContext.props(plugin: plugin, appearance: settings.appearance, task: task, composer: nil)
+                        command.baseProps = PluginContext.props(plugin: stated, appearance: settings.appearance, task: task, composer: nil)
                     }
                     // The plugin's Playhouse.bridge calls run as requests of this caller,
                     // against the same managers the CLI reaches.

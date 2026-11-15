@@ -319,6 +319,35 @@ final class PlayhouseUITests: XCTestCase {
     Playhouse.render(h(Context));
     """
 
+    /// The same workspace probe plugin the CLI case renders headlessly (`PLUGIN_WORKSPACE_SOURCE`).
+    static let pluginWorkspaceSource = """
+    function Probe() {
+      var props = Playhouse.useProps();
+      var workspace = props.workspace || {};
+      var state = React.useState("idle");
+      function report(promise, label) {
+        promise.then(function () { state[1](label + ": ok"); }, function (error) { state[1](label + ": " + error.code); });
+      }
+      function openFirst() {
+        if (!props.task) { report(Playhouse.ui.openDiff({ repository: "none", path: "none.txt", group: "unviewed" }), "openDiff"); return; }
+        Playhouse.bridge("task.changes.list", { taskID: props.task.id }).then(function (inventory) {
+          var entry = inventory.unviewed[0] || { repository: "none", path: "none.txt", group: "unviewed" };
+          report(Playhouse.ui.openDiff(entry), "openDiff");
+        });
+      }
+      return h(Stack, { spacing: 4, align: "leading", group: true, testID: "probe" },
+        h(Text, { testID: "probe-revision" }, workspace.revision === undefined ? "no workspace" : "revision " + workspace.revision),
+        h(Text, { testID: "probe-open" }, workspace.openDiff ? "open " + workspace.openDiff.path : "no diff"),
+        h(Text, { testID: "probe-rail" }, props.sidebar ? (props.sidebar.collapsed ? "rail" : "expanded") : "no sidebar"),
+        h(Text, { testID: "probe-status" }, state[0]),
+        h(Text, { testID: "probe-state" }, "saved " + ((props.state || {}).clicks || 0)),
+        h(Button, { testID: "probe-refresh", onPress: function () { report(Playhouse.ui.refreshWorkspace(), "refresh"); } }, h(Text, null, "Refresh")),
+        h(Button, { testID: "probe-open-diff", onPress: openFirst }, h(Text, null, "Open first diff")),
+        h(Button, { testID: "probe-save", onPress: function () { report(Playhouse.setState("clicks", ((props.state || {}).clicks || 0) + 1), "save"); } }, h(Text, null, "Save")));
+    }
+    Playhouse.render(h(Probe));
+    """
+
     /// The same fetch plugin the CLI case renders headlessly (`PLUGIN_FETCH_SOURCE`).
     static let pluginFetchSource = """
     function Fetcher() {
