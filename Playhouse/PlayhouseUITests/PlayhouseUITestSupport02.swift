@@ -908,9 +908,11 @@ extension PlayhouseUITests {
         return found()
     }
     func bringIntoTranscriptViewport(_ target: XCUIElement, scrollView: XCUIElement) {
-        for _ in 0..<12 where target.exists {
+        for _ in 0..<12 {
+            // A streaming transcript can scroll the lazy row away between an existence
+            // check and a frame read; a snapshot fails softly and the caller scrolls again.
+            guard let top = (try? target.snapshot())?.frame.minY else { break }
             let viewport = scrollView.frame
-            let top = target.frame.minY
             if top >= viewport.minY, top < viewport.maxY - 24 { break }
             // Wheel steps move less than their delta, so step by up to a viewport.
             let distance = top < viewport.minY ? viewport.minY + 24 - top : top - (viewport.maxY - 24) + 24

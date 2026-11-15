@@ -76,7 +76,13 @@ function Totals(props) {
         return h(Stack, { key: bucket.label, axis: "v", spacing: 2, align: "leading" },
           h(Text, { size: 10, color: "tertiary" }, bucket.label),
           h(Text, { size: 13, weight: "medium" }, bucket.value));
-      })));
+      })),
+    overview.contextCompactions.map(function (detail, index) {
+      return h(Text, { key: "compaction-" + index, size: 10, color: "secondary", wrap: true, testID: id + "-compaction-" + index }, detail);
+    }),
+    overview.resumeCacheMisses.map(function (detail, index) {
+      return h(Text, { key: "resume-cache-miss-" + index, size: 10, color: "secondary", wrap: true, testID: id + "-resume-cache-miss-" + index }, "Resume cache miss · " + detail);
+    }));
 }
 
 function overviewSection(model) {

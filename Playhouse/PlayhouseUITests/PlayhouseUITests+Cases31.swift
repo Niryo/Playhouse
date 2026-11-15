@@ -121,7 +121,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(waitUntil({ !js("done-archive-panel").exists && self.pluginText(js("js-last-action")) == "Last: close" }, timeout: 5), "The close button closes it.")
         XCTAssertEqual(pluginText(native("native-last-action")), "Last: none", "The native archive keeps its own state.")
     }
-    // case-contract: test_plugin_token_stats_renders_from_atoms_like_native | The Plugin Catalog's Token Stats page shows the Token Stats modal composed in JavaScript from atoms above the native SwiftUI modal the board presents, built from the same atoms and sample data, each opened by the task item's token counter (the same overhanging Button atom, labelled with its description and hinted Open Token Stats). Both show the title and the task's title, the View raw input… button, a section bar of Overview, Wasters, Tools & MCP and Overhead with Overview selected, the call headlines (Final transcript size, Total sent (incl. subagents), Excluding cache reads (incl. subagents)), the main-agent and subagent split, the call and output lines, the total, the four buckets, the per-tool rollup and the per-turn rows, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Label, Button, Spacer, ChoiceBar, Divider, Scroll, Meter) with the board modal's identifiers. Choosing Wasters in the JavaScript section bar runs onChange with its value (Last: section wasters) and shows the largest items, each with a 72-point share bar, its kind, the removed-by-compaction flag, its request count and a small Show button, then the repeated result and the cache miss, while the native modal stays on Overview until its own bar moves it, after which both show the same rows at the same size. Show runs its JavaScript handler with the item's raw input target (Last: raw input claude #14) and View raw input… with the final transcript (Last: raw input final transcript), without re-rendering any row. Tools & MCP lists each tool's bar, calls and total and the MCP server, and Overhead lists what every request carries and each agent. The overview scrolls within at most 320 points and each map section within a fixed 420. Done closes the JavaScript modal (Last: done) and leaves the native one open, and the counter opens it again (Last: open). The section bar raises no onPress, so pressing it is refused as invalid_argument.
+    // case-contract: test_plugin_token_stats_renders_from_atoms_like_native | The Plugin Catalog's Token Stats page shows the Token Stats modal composed in JavaScript from atoms above the native SwiftUI modal the board presents, built from the same atoms and sample data, each opened by the task item's token counter (the same overhanging Button atom, labelled with its description and hinted Open Token Stats). Both show the title and the task's title, the View raw input… button, a section bar of Overview, Wasters, Tools & MCP and Overhead with Overview selected, the call headlines (Final transcript size, Total sent (incl. subagents), Excluding cache reads (incl. subagents)), the main-agent and subagent split, the call and output lines, the total, the four buckets, the context compaction and resume cache miss lines, the per-tool rollup and the per-turn rows, each at the same size in both, and the JavaScript tree uses only atoms (Panel, Stack, Text, Label, Button, Spacer, ChoiceBar, Divider, Scroll, Meter) with the board modal's identifiers. Choosing Wasters in the JavaScript section bar runs onChange with its value (Last: section wasters) and shows the largest items, each with a 72-point share bar, its kind, the removed-by-compaction flag, its request count and a small Show button, then the repeated result and the cache miss, while the native modal stays on Overview until its own bar moves it, after which both show the same rows at the same size. Show runs its JavaScript handler with the item's raw input target (Last: raw input claude #14) and View raw input… with the final transcript (Last: raw input final transcript), without re-rendering any row. Tools & MCP lists each tool's bar, calls and total and the MCP server, and Overhead lists what every request carries and each agent. The overview scrolls within at most 320 points and each map section within a fixed 420. Done closes the JavaScript modal (Last: done) and leaves the native one open, and the counter opens it again (Last: open). The section bar raises no onPress, so pressing it is refused as invalid_argument.
     func test_plugin_token_stats_renders_from_atoms_like_native() throws {
         launchApp(defaultParent: fixture.parent.path)
         clickPluginsMenuItem("Plugin Catalog")
@@ -179,13 +179,15 @@ extension PlayhouseUITests {
         // root container into it, so the frame carries the modal's size.
         for suffix in ["-modal", "-title", "-task-title", "-raw-input-button", "-sections", "-section-overview", "-section-wasters", "-section-tools",
                        "-section-overhead", "-final-transcript", "-total-sent", "-excluding-cache", "-excluding-cache-split", "-total-calls",
-                       "-output", "-total", "-overview", "-tool-Bash", "-tool-Read", "-turn-turn-1", "-turn-turn-2"] {
+                       "-output", "-total", "-compaction-0", "-resume-cache-miss-0", "-overview", "-tool-Bash", "-tool-Read", "-turn-turn-1", "-turn-turn-2"] {
             assertSameSize(suffix)
         }
         assertSameSize(js("close-token-stats-button"), native("close-native-token-stats-button"), "Done")
         for (suffix, text) in [("-title", "Token stats"), ("-task-title", "Refactor the login flow"), ("-final-transcript", "650"), ("-total-sent", "3,680"),
                                ("-excluding-cache", "1,710"), ("-excluding-cache-split", "Excluding cache reads: 720 main agent · 990 subagents"),
-                               ("-total-calls", "8 model calls · 4 main, 4 across 2 subagents"), ("-output", "Output 170"), ("-total", "3,200")] {
+                               ("-total-calls", "8 model calls · 4 main, 4 across 2 subagents"), ("-output", "Output 170"), ("-total", "3,200"),
+                               ("-compaction-0", "Requested with /compact · 2,900 → 900 tokens"),
+                               ("-resume-cache-miss-0", "Resume cache miss · Cache read 0 tokens · cache rewritten with 390 tokens")] {
             XCTAssertEqual(pluginText(pair(suffix).js), text, "token-stats\(suffix) reads \(text).")
             XCTAssertEqual(pluginText(pair(suffix).native), text, "native-token-stats\(suffix) reads \(text).")
         }
@@ -363,9 +365,7 @@ extension PlayhouseUITests {
         try writeInstalledPlugin("versioned", source: Self.pluginContextSource, placement: "mainSidebar", name: "Versioned")
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["plugin", "refresh"])
-        let menu = app.menuBars.menuBarItems["Plugins"]
-        menu.click()
-        menu.menuItems["Edit Versioned…"].click()
+        clickInstalledPluginAction("Edit…", pluginRow: "Versioned — Main sidebar")
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 15))
         let draft = pluginsFolder.appendingPathComponent(".drafts/plugins/versioned/index.js")
         let original = try String(contentsOf: draft, encoding: .utf8)
@@ -382,8 +382,7 @@ extension PlayhouseUITests {
         XCTAssertTrue(app.sheets.buttons["OK"].waitToExist(timeout: 5))
         attachAppWindowScreenshot(named: "Plugin draft saved notice")
         app.sheets.buttons["OK"].click()
-        menu.click()
-        menu.menuItems["Edit Versioned…"].click()
+        clickInstalledPluginAction("Edit…", pluginRow: "Versioned — Main sidebar")
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "draft change" }, timeout: 10))
         app.buttons["Save"].click()
@@ -621,25 +620,20 @@ extension PlayhouseUITests {
         element("back-to-board-button").click()
         try writeInstalledPlugin("installed-editor", source: Self.pluginContextSource, placement: "mainSidebar", name: "Installed editor")
         _ = try runCLI(["plugin", "refresh"])
-        let installedMenu = app.menuBars.menuBarItems["Plugins"]
-        installedMenu.click()
-        XCTAssertTrue(installedMenu.menuItems["Edit Installed editor…"].waitToExist(timeout: 10))
-        installedMenu.menuItems["Edit Installed editor…"].click()
+        clickInstalledPluginAction("Edit…", pluginRow: "Installed editor — Main sidebar")
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
         XCTAssertTrue(try sessions().contains { $0["authoredPluginID"] as? String == "installed-editor" })
         element("back-to-board-button").click()
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: pluginsFolder.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: pluginsFolder.path) }
-        installedMenu.click()
-        installedMenu.menuItems["Delete Installed editor…"].click()
+        clickInstalledPluginAction("Delete…", pluginRow: "Installed editor — Main sidebar")
         XCTAssertTrue(app.dialogs.buttons["Delete"].waitToExist(timeout: 5))
         app.dialogs.buttons["Delete"].click()
         XCTAssertTrue(app.dialogs.buttons["OK"].waitToExist(timeout: 10), "A failed folder removal reports an error.")
         app.dialogs.buttons["OK"].click()
         XCTAssertTrue(try sessions().contains { $0["authoredPluginID"] as? String == "installed-editor" })
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: pluginsFolder.path)
-        installedMenu.click()
-        installedMenu.menuItems["Delete Installed editor…"].click()
+        clickInstalledPluginAction("Delete…", pluginRow: "Installed editor — Main sidebar")
         app.dialogs.buttons["Delete"].click()
         XCTAssertTrue(waitUntil({ (try? sessions().contains { $0["authoredPluginID"] as? String == "installed-editor" }) == false }, timeout: 10))
 
@@ -651,8 +645,7 @@ extension PlayhouseUITests {
         try writeInstalledPlugin("legacy-codex", source: Self.pluginContextSource, placement: "mainSidebar", name: "Codex legacy")
         try seedLegacyPluginTask(taskID: codexID, pluginID: "legacy-codex")
         _ = try runCLI(["plugin", "refresh"])
-        installedMenu.click()
-        installedMenu.menuItems["Edit Codex legacy…"].click()
+        clickInstalledPluginAction("Edit…", pluginRow: "Codex legacy — Main sidebar")
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
         let stopCodex = Process()
         stopCodex.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
@@ -677,9 +670,7 @@ extension PlayhouseUITests {
         try writeInstalledPlugin("legacy-editor", source: Self.pluginContextSource, placement: "mainSidebar", name: "Legacy editor")
         try seedLegacyPluginTask(taskID: legacyID, pluginID: "legacy-editor")
         _ = try runCLI(["plugin", "refresh"])
-        installedMenu.click()
-        XCTAssertTrue(installedMenu.menuItems["Edit Legacy editor…"].waitToExist(timeout: 10))
-        installedMenu.menuItems["Edit Legacy editor…"].click()
+        clickInstalledPluginAction("Edit…", pluginRow: "Legacy editor — Main sidebar")
         XCTAssertTrue(element("plugin-creation-preview").waitToExist(timeout: 10))
         XCTAssertTrue(waitUntil({ (self.element("message-composer").value as? String ?? "").contains("Legacy unsent draft") }, timeout: 10))
         XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: self.element("plugin-creation-preview").descendants(matching: .any)["plugin-placement"]) == "mainSidebar" }, timeout: 10))
@@ -693,9 +684,7 @@ extension PlayhouseUITests {
         try writeInstalledPlugin("legacy-delete", source: Self.pluginContextSource, placement: "mainSidebar", name: "Delete legacy")
         try seedLegacyPluginTask(taskID: legacyDeleteID, pluginID: "legacy-delete")
         _ = try runCLI(["plugin", "refresh"])
-        installedMenu.click()
-        XCTAssertTrue(installedMenu.menuItems["Delete Delete legacy…"].waitToExist(timeout: 10))
-        installedMenu.menuItems["Delete Delete legacy…"].click()
+        clickInstalledPluginAction("Delete…", pluginRow: "Delete legacy — Main sidebar")
         app.dialogs.buttons["Delete"].click()
         XCTAssertTrue(waitUntil({ (try? self.boardTaskRecords().contains { $0["id"] as? String == legacyDeleteID }) == false }, timeout: 10))
 
@@ -815,8 +804,8 @@ extension PlayhouseUITests {
         XCTAssertTrue(helloItem.isEnabled, "The plugin row is an enabled submenu trigger, not a command that runs the plugin.")
         attachScreenshot(named: "The Plugins menu lists installed plugins with their placement")
 
-        helloItem.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).click()
-        app.typeKey(.rightArrow, modifierFlags: [])
+        // Hovering opens the submenu; a click followed by Right Arrow can instead move on to the next menu bar menu.
+        helloItem.hover()
         let editAction = helloItem.descendants(matching: .menuItem)["Edit…"]
         let deleteAction = helloItem.descendants(matching: .menuItem)["Delete…"]
         let settingsAction = helloItem.descendants(matching: .menuItem)["Settings…"]

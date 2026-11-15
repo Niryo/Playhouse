@@ -153,8 +153,24 @@ struct PluginCatalogView: View {
     }
 }
 
+@MainActor
 private func catalogPage(_ page: String) -> (source: String, props: [String: PluginValue])? {
-    try? PluginRenderCommand.catalogPage(page, resources: PluginRuntime.bundledResources)
+    catalogValue(page) { try PluginRenderCommand.catalogPage(page, resources: PluginRuntime.bundledResources) }
+}
+
+/// A page's bundled script or decoded sample. A page that cannot load renders
+/// only its title, so the reason goes to diagnostics.
+@MainActor
+private func catalogValue<Value>(_ page: String, _ load: () throws -> Value) -> Value? {
+    do {
+        return try load()
+    } catch {
+        var fields = PlayhouseDiagnostics.errorFields(error)
+        fields["page"] = page
+        fields["error"] = String(describing: error)
+        PlayhouseDiagnostics.record("plugin.catalog.page_failed", fields: fields)
+        return nil
+    }
 }
 
 /// One side of a composite's comparison page.
@@ -211,7 +227,7 @@ private struct TaskItemComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("TaskItem"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("TaskItem", { try Self.sample(page.props) }) {
                 HStack(alignment: .top, spacing: 28) {
                     comparisonColumn("JavaScript (React → atoms)", width: 300) {
                         PluginSurface(source: page.source, name: "TaskItem.js", props: page.props)
@@ -296,7 +312,7 @@ private struct AgentsInfoComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("AgentsInfo"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("AgentsInfo", { try Self.sample(page.props) }) {
                 HStack(alignment: .top, spacing: 28) {
                     comparisonColumn("JavaScript (React → atoms)", width: 240) {
                         PluginSurface(source: page.source, name: "AgentsInfo.js", props: page.props)
@@ -373,7 +389,7 @@ private struct KanbanColumnComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("KanbanColumn"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("KanbanColumn", { try Self.sample(page.props) }) {
                 HStack(alignment: .top, spacing: 28) {
                     comparisonColumn("JavaScript (React → atoms)", width: 264) {
                         PluginSurface(source: page.source, name: "KanbanColumn.js", props: page.props)
@@ -438,7 +454,7 @@ private struct TokenStatsComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("TokenStats"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("TokenStats", { try Self.sample(page.props) }) {
                 comparisonColumn("JavaScript (React → atoms)", width: 740) {
                     PluginSurface(source: page.source, name: "TokenStats.js", props: page.props)
                 }
@@ -514,7 +530,7 @@ private struct SkillsPageComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("SkillsPage"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("SkillsPage", { try Self.sample(page.props) }) {
                 ScrollView(.horizontal) {
                     VStack(alignment: .leading, spacing: 18) {
                         comparisonColumn("JavaScript (React → atoms)", width: 1060) {
@@ -659,7 +675,7 @@ private struct RepositoryChipsComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("RepositoryChips"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("RepositoryChips", { try Self.sample(page.props) }) {
                 HStack(alignment: .top, spacing: 28) {
                     comparisonColumn("JavaScript (React → atoms)", width: 360) {
                         PluginSurface(source: page.source, name: "RepositoryChips.js", props: page.props)
@@ -781,7 +797,7 @@ private struct ComposerComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("Composer"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("Composer", { try Self.sample(page.props) }) {
                 comparisonColumn("JavaScript (React → atoms)", width: 784) {
                     PluginSurface(source: page.source, name: "Composer.js", props: page.props)
                 }
@@ -901,7 +917,7 @@ private struct DoneArchiveComparison: View {
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("plugin-catalog-title")
             if let page = catalogPage("DoneArchive"),
-               let sample = try? Self.sample(page.props) {
+               let sample = catalogValue("DoneArchive", { try Self.sample(page.props) }) {
                 comparisonColumn("JavaScript (React → atoms)", width: 580) {
                     PluginSurface(source: page.source, name: "DoneArchive.js", props: page.props)
                 }

@@ -207,7 +207,9 @@ extension PlayhouseUITests {
         XCTAssertTrue(response.waitToExist(timeout: 10))
         XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
         XCTAssertTrue(response.label.contains("Additional detail: Retry this answer."))
-        XCTAssertTrue(card.staticTexts["Answered"].waitToExist(timeout: 10), "The queued answer should settle as Answered after its response appears.")
+        // The response and the outcome nudge can push the card out of the lazy viewport, so scan for it.
+        XCTAssertTrue(waitUntil({ self.transcriptScan { card.exists && card.staticTexts["Answered"].exists } }, timeout: 10),
+                      "The queued answer should settle as Answered after its response appears.")
         let deliveredAnswered = try XCTUnwrap(try runCLI(["conversation", "answered-async", taskID])["result"] as? [String: Any])
         XCTAssertEqual(deliveredAnswered["itemIDs"] as? [String], ["item_playhouse_async_question"], "The delivered async answer should be recorded as answered.")
     }
