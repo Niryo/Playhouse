@@ -233,7 +233,14 @@ final class PlayhouseBridgeRuntime {
                 result = try Self.value(["tasks": taskManager.scheduledTasks()])
             case "schedule.set":
                 let taskID = try request.requiredUUID("taskID")
-                result = try Self.value(await taskManager.setSchedule(taskID, request.scheduleRequest()))
+                let scheduled = try await taskManager.setSchedule(taskID, request.scheduleRequest())
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try Self.value(try await conversations.nameScheduledTask(taskID) ?? scheduled)
+            case "schedule.name":
+                // The app saves a schedule through its own model context, then names it here.
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                let taskID = try request.requiredUUID("taskID")
+                result = try Self.value(try await conversations.nameScheduledTask(taskID) ?? taskManager.get(taskID))
             case "schedule.clear":
                 result = try Self.value(await taskManager.clearSchedule(request.requiredUUID("taskID")))
             case "schedule.pause", "schedule.resume":

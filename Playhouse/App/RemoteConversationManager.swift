@@ -481,6 +481,12 @@ struct RemoteConversationManager {
         return (title, provider)
     }
 
+    /// Names a one-time scheduled task that is still untitled; the daemon reserves the title and
+    /// generates it in the background.
+    func nameScheduledTask(taskID: UUID) async throws {
+        _ = try await daemon.call("schedule.name", ["taskID": id(taskID)])
+    }
+
     /// Sends a side chat message; without `sideChatID`, opens a side chat on `selection`.
     func sideChat(
         taskID: UUID,

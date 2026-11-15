@@ -20,6 +20,28 @@ extension ConversationManager {
         )
     }
 
+    /// Names a one-time scheduled task that still has a placeholder title from its scheduled
+    /// prompt, as its first send would, so it doesn't wait on the board untitled. The title is
+    /// reserved before this returns; the name is generated in the background and falls back to
+    /// the prompt's first words. Returns the reserved task, or nil when nothing needs a name.
+    func nameScheduledTask(_ taskID: UUID) async throws -> BoardTaskRecord? {
+        let task = try tasks.taskModel(taskID)
+        guard task.scheduleKind == .once, ["Untitled task", "Generating title…"].contains(task.title),
+              let prompt = task.scheduledPrompt?.trimmingCharacters(in: .whitespacesAndNewlines), !prompt.isEmpty,
+              let reserved = try await tasks.renameIfTitleMatches(taskID, expectedTitle: task.title, title: "Generating title…")
+        else { return nil }
+        // A task with no repository yet still gets a name; the title turn needs no workspace.
+        let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        let workspace = try (try? ConversationWorkspaceContext(roots: roots)) ?? ConversationWorkspaceContext(roots: [])
+        let titleClients = clients.helperClients(preferring: task.conversationProvider)
+        // Registered work keeps the daemon alive after the request that scheduled it returns.
+        BridgeBackgroundWork.start {
+            // Best-effort like a send's title: the helper records failures and falls back.
+            _ = try? await self.generateAndApplyTitle(taskID: taskID, prompt: prompt, workspace: workspace, clients: titleClients)
+        }
+        return reserved
+    }
+
     func generateAndApplyTitle(
         taskID: UUID,
         prompt: String,
